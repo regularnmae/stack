@@ -258,7 +258,11 @@ else
     mkdir -p "$DATA_DIR/tor"
     hash=""
     if command -v podman >/dev/null 2>&1 && podman image exists "$TOR_IMAGE" 2>/dev/null; then
-        hash=$(podman run --rm "$TOR_IMAGE" tor --hash-password "$TOR_SERVICE_PASSWORD" 2>/dev/null | head -n1 || true)
+        # `tor --hash-password` prints a warning line to *stdout* first ("You
+        # are running Tor as root..."), so take the hash by its shape -- Tor
+        # writes it as 16:<hex> -- rather than the first line.
+        hash=$(podman run --rm "$TOR_IMAGE" tor --hash-password "$TOR_SERVICE_PASSWORD" 2>/dev/null \
+            | grep -E '^16:' | head -n1 || true)
     fi
     if [ -n "$hash" ]; then
         cat > "$DATA_DIR/tor/torrc" <<EOF

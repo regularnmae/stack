@@ -39,13 +39,13 @@ head2 "Containers"
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
     containers=(
-        valkey searxng nginx-proxy-manager
+        tor valkey searxng nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
     )
 else
     containers=(
-        bitcoind monerod monero-wallet-rpc lightningd tor
-        valkey searxng nginx-proxy-manager
+        bitcoind monerod monero-wallet-rpc lightningd
+        tor valkey searxng nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
     )
 fi
