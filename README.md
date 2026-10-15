@@ -1,118 +1,131 @@
-# crypto-nodes
+# stack
 
-The podman/quadlet units for the crypto node stack on the mainnet host: a
-Bitcoin Core node, a Monero node, a Monero wallet RPC, Core Lightning, and the
-Tor proxy lightningd uses. This is the **single owner** of those units — the
-MCP servers (`bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`,
-`lightning-mcp`) and `searxng-mcp` each own only their own unit and the shared
-`npm-network.network`, so nothing else can rewrite the node config.
+The whole server stack for the mainnet host, in one repo: every podman/quadlet
+unit, every secret/env wiring, and a one-click deploy that can rebuild the host
+from scratch.
 
-| Unit | Image | Reaches | Data dir |
+The application code lives in sibling repos — `searxng-mcp`,
+`bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`, `lightning-mcp` —
+each of which ships only its code, tests, CI and `Containerfile`. **Their units
+and env files live here**, so there is exactly one place that defines how the
+stack runs and one script that fixes a deployment problem.
+
+## What runs
+
+| Unit | Image | Published on the LAN | Data |
 | --- | --- | --- | --- |
-| `bitcoind.container` | `lncm/bitcoind:v27.2` | mainnet, RPC `8332` on `npm-network` | `~/data/bitcoin` |
-| `monerod.container` | `simple-monerod` | mainnet, restricted RPC `18089` on `npm-network` | `~/data/monero` |
-| `tor.container` | `localhost/tor:0.4.9.11-alpine3.20` | SOCKS/control on `127.0.0.1:9050-9051` | `~/data/tor` |
-| `lightningd.container` | `elementsproject/lightningd` | clnrest `3010` + P2P `9735` on `npm-network` | `~/data/cln` |
-| `monero-wallet-rpc.container` | `simple-monero-wallet-rpc` | `127.0.0.1:18083` + `npm-network` | `~/data/monero-wallet-rpc` |
+| `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — (RPC stays on `npm-network`) | `~/data/bitcoin` |
+| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `~/data/monero` |
+| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `~/data/monero-wallet-rpc` |
+| `lightningd` | `docker.io/elementsproject/lightningd:latest` | — (onion over Tor) | `~/data/cln` |
+| `tor` | `localhost/tor:0.4.9.11-alpine3.20` | `127.0.0.1:9050-9051` | `~/data/tor` |
+| `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
+| `searxng` | `docker.io/searxng/searxng:latest` | `8080` | `~/data/searxng` |
+| `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `~/npm/{data,letsencrypt}` |
+| `searxng-mcp` | `localhost/searxng-mcp:latest` | `8000` | — |
+| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `8101` | — |
+| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `8102` | — |
+| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `8103` 🔑 | — |
+| `lightning-mcp` | `localhost/lightning-mcp:latest` | `8104` 🔑 | — |
 
-No daemon RPC port is published on the LAN. The MCP servers join
-`npm-network` and address the daemons by container name.
+No daemon RPC port is published on the LAN: the daemons address each other by
+container name on `npm-network` (`10.89.0.0/24`, pinned in
+`deploy/npm-network.network` because `tor.container` pins `--ip=10.89.0.240` and
+both `bitcoin.conf` and `torrc` allow that subnet). The MCP servers publish
+their own raw ports; `nginx-proxy-manager` is available for you to add proxy
+hosts by hand but is **not** in the request path for any MCP server.
+
+🔑 = a money-moving surface. Spending is **off** by default on both.
+
+## One-click install
+
+On a fresh Rocky Linux 10 host:
+
+```sh
+git clone https://github.com/regularnmae/stack ~/build/stack
+cd ~/build/stack
+./bootstrap.sh        # podman, linger, unprivileged ports, firewalld, dirs
+./deploy.sh           # clone the app repos, build every image, start everything
+```
+
+`./deploy.sh --bootstrap` does both in one step. On a host that already has
+podman, only `./deploy.sh` is needed.
+
+`deploy.sh` is idempotent and never destructive: re-running reuses every
+existing secret and leaves running containers alone. Common flags:
+
+```sh
+./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
+./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
+./deploy.sh --no-wallets              # skip the interactive wallet prompts
+./deploy.sh --dry-run                 # print the plan, change nothing
+./verify.sh                           # container health + MCP handshakes
+```
+
+Chain sync takes hours to days on a truly bare host (`bitcoind` is pruned, so
+it re-downloads the chain; `monerod` is pruned too). `deploy.sh` starts the
+containers and does **not** wait for sync — re-run it once the chains are
+current and anything that was waiting (notably the CLN runes) completes.
+
+### Wallets
+
+A bare host has no wallets. `deploy.sh` prompts:
+
+- **Monero** — create a new wallet (and print its 25-word seed once) or restore
+  an existing one from its seed. This must exist before `monero-wallet-rpc`
+  starts, so it happens between `monerod` and the wallet RPC.
+- **Bitcoin** — create a new descriptor wallet or restore from a `.dat` backup.
+
+Both are skipped when there is no TTY. See `scripts/wallets.sh`.
 
 ## How secrets are kept out of git
 
-The original units carried secrets on their `Exec=` lines
-(`--bitcoin-rpcpassword`, `--tor-service-password`, `--password`,
-`--rpc-login`), which made them uncommittable — they were `chmod 600` host
-files in no version control.
+No secret is committed. Everything real is generated or adopted on the host,
+under `~/.config/<name>/` and `~/data/`, mode 600.
 
-**Quadlet does not expand environment variables in `Exec=`**, so an
-`EnvironmentFile=` cannot feed those flags (verified: a literal `$FOO` stays a
-literal `$FOO` in the generated `ExecStart`). Two mechanisms, chosen per unit:
+- **`~/.config/stack/secrets.env`** holds the node secrets (bitcoind RPC user
+  and password, Tor service password, Monero wallet password and RPC login).
+  It is resolved in the order **`secrets.env` → the currently-installed unit →
+  the daemon's own config → generate**, so adopting the deploy on a running
+  host changes no credential.
+- **Per-app env files** (`~/.config/<name>/{token,upstream,spend,node}.env`)
+  hold the bearer tokens, upstream credentials, spend policy and CLN runes. The
+  unit reads them with `EnvironmentFile=`; the shapes are documented in
+  `deploy/examples/<name>/`.
 
-- **Secret-free units are symlinked.** `bitcoind`, `monerod` and `tor` carry
-  no secret — bitcoind's RPC password lives in its own `bitcoin.conf`, and
-  tor's control password is a hash in `~/data/tor/torrc`. Their committed
-  `.container` files are static and linked.
-- **Secret-bearing units are rendered from a template.** `lightningd` and
-  `monero-wallet-rpc` need their secrets as arguments, so each ships a
-  `.container.in` with `@PLACEHOLDER@` tokens; `install.sh` substitutes values
-  from `~/.config/crypto-nodes/secrets.env` and writes the real unit, mode
-  `600`, into the quadlet directory. The rendered file is the only copy and
-  never enters git.
+**Quadlet does not expand environment variables in `Exec=`**, which is why
+`lightningd` and `monero-wallet-rpc` are *rendered* from `deploy/*.container.in`
+by `install.sh` (substituting `@PLACEHOLDERS@`), while the secret-free units are
+symlinked. The rendered units are mode 600 and never enter git. Do not "simplify"
+`monero-wallet-rpc` to a config file: its entrypoint binds `0.0.0.0` only when
+`--rpc-login` is on the command line.
 
-Why a template and not a daemon config file for the wallet: the
-`simple-monero-wallet-rpc` entrypoint only binds `0.0.0.0`
-(`--confirm-external-bind`) when it sees `--rpc-login` **on the command line**,
-and otherwise forces `127.0.0.1` — which would make the wallet unreachable from
-the other containers on `npm-network`. So the secret has to be on `Exec`.
-
-`deploy/secrets.env.example`, `torrc.example` and `bitcoin.conf.example`
-document the shapes; none carries a real value.
-
-## Install
-
-```sh
-# On the node host, from a checkout under ~/build:
-./deploy/install.sh
-```
-
-`install.sh` is idempotent and non-destructive:
-
-- resolves each secret in the order **`secrets.env` → the currently-installed
-  unit → the daemon's own config → generate**. So adopting it on a host that
-  already runs the stack reuses every existing credential and changes nothing;
-- writes `~/.config/crypto-nodes/secrets.env` (mode 600);
-- renders `lightningd.container` and `monero-wallet-rpc.container` from their
-  templates (mode 600), replacing any earlier symlink first;
-- symlinks `bitcoind`, `monerod`, `tor` (backing up any real file to `.bak`)
-  plus `npm-network.network` if no other repo already provided it;
-- seeds `~/data/tor/torrc` on a fresh host, computing the control-password
-  hash with `tor --hash-password`;
-- reloads systemd.
-
-Then restart the units whose `Exec` is rendered, and verify:
-
-```sh
-systemctl --user restart lightningd.service monero-wallet-rpc.service
-
-podman exec lightningd lightning-cli getinfo | head -5
-podman exec monero-wallet-rpc /healthcheck.sh && echo wallet-rpc healthy
-```
-
-Roll back a single unit by restoring `<unit>.container.bak` beside it in
-`~/.config/containers/systemd/` and re-running `systemctl --user daemon-reload`.
-
-### The Tor image
-
-`tor.container` uses `localhost/tor:0.4.9.11-alpine3.20`, built from
-`tor/Containerfile`:
-
-```sh
-podman build -t localhost/tor:0.4.9.11-alpine3.20 tor/
-```
-
-### Fresh hosts
-
-This repo seeds `secrets.env` and the rendered units, but two prerequisites
-belong to the nodes themselves and are only referenced here for completeness:
-
-- **`bitcoin.conf`** must exist with an `rpcuser`/`rpcpassword` before
-  `install.sh` can reuse it; a fresh host gets a generated password in
-  `secrets.env` that must then be written into `bitcoin.conf` (see
-  `deploy/bitcoin.conf.example`). That file is owned by the image's uid, so
-  edit it through `podman exec bitcoind ...`.
-- **The Monero wallet file** (`~/data/monero-wallet-rpc/mainnet`) is created
-  out of band; the wallet password in `secrets.env` must match it.
+`bitcoind` keeps its RPC credentials in its own `bitcoin.conf`, which
+`install.sh` seeds on a fresh host and hands to the image uid. It is edited
+through the container: `podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf`.
 
 ## Layout
 
 ```
-crypto-nodes/
+stack/
+  bootstrap.sh            # bare host -> podman, linger, sysctl, firewalld, dirs
+  deploy.sh               # the one-click orchestrator
+  verify.sh               # health + endpoint checks
+  stack.conf              # repo / port / order manifest
+  scripts/wallets.sh      # Monero + Bitcoin create/restore
   deploy/
-    bitcoind.container            monerod.container     tor.container
-    lightningd.container.in       monero-wallet-rpc.container.in
+    install.sh            # the ONLY installer: units + secrets + data dirs
+    *.container           # every unit, symlinked
+    *.container.in        # lightningd and monero-wallet-rpc, rendered (secrets)
     npm-network.network
-    install.sh
-    *.example                     # config/secret templates, no real values
-  tor/Containerfile               # the tor image
+    searxng/{settings.yml,limiter.toml}
+    examples/<app>/*.example
+  tor/Containerfile
 ```
+
+## Rollback
+
+Everything is idempotent and every replaced real unit is backed up to
+`~/.config/containers/systemd/<unit>.bak`. Restore the `.bak` beside its unit
+and `systemctl --user daemon-reload`. To roll back an application, check out an
+older commit in its repo and `./deploy.sh --only <app>`.

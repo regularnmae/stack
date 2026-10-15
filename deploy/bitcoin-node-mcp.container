@@ -1,0 +1,38 @@
+# Quadlet unit for the MCP server itself. deploy/install.sh symlinks this
+# into ~/.config/containers/systemd/, where quadlet turns it into
+# bitcoin-node-mcp.service.
+[Unit]
+Description=Bitcoin Node MCP Server (streamable HTTP)
+After=network-online.target npm-network-network.service bitcoind.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=bitcoin-node-mcp
+Image=localhost/bitcoin-node-mcp:latest
+Network=npm-network.network
+
+# The bearer token clients must present, and the node's RPC credentials.
+# Both live OUTSIDE this repo in ~/.config/bitcoin-node-mcp/ (mode 600),
+# written by deploy/install.sh, so no secret is ever committed -- only the
+# *.example files under deploy/ are.
+EnvironmentFile=%h/.config/bitcoin-node-mcp/token.env
+EnvironmentFile=%h/.config/bitcoin-node-mcp/upstream.env
+
+# Host 8101 -> container 8000 (the app's default). LAN-published like
+# searxng-mcp on 8000; open 8101/tcp in firewalld.
+PublishPort=8101:8000
+
+# Healthcheck: MCP initialize probe (authenticated). Makes a wedged
+# server visible/restartable instead of silently erroring.
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=restart
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,39 @@
+# Quadlet unit for the MCP server itself. deploy/install.sh symlinks this
+# into ~/.config/containers/systemd/, where quadlet turns it into
+# monero-wallet-mcp.service.
+[Unit]
+Description=Monero Wallet MCP Server (streamable HTTP)
+After=network-online.target npm-network-network.service monero-wallet-rpc.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=monero-wallet-mcp
+Image=localhost/monero-wallet-mcp:latest
+Network=npm-network.network
+
+# Three env files, all OUTSIDE this repo under ~/.config/monero-wallet-mcp/
+# (mode 600), written by deploy/install.sh so no secret is committed:
+#   token.env    -- MONERO_MCP_TOKEN (read) and MONERO_MCP_SPEND_TOKEN
+#   upstream.env -- the wallet's RPC login
+#   spend.env    -- ENABLE_SPENDING and the caps (operator-editable)
+EnvironmentFile=%h/.config/monero-wallet-mcp/token.env
+EnvironmentFile=%h/.config/monero-wallet-mcp/upstream.env
+EnvironmentFile=%h/.config/monero-wallet-mcp/spend.env
+
+# Host 8103 -> container 8000. LAN-published like searxng-mcp; open
+# 8103/tcp in firewalld. This is a money-moving surface: the bearer tokens
+# are the only gate.
+PublishPort=8103:8000
+
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=restart
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

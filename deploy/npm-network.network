@@ -5,3 +5,9 @@
 # provided it.
 [Network]
 NetworkName=npm-network
+
+# Pin the subnet: tor.container pins --ip=10.89.0.240 and both
+# bitcoin.conf (rpcallowip) and torrc (SocksPolicy) allow 10.89.0.0/24,
+# so the network must not be assigned a different pool on a fresh host.
+Subnet=10.89.0.0/24
+Gateway=10.89.0.1

@@ -1,0 +1,42 @@
+# Quadlet unit for nginx-proxy-manager (NPM).
+#
+# Owned by this repo: NPM is the one service in the stack that had no home in
+# version control before. deploy/install.sh symlinks this into
+# ~/.config/containers/systemd/ and creates its data dirs under ~/npm.
+#
+# Publishes 80/443 (proxied sites) and 81 (the admin UI) on the LAN. Binding
+# :80 rootless needs net.ipv4.ip_unprivileged_port_start<=80, which
+# bootstrap.sh sets. Its SQLite database and TLS material live in
+# ~/npm/{data,letsencrypt}; back those up -- install.sh never overwrites them.
+#
+# NPM is NOT in the request path for any MCP server: those are published on
+# their own raw ports (8000, 8101-8104) and guarded by bearer tokens. NPM is
+# available for you to add proxy hosts by hand.
+[Unit]
+Description=Nginx Proxy Manager
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=nginx-proxy-manager
+Image=docker.io/jc21/nginx-proxy-manager:latest
+Network=npm-network.network
+
+# Port mappings: HTTP, HTTPS, and Admin Web UI.
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=81:81
+
+# Volume mounts with :Z flag for SELinux labelling.
+Volume=%h/npm/data:/data:Z
+Volume=%h/npm/letsencrypt:/etc/letsencrypt:Z
+
+# Environment settings.
+Environment=DISABLE_IPV6=true
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

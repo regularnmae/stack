@@ -1,0 +1,39 @@
+# Quadlet unit for the MCP server itself. deploy/install.sh symlinks this
+# into ~/.config/containers/systemd/, where quadlet turns it into
+# lightning-mcp.service.
+[Unit]
+Description=Core Lightning MCP Server (streamable HTTP)
+After=network-online.target npm-network-network.service lightningd.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=lightning-mcp
+Image=localhost/lightning-mcp:latest
+Network=npm-network.network
+
+# Three env files, all OUTSIDE this repo under ~/.config/lightning-mcp/
+# (mode 600), written by deploy/install.sh so no secret is committed:
+#   token.env -- LIGHTNING_MCP_TOKEN (read) and LIGHTNING_MCP_SPEND_TOKEN
+#   node.env  -- the runes (read + spend) and the TLS settings
+#   spend.env -- ENABLE_SPENDING and the caps (operator-editable)
+EnvironmentFile=%h/.config/lightning-mcp/token.env
+EnvironmentFile=%h/.config/lightning-mcp/node.env
+EnvironmentFile=%h/.config/lightning-mcp/spend.env
+
+# Host 8104 -> container 8000. LAN-published like searxng-mcp; open
+# 8104/tcp in firewalld. This is a money-moving surface: the bearer tokens
+# are the only gate.
+PublishPort=8104:8000
+
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=restart
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
