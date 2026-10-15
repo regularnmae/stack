@@ -119,8 +119,7 @@ first_nonempty() {
 }
 
 read_secret() {
-    [ -s "$SECRETS_FILE" ] || return 0
-    sed -n "s/^$1=//p" "$SECRETS_FILE" | head -n1
+    env_value "$SECRETS_FILE" "$1"
 }
 
 flag_value() {
@@ -448,12 +447,10 @@ read_rune=""
 spend_rune=""
 tls_insecure=""
 ca_cert=""
-if [ -s "$LN_ENV/node.env" ]; then
-    read_rune=$(sed -n 's/^LIGHTNING_RUNE=//p' "$LN_ENV/node.env" | head -n1)
-    spend_rune=$(sed -n 's/^LIGHTNING_SPEND_RUNE=//p' "$LN_ENV/node.env" | head -n1)
-    tls_insecure=$(sed -n 's/^LIGHTNING_TLS_INSECURE=//p' "$LN_ENV/node.env" | head -n1)
-    ca_cert=$(sed -n 's/^LIGHTNING_CA_CERT=//p' "$LN_ENV/node.env" | head -n1)
-fi
+read_rune=$(env_value "$LN_ENV/node.env" LIGHTNING_RUNE)
+spend_rune=$(env_value "$LN_ENV/node.env" LIGHTNING_SPEND_RUNE)
+tls_insecure=$(env_value "$LN_ENV/node.env" LIGHTNING_TLS_INSECURE)
+ca_cert=$(env_value "$LN_ENV/node.env" LIGHTNING_CA_CERT)
 
 node_needs_write=0
 [ -s "$LN_ENV/node.env" ] || node_needs_write=1

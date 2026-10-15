@@ -173,6 +173,8 @@ stack/
   deploy.sh               # the one-click orchestrator (asks for the data dir)
   verify.sh               # health + endpoint checks
   stack.conf              # repo / port / order manifest, data-dir defaults
+  renovate.json           # Renovate policy (tor image base/image bumps)
+  .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
   scripts/lib.sh          # data-dir resolution + SELinux labelling
   scripts/wallets.sh      # Monero + Bitcoin create/restore
   deploy/
@@ -181,7 +183,8 @@ stack/
     *.container.in        # lightningd and monero-wallet-rpc, rendered (secrets)
     npm-network.network
     searxng/{settings.yml,limiter.toml}
-    examples/<app>/*.example
+    examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by hand
+    examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
   tor/Containerfile
 ```
 

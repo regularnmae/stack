@@ -37,15 +37,11 @@ BITCOIN_WALLET="mainnet"
 DO_MONERO=0
 DO_BITCOIN=0
 
-log()  { printf '==> %s\n' "$*"; }
-warn() { printf 'WARNING: %s\n' "$*" >&2; }
-die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-
 while [ $# -gt 0 ]; do
     case "$1" in
         --monero)  DO_MONERO=1 ;;
         --bitcoin) DO_BITCOIN=1 ;;
-        -h|--help) sed -n '2,14p' "$REPO_DIR/scripts/wallets.sh" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) usage_header "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
     shift
@@ -63,7 +59,6 @@ SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 [ -s "$SECRETS_FILE" ] || SECRETS_FILE="$CONFIG_HOME/crypto-nodes/secrets.env"
 MONERO_DIR="$DATA_DIR/monero-wallet-rpc"
 
-secret() { [ -s "$SECRETS_FILE" ] && sed -n "s/^$1=//p" "$SECRETS_FILE" | head -n1 || true; }
 ask() { local p="$1" a; read -r -p "$p" a; printf '%s' "$a"; }
 
 # ---------------------------------------------------------------------------
@@ -83,7 +78,7 @@ setup_monero() {
     fi
     podman network exists npm-network 2>/dev/null || { warn "npm-network does not exist yet; run ./deploy.sh first"; return 1; }
 
-    local pw; pw=$(secret MONERO_WALLET_PASSWORD)
+    local pw; pw=$(env_value "$SECRETS_FILE" MONERO_WALLET_PASSWORD)
     [ -n "$pw" ] || { warn "no MONERO_WALLET_PASSWORD in $SECRETS_FILE; run deploy/install.sh first"; return 1; }
 
     echo

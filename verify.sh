@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --deep)     DEEP=1 ;;
         --no-nodes) NO_NODES=1 ;;
-        -h|--help)  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
+        -h|--help)  usage_header "$0"; exit 0 ;;
         *)          printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
     shift
@@ -37,8 +37,6 @@ pass() { printf '  \033[32mok\033[0m   %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fails=$((fails+1)); }
 warn() { printf '  \033[33mwarn\033[0m %s\n' "$*"; }
 head2() { printf '\n%s\n' "$*"; }
-
-token_from() { [ -s "$1" ] && sed -n "s/^$2=//p" "$1" | head -n1 || true; }
 
 # ---------------------------------------------------------------------------
 head2 "Containers"
@@ -87,13 +85,13 @@ for e in "${endpoints[@]}"; do
     base="http://${VERIFY_HOST:-127.0.0.1}:$port"
 
     health=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$base/health" 2>/dev/null || echo 000)
-    [ "$health" = "200" ] && pass "$name /health 200" || bad "$name /health -> $health"
+    if [ "$health" = "200" ]; then pass "$name /health 200"; else bad "$name /health -> $health"; fi
 
     gated=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "$base/mcp" \
         -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)
-    [ "$gated" = "401" ] && pass "$name /mcp is token-gated (401)" || bad "$name /mcp without a token -> $gated (expected 401)"
+    if [ "$gated" = "401" ]; then pass "$name /mcp is token-gated (401)"; else bad "$name /mcp without a token -> $gated (expected 401)"; fi
 
-    token=$(token_from "$envfile" "$var")
+    token=$(env_value "$envfile" "$var")
     if [ -z "$token" ]; then
         bad "$name has no token in $envfile"
         continue

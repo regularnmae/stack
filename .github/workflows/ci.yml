@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # -P SCRIPTDIR makes the `# shellcheck source=…` directives resolve
+      # relative to each script, and -S info gates on every finding.
+      - name: shellcheck
+        run: |
+          shellcheck -x -P SCRIPTDIR -S info \
+            bootstrap.sh deploy.sh verify.sh \
+            deploy/install.sh scripts/lib.sh scripts/wallets.sh
+      - name: syntax check
+        run: |
+          for f in bootstrap.sh deploy.sh verify.sh \
+                   deploy/install.sh scripts/lib.sh scripts/wallets.sh; do
+            bash -n "$f"
+          done

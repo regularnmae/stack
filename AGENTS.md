@@ -38,6 +38,7 @@ the wallet is unreachable from the MCP server.
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health + MCP handshakes
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh  # the CI lint
 ```
 
 ## Facts that are easy to get wrong

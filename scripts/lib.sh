@@ -7,6 +7,21 @@ log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Echo the value of KEY from a KEY=VALUE env/secrets file (first match). Reads
+# the file line by line and never sources it, and strips a trailing CR so a
+# CRLF file still parses. Prints nothing when the file or the key is absent.
+env_value() {
+    local file="$1" key="$2"
+    [ -s "$file" ] || return 0
+    sed -n "s/^$key=//p" "$file" | head -n1 | tr -d '\r'
+}
+
+# Print a script's leading comment block (shebang excluded) for --help. Stops at
+# the first non-comment line, so keep each script's header one contiguous block.
+usage_header() {
+    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$1"
+}
+
 # Where the stack keeps everything it must not lose: the daemon data dirs, the
 # nginx-proxy-manager data, AND the config/secrets. That way a rebuild only has
 # to preserve one directory. Resolved in this order, then persisted so it is

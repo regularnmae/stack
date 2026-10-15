@@ -38,9 +38,7 @@ APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"
 
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
-usage() {
-    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$REPO_DIR/deploy.sh"
-}
+usage() { usage_header "$REPO_DIR/deploy.sh"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -110,10 +108,11 @@ preflight() {
 # ---------------------------------------------------------------------------
 # 1. fetch the application repos
 # ---------------------------------------------------------------------------
-fetch_repos() {
+fetch_repos() { # [repo...]  (default: every APP_REPOS entry)
     mkdir -p "$BUILD_DIR"
-    local r dir
-    for r in "${APP_REPOS[@]}"; do
+    local repos=("$@") r dir
+    [ "${#repos[@]}" -gt 0 ] || repos=("${APP_REPOS[@]}")
+    for r in "${repos[@]}"; do
         dir="$BUILD_DIR/$r"
         if [ -d "$dir/.git" ]; then
             log "updating $r"
@@ -144,6 +143,23 @@ restart_unit() { log "restarting $1.service"; run systemctl --user restart "$1.s
 wait_healthy() { # container timeout
     local c="$1" t="${2:-180}" deadline st=""
     [ "$DRY_RUN" = 1 ] && return 0
+
+    # Prefer podman's own health wait: it wakes the instant the state changes
+    # instead of a shell `sleep 5` loop that spawns podman and date per tick.
+    # Only when the container actually defines a healthcheck, else podman has
+    # nothing to wait on.
+    if podman wait --help 2>/dev/null | grep -q -- '--condition' \
+        && [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$c" 2>/dev/null)" = yes ]; then
+        podman wait --condition=healthy --condition=unhealthy --interval 2 --timeout "$t" "$c" >/dev/null 2>&1 || true
+        st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
+        case "$st" in
+            *"(healthy)"*) log "$c is healthy"; return 0 ;;
+        esac
+        warn "$c not healthy after ${t}s (status: ${st:-container missing})"
+        return 1
+    fi
+
+    # Fallback (no podman --condition, or no healthcheck): poll.
     deadline=$(( $(date +%s) + t ))
     while :; do
         st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
@@ -332,7 +348,7 @@ if [ -n "$ONLY" ]; then
     # from the unit exactly as the full deploy does.
     ensure_network
     if in_list "$ONLY" "${APP_REPOS[@]}"; then
-        fetch_repos
+        fetch_repos "$ONLY"
         install_units
         deploy_app "$ONLY"
     else
