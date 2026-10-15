@@ -1,10 +1,11 @@
 # Quadlet unit for Tor, used by lightningd for its onion service and to
 # reach the network over a proxy. No secrets: tor's own configuration
-# (including the control-port password hash) lives in ~/data/tor/torrc,
+# (including the control-port password hash) lives in $DATA_DIR/tor/torrc,
 # which is outside the repo and never committed.
 [Unit]
 Description=Tor SOCKS5 & Control Proxy
-After=network-online.target
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
 Before=lightningd.service
 
 [Container]

@@ -1,7 +1,7 @@
 # TEMPLATE -- do not symlink this file. deploy/install.sh renders it into
 # ~/.config/containers/systemd/monero-wallet-rpc.container (mode 600),
 # substituting the @PLACEHOLDERS@ with values from
-# ~/.config/crypto-nodes/secrets.env.
+# $DATA_DIR/config/stack/secrets.env.
 #
 # `--rpc-login` MUST be on the Exec line, not merely in a config file: the
 # image's entrypoint only binds 0.0.0.0 (with --confirm-external-bind) when it

@@ -16,13 +16,18 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
-DATA_DIR="${STACK_DATA_DIR:-$HOME/data}"
 
-SECRETS_FILE="$CONFIG_HOME/stack/secrets.env"
-[ -s "$SECRETS_FILE" ] || SECRETS_FILE="$CONFIG_HOME/crypto-nodes/secrets.env"
+# The secrets live under the configured data dir ($DATA_DIR/config) now, so we
+# resolve that dir the same way deploy.sh/verify.sh do: stack.conf ->
+# data-dir.env -> prompt/default -> $HOME/data. deploy.sh exports
+# STACK_DATA_DIR, so an invoked run never re-prompts. The resolution happens
+# after the TTY check below, so --help and the no-TTY skip stay side-effect free.
+# shellcheck source=../stack.conf
+[ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
+# shellcheck source=lib.sh
+. "$REPO_DIR/scripts/lib.sh"
 
 MONERO_IMAGE="ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest"
-MONERO_DIR="$DATA_DIR/monero-wallet-rpc"
 MONERO_WALLET="mainnet"
 SETUP_NAME="monero-wallet-setup"
 SETUP_PORT=18099
@@ -51,6 +56,12 @@ if [ ! -t 0 ]; then
     log "no TTY; skipping interactive wallet setup"
     exit 0
 fi
+
+resolve_data_dir
+SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
+# Fall back to the pre-data-dir layout if install.sh has not migrated yet.
+[ -s "$SECRETS_FILE" ] || SECRETS_FILE="$CONFIG_HOME/crypto-nodes/secrets.env"
+MONERO_DIR="$DATA_DIR/monero-wallet-rpc"
 
 secret() { [ -s "$SECRETS_FILE" ] && sed -n "s/^$1=//p" "$SECRETS_FILE" | head -n1 || true; }
 ask() { local p="$1" a; read -r -p "$p" a; printf '%s' "$a"; }

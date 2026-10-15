@@ -1,6 +1,6 @@
 # TEMPLATE -- do not symlink this file. deploy/install.sh renders it into
 # ~/.config/containers/systemd/lightningd.container (mode 600), substituting
-# the @PLACEHOLDERS@ with values from ~/.config/crypto-nodes/secrets.env.
+# the @PLACEHOLDERS@ with values from $DATA_DIR/config/stack/secrets.env.
 #
 # Exec= cannot expand environment variables (Quadlet does not do that), and
 # lightningd needs its secrets as arguments, so the unit is generated with the

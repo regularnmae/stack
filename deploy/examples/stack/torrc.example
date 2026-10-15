@@ -1,6 +1,6 @@
 # Template for tor's configuration.
 #
-# deploy/install.sh seeds ~/data/tor/torrc only on a fresh host, computing the
+# deploy/install.sh seeds $DATA_DIR/tor/torrc only on a fresh host, computing the
 # control-password hash from TOR_SERVICE_PASSWORD with
 # `podman run --rm localhost/tor:<tag> tor --hash-password`. On an existing
 # host the file is left alone. Carries no secret (the hash is derived).

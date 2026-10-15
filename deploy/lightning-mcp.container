@@ -1,4 +1,4 @@
-# Quadlet unit for the MCP server itself. deploy/install.sh symlinks this
+# Quadlet unit for the MCP server itself. deploy/install.sh renders this
 # into ~/.config/containers/systemd/, where quadlet turns it into
 # lightning-mcp.service.
 [Unit]
@@ -11,7 +11,7 @@ ContainerName=lightning-mcp
 Image=localhost/lightning-mcp:latest
 Network=npm-network.network
 
-# Three env files, all OUTSIDE this repo under ~/.config/lightning-mcp/
+# Three env files, all OUTSIDE this repo under $DATA_DIR/config/lightning-mcp/
 # (mode 600), written by deploy/install.sh so no secret is committed:
 #   token.env -- LIGHTNING_MCP_TOKEN (read) and LIGHTNING_MCP_SPEND_TOKEN
 #   node.env  -- the runes (read + spend) and the TLS settings

@@ -15,11 +15,14 @@ daemon's argv. So a secret cannot be fed to `--bitcoin-rpcpassword` etc. from an
 env file. Two answers, and the split is deliberate:
 
 - secret-free units (`bitcoind`, `monerod`, `tor`, `valkey`, `searxng`, NPM and
-  the five MCP units) are **symlinked** — their secrets live in the daemons' own
-  files or in `EnvironmentFile=`;
+  the five MCP units) are **rendered** too, but their `@PLACEHOLDERS@` are only
+  `@DATA_DIR@`/`@CONFIG_DIR@` — their secrets live in the daemons' own files or
+  in `EnvironmentFile=`;
 - secret-bearing units (`lightningd`, `monero-wallet-rpc`) are **rendered** from
   a `.container.in` by `install.sh`, substituting `@PLACEHOLDERS@` from
-  `$DATA_DIR/config/stack/secrets.env`. The rendered unit is mode 600, never committed.
+  `$DATA_DIR/config/stack/secrets.env` as well. The rendered units are mode 600,
+  never committed. (Every unit is rendered — `install.sh` `UNITS` — because all
+  of them reference the data or config dir; none is a symlink.)
 
 Do not move a secret onto a committed `.container`, and do not "simplify"
 `monero-wallet-rpc` to a config file: the image's entrypoint only binds `0.0.0.0`
@@ -39,9 +42,9 @@ the wallet is unreachable from the MCP server.
 
 ## Facts that are easy to get wrong
 
-- **`install.sh` is the only installer.** It seeds every env file and links or
-  renders every unit. Adding a service means adding its unit to `STATIC_UNITS`
-  (or `RENDERED`) and its env seeding to `install.sh` — nothing in the app repos.
+- **`install.sh` is the only installer.** It seeds every env file and renders
+  every unit. Adding a service means adding its unit to the `UNITS` array and its
+  env seeding to `install.sh` — nothing in the app repos.
 - **Secret resolution order** is `secrets.env` → the currently-installed unit
   (`flag_value`) → the daemon's config (`bitcoin_conf_value`) → generate. Keep
   that order: it is what makes adoption on a running host a no-op.

@@ -1,7 +1,7 @@
 # Template for bitcoind's config file.
 #
 # bitcoind owns this file itself, under its data directory
-# (~/data/bitcoin/bitcoin.conf), which is not part of this repo. It is shown
+# ($DATA_DIR/bitcoin/bitcoin.conf), which is not part of this repo. It is shown
 # here for reference because the MCP servers and lightningd read its RPC
 # credentials. Carries no real secret.
 server=1

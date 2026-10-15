@@ -1,4 +1,4 @@
-# Quadlet unit for the MCP server itself. deploy/install.sh symlinks this
+# Quadlet unit for the MCP server itself. deploy/install.sh renders this
 # into ~/.config/containers/systemd/, where quadlet turns it into
 # bitcoin-node-mcp.service.
 [Unit]
@@ -12,7 +12,7 @@ Image=localhost/bitcoin-node-mcp:latest
 Network=npm-network.network
 
 # The bearer token clients must present, and the node's RPC credentials.
-# Both live OUTSIDE this repo in ~/.config/bitcoin-node-mcp/ (mode 600),
+# Both live OUTSIDE this repo in $DATA_DIR/config/bitcoin-node-mcp/ (mode 600),
 # written by deploy/install.sh, so no secret is ever committed -- only the
 # *.example files under deploy/ are.
 EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/token.env

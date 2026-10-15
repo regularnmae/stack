@@ -66,7 +66,9 @@ preflight() {
     [ -n "${HOME:-}" ] || die "HOME is not set"
 
     if ! command -v podman >/dev/null 2>&1; then
-        if [ "$DO_BOOTSTRAP" = 1 ]; then
+        if [ "$DRY_RUN" = 1 ]; then
+            printf '  [dry-run] %s/bootstrap.sh\n' "$REPO_DIR"
+        elif [ "$DO_BOOTSTRAP" = 1 ]; then
             "$REPO_DIR/bootstrap.sh"
         else
             die "podman is not installed. Re-run with --bootstrap, or run ./bootstrap.sh first."
@@ -84,19 +86,25 @@ preflight() {
     fi
 
     # Prompt for sudo now rather than twenty minutes from now at the firewalld
-    # step, where the timestamp would already have expired.
-    if ! sudo -n true 2>/dev/null; then
+    # step, where the timestamp would already have expired. A dry run changes
+    # nothing, so it must not prompt or touch the filesystem.
+    if [ "$DRY_RUN" != 1 ] && ! sudo -n true 2>/dev/null; then
         log "some steps use sudo; you may be prompted once"
         sudo -v || warn "sudo unavailable; firewalld ports will not be opened automatically"
     fi
 
     # Choose where the stack keeps its data (asked once, then remembered) and
     # make sure it is usable: owned by us (containers write as this uid) and
-    # labelled for containers.
+    # labelled for containers. resolve_data_dir only persists the answer, which
+    # it skips on a dry run; creating/labelling the dirs is a real change.
     resolve_data_dir
     log "data directory: $DATA_DIR"
-    ensure_data_dirs
-    ensure_data_dir_selinux
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  [dry-run] would create and label %s\n' "$DATA_DIR"
+    else
+        ensure_data_dirs
+        ensure_data_dir_selinux
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -302,7 +310,8 @@ open_firewall() {
     # A deploy easily outlasts sudo's timestamp (5 minutes by default), so
     # refresh it here instead of failing at the last step. If sudo cannot
     # prompt (no terminal), warn rather than aborting an otherwise good deploy.
-    if ! sudo -n true 2>/dev/null; then
+    # A dry run never opens ports, so it must not prompt for sudo.
+    if [ "$DRY_RUN" != 1 ] && ! sudo -n true 2>/dev/null; then
         sudo -v || { warn "sudo unavailable; open ${FIREWALL_PORTS[*]}/tcp yourself"; return 0; }
     fi
     local p args=()
@@ -319,6 +328,9 @@ open_firewall() {
 preflight
 
 if [ -n "$ONLY" ]; then
+    # A hand-removed network would make every restart below fail; recreate it
+    # from the unit exactly as the full deploy does.
+    ensure_network
     if in_list "$ONLY" "${APP_REPOS[@]}"; then
         fetch_repos
         install_units

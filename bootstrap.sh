@@ -6,7 +6,7 @@
 #   * net.ipv4.ip_unprivileged_port_start=80, so nginx-proxy-manager can bind
 #     80/443/81 without root
 #   * firewalld enabled (deploy.sh opens the specific ports)
-#   * the build, data and NPM directories
+#   * the build dir and the quadlet directory (deploy.sh creates the data dirs)
 #
 # Run as your normal login user -- it uses sudo for the privileged parts. The
 # containers themselves always run rootless. Idempotent.

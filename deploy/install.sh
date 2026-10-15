@@ -438,7 +438,10 @@ create_rune() {
         printf '==> created rune %s... was refused (blacklisted id?); retrying\n' \
             "${rune:0:8}" >&2
     done
-    printf '%s' "$rune"
+    # Never hand back an unproven rune: return empty so the caller keeps the
+    # existing node.env (or retries on a later run) instead of writing a rune
+    # the node will refuse.
+    printf '==> gave up creating a usable rune after 12 tries\n' >&2
 }
 
 read_rune=""

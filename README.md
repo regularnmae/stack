@@ -48,9 +48,10 @@ curl -fsSL https://raw.githubusercontent.com/regularnmae/stack/main/bootstrap.sh
 
 `bootstrap.sh` installs podman/firewalld/git, enables user linger, sets
 `net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
-80/443/81 rootless), creates the data directories and clones this repo to
-`~/build/stack`. `deploy.sh` then clones the app repos, builds every image,
-starts everything in order, opens firewalld and verifies.
+80/443/81 rootless), creates the build dir and the quadlet directory, and clones
+this repo to `~/build/stack`. `deploy.sh` then resolves and creates the data
+directories, clones the app repos, builds every image, starts everything in
+order, opens firewalld and verifies.
 
 With git already present, the equivalent is:
 
@@ -69,7 +70,8 @@ On the first run, `deploy.sh` asks **where the stack keeps its data** (default
 an OS reinstall. See [Where the data lives](#where-the-data-lives).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
-existing secret and leaves running containers alone. Common flags:
+existing secret, leaves the running daemons alone, and rebuilds + restarts the
+five MCP servers (a plain start would keep running a stale image). Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
@@ -153,10 +155,11 @@ under `$DATA_DIR/config/`, mode 600.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
 `lightningd` and `monero-wallet-rpc` are *rendered* from `deploy/*.container.in`
-by `install.sh` (substituting `@PLACEHOLDERS@`), while the secret-free units are
-symlinked. The rendered units are mode 600 and never enter git. Do not "simplify"
-`monero-wallet-rpc` to a config file: its entrypoint binds `0.0.0.0` only when
-`--rpc-login` is on the command line.
+by `install.sh` (substituting `@PLACEHOLDERS@`). Every unit is rendered the same
+way — the secret-free ones only substitute `@DATA_DIR@`/`@CONFIG_DIR@` — so no
+unit is a symlink. The rendered units are mode 600 and never enter git. Do not
+"simplify" `monero-wallet-rpc` to a config file: its entrypoint binds `0.0.0.0`
+only when `--rpc-login` is on the command line.
 
 `bitcoind` keeps its RPC credentials in its own `bitcoin.conf`, which
 `install.sh` seeds on a fresh host and hands to the image uid. It is edited

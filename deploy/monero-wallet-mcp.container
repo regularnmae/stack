@@ -1,4 +1,4 @@
-# Quadlet unit for the MCP server itself. deploy/install.sh symlinks this
+# Quadlet unit for the MCP server itself. deploy/install.sh renders this
 # into ~/.config/containers/systemd/, where quadlet turns it into
 # monero-wallet-mcp.service.
 [Unit]
@@ -11,7 +11,7 @@ ContainerName=monero-wallet-mcp
 Image=localhost/monero-wallet-mcp:latest
 Network=npm-network.network
 
-# Three env files, all OUTSIDE this repo under ~/.config/monero-wallet-mcp/
+# Three env files, all OUTSIDE this repo under $DATA_DIR/config/monero-wallet-mcp/
 # (mode 600), written by deploy/install.sh so no secret is committed:
 #   token.env    -- MONERO_MCP_TOKEN (read) and MONERO_MCP_SPEND_TOKEN
 #   upstream.env -- the wallet's RPC login
