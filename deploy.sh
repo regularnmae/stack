@@ -84,6 +84,13 @@ preflight() {
     if [ "${portstart:-0}" -gt 80 ] 2>/dev/null; then
         warn "net.ipv4.ip_unprivileged_port_start=$portstart: nginx-proxy-manager cannot bind 80/443/81. Run ./bootstrap.sh."
     fi
+
+    # Prompt for sudo now rather than twenty minutes from now at the firewalld
+    # step, where the timestamp would already have expired.
+    if ! sudo -n true 2>/dev/null; then
+        log "some steps use sudo; you may be prompted once"
+        sudo -v || warn "sudo unavailable; firewalld ports will not be opened automatically"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -283,11 +290,18 @@ open_firewall() {
         warn "firewalld is not running; open ${FIREWALL_PORTS[*]}/tcp yourself"
         return 0
     fi
+    # A deploy easily outlasts sudo's timestamp (5 minutes by default), so
+    # refresh it here instead of failing at the last step. If sudo cannot
+    # prompt (no terminal), warn rather than aborting an otherwise good deploy.
+    if ! sudo -n true 2>/dev/null; then
+        sudo -v || { warn "sudo unavailable; open ${FIREWALL_PORTS[*]}/tcp yourself"; return 0; }
+    fi
     local p args=()
     for p in "${FIREWALL_PORTS[@]}"; do args+=(--add-port="$p/tcp"); done
     log "opening ${FIREWALL_PORTS[*]}/tcp in firewalld"
-    run sudo firewall-cmd --permanent "${args[@]}" >/dev/null
-    run sudo firewall-cmd --reload >/dev/null
+    run sudo firewall-cmd --permanent "${args[@]}" >/dev/null \
+        || warn "could not open ports; run: sudo firewall-cmd --permanent ${args[*]} && sudo firewall-cmd --reload"
+    run sudo firewall-cmd --reload >/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
