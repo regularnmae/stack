@@ -77,3 +77,33 @@ the wallet is unreachable from the MCP server.
   servers' `spend.env`. Never seed it to 1.
 - MCP test suites live in their own repos; `./verify.sh` is the runtime check
   (health, 401-without-token, authenticated handshake per endpoint).
+
+## Interface contract with the app repos
+
+The five MCP servers are pure env-configured services: **they never read a stack
+path, a config file or a data dir** — only the variables below. This table is
+the shared contract; the app repos' docs own the *meaning* of the variables,
+this repo owns everything about *how they get set*. If a container name, port or
+variable name changes, it changes on both sides at once.
+
+| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | Host port | Bind + health |
+| --- | --- | --- | --- | --- | --- |
+| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `8000` | `0.0.0.0:8000`, `/health` |
+| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `8101` | `0.0.0.0:8000`, `/health` |
+| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `8102` | `0.0.0.0:8000`, `/health` |
+| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `8103` | `0.0.0.0:8000`, `/health` |
+| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `8104` | `0.0.0.0:8000`, `/health` |
+
+The variables the apps read (names and defaults are the app repos' contract):
+`SEARXNG_URL`/`SEARXNG_MCP_TOKEN`; `BITCOIN_RPC_URL`/`BITCOIN_RPC_USER`/
+`BITCOIN_RPC_PASSWORD`/`BITCOIN_MCP_TOKEN`; `MONERO_RPC_URL`/`MONERO_RPC_USER`/
+`MONERO_RPC_PASSWORD`/`MONERO_MCP_TOKEN`; `MONERO_WALLET_RPC_URL`/
+`MONERO_WALLET_RPC_USER`/`MONERO_WALLET_RPC_PASSWORD`/`MONERO_MCP_TOKEN`/
+`MONERO_MCP_SPEND_TOKEN`; `LIGHTNING_REST_URL`/`LIGHTNING_RUNE`/
+`LIGHTNING_SPEND_RUNE`/`LIGHTNING_TLS_INSECURE`/`LIGHTNING_CA_CERT`/
+`LIGHTNING_MCP_TOKEN`/`LIGHTNING_MCP_SPEND_TOKEN`; and the shared
+`MCP_HOST`/`MCP_PORT`, `ENABLE_SPENDING` and the spend caps.
+
+Because the upstream names/ports are compiler-baked defaults, renaming a daemon
+in `deploy/` without updating this table (and the app's default) silently breaks
+that server — treat this section as the thing to check when either side moves.
