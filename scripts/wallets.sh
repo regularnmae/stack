@@ -103,7 +103,9 @@ setup_monero() {
     trap "podman rm -f '$SETUP_NAME' >/dev/null 2>&1 || true" EXIT
 
     local deadline; deadline=$(( $(date +%s) + 60 ))
-    until monero_rpc '{"jsonrpc":"2.0","id":"0","method":"get_version"}' 2>/dev/null | grep -q '"status":"OK"'; do
+    # The wallet RPC answers `{"result":{...}}`; unlike the daemon's responses
+    # it carries no "status":"OK", so probe for the result object.
+    until monero_rpc '{"jsonrpc":"2.0","id":"0","method":"get_version"}' 2>/dev/null | grep -q '"result"'; do
         [ "$(date +%s)" -ge "$deadline" ] && { warn "the setup wallet-rpc did not come up"; return 1; }
         sleep 2
     done
