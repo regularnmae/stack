@@ -290,7 +290,6 @@ else
     log "seeding $SEARXNG_DATA_DIR/settings.yml with a fresh secret_key"
     sed "s/^  secret_key: .*/  secret_key: \"${secret}\"/" \
         "$DEPLOY_DIR/searxng/settings.yml" > "$SEARXNG_DATA_DIR/settings.yml"
-    chmod 600 "$SEARXNG_DATA_DIR/settings.yml"
 fi
 if [ -s "$SEARXNG_DATA_DIR/limiter.toml" ]; then
     log "keeping existing $SEARXNG_DATA_DIR/limiter.toml"

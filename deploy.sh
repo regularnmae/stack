@@ -36,7 +36,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
 usage() {
-    sed -n '2,20p' "$REPO_DIR/deploy.sh" | sed 's/^# \{0,1\}//'
+    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$REPO_DIR/deploy.sh"
 }
 
 while [ $# -gt 0 ]; do
