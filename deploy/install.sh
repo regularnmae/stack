@@ -156,11 +156,18 @@ mkdir -p "$CONFIG_HOME" "$QUADLET_DIR" "$DATA_DIR" "$NPM_DIR/data" "$NPM_DIR/let
 mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$DATA_DIR/tor"
 
 # A host that ran the stack before the crypto-nodes -> stack rename keeps its
-# secrets under the old name.
-if [ ! -s "$SECRETS_FILE" ] && [ -s "$CONFIG_HOME/crypto-nodes/secrets.env" ]; then
+# secrets under the old name. Move them across, but only delete the old copy
+# once it is byte-identical to the new one, so a failed copy cannot lose them.
+LEGACY_SECRETS="$CONFIG_HOME/crypto-nodes/secrets.env"
+if [ -s "$LEGACY_SECRETS" ]; then
     mkdir -p "$SECRETS_DIR"
-    cp -p "$CONFIG_HOME/crypto-nodes/secrets.env" "$SECRETS_FILE"
-    log "migrated crypto-nodes/secrets.env -> stack/secrets.env"
+    [ -s "$SECRETS_FILE" ] || cp -p "$LEGACY_SECRETS" "$SECRETS_FILE"
+    if cmp -s "$LEGACY_SECRETS" "$SECRETS_FILE"; then
+        rm -f "$LEGACY_SECRETS"
+        log "migrated crypto-nodes/secrets.env -> stack/secrets.env"
+    else
+        log "note: $LEGACY_SECRETS differs from $SECRETS_FILE; leaving both"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
