@@ -155,10 +155,30 @@ bitcoind_syncing() {
         | grep -q '"initialblockdownload": *true'
 }
 
+# Make sure the podman network exists before anything joins it. The quadlet
+# unit can be left "active (exited)" while the network itself is gone (e.g. the
+# network was removed by hand), and systemd will not re-run it, so a plain
+# start of a dependent unit fails. Recreate it from the unit (which pins the
+# subnet the tor IP and the rpcallowip/SocksPolicy allowlists rely on).
+ensure_network() {
+    if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] ensure npm-network exists\n'; return 0; fi
+    if podman network exists npm-network 2>/dev/null; then
+        log "npm-network present"
+        return 0
+    fi
+    log "creating npm-network"
+    systemctl --user reset-failed npm-network-network.service 2>/dev/null || true
+    systemctl --user restart npm-network-network.service 2>/dev/null || true
+    if ! podman network exists npm-network 2>/dev/null; then
+        podman network create --subnet 10.89.0.0/24 --gateway 10.89.0.1 npm-network >/dev/null
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # 3. start the infrastructure, in dependency order
 # ---------------------------------------------------------------------------
 start_infra() {
+    ensure_network
     # tor first: lightningd requires it and addresses it by its pinned IP.
     start_unit tor
     if [ "$SKIP_DAEMONS" = 0 ]; then
