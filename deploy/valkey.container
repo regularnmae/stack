@@ -14,6 +14,12 @@ Network=npm-network.network
 # npm-network. It holds short-lived limiter counters only, so
 # no volume is needed (loss on restart is harmless).
 
+# The valkey image ships no HEALTHCHECK; PING is the canonical liveness probe.
+HealthCmd=valkey-cli ping
+HealthInterval=30s
+HealthStartPeriod=10s
+HealthRetries=3
+
 [Service]
 Restart=always
 TimeoutStartSec=300

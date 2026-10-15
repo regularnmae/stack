@@ -32,6 +32,15 @@ Network=npm-network.network
 # $USER fails, and chown -R would lock bitcoind out of its own chainstate.
 Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 
+# The lncm image ships no HEALTHCHECK, so without this podman reports
+# "Up (no health status)" and verify.sh can only warn. Probe the RPC the
+# same way deploy.sh does; bitcoin-cli reads bitcoin.conf from the image's
+# datadir. The call is loopback in-container, so rpcallowip still applies.
+HealthCmd=bitcoin-cli getblockchaininfo
+HealthInterval=60s
+HealthStartPeriod=2m
+HealthRetries=3
+
 [Service]
 Restart=always
 TimeoutStartSec=300
