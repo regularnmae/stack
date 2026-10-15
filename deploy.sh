@@ -84,20 +84,10 @@ preflight() {
     fi
 
     # Prompt for sudo now rather than twenty minutes from now at the firewalld
-    # step -- but priming it once is not enough: the default timestamp timeout
-    # is 5 minutes and a cold build runs ~20, so the firewalld step would prompt
-    # again. Prime it, then refresh it in the background for the whole run.
-    if [ "$DRY_RUN" = 0 ]; then
-        if ! sudo -n true 2>/dev/null; then
-            log "some steps use sudo; you may be prompted once"
-            sudo -v || warn "sudo unavailable; firewalld ports will not be opened automatically"
-        fi
-        if sudo -n true 2>/dev/null; then
-            # Bounded (~3h) so a SIGKILLed deploy cannot orphan the refresher.
-            ( for _ in $(seq 1 240); do sleep 50; sudo -n true 2>/dev/null || exit; done ) &
-            SUDO_KEEPALIVE=$!
-            trap 'kill "$SUDO_KEEPALIVE" 2>/dev/null || true' EXIT
-        fi
+    # step, where the timestamp would already have expired.
+    if ! sudo -n true 2>/dev/null; then
+        log "some steps use sudo; you may be prompted once"
+        sudo -v || warn "sudo unavailable; firewalld ports will not be opened automatically"
     fi
 
     # Choose where the stack keeps its data (asked once, then remembered) and
