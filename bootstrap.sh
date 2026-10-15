@@ -12,9 +12,15 @@
 # containers themselves always run rootless. Idempotent.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=stack.conf
-. "$REPO_DIR/stack.conf"
+REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || printf '%s' "$PWD")"
+# The manifest is optional: this script also runs standalone (curl | bash) on a
+# host that has no clone yet, where REPO_DIR is just the current directory.
+if [ -r "$REPO_DIR/stack.conf" ]; then
+    # shellcheck source=stack.conf
+    . "$REPO_DIR/stack.conf"
+fi
+GITHUB_ORG="${GITHUB_ORG:-regularnmae}"
+BUILD_DIR="${BUILD_DIR:-$HOME/build}"
 
 USER_NAME="$(id -un)"
 DATA_HOME="$HOME"
@@ -56,6 +62,7 @@ if ! command -v podman >/dev/null 2>&1; then
 else
     log "podman already installed ($(podman --version))"
 fi
+command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y git; }
 
 # Rootless networking needs one of these; both are optional per release.
 command -v slirp4netns >/dev/null 2>&1 || sudo dnf install -y slirp4netns >/dev/null 2>&1 || true
@@ -110,6 +117,19 @@ mkdir -p "$BUILD_DIR" \
 
 systemctl --user daemon-reload 2>/dev/null || true
 
+# If this is not a checkout (curl | bash), fetch one now that git exists, so
+# the next step is always deploy.sh.
+if [ -f "$REPO_DIR/deploy.sh" ]; then
+    NEXT="$REPO_DIR/deploy.sh"
+else
+    NEXT="$BUILD_DIR/stack/deploy.sh"
+    if [ ! -d "$BUILD_DIR/stack/.git" ]; then
+        log "cloning $GITHUB_ORG/stack into $BUILD_DIR/stack"
+        git clone -q "https://github.com/$GITHUB_ORG/stack.git" "$BUILD_DIR/stack" \
+            || warn "could not clone; clone it yourself, then run deploy.sh"
+    fi
+fi
+
 cat <<EOF
 
 Bootstrap complete.
@@ -121,5 +141,5 @@ Bootstrap complete.
   npm         $DATA_HOME/npm
 
 Next:
-  $REPO_DIR/deploy.sh
+  $NEXT
 EOF

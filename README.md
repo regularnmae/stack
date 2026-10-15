@@ -39,17 +39,30 @@ hosts by hand but is **not** in the request path for any MCP server.
 
 ## One-click install
 
-On a fresh Rocky Linux 10 host:
+On a truly bare Rocky Linux 10 host (no git, no podman):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/regularnmae/stack/main/bootstrap.sh | bash
+~/build/stack/deploy.sh
+```
+
+`bootstrap.sh` installs podman/firewalld/git, enables user linger, sets
+`net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
+80/443/81 rootless), creates the data directories and clones this repo to
+`~/build/stack`. `deploy.sh` then clones the app repos, builds every image,
+starts everything in order, opens firewalld and verifies.
+
+With git already present, the equivalent is:
 
 ```sh
 git clone https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
-./bootstrap.sh        # podman, linger, unprivileged ports, firewalld, dirs
-./deploy.sh           # clone the app repos, build every image, start everything
+./bootstrap.sh
+./deploy.sh           # or: ./deploy.sh --bootstrap to do both in one step
 ```
 
-`./deploy.sh --bootstrap` does both in one step. On a host that already has
-podman, only `./deploy.sh` is needed.
+`sudo` needs a terminal to prompt for its password, so run these from an
+interactive shell (over SSH, `ssh -t`).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret and leaves running containers alone. Common flags:
