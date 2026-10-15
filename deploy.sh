@@ -93,7 +93,8 @@ preflight() {
             sudo -v || warn "sudo unavailable; firewalld ports will not be opened automatically"
         fi
         if sudo -n true 2>/dev/null; then
-            ( while sleep 50; do sudo -n true 2>/dev/null || exit; done ) &
+            # Bounded (~3h) so a SIGKILLed deploy cannot orphan the refresher.
+            ( for _ in $(seq 1 240); do sleep 50; sudo -n true 2>/dev/null || exit; done ) &
             SUDO_KEEPALIVE=$!
             trap 'kill "$SUDO_KEEPALIVE" 2>/dev/null || true' EXIT
         fi
