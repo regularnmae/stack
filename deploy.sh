@@ -256,7 +256,10 @@ open_firewall() {
         warn "firewall-cmd not found; open ${FIREWALL_PORTS[*]}/tcp yourself"
         return 0
     fi
-    if ! firewall-cmd --state >/dev/null 2>&1; then
+    # `firewall-cmd --state` needs privilege (it talks to firewalld over D-Bus)
+    # and fails as a normal user even when the daemon is running, so it can't be
+    # used as the check here. systemctl answers the same question unprivileged.
+    if ! systemctl is-active --quiet firewalld; then
         warn "firewalld is not running; open ${FIREWALL_PORTS[*]}/tcp yourself"
         return 0
     fi
@@ -304,7 +307,21 @@ verify_args=()
 if [ "$SKIP_DAEMONS" = 1 ]; then verify_args+=(--no-nodes); fi
 "$REPO_DIR/verify.sh" ${verify_args[@]+"${verify_args[@]}"} || warn "verification reported problems"
 
-cat <<EOF
+if [ "$SKIP_DAEMONS" = 1 ]; then
+    cat <<EOF
+
+Stack deployed (chain daemons skipped).
+
+  Web and MCP:  valkey, searxng, nginx-proxy-manager (80/443/81),
+                searxng-mcp :8000, bitcoin-node-mcp :8101,
+                monero-node-mcp :8102, monero-wallet-mcp :8103,
+                lightning-mcp :8104
+
+The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
+bitcoind, monerod, lightningd and monero-wallet-rpc.
+EOF
+else
+    cat <<EOF
 
 Stack deployed.
 
@@ -319,3 +336,4 @@ Chain sync continues in the background (bitcoind is pruned; monerod is
 pruned). Re-run ./deploy.sh once the chains are current to finish anything
 that was waiting on them.
 EOF
+fi

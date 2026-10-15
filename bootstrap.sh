@@ -31,7 +31,7 @@ command -v sudo >/dev/null 2>&1 || die "sudo is required"
 # through provisioning).
 if ! sudo -n true 2>/dev/null; then
     log "sudo needs a password; you may be prompted once"
-    sudo -v || die "sudo authentication failed"
+    sudo -v || die "sudo authentication failed -- run bootstrap.sh from an interactive terminal (sudo needs a TTY to prompt), or configure passwordless sudo"
 fi
 
 # ---------------------------------------------------------------------------
