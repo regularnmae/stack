@@ -1,8 +1,13 @@
-# Quadlet unit for the Monero wallet RPC. The wallet file password and the
-# RPC login are NOT here: Exec= cannot expand environment variables, so they
-# live in a config file passed with --config-file, which deploy/install.sh
-# seeds (reusing what the previously-installed unit carried). That file lives
-# under the data directory and is never committed.
+# TEMPLATE -- do not symlink this file. deploy/install.sh renders it into
+# ~/.config/containers/systemd/monero-wallet-rpc.container (mode 600),
+# substituting the @PLACEHOLDERS@ with values from
+# ~/.config/crypto-nodes/secrets.env.
+#
+# `--rpc-login` MUST be on the Exec line, not merely in a config file: the
+# image's entrypoint only binds 0.0.0.0 (with --confirm-external-bind) when it
+# sees `--rpc-login` in the arguments, and otherwise forces 127.0.0.1, which
+# would make the wallet unreachable from the other containers. So the secret
+# lives in the generated unit rather than in a wallet config file.
 [Unit]
 Description=Monero Wallet RPC
 After=monerod.service
@@ -14,8 +19,8 @@ Image=ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest
 Network=npm-network.network
 
 # The wallet RPC can open wallets and move funds, so it is
-# protected twice over: authenticated (--rpc-login in the config
-# file) AND published on host loopback only, mirroring tor's
+# protected twice over: authenticated (--rpc-login below) AND
+# published on host loopback only, mirroring tor's
 # 127.0.0.1:9050-9051. It is never reachable from the LAN.
 PublishPort=127.0.0.1:18083:18083
 
@@ -28,15 +33,16 @@ PublishPort=127.0.0.1:18083:18083
 # The :z label is required: this host runs SELinux enforcing.
 Volume=%h/data/monero-wallet-rpc:/home/monero/wallet:z
 
-# NOTE: Exec= replaces the image CMD (--wallet-dir +
-# --rpc-bind-port), so restate them, then add our flags.
-# --password and --rpc-login are intentionally absent: they come
-# from the config file (see the header above).
+# NOTE: Exec= replaces the image CMD; the entrypoint prepends
+# --non-interactive and, because --rpc-login is present here,
+# binds 0.0.0.0 + --confirm-external-bind and drops privileges
+# to the monero user via su-exec.
 Exec=--wallet-file=/home/monero/wallet/mainnet \
+     --password=@MONERO_WALLET_PASSWORD@ \
      --rpc-bind-port=18083 \
      --daemon-address=monerod:18089 \
      --untrusted-daemon \
-     --config-file=/home/monero/wallet/wallet.conf
+     --rpc-login=@MONERO_RPC_LOGIN@
 
 # Image ships /healthcheck.sh: calls get_version over JSON-RPC
 # with digest auth (creds/port auto-detected from PID 1).

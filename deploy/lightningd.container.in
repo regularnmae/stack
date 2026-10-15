@@ -1,10 +1,11 @@
-# Quadlet unit for Core Lightning. The two secrets it needs -- the bitcoind
-# RPC password and tor's control password -- are NOT here. Exec= cannot expand
-# environment variables (Quadlet does not do that), so they live in a CLN
-# config file at $LIGHTNINGDIR/config (i.e. ~/data/cln/config on the host),
-# which lightningd reads at startup. deploy/install.sh seeds it, reusing the
-# values the previously-installed unit carried and writing them where no unit
-# file can leak them.
+# TEMPLATE -- do not symlink this file. deploy/install.sh renders it into
+# ~/.config/containers/systemd/lightningd.container (mode 600), substituting
+# the @PLACEHOLDERS@ with values from ~/.config/crypto-nodes/secrets.env.
+#
+# Exec= cannot expand environment variables (Quadlet does not do that), and
+# lightningd needs its secrets as arguments, so the unit is generated with the
+# secret in place rather than keeping it on a committed static unit. The
+# rendered file is the only copy and never enters git.
 [Unit]
 Description=Core Lightning Daemon
 After=bitcoind.service tor.service
@@ -21,7 +22,7 @@ Network=npm-network.network
 # Peers reach us through the statictor onion service instead.
 #PublishPort=3010:3010
 
-# Volume mount using %h/data/cln (also holds config)
+# Volume mount using %h/data/cln
 Volume=%h/data/cln:/root/.lightning:Z
 
 # Map host bitcoind directory into CLN
@@ -31,17 +32,17 @@ Volume=%h/data/bitcoin:/root/.bitcoin:z
 # NOTE: --proxy expects an IP address (it does not accept a hostname) and
 # --always-use-proxy=true suppresses DNS lookups, so Tor must be addressed by
 # its pinned IP 10.89.0.240 (set in tor.container) rather than "tor".
-# --bitcoin-rpcpassword and --tor-service-password are intentionally absent:
-# they come from /root/.lightning/config (see the header above).
 Exec=--network=bitcoin \
      --bitcoin-rpcconnect=bitcoind \
      --bitcoin-rpcport=8332 \
-     --bitcoin-rpcuser=btcuser \
+     --bitcoin-rpcuser=@BITCOIN_RPC_USER@ \
+     --bitcoin-rpcpassword=@BITCOIN_RPC_PASSWORD@ \
      --bitcoin-datadir=/root/.bitcoin \
      --clnrest-port=3010 \
      --clnrest-host=0.0.0.0 \
      --proxy=10.89.0.240:9050 \
      --addr=statictor:10.89.0.240:9051 \
+     --tor-service-password=@TOR_SERVICE_PASSWORD@ \
      --always-use-proxy=true \
      --bind-addr=0.0.0.0:9735
 

@@ -3,16 +3,20 @@
 # tor, lightningd, monero-wallet-rpc).
 #
 # One owner for the node config, so a fresh checkout can rebuild the stack.
-# The committed units carry NO secrets: Quadlet does not expand environment
-# variables in Exec=, so the secrets the daemons need live in config files
-# they read themselves (bitcoin.conf, ~/data/cln/config,
-# ~/data/monero-wallet-rpc/wallet.conf, ~/data/tor/torrc), all outside the
-# repo. This script seeds those files, reusing the values the
-# previously-installed units carried so adopting it on a running host changes
-# no secret, then symlinks the units into the quadlet directory.
+# The committed files carry NO secrets. Two different mechanisms, for a reason:
 #
-# Idempotent: re-running refreshes the symlinks and never clobbers an
-# existing secret or config file.
+#   * bitcoind, monerod and tor are secret-free and are symlinked.
+#   * lightningd and monero-wallet-rpc need their secrets as arguments, and
+#     Quadlet does not expand environment variables in Exec=, so install.sh
+#     renders them from a `.container.in` template with the secrets
+#     substituted. The rendered unit is mode 600 and never enters git. (A
+#     daemon config file would be an alternative for lightningd, but the
+#     monero-wallet-rpc image forces its bind address based on whether
+#     `--rpc-login` is on the command line, so the secret has to be there.)
+#
+# install.sh reuses the values the previously-installed units carried, so
+# adopting it on a running host changes no credential. It is idempotent and
+# never clobbers an existing secret.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,20 +27,17 @@ ENV_DIR="$CONFIG_HOME/crypto-nodes"
 SECRETS_FILE="$ENV_DIR/secrets.env"
 
 DATA_DIR="${CRYPTO_NODES_DATA_DIR:-$HOME/data}"
-CLN_DIR="$DATA_DIR/cln"
-WALLET_DIR="$DATA_DIR/monero-wallet-rpc"
 TOR_DIR="$DATA_DIR/tor"
-
-MONERO_WALLET_IMAGE="ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest"
 TOR_IMAGE="localhost/tor:0.4.9.11-alpine3.20"
 
-# Every unit this repo owns. All are secret-free and symlinked.
-UNITS=(
-    bitcoind.container
-    monerod.container
-    tor.container
-    lightningd.container
-    monero-wallet-rpc.container
+# Secret-free units: symlinked.
+UNITS=(bitcoind.container monerod.container tor.container)
+
+# Secret-bearing units: rendered from these templates into the quadlet dir.
+# Pairs are "template:target".
+RENDERED=(
+    "lightningd.container.in:lightningd.container"
+    "monero-wallet-rpc.container.in:monero-wallet-rpc.container"
 )
 
 log() { printf '==> %s\n' "$*"; }
@@ -56,7 +57,9 @@ write_secret() {
     chmod 600 "$path"
 }
 
-# First non-empty argument wins.
+# Escape a value for a sed replacement (delimiter is |).
+esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
+
 first_nonempty() {
     local v
     for v in "$@"; do
@@ -64,7 +67,6 @@ first_nonempty() {
     done
 }
 
-# A value already in secrets.env (so re-runs are stable).
 read_secret() {
     [ -s "$SECRETS_FILE" ] || return 0
     sed -n "s/^$1=//p" "$SECRETS_FILE" | head -n1
@@ -79,7 +81,7 @@ flag_value() {
     ' "$file"
 }
 
-# A key=value from bitcoind's own config (via the container, since the file is
+# A key=value from bitcoind's own config (via the container, as the file is
 # owned by the image's uid on the host).
 bitcoin_conf_value() {
     local key="$1" v=""
@@ -93,9 +95,22 @@ bitcoin_conf_value() {
     printf '%s' "$v"
 }
 
-# Write a file inside a data dir owned by the image's uid, by doing it from a
-# container so the ownership is right. Uses the running container when there
-# is one, otherwise a throwaway.
+# Render a .container.in into the quadlet dir, mode 600. Replaces a symlink
+# first so the write can never follow one back into the repo.
+render_unit() {
+    local template="$1" target="$2" tmp
+    tmp="$(mktemp)"
+    sed -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
+        -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
+        -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
+        -e "s|@MONERO_WALLET_PASSWORD@|$(esc "$MONERO_WALLET_PASSWORD")|g" \
+        -e "s|@MONERO_RPC_LOGIN@|$(esc "$MONERO_RPC_LOGIN")|g" \
+        "$template" > "$tmp"
+    [ -L "$target" ] && rm -f "$target"
+    install -m 600 "$tmp" "$target"
+    rm -f "$tmp"
+}
+
 mkdir -p "$ENV_DIR" "$DATA_DIR"
 
 # --- 1. resolve secrets (reuse > previous unit > daemon config > generate) --
@@ -138,55 +153,7 @@ EOF
     log "wrote $SECRETS_FILE (mode 600)"
 fi
 
-# --- 2. CLN config (~/data/cln/config, read by lightningd at startup) -------
-mkdir -p "$CLN_DIR"
-if [ -s "$CLN_DIR/config" ]; then
-    log "keeping existing $CLN_DIR/config"
-else
-    write_secret "$CLN_DIR/config" <<EOF
-# Managed by crypto-nodes/deploy/install.sh. lightningd reads this at startup
-# (default path \$LIGHTNINGDIR/config). The two secrets below are why the
-# lightningd unit no longer carries them on its Exec line.
-bitcoin-rpcuser=$BITCOIN_RPC_USER
-bitcoin-rpcpassword=$BITCOIN_RPC_PASSWORD
-tor-service-password=$TOR_SERVICE_PASSWORD
-EOF
-    log "seeded $CLN_DIR/config (mode 600)"
-fi
-
-# --- 3. monero-wallet-rpc config (in a dir owned by the image's uid) --------
-seed_wallet_conf() {
-    local body="$1"
-    if command -v podman >/dev/null 2>&1 \
-        && [ "$(podman inspect -f '{{.State.Running}}' monero-wallet-rpc 2>/dev/null || echo false)" = "true" ]; then
-        printf '%s' "$body" | podman exec -i monero-wallet-rpc sh -c \
-            'cat > /home/monero/wallet/wallet.conf && chown monero:monero /home/monero/wallet/wallet.conf && chmod 600 /home/monero/wallet/wallet.conf'
-        return 0
-    fi
-    mkdir -p "$WALLET_DIR"
-    if command -v podman >/dev/null 2>&1; then
-        podman unshare chown 1000:1000 "$WALLET_DIR" 2>/dev/null || true
-        printf '%s' "$body" | podman run --rm -i --entrypoint sh \
-            -v "$WALLET_DIR:/home/monero/wallet:z" "$MONERO_WALLET_IMAGE" -c \
-            'cat > /home/monero/wallet/wallet.conf && chown monero:monero /home/monero/wallet/wallet.conf && chmod 600 /home/monero/wallet/wallet.conf'
-    else
-        log "podman not available; cannot seed $WALLET_DIR/wallet.conf"
-    fi
-}
-
-if [ -f "$WALLET_DIR/wallet.conf" ]; then
-    log "keeping existing $WALLET_DIR/wallet.conf"
-else
-    seed_wallet_conf "# Managed by crypto-nodes/deploy/install.sh. The two secrets
-# below are why the monero-wallet-rpc unit no longer carries them on its
-# Exec line.
-password=$MONERO_WALLET_PASSWORD
-rpc-login=$MONERO_RPC_LOGIN
-"
-    log "seeded $WALLET_DIR/wallet.conf (mode 600)"
-fi
-
-# --- 4. torrc (fresh hosts only; its control password must match) -----------
+# --- 2. torrc (fresh hosts only; its control password must match) -----------
 if [ -s "$TOR_DIR/torrc" ]; then
     log "keeping existing $TOR_DIR/torrc"
 else
@@ -214,7 +181,7 @@ EOF
     fi
 fi
 
-# --- 5. symlink units into the quadlet search path --------------------------
+# --- 3. install units into the quadlet search path --------------------------
 mkdir -p "$QUADLET_DIR"
 
 NETWORK_TARGET="$QUADLET_DIR/npm-network.network"
@@ -235,7 +202,19 @@ for unit in "${UNITS[@]}"; do
     log "linked $unit"
 done
 
-# --- 6. reload systemd so the generator re-reads the units ------------------
+for pair in "${RENDERED[@]}"; do
+    template="${pair%%:*}"
+    unit="${pair##*:}"
+    target="$QUADLET_DIR/$unit"
+    if [ -e "$target" ] && [ ! -L "$target" ] && [ ! -e "$target.bak" ]; then
+        mv -f "$target" "$target.bak"
+        log "backed up existing $unit -> $unit.bak"
+    fi
+    render_unit "$DEPLOY_DIR/$template" "$target"
+    log "rendered $unit (mode 600)"
+done
+
+# --- 4. reload systemd so the generator re-reads the units ------------------
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload
     log "systemd --user reloaded"
@@ -243,16 +222,16 @@ fi
 
 cat <<EOF
 
-Done. Adopting new units on a running host needs a restart of each unit whose
-Exec changed (lightningd and monero-wallet-rpc moved their secrets to config):
+Done. Adopting new units on a running host needs a restart of the units whose
+Exec changed (lightningd and monero-wallet-rpc):
 
-  systemctl --user restart bitcoind.service monerod.service tor.service
   systemctl --user restart lightningd.service monero-wallet-rpc.service
 
 Verify with:
   podman exec lightningd lightning-cli getinfo | head -5
   podman exec monero-wallet-rpc /healthcheck.sh && echo wallet-rpc healthy
 
-Secrets live in $SECRETS_FILE (mode 600). Roll back a unit from its
-.bak beside it in $QUADLET_DIR.
+Secrets live in $SECRETS_FILE (mode 600) and in the two rendered units
+(mode 600) beside their siblings in $QUADLET_DIR. Roll back a unit from its
+.bak there.
 EOF

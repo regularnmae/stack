@@ -13,12 +13,12 @@ MCP servers (`bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`,
 | `monerod.container` | `simple-monerod` | mainnet, restricted RPC `18089` on `npm-network` | `~/data/monero` |
 | `tor.container` | `localhost/tor:0.4.9.11-alpine3.20` | SOCKS/control on `127.0.0.1:9050-9051` | `~/data/tor` |
 | `lightningd.container` | `elementsproject/lightningd` | clnrest `3010` + P2P `9735` on `npm-network` | `~/data/cln` |
-| `monero-wallet-rpc.container` | `simple-monero-wallet-rpc` | `127.0.0.1:18083` only | `~/data/monero-wallet-rpc` |
+| `monero-wallet-rpc.container` | `simple-monero-wallet-rpc` | `127.0.0.1:18083` + `npm-network` | `~/data/monero-wallet-rpc` |
 
 No daemon RPC port is published on the LAN. The MCP servers join
 `npm-network` and address the daemons by container name.
 
-## Secrets live in daemon config files, not the units
+## How secrets are kept out of git
 
 The original units carried secrets on their `Exec=` lines
 (`--bitcoin-rpcpassword`, `--tor-service-password`, `--password`,
@@ -27,17 +27,27 @@ files in no version control.
 
 **Quadlet does not expand environment variables in `Exec=`**, so an
 `EnvironmentFile=` cannot feed those flags (verified: a literal `$FOO` stays a
-literal `$FOO` in the generated `ExecStart`). Instead the secrets moved to the
-config files the daemons already read:
+literal `$FOO` in the generated `ExecStart`). Two mechanisms, chosen per unit:
 
-| Secret | Lives in | Read by |
-| --- | --- | --- |
-| bitcoind RPC user/password | `~/data/bitcoin/bitcoin.conf` | bitcoind, lightningd, the MCP servers |
-| tor control password | `~/data/tor/torrc` (`HashedControlPassword`) + `~/data/cln/config` | tor, lightningd |
-| wallet password, RPC login | `~/data/monero-wallet-rpc/wallet.conf` (`--config-file`) | monero-wallet-rpc |
+- **Secret-free units are symlinked.** `bitcoind`, `monerod` and `tor` carry
+  no secret — bitcoind's RPC password lives in its own `bitcoin.conf`, and
+  tor's control password is a hash in `~/data/tor/torrc`. Their committed
+  `.container` files are static and linked.
+- **Secret-bearing units are rendered from a template.** `lightningd` and
+  `monero-wallet-rpc` need their secrets as arguments, so each ships a
+  `.container.in` with `@PLACEHOLDER@` tokens; `install.sh` substitutes values
+  from `~/.config/crypto-nodes/secrets.env` and writes the real unit, mode
+  `600`, into the quadlet directory. The rendered file is the only copy and
+  never enters git.
 
-None of those files is in this repo. The committed units are secret-free and
-symlinked like every other quadlet in the stack.
+Why a template and not a daemon config file for the wallet: the
+`simple-monero-wallet-rpc` entrypoint only binds `0.0.0.0`
+(`--confirm-external-bind`) when it sees `--rpc-login` **on the command line**,
+and otherwise forces `127.0.0.1` — which would make the wallet unreachable from
+the other containers on `npm-network`. So the secret has to be on `Exec`.
+
+`deploy/secrets.env.example`, `torrc.example` and `bitcoin.conf.example`
+document the shapes; none carries a real value.
 
 ## Install
 
@@ -52,18 +62,17 @@ symlinked like every other quadlet in the stack.
   unit → the daemon's own config → generate**. So adopting it on a host that
   already runs the stack reuses every existing credential and changes nothing;
 - writes `~/.config/crypto-nodes/secrets.env` (mode 600);
-- seeds `~/data/cln/config` and `~/data/monero-wallet-rpc/wallet.conf` only if
-  absent (the latter through a container, since that directory is owned by the
-  image's uid); seeds `~/data/tor/torrc` on a fresh host, computing the
-  control-password hash with `tor --hash-password`;
-- symlinks the five units (backing up any real file to `.bak`) plus
-  `npm-network.network` if no other repo already provided it;
+- renders `lightningd.container` and `monero-wallet-rpc.container` from their
+  templates (mode 600), replacing any earlier symlink first;
+- symlinks `bitcoind`, `monerod`, `tor` (backing up any real file to `.bak`)
+  plus `npm-network.network` if no other repo already provided it;
+- seeds `~/data/tor/torrc` on a fresh host, computing the control-password
+  hash with `tor --hash-password`;
 - reloads systemd.
 
-Then restart the units whose `Exec` changed, and verify:
+Then restart the units whose `Exec` is rendered, and verify:
 
 ```sh
-systemctl --user restart bitcoind.service monerod.service tor.service
 systemctl --user restart lightningd.service monero-wallet-rpc.service
 
 podman exec lightningd lightning-cli getinfo | head -5
@@ -84,8 +93,8 @@ podman build -t localhost/tor:0.4.9.11-alpine3.20 tor/
 
 ### Fresh hosts
 
-This repo seeds the files it owns, but two prerequisites belong to the nodes
-themselves and are only referenced here for completeness:
+This repo seeds `secrets.env` and the rendered units, but two prerequisites
+belong to the nodes themselves and are only referenced here for completeness:
 
 - **`bitcoin.conf`** must exist with an `rpcuser`/`rpcpassword` before
   `install.sh` can reuse it; a fresh host gets a generated password in
@@ -100,10 +109,10 @@ themselves and are only referenced here for completeness:
 ```
 crypto-nodes/
   deploy/
-    bitcoind.container          monerod.container      tor.container
-    lightningd.container        monero-wallet-rpc.container
+    bitcoind.container            monerod.container     tor.container
+    lightningd.container.in       monero-wallet-rpc.container.in
     npm-network.network
     install.sh
-    *.example                   # config/secret templates, no real values
-  tor/Containerfile             # the tor image
+    *.example                     # config/secret templates, no real values
+  tor/Containerfile               # the tor image
 ```
