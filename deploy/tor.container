@@ -10,7 +10,7 @@ Before=lightningd.service
 [Container]
 ContainerName=tor
 # Prebuilt image with tor already installed (see ../tor/Containerfile).
-Image=localhost/tor:0.4.9.11-alpine3.20
+Image=localhost/tor:local
 Network=npm-network.network
 
 # lightningd runs with --always-use-proxy=true, which suppresses DNS lookups,

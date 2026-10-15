@@ -18,7 +18,7 @@ stack runs and one script that fixes a deployment problem.
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
 | `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
 | `lightningd` | `docker.io/elementsproject/lightningd:latest` | — (onion over Tor) | `$DATA_DIR/cln` |
-| `tor` | `localhost/tor:0.4.9.11-alpine3.20` | `127.0.0.1:9050-9051` | `$DATA_DIR/tor` |
+| `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | `127.0.0.1:9050-9051` | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
 | `searxng` | `docker.io/searxng/searxng:latest` | `8080` | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |

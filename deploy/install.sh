@@ -27,8 +27,6 @@ QUADLET_DIR="$CONFIG_HOME/containers/systemd"
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 
-TOR_IMAGE="localhost/tor:0.4.9.11-alpine3.20"
-
 # Every unit is rendered: all of them reference either the data dir or the
 # config dir, so none is a plain symlink any more. Pairs are "source:target".
 UNITS=(
