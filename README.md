@@ -112,6 +112,28 @@ SELinux has no rule for it — a freshly formatted disk is often `unlabeled_t`,
 and then podman's `:z` relabel fails with `EPERM` and every container that
 mounts it is denied.
 
+## Reinstalling the host without re-syncing
+
+With the data dir on a separate disk (e.g. `/data/stack`), a Rocky reinstall on
+the system disk keeps the chains, wallets, CLN identity and every token:
+
+1. Reinstall the OS. Do **not** touch the data disk.
+2. Make sure it is mounted at the same path again (`/etc/fstab` — a reinstall
+   rewrites fstab), then:
+
+   ```sh
+   git clone https://github.com/regularnmae/stack ~/build/stack
+   cd ~/build/stack
+   ./bootstrap.sh
+   ./deploy.sh                 # answer the data-dir prompt with /data/stack
+   ./verify.sh --deep
+   ```
+
+`deploy.sh` takes ownership of the path, labels it for containers, and finds
+the existing `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ npm/ config/`
+there — so nothing re-syncs, the wallet still opens (its password is in
+`config/stack/secrets.env`), and the client tokens are unchanged.
+
 ## How secrets are kept out of git
 
 No secret is committed. Everything real is generated or adopted on the host,
