@@ -129,6 +129,9 @@ install_units() {
 # helpers for the runtime steps
 # ---------------------------------------------------------------------------
 start_unit() { log "starting $1.service"; run systemctl --user start "$1.service"; }
+# `start` is a no-op on an already-active unit, so a redeploy that rebuilt the
+# image would keep running the old container. Redeploys restart instead.
+restart_unit() { log "restarting $1.service"; run systemctl --user restart "$1.service"; }
 
 wait_healthy() { # container timeout
     local c="$1" t="${2:-180}" deadline st=""
@@ -269,7 +272,7 @@ deploy_app() { # repo name
 
     log "building $image"
     run podman build -t "$image" "$dir"
-    start_unit "$r"
+    restart_unit "$r"
     wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
 }
 
@@ -322,7 +325,7 @@ if [ -n "$ONLY" ]; then
         deploy_app "$ONLY"
     else
         install_units
-        start_unit "$ONLY"
+        restart_unit "$ONLY"
         wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
     fi
     log "done (--only $ONLY)"
