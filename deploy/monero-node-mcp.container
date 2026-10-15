@@ -14,8 +14,8 @@ Network=npm-network.network
 # The bearer token clients must present, and the node's optional restricted
 # RPC credentials. Both live OUTSIDE this repo in ~/.config/monero-node-mcp/
 # (mode 600), written by deploy/install.sh.
-EnvironmentFile=%h/.config/monero-node-mcp/token.env
-EnvironmentFile=%h/.config/monero-node-mcp/upstream.env
+EnvironmentFile=@CONFIG_DIR@/monero-node-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/monero-node-mcp/upstream.env
 
 # Host 8102 -> container 8000 (the app's default). LAN-published like
 # searxng-mcp on 8000; open 8102/tcp in firewalld.

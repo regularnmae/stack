@@ -16,9 +16,9 @@ Network=npm-network.network
 #   token.env    -- MONERO_MCP_TOKEN (read) and MONERO_MCP_SPEND_TOKEN
 #   upstream.env -- the wallet's RPC login
 #   spend.env    -- ENABLE_SPENDING and the caps (operator-editable)
-EnvironmentFile=%h/.config/monero-wallet-mcp/token.env
-EnvironmentFile=%h/.config/monero-wallet-mcp/upstream.env
-EnvironmentFile=%h/.config/monero-wallet-mcp/spend.env
+EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/upstream.env
+EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/spend.env
 
 # Host 8103 -> container 8000. LAN-published like searxng-mcp; open
 # 8103/tcp in firewalld. This is a money-moving surface: the bearer tokens

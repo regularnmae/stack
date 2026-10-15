@@ -4,64 +4,64 @@
 #
 # This is the **only** installer. The application repos (searxng-mcp and the
 # four crypto MCP servers) ship code, tests, CI and their Containerfile; their
-# units and env wiring live here, in one file, so a fix lands once instead of
-# in five near-identical copies.
+# units and env wiring live here.
 #
-# Idempotent and non-destructive:
-#   * an existing secret/env file is never overwritten (so re-running on a
-#     running host changes no credential and no client token);
-#   * secret resolution order is secrets.env -> the currently-installed unit
-#     -> the daemon's own config -> generate, which is what makes adoption on
-#     a running host a no-op;
-#   * a pre-existing real unit file is backed up to <unit>.bak first.
+# EVERYTHING persistent lives under one data dir ($STACK_DATA_DIR, default
+# $HOME/data): the daemon data, the nginx-proxy-manager data, and the
+# config/secrets. Point it at a separate disk and a rebuild only has to keep
+# that one directory.
 #
-# Nothing here prints a secret. The files land under ~/.config (mode 600) and
-# ~/data (owned by the containers' uid).
+# Idempotent and non-destructive: an existing secret/env file is never
+# overwritten, secret resolution order is secrets.env -> the installed unit ->
+# the daemon's own config -> generate, and a pre-existing real unit is backed
+# up to <unit>.bak. Nothing here prints a secret.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_DIR="$REPO_DIR/deploy"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 QUADLET_DIR="$CONFIG_HOME/containers/systemd"
-DATA_DIR="${STACK_DATA_DIR:-$HOME/data}"
-NPM_DIR="${STACK_NPM_DIR:-$HOME/npm}"
 
-SECRETS_DIR="$CONFIG_HOME/stack"
-SECRETS_FILE="$SECRETS_DIR/secrets.env"
+# shellcheck source=../scripts/lib.sh
+. "$REPO_DIR/scripts/lib.sh"
+# shellcheck source=../stack.conf
+[ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 
 TOR_IMAGE="localhost/tor:0.4.9.11-alpine3.20"
-SEARXNG_DATA_DIR="${SEARXNG_DATA_DIR:-$DATA_DIR/searxng}"
 
-# Secret-free units, symlinked verbatim into the quadlet search path.
-STATIC_UNITS=(
-    npm-network.network
-    nginx-proxy-manager.container
-    valkey.container
-    searxng.container
-    bitcoind.container
-    monerod.container
-    tor.container
-    searxng-mcp.container
-    bitcoin-node-mcp.container
-    monero-node-mcp.container
-    monero-wallet-mcp.container
-    lightning-mcp.container
-)
-
-# Secret-bearing units, rendered from a template (Quadlet does not expand
-# env vars in Exec=, so the secret has to be substituted into the unit).
-RENDERED=(
+# Every unit is rendered: all of them reference either the data dir or the
+# config dir, so none is a plain symlink any more. Pairs are "source:target".
+UNITS=(
+    "npm-network.network:npm-network.network"
+    "nginx-proxy-manager.container:nginx-proxy-manager.container"
+    "valkey.container:valkey.container"
+    "searxng.container:searxng.container"
+    "bitcoind.container:bitcoind.container"
+    "monerod.container:monerod.container"
+    "tor.container:tor.container"
     "lightningd.container.in:lightningd.container"
     "monero-wallet-rpc.container.in:monero-wallet-rpc.container"
+    "searxng-mcp.container:searxng-mcp.container"
+    "bitcoin-node-mcp.container:bitcoin-node-mcp.container"
+    "monero-node-mcp.container:monero-node-mcp.container"
+    "monero-wallet-mcp.container:monero-wallet-mcp.container"
+    "lightning-mcp.container:lightning-mcp.container"
 )
 
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
-# The read rune cannot name a payment method at all, so the node refuses a
-# spend through it regardless of this server's own token gate.
 READ_METHODS='"method^getinfo","method^listfunds","method^listchannels","method^listpeers","method^listinvoices","method^listpays","method^decode"'
 SPEND_METHODS="$READ_METHODS,\"method^invoice\",\"method^pay\",\"method^keysend\",\"method^withdraw\",\"method^close\""
 
-log() { printf '==> %s\n' "$*"; }
+# ---------------------------------------------------------------------------
+# where the data lives
+# ---------------------------------------------------------------------------
+resolve_data_dir
+ensure_data_dirs
+ensure_data_dir_selinux
+
+SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
+SEARXNG_DATA_DIR="$DATA_DIR/searxng"
+TOR_DIR="$DATA_DIR/tor"
 
 rand_hex() {
     openssl rand -hex 32 2>/dev/null && return 0
@@ -90,8 +90,6 @@ ensure_secret() {
     return 0
 }
 
-# Echo the token a running container already has, else a fresh one. Notes go
-# to stderr so they are not captured by $(...).
 new_or_reused_token() {
     local container="$1" var="$2" val=""
     if command -v podman >/dev/null 2>&1; then
@@ -107,8 +105,6 @@ new_or_reused_token() {
 }
 
 # Hand paths to the image's in-container uid 1000 (host subuid, 525287 here).
-# bitcoind and monero-wallet-rpc run as that user and do NOT re-own their bind
-# mounts, so a fresh host has to do it or they cannot write.
 chown_image_uid() {
     command -v podman >/dev/null 2>&1 || return 0
     podman unshare chown -R 1000:1000 "$@" 2>/dev/null \
@@ -149,26 +145,35 @@ bitcoin_conf_value() {
     printf '%s' "$v"
 }
 
-# ---------------------------------------------------------------------------
-# 0. legacy migration + directories
-# ---------------------------------------------------------------------------
-mkdir -p "$CONFIG_HOME" "$QUADLET_DIR" "$DATA_DIR" "$NPM_DIR/data" "$NPM_DIR/letsencrypt"
-mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$DATA_DIR/tor"
-
-# A host that ran the stack before the crypto-nodes -> stack rename keeps its
-# secrets under the old name. Move them across, but only delete the old copy
-# once it is byte-identical to the new one, so a failed copy cannot lose them.
-LEGACY_SECRETS="$CONFIG_HOME/crypto-nodes/secrets.env"
-if [ -s "$LEGACY_SECRETS" ]; then
-    mkdir -p "$SECRETS_DIR"
-    [ -s "$SECRETS_FILE" ] || cp -p "$LEGACY_SECRETS" "$SECRETS_FILE"
-    if cmp -s "$LEGACY_SECRETS" "$SECRETS_FILE"; then
-        rm -f "$LEGACY_SECRETS"
-        log "migrated crypto-nodes/secrets.env -> stack/secrets.env"
-    else
-        log "note: $LEGACY_SECRETS differs from $SECRETS_FILE; leaving both"
+# Move a file into the data dir if it is not there yet, and drop the old copy
+# once the two are byte-identical. Used to adopt the pre-data-dir layout.
+adopt_file() {
+    local src="$1" dest="$2"
+    [ -s "$src" ] || return 0
+    mkdir -p "$(dirname "$dest")"
+    [ -e "$dest" ] || cp -p "$src" "$dest" || return 0
+    if cmp -s "$src" "$dest"; then
+        rm -f "$src"
+        log "moved into the data dir: $src -> $dest"
     fi
-fi
+}
+
+# ---------------------------------------------------------------------------
+# 0. adopt the old ~/.config layout
+# ---------------------------------------------------------------------------
+migrate_legacy_config() {
+    adopt_file "$CONFIG_HOME/crypto-nodes/secrets.env" "$CONFIG_DIR/stack/secrets.env"
+    adopt_file "$CONFIG_HOME/stack/secrets.env"        "$CONFIG_DIR/stack/secrets.env"
+    local d f
+    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp; do
+        [ -d "$CONFIG_HOME/$d" ] || continue
+        for f in "$CONFIG_HOME/$d"/*.env; do
+            [ -e "$f" ] || continue
+            adopt_file "$f" "$CONFIG_DIR/$d/$(basename "$f")"
+        done
+    done
+}
+migrate_legacy_config
 
 # ---------------------------------------------------------------------------
 # 1. resolve the node secrets (reuse > installed unit > daemon config > new)
@@ -200,7 +205,8 @@ if ensure_secret "$SECRETS_FILE" "secrets"; then
     write_secret "$SECRETS_FILE" <<EOF
 # Secrets for the whole stack. Written by deploy/install.sh (mode 600), seeded
 # from the previously-installed units where possible so adopting it changes no
-# credential. Never committed.
+# credential. Never committed. MONERO_WALLET_PASSWORD is the only key to the
+# wallet file -- keep this file with the data.
 BITCOIN_RPC_USER=$BITCOIN_RPC_USER
 BITCOIN_RPC_PASSWORD=$BITCOIN_RPC_PASSWORD
 TOR_SERVICE_PASSWORD=$TOR_SERVICE_PASSWORD
@@ -239,15 +245,17 @@ rpcallowip=10.89.0.0/24
 listen=0
 EOF
     log "seeded $DATA_DIR/bitcoin/bitcoin.conf"
-    chown_image_uid "$DATA_DIR/bitcoin" "$DATA_DIR/bitcoin/bitcoin.conf"
 fi
+[ -d "$DATA_DIR/bitcoin" ] && chown_image_uid "$DATA_DIR/bitcoin"
 
 # monero-wallet-rpc's image does not re-own its bind mount; create it for the
-# image uid so the wallet-rpc can write the wallet once it is restored.
+# image uid so the wallet-rpc can write the wallet.
 if [ ! -d "$DATA_DIR/monero-wallet-rpc" ]; then
     mkdir -p "$DATA_DIR/monero-wallet-rpc"
-    chown_image_uid "$DATA_DIR/monero-wallet-rpc"
 fi
+chown_image_uid "$DATA_DIR/monero-wallet-rpc"
+
+mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 
 # ---------------------------------------------------------------------------
 # 3. tor image + torrc
@@ -259,10 +267,10 @@ if command -v podman >/dev/null 2>&1 && ! podman image exists "$TOR_IMAGE" 2>/de
     fi
 fi
 
-if [ -s "$DATA_DIR/tor/torrc" ]; then
-    log "keeping existing $DATA_DIR/tor/torrc"
+if [ -s "$TOR_DIR/torrc" ]; then
+    log "keeping existing $TOR_DIR/torrc"
 else
-    mkdir -p "$DATA_DIR/tor"
+    mkdir -p "$TOR_DIR"
     hash=""
     if command -v podman >/dev/null 2>&1 && podman image exists "$TOR_IMAGE" 2>/dev/null; then
         # `tor --hash-password` prints a warning line to *stdout* first ("You
@@ -272,7 +280,7 @@ else
             | grep -E '^16:' | head -n1 || true)
     fi
     if [ -n "$hash" ]; then
-        cat > "$DATA_DIR/tor/torrc" <<EOF
+        cat > "$TOR_DIR/torrc" <<EOF
 SocksPort 0.0.0.0:9050
 ControlPort 0.0.0.0:9051
 
@@ -284,9 +292,9 @@ SocksPolicy reject *
 
 Log notice stdout
 EOF
-        log "seeded $DATA_DIR/tor/torrc with a control-password hash"
+        log "seeded $TOR_DIR/torrc with a control-password hash"
     else
-        log "could not seed $DATA_DIR/tor/torrc (tor image '$TOR_IMAGE' not built?) -- re-run after the build"
+        log "could not seed $TOR_DIR/torrc (tor image '$TOR_IMAGE' not built?) -- re-run after the build"
     fi
 fi
 
@@ -310,11 +318,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. per-application env files
+# 5. per-application env files (under the data dir)
 # ---------------------------------------------------------------------------
 
-# searxng-mcp -- a single bearer token.
-SEARXNG_ENV="$CONFIG_HOME/searxng-mcp/token.env"
+SEARXNG_ENV="$CONFIG_DIR/searxng-mcp/token.env"
 if ensure_secret "$SEARXNG_ENV" "searxng-mcp token env"; then
     token=$(new_or_reused_token searxng-mcp SEARXNG_MCP_TOKEN)
     write_secret "$SEARXNG_ENV" <<EOF
@@ -323,8 +330,7 @@ EOF
     log "wrote $SEARXNG_ENV (mode 600)"
 fi
 
-# bitcoin-node-mcp -- token + bitcoind RPC credentials (already resolved).
-BTC_ENV="$CONFIG_HOME/bitcoin-node-mcp"
+BTC_ENV="$CONFIG_DIR/bitcoin-node-mcp"
 if ensure_secret "$BTC_ENV/token.env" "bitcoin-node-mcp token env"; then
     token=$(new_or_reused_token bitcoin-node-mcp BITCOIN_MCP_TOKEN)
     write_secret "$BTC_ENV/token.env" <<EOF
@@ -342,8 +348,7 @@ EOF
     log "wrote $BTC_ENV/upstream.env (mode 600)"
 fi
 
-# monero-node-mcp -- token + (usually empty) restricted-RPC credentials.
-XMR_ENV="$CONFIG_HOME/monero-node-mcp"
+XMR_ENV="$CONFIG_DIR/monero-node-mcp"
 if ensure_secret "$XMR_ENV/token.env" "monero-node-mcp token env"; then
     token=$(new_or_reused_token monero-node-mcp MONERO_MCP_TOKEN)
     write_secret "$XMR_ENV/token.env" <<EOF
@@ -353,16 +358,14 @@ EOF
 fi
 if ensure_secret "$XMR_ENV/upstream.env" "monero-node-mcp upstream env"; then
     write_secret "$XMR_ENV/upstream.env" <<EOF
-# Empty unless monerod was started with --rpc-login. The unit reads this via
-# EnvironmentFile.
+# Empty unless monerod was started with --rpc-login.
 MONERO_RPC_USER=
 MONERO_RPC_PASSWORD=
 EOF
     log "wrote $XMR_ENV/upstream.env (mode 600)"
 fi
 
-# monero-wallet-mcp -- read+spend tokens, the wallet RPC login, spend policy.
-XMRW_ENV="$CONFIG_HOME/monero-wallet-mcp"
+XMRW_ENV="$CONFIG_DIR/monero-wallet-mcp"
 if ensure_secret "$XMRW_ENV/token.env" "monero-wallet-mcp token env"; then
     read_token=$(new_or_reused_token monero-wallet-mcp MONERO_MCP_TOKEN)
     write_secret "$XMRW_ENV/token.env" <<EOF
@@ -375,8 +378,7 @@ EOF
 fi
 if ensure_secret "$XMRW_ENV/upstream.env" "monero-wallet-mcp upstream env"; then
     write_secret "$XMRW_ENV/upstream.env" <<EOF
-# Upstream credentials for monero-wallet-rpc (--rpc-login), split out of the
-# resolved wallet login.
+# Upstream credentials for monero-wallet-rpc (--rpc-login).
 MONERO_WALLET_RPC_USER=${MONERO_RPC_LOGIN%%:*}
 MONERO_WALLET_RPC_PASSWORD=${MONERO_RPC_LOGIN#*:}
 EOF
@@ -395,8 +397,7 @@ EOF
     log "wrote $XMRW_ENV/spend.env (mode 600) with ENABLE_SPENDING=0"
 fi
 
-# lightning-mcp -- read+spend tokens, runes + TLS, spend policy.
-LN_ENV="$CONFIG_HOME/lightning-mcp"
+LN_ENV="$CONFIG_DIR/lightning-mcp"
 if ensure_secret "$LN_ENV/token.env" "lightning-mcp token env"; then
     read_token=$(new_or_reused_token lightning-mcp LIGHTNING_MCP_TOKEN)
     write_secret "$LN_ENV/token.env" <<EOF
@@ -411,7 +412,6 @@ if ensure_secret "$LN_ENV/spend.env" "lightning-mcp spend env"; then
     write_secret "$LN_ENV/spend.env" <<EOF
 # Spending (payments) is OFF until you set ENABLE_SPENDING=1. With it on, both
 # caps below must be positive (in satoshis) or the server refuses to start.
-# MAINNET: this is real money.
 ENABLE_SPENDING=0
 MAX_PAYMENT_PER_CALL_SATS=10000
 MAX_PAYMENT_PER_DAY_SATS=100000
@@ -454,10 +454,6 @@ if [ -s "$LN_ENV/node.env" ]; then
     ca_cert=$(sed -n 's/^LIGHTNING_CA_CERT=//p' "$LN_ENV/node.env" | head -n1)
 fi
 
-# Re-running is a no-op only while the stored runes are usable. A rune can be
-# silently unusable -- a blacklisted unique_id, which the first deploy of
-# lightning-mcp hit -- so check rather than trust the file. If the node is
-# unreachable nothing is refreshed and any existing values are kept.
 node_needs_write=0
 [ -s "$LN_ENV/node.env" ] || node_needs_write=1
 if command -v podman >/dev/null 2>&1 \
@@ -502,43 +498,36 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 6. units
+# 6. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
-for unit in "${STATIC_UNITS[@]}"; do
-    target="$QUADLET_DIR/$unit"
-    if [ -e "$target" ] && [ ! -L "$target" ]; then
-        mv -f "$target" "$target.bak"
-        log "backed up existing $unit -> $unit.bak"
-    fi
-    ln -sfn "$DEPLOY_DIR/$unit" "$target"
-done
-log "linked ${#STATIC_UNITS[@]} static units"
-
 render_unit() {
-    local template="$1" target="$2" tmp
+    local src="$1" target="$2" tmp
     tmp="$(mktemp)"
-    sed -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
+    sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
+        -e "s|@CONFIG_DIR@|$(esc "$CONFIG_DIR")|g" \
+        -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
         -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
         -e "s|@MONERO_WALLET_PASSWORD@|$(esc "$MONERO_WALLET_PASSWORD")|g" \
         -e "s|@MONERO_RPC_LOGIN@|$(esc "$MONERO_RPC_LOGIN")|g" \
-        "$template" > "$tmp"
+        "$src" > "$tmp"
     [ -L "$target" ] && rm -f "$target"
     install -m 600 "$tmp" "$target"
     rm -f "$tmp"
 }
 
-for pair in "${RENDERED[@]}"; do
-    template="${pair%%:*}"
+mkdir -p "$QUADLET_DIR"
+for pair in "${UNITS[@]}"; do
+    src="$DEPLOY_DIR/${pair%%:*}"
     unit="${pair##*:}"
     target="$QUADLET_DIR/$unit"
     if [ -e "$target" ] && [ ! -L "$target" ] && [ ! -e "$target.bak" ]; then
         mv -f "$target" "$target.bak"
         log "backed up existing $unit -> $unit.bak"
     fi
-    render_unit "$DEPLOY_DIR/$template" "$target"
-    log "rendered $unit (mode 600)"
+    render_unit "$src" "$target"
 done
+log "rendered ${#UNITS[@]} units (mode 600)"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload
@@ -547,12 +536,12 @@ fi
 
 cat <<EOF
 
-Done. Units are installed and env files are seeded under:
-  $CONFIG_HOME/{stack,searxng-mcp,bitcoin-node-mcp,monero-node-mcp,monero-wallet-mcp,lightning-mcp}/
-  $DATA_DIR/{bitcoin,monero,monero-wallet-rpc,cln,tor,searxng}/
-  $NPM_DIR/{data,letsencrypt}/
+Done. Everything the stack owns lives under:
+  $DATA_DIR
+    bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/ npm/
+    config/   <- all bearer tokens and secrets (mode 600)
 
 Next:  ./deploy.sh         # build images, start everything, open firewalld, verify
-Spending is OFF on both money servers until you set ENABLE_SPENDING=1 in
-  $CONFIG_HOME/monero-wallet-mcp/spend.env  and  $CONFIG_HOME/lightning-mcp/spend.env
+Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
+  $CONFIG_DIR/monero-wallet-mcp/spend.env  and  $CONFIG_DIR/lightning-mcp/spend.env
 EOF

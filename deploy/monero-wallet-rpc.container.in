@@ -28,10 +28,10 @@ PublishPort=127.0.0.1:18083:18083
 # entrypoint checks /home/monero (image-owned, uid 1000)
 # rather than the bind mount, so it will NOT re-own the dir
 # for us. Pre-create it and chown to the mapped uid with:
-#   podman unshare chown 1000:1000 %h/data/monero-wallet-rpc
+#   podman unshare chown 1000:1000 @DATA_DIR@/monero-wallet-rpc
 # (host uid 525287 == in-container uid 1000 == monero user).
 # The :z label is required: this host runs SELinux enforcing.
-Volume=%h/data/monero-wallet-rpc:/home/monero/wallet:z
+Volume=@DATA_DIR@/monero-wallet-rpc:/home/monero/wallet:z
 
 # NOTE: Exec= replaces the image CMD; the entrypoint prepends
 # --non-interactive and, because --rpc-login is present here,

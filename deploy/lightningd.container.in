@@ -22,11 +22,11 @@ Network=npm-network.network
 # Peers reach us through the statictor onion service instead.
 #PublishPort=3010:3010
 
-# Volume mount using %h/data/cln
-Volume=%h/data/cln:/root/.lightning:Z
+# Volume mount using @DATA_DIR@/cln
+Volume=@DATA_DIR@/cln:/root/.lightning:Z
 
 # Map host bitcoind directory into CLN
-Volume=%h/data/bitcoin:/root/.bitcoin:z
+Volume=@DATA_DIR@/bitcoin:/root/.bitcoin:z
 
 # Exec arguments connecting to bitcoind and tor.
 # NOTE: --proxy expects an IP address (it does not accept a hostname) and

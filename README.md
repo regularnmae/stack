@@ -14,14 +14,14 @@ stack runs and one script that fixes a deployment problem.
 
 | Unit | Image | Published on the LAN | Data |
 | --- | --- | --- | --- |
-| `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — (RPC stays on `npm-network`) | `~/data/bitcoin` |
-| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `~/data/monero` |
-| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `~/data/monero-wallet-rpc` |
-| `lightningd` | `docker.io/elementsproject/lightningd:latest` | — (onion over Tor) | `~/data/cln` |
-| `tor` | `localhost/tor:0.4.9.11-alpine3.20` | `127.0.0.1:9050-9051` | `~/data/tor` |
+| `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — (RPC stays on `npm-network`) | `$DATA_DIR/bitcoin` |
+| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
+| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
+| `lightningd` | `docker.io/elementsproject/lightningd:latest` | — (onion over Tor) | `$DATA_DIR/cln` |
+| `tor` | `localhost/tor:0.4.9.11-alpine3.20` | `127.0.0.1:9050-9051` | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:latest` | `8080` | `~/data/searxng` |
-| `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `~/npm/{data,letsencrypt}` |
+| `searxng` | `docker.io/searxng/searxng:latest` | `8080` | `$DATA_DIR/searxng` |
+| `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
 | `searxng-mcp` | `localhost/searxng-mcp:latest` | `8000` | — |
 | `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `8101` | — |
 | `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `8102` | — |
@@ -64,6 +64,10 @@ cd ~/build/stack
 `sudo` needs a terminal to prompt for its password, so run these from an
 interactive shell (over SSH, `ssh -t`).
 
+On the first run, `deploy.sh` asks **where the stack keeps its data** (default
+`$HOME/data`) and remembers the answer; point it at a separate disk to survive
+an OS reinstall. See [Where the data lives](#where-the-data-lives).
+
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret and leaves running containers alone. Common flags:
 
@@ -91,19 +95,38 @@ A bare host has no wallets. `deploy.sh` prompts:
 
 Both are skipped when there is no TTY. See `scripts/wallets.sh`.
 
+## Where the data lives
+
+Everything the stack must not lose sits under **one directory**, `$DATA_DIR`
+(`STACK_DATA_DIR`, default `$HOME/data`). `deploy.sh` asks for it once and
+remembers the answer in `~/.config/stack/data-dir.env`:
+
+  - `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
+  - `npm/{data,letsencrypt}` — nginx-proxy-manager
+  - `config/` — every bearer token and secret
+
+Point it at a separate disk and an OS reinstall only has to keep that one
+directory. `deploy.sh` creates the path if needed, takes ownership of it
+(containers run rootless and write as you), and labels it for containers when
+SELinux has no rule for it — a freshly formatted disk is often `unlabeled_t`,
+and then podman's `:z` relabel fails with `EPERM` and every container that
+mounts it is denied.
+
 ## How secrets are kept out of git
 
 No secret is committed. Everything real is generated or adopted on the host,
-under `~/.config/<name>/` and `~/data/`, mode 600.
+under `$DATA_DIR/config/`, mode 600.
 
-- **`~/.config/stack/secrets.env`** holds the node secrets (bitcoind RPC user
-  and password, Tor service password, Monero wallet password and RPC login).
-  It is resolved in the order **`secrets.env` → the currently-installed unit →
-  the daemon's own config → generate**, so adopting the deploy on a running
-  host changes no credential.
-- **Per-app env files** (`~/.config/<name>/{token,upstream,spend,node}.env`)
-  hold the bearer tokens, upstream credentials, spend policy and CLN runes. The
-  unit reads them with `EnvironmentFile=`; the shapes are documented in
+- **`$DATA_DIR/config/stack/secrets.env`** holds the node secrets (bitcoind RPC
+  user and password, Tor service password, Monero wallet password and RPC
+  login). It is resolved in the order **`secrets.env` → the currently-installed
+  unit → the daemon's own config → generate**, so adopting the deploy on a
+  running host changes no credential. `MONERO_WALLET_PASSWORD` is the **only**
+  key to the wallet file — keep it with the data.
+- **Per-app env files**
+  (`$DATA_DIR/config/<name>/{token,upstream,spend,node}.env`) hold the bearer
+  tokens, upstream credentials, spend policy and CLN runes. The unit reads them
+  with `EnvironmentFile=`; the shapes are documented in
   `deploy/examples/<name>/`.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
@@ -122,13 +145,14 @@ through the container: `podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf`
 ```
 stack/
   bootstrap.sh            # bare host -> podman, linger, sysctl, firewalld, dirs
-  deploy.sh               # the one-click orchestrator
+  deploy.sh               # the one-click orchestrator (asks for the data dir)
   verify.sh               # health + endpoint checks
-  stack.conf              # repo / port / order manifest
+  stack.conf              # repo / port / order manifest, data-dir defaults
+  scripts/lib.sh          # data-dir resolution + SELinux labelling
   scripts/wallets.sh      # Monero + Bitcoin create/restore
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
-    *.container           # every unit, symlinked
+    *.container           # every unit, rendered (they reference the data dir)
     *.container.in        # lightningd and monero-wallet-rpc, rendered (secrets)
     npm-network.network
     searxng/{settings.yml,limiter.toml}

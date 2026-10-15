@@ -19,7 +19,7 @@ env file. Two answers, and the split is deliberate:
   files or in `EnvironmentFile=`;
 - secret-bearing units (`lightningd`, `monero-wallet-rpc`) are **rendered** from
   a `.container.in` by `install.sh`, substituting `@PLACEHOLDERS@` from
-  `~/.config/stack/secrets.env`. The rendered unit is mode 600, never committed.
+  `$DATA_DIR/config/stack/secrets.env`. The rendered unit is mode 600, never committed.
 
 Do not move a secret onto a committed `.container`, and do not "simplify"
 `monero-wallet-rpc` to a config file: the image's entrypoint only binds `0.0.0.0`
@@ -57,7 +57,7 @@ the wallet is unreachable from the MCP server.
 - **Data-dir ownership.** `bitcoind` and `monero-wallet-rpc` run as the image's
   uid (host 525287 = in-container 1000) and do **not** re-own their bind mounts;
   `install.sh` does `podman unshare chown -R 1000:1000` for them. `monerod`'s
-  entrypoint does re-own its own directory. `~/data/cln` and `~/data/tor` are
+  entrypoint does re-own its own directory. `$DATA_DIR/cln` and `$DATA_DIR/tor` are
   written by container root, which is the host user under rootless podman.
 - **The network subnet is pinned** (`10.89.0.0/24` in
   `deploy/npm-network.network`) because `tor.container` pins `--ip=10.89.0.240`

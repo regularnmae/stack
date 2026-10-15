@@ -67,6 +67,9 @@ command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y gi
 # Rootless networking needs one of these; both are optional per release.
 command -v slirp4netns >/dev/null 2>&1 || sudo dnf install -y slirp4netns >/dev/null 2>&1 || true
 command -v pasta >/dev/null 2>&1 || sudo dnf install -y passt >/dev/null 2>&1 || true
+# semanage (policycoreutils-python-utils) lets the deploy label a data disk
+# persistently; without it the deploy falls back to chcon.
+command -v semanage >/dev/null 2>&1 || sudo dnf install -y policycoreutils-python-utils >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # 3. subuid / subgid (rootless user namespaces)
@@ -109,11 +112,8 @@ sudo systemctl enable --now firewalld >/dev/null 2>&1 || warn "could not enable 
 # ---------------------------------------------------------------------------
 # 7. directories
 # ---------------------------------------------------------------------------
-log "creating $BUILD_DIR, $DATA_HOME/data and $DATA_HOME/npm"
-mkdir -p "$BUILD_DIR" \
-    "$DATA_HOME/data" \
-    "$DATA_HOME/npm/data" "$DATA_HOME/npm/letsencrypt" \
-    "$DATA_HOME/.config/containers/systemd"
+log "creating $BUILD_DIR and the quadlet directory"
+mkdir -p "$BUILD_DIR" "$DATA_HOME/.config/containers/systemd"
 
 systemctl --user daemon-reload 2>/dev/null || true
 
@@ -137,9 +137,12 @@ Bootstrap complete.
   podman      $(podman --version 2>/dev/null || echo missing)
   linger      $(loginctl show-user "$USER_NAME" 2>/dev/null | sed -n 's/^Linger=//p')
   port start  $(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null)
-  data        $DATA_HOME/data
-  npm         $DATA_HOME/npm
+  build       $BUILD_DIR
 
 Next:
   $NEXT
+
+That asks where the stack keeps its data (default \$HOME/data). Point it at a
+separate disk to survive an OS reinstall; it will take ownership of the path
+and label it for containers.
 EOF

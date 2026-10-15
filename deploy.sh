@@ -20,10 +20,11 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DRY_RUN=0
 # shellcheck source=stack.conf
 . "$REPO_DIR/stack.conf"
-
-DRY_RUN=0
+# shellcheck source=scripts/lib.sh
+. "$REPO_DIR/scripts/lib.sh"
 ONLY=""
 DO_BOOTSTRAP=0
 DO_WALLETS=1
@@ -35,9 +36,6 @@ MONEROD_WAIT="${MONEROD_WAIT:-300}"
 LIGHTNINGD_WAIT="${LIGHTNINGD_WAIT:-900}"
 APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"
 
-log()  { printf '==> %s\n' "$*"; }
-warn() { printf 'WARNING: %s\n' "$*" >&2; }
-die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
 usage() {
@@ -91,6 +89,14 @@ preflight() {
         log "some steps use sudo; you may be prompted once"
         sudo -v || warn "sudo unavailable; firewalld ports will not be opened automatically"
     fi
+
+    # Choose where the stack keeps its data (asked once, then remembered) and
+    # make sure it is usable: owned by us (containers write as this uid) and
+    # labelled for containers.
+    resolve_data_dir
+    log "data directory: $DATA_DIR"
+    ensure_data_dirs
+    ensure_data_dir_selinux
 }
 
 # ---------------------------------------------------------------------------

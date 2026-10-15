@@ -28,8 +28,8 @@ PublishPort=443:443
 PublishPort=81:81
 
 # Volume mounts with :Z flag for SELinux labelling.
-Volume=%h/npm/data:/data:Z
-Volume=%h/npm/letsencrypt:/etc/letsencrypt:Z
+Volume=@DATA_DIR@/npm/data:/data:Z
+Volume=@DATA_DIR@/npm/letsencrypt:/etc/letsencrypt:Z
 
 # Environment settings.
 Environment=DISABLE_IPV6=true

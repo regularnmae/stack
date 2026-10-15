@@ -16,9 +16,9 @@ Network=npm-network.network
 #   token.env -- LIGHTNING_MCP_TOKEN (read) and LIGHTNING_MCP_SPEND_TOKEN
 #   node.env  -- the runes (read + spend) and the TLS settings
 #   spend.env -- ENABLE_SPENDING and the caps (operator-editable)
-EnvironmentFile=%h/.config/lightning-mcp/token.env
-EnvironmentFile=%h/.config/lightning-mcp/node.env
-EnvironmentFile=%h/.config/lightning-mcp/spend.env
+EnvironmentFile=@CONFIG_DIR@/lightning-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/lightning-mcp/node.env
+EnvironmentFile=@CONFIG_DIR@/lightning-mcp/spend.env
 
 # Host 8104 -> container 8000. LAN-published like searxng-mcp; open
 # 8104/tcp in firewalld. This is a money-moving surface: the bearer tokens

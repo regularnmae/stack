@@ -20,7 +20,7 @@ PodmanArgs=--ip=10.89.0.240
 
 PublishPort=127.0.0.1:9050:9050
 PublishPort=127.0.0.1:9051:9051
-Volume=%h/data/tor/torrc:/etc/tor/torrc:ro,Z
+Volume=@DATA_DIR@/tor/torrc:/etc/tor/torrc:ro,Z
 
 Exec=tor -f /etc/tor/torrc
 

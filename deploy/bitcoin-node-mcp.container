@@ -15,8 +15,8 @@ Network=npm-network.network
 # Both live OUTSIDE this repo in ~/.config/bitcoin-node-mcp/ (mode 600),
 # written by deploy/install.sh, so no secret is ever committed -- only the
 # *.example files under deploy/ are.
-EnvironmentFile=%h/.config/bitcoin-node-mcp/token.env
-EnvironmentFile=%h/.config/bitcoin-node-mcp/upstream.env
+EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/upstream.env
 
 # Host 8101 -> container 8000 (the app's default). LAN-published like
 # searxng-mcp on 8000; open 8101/tcp in firewalld.

@@ -23,7 +23,7 @@ Network=npm-network.network
 # uid 525287 via /etc/subuid), then drops privileges via su-exec.
 # The directory can therefore be created as $USER -- unlike
 # bitcoind, no chown dance is needed.
-Volume=%h/data/monero:/home/monero/.bitmonero:z
+Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
 
 # NOTE: Exec= replaces the image CMD, so the image's default flags
 # must be restated verbatim, with our additions appended.

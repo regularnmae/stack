@@ -30,7 +30,7 @@ Network=npm-network.network
 # NOTE: this :z bind mount is owned by the image's non-root uid (525287 on the
 # host). Edit bitcoin.conf via "podman exec bitcoind ..." -- writing it as
 # $USER fails, and chown -R would lock bitcoind out of its own chainstate.
-Volume=%h/data/bitcoin:/data/.bitcoin:z
+Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 
 [Service]
 Restart=always
