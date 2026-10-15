@@ -12,7 +12,13 @@
 # Read-only. Exits non-zero if anything is wrong.
 set -uo pipefail
 
-CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=stack.conf
+[ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
+# shellcheck source=scripts/lib.sh
+. "$REPO_DIR/scripts/lib.sh"
+# The tokens live under the data dir now, so resolving it is how we find them.
+resolve_data_dir
 
 DEEP=0
 NO_NODES=0
@@ -66,11 +72,11 @@ done
 head2 "MCP endpoints"
 # name|port|env-file|token-var|deep-tool|deep-args|needs-nodes
 endpoints=(
-    "searxng-mcp|8000|$CONFIG_HOME/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
-    "bitcoin-node-mcp|8101|$CONFIG_HOME/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
-    "monero-node-mcp|8102|$CONFIG_HOME/monero-node-mcp/token.env|MONERO_MCP_TOKEN|get_info|{}|1"
-    "monero-wallet-mcp|8103|$CONFIG_HOME/monero-wallet-mcp/token.env|MONERO_MCP_TOKEN|get_balance|{}|1"
-    "lightning-mcp|8104|$CONFIG_HOME/lightning-mcp/token.env|LIGHTNING_MCP_TOKEN|getinfo|{}|1"
+    "searxng-mcp|8000|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
+    "bitcoin-node-mcp|8101|$CONFIG_DIR/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
+    "monero-node-mcp|8102|$CONFIG_DIR/monero-node-mcp/token.env|MONERO_MCP_TOKEN|get_info|{}|1"
+    "monero-wallet-mcp|8103|$CONFIG_DIR/monero-wallet-mcp/token.env|MONERO_MCP_TOKEN|get_balance|{}|1"
+    "lightning-mcp|8104|$CONFIG_DIR/lightning-mcp/token.env|LIGHTNING_MCP_TOKEN|getinfo|{}|1"
 )
 read -r -d '' init_body <<'JSON' || true
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}
