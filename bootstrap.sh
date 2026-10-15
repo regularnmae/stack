@@ -26,6 +26,14 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -ne 0 ] || die "run as your login user, not root; this script calls sudo itself"
 command -v sudo >/dev/null 2>&1 || die "sudo is required"
 
+# Prime sudo once, so the privileged calls below don't each prompt (and so a
+# non-interactive session fails here with a clear message rather than halfway
+# through provisioning).
+if ! sudo -n true 2>/dev/null; then
+    log "sudo needs a password; you may be prompted once"
+    sudo -v || die "sudo authentication failed"
+fi
+
 # ---------------------------------------------------------------------------
 # 1. distribution
 # ---------------------------------------------------------------------------
