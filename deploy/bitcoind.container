@@ -1,0 +1,40 @@
+# Quadlet unit for the Bitcoin Core node. Owned by this repo so the node
+# config is version-controlled in one place; the secrets are not here --
+# bitcoind keeps its RPC credentials in bitcoin.conf under the data
+# directory, which is never committed.
+[Unit]
+Description=Bitcoin Core Node
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=bitcoind
+Image=docker.io/lncm/bitcoind:v27.2
+Network=npm-network.network
+
+# P2P & RPC ports are deliberately NOT published to the host.
+#
+# Publishing them bound 0.0.0.0 on every host interface, which exposed the RPC
+# port to the whole LAN. lightningd reaches bitcoind over the podman network
+# (--bitcoin-rpcconnect=bitcoind), so no PublishPort is needed for RPC.
+# bitcoind makes its own outbound P2P connections to the Bitcoin network, so
+# inbound 8333 is not required either.
+#
+# Defence in depth: bitcoin.conf sets rpcallowip to the podman subnet only, so
+# even if a PublishPort is re-added the connection arrives from the host's LAN
+# address and is refused.
+#PublishPort=8333:8333
+#PublishPort=8332:8332
+
+# LNCM image uses /data internally.
+# NOTE: this :z bind mount is owned by the image's non-root uid (525287 on the
+# host). Edit bitcoin.conf via "podman exec bitcoind ..." -- writing it as
+# $USER fails, and chown -R would lock bitcoind out of its own chainstate.
+Volume=%h/data/bitcoin:/data/.bitcoin:z
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

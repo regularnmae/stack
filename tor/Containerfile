@@ -1,0 +1,7 @@
+# Tor image: a prebuilt alpine with tor installed. The previous approach
+# (alpine:latest + "apk add tor" at every boot) required working internet on
+# every start; baking the package in removes that dependency.
+#
+# Build:  podman build -t localhost/tor:0.4.9.11-alpine3.20 tor/
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache tor

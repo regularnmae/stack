@@ -1,0 +1,53 @@
+# Quadlet unit for the Monero node. No secrets: the restricted RPC runs
+# without a login, and standard RPC (18081) is bound to loopback inside the
+# container and never reachable from the network.
+[Unit]
+Description=Monero Node
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=monerod
+Image=ghcr.io/sethforprivacy/simple-monerod:latest
+Network=npm-network.network
+
+# Same policy as bitcoind: no ports published to the host.
+# P2P (18080) is outbound-only, which is enough to sync; the
+# restricted RPC (18089) stays inside npm-network, so nothing on
+# the LAN can reach it even though it binds 0.0.0.0 in-container.
+#PublishPort=18080:18080
+#PublishPort=18089:18089
+
+# The image's entrypoint runs as root only long enough to re-own
+# this directory for its monero user (uid 1000 in-container, host
+# uid 525287 via /etc/subuid), then drops privileges via su-exec.
+# The directory can therefore be created as $USER -- unlike
+# bitcoind, no chown dance is needed.
+Volume=%h/data/monero:/home/monero/.bitmonero:z
+
+# NOTE: Exec= replaces the image CMD, so the image's default flags
+# must be restated verbatim, with our additions appended.
+# (--non-interactive is prepended by the entrypoint itself.)
+#   --prune-blockchain: rolling prune keeps the chain ~70-80 GB.
+Exec=--rpc-restricted-bind-ip=0.0.0.0 \
+     --rpc-restricted-bind-port=18089 \
+     --no-igd --no-zmq --enable-dns-blocklist \
+     --ban-list=/home/monero/ban_list.txt \
+     --prune-blockchain
+
+# The image build drops the Dockerfile HEALTHCHECK (the OCI image
+# config has no healthcheck field), so define it here instead. This
+# reuses the image's shipped /healthcheck.sh, which auto-detects the
+# restricted RPC port (and --rpc-login credentials, if ever added)
+# from PID 1's cmdline.
+HealthCmd=/healthcheck.sh
+HealthInterval=60s
+HealthStartPeriod=2m
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

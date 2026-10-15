@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+# Local secrets; install.sh writes the real files outside the tree, so this
+# only guards against a stray copy.
+*.env
+!*.env.example
+deploy/*.bak

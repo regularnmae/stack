@@ -1,0 +1,7 @@
+# The podman network the crypto node stack shares with the MCP servers and
+# searxng. Vendored here (rather than left only on the host) so a fresh
+# checkout has it. deploy/install.sh symlinks this into
+# ~/.config/containers/systemd/, but only when no other repo has already
+# provided it.
+[Network]
+NetworkName=npm-network

@@ -1,0 +1,9 @@
+# Template for monero-wallet-rpc's config file.
+#
+# deploy/install.sh writes the real file to
+# ~/data/monero-wallet-rpc/wallet.conf (mode 600), reusing what the previous
+# monero-wallet-rpc unit carried, and passes it with --config-file. That is
+# why the wallet password and RPC login are not on the unit's Exec line.
+# Carries no secret.
+password=change-me
+rpc-login=monero:change-me

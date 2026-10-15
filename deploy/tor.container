@@ -1,0 +1,32 @@
+# Quadlet unit for Tor, used by lightningd for its onion service and to
+# reach the network over a proxy. No secrets: tor's own configuration
+# (including the control-port password hash) lives in ~/data/tor/torrc,
+# which is outside the repo and never committed.
+[Unit]
+Description=Tor SOCKS5 & Control Proxy
+After=network-online.target
+Before=lightningd.service
+
+[Container]
+ContainerName=tor
+# Prebuilt image with tor already installed (see ../tor/Containerfile).
+Image=localhost/tor:0.4.9.11-alpine3.20
+Network=npm-network.network
+
+# lightningd runs with --always-use-proxy=true, which suppresses DNS lookups,
+# so it cannot resolve the "tor" container name. Tor therefore needs a
+# stable address that is referenced by IP.
+PodmanArgs=--ip=10.89.0.240
+
+PublishPort=127.0.0.1:9050:9050
+PublishPort=127.0.0.1:9051:9051
+Volume=%h/data/tor/torrc:/etc/tor/torrc:ro,Z
+
+Exec=tor -f /etc/tor/torrc
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

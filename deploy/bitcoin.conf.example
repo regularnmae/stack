@@ -1,0 +1,23 @@
+# Template for bitcoind's config file.
+#
+# bitcoind owns this file itself, under its data directory
+# (~/data/bitcoin/bitcoin.conf), which is not part of this repo. It is shown
+# here for reference because the MCP servers and lightningd read its RPC
+# credentials. Carries no real secret.
+server=1
+daemon=0
+
+# Rolling prune: keeps the node small. Incompatible with -txindex.
+prune=20000
+txindex=0
+
+# RPC. rpcallowip is the podman subnet only, so a re-added PublishPort would
+# still be refused.
+rpcuser=btcuser
+rpcpassword=change-me
+rpcbind=0.0.0.0
+rpcallowip=127.0.0.1
+rpcallowip=10.89.0.0/24
+
+# Outbound-only: no inbound P2P peers.
+listen=0

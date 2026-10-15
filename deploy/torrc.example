@@ -1,0 +1,18 @@
+# Template for tor's configuration.
+#
+# deploy/install.sh seeds ~/data/tor/torrc only on a fresh host, computing the
+# control-password hash from TOR_SERVICE_PASSWORD with
+# `podman run --rm localhost/tor:<tag> tor --hash-password`. On an existing
+# host the file is left alone. Carries no secret (the hash is derived).
+SocksPort 0.0.0.0:9050
+ControlPort 0.0.0.0:9051
+
+HashedControlPassword 16:REPLACE_WITH_TOR_HASH_PASSWORD
+
+# Only containers on the podman npm-network may use the SOCKS proxy; reject
+# everything else so this can never act as an open proxy.
+SocksPolicy accept 10.89.0.0/24
+SocksPolicy reject *
+
+# Log to stdout so "podman logs tor" works.
+Log notice stdout

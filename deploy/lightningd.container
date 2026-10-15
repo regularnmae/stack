@@ -1,0 +1,61 @@
+# Quadlet unit for Core Lightning. The two secrets it needs -- the bitcoind
+# RPC password and tor's control password -- are NOT here. Exec= cannot expand
+# environment variables (Quadlet does not do that), so they live in a CLN
+# config file at $LIGHTNINGDIR/config (i.e. ~/data/cln/config on the host),
+# which lightningd reads at startup. deploy/install.sh seeds it, reusing the
+# values the previously-installed unit carried and writing them where no unit
+# file can leak them.
+[Unit]
+Description=Core Lightning Daemon
+After=bitcoind.service tor.service
+Requires=bitcoind.service tor.service
+
+[Container]
+ContainerName=lightningd
+Image=docker.io/elementsproject/lightningd:latest
+Network=npm-network.network
+
+# Lightning P2P & CLNRest API ports
+# 9735 is deliberately NOT published: it would bind on 0.0.0.0 on the host,
+# advertise this host's real IP to every peer and defeat the point of Tor.
+# Peers reach us through the statictor onion service instead.
+#PublishPort=3010:3010
+
+# Volume mount using %h/data/cln (also holds config)
+Volume=%h/data/cln:/root/.lightning:Z
+
+# Map host bitcoind directory into CLN
+Volume=%h/data/bitcoin:/root/.bitcoin:z
+
+# Exec arguments connecting to bitcoind and tor.
+# NOTE: --proxy expects an IP address (it does not accept a hostname) and
+# --always-use-proxy=true suppresses DNS lookups, so Tor must be addressed by
+# its pinned IP 10.89.0.240 (set in tor.container) rather than "tor".
+# --bitcoin-rpcpassword and --tor-service-password are intentionally absent:
+# they come from /root/.lightning/config (see the header above).
+Exec=--network=bitcoin \
+     --bitcoin-rpcconnect=bitcoind \
+     --bitcoin-rpcport=8332 \
+     --bitcoin-rpcuser=btcuser \
+     --bitcoin-datadir=/root/.bitcoin \
+     --clnrest-port=3010 \
+     --clnrest-host=0.0.0.0 \
+     --proxy=10.89.0.240:9050 \
+     --addr=statictor:10.89.0.240:9051 \
+     --always-use-proxy=true \
+     --bind-addr=0.0.0.0:9735
+
+# The image's entrypoint.sh stays alive as PID 1 even after lightningd dies,
+# so systemd reported the unit "active" while the daemon was gone. This
+# healthcheck makes that failure visible.
+HealthCmd=lightning-cli getinfo
+HealthInterval=60s
+HealthStartPeriod=5m
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
