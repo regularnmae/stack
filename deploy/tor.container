@@ -24,10 +24,11 @@ Volume=@DATA_DIR@/tor/torrc:/etc/tor/torrc:ro,Z
 
 Exec=tor -f /etc/tor/torrc
 
-# The tor image ships no HEALTHCHECK. The SOCKS listener on 9050 is what
-# lightningd actually depends on, and a bare TCP connect proves tor is
-# serving it (busybox nc -z is present in this image).
-HealthCmd=nc -z 127.0.0.1 9050
+# The tor image ships no HEALTHCHECK. Probe the SOCKS listener lightningd
+# depends on, but from the container's own pinned podman IP: torrc's
+# SocksPolicy allows only 10.89.0.0/24, so a probe from 127.0.0.1 is
+# rejected and logs a denial every interval. busybox nc -z is in the image.
+HealthCmd=nc -z 10.89.0.240 9050
 HealthInterval=30s
 HealthStartPeriod=10s
 HealthRetries=3
