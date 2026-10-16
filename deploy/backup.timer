@@ -1,0 +1,21 @@
+# The schedule for the backup job in backup.container.
+#
+# Quadlet has no .timer type (its extensions are .container, .volume, .network,
+# .pod, .kube, .image, .build and .artifact), so this is a plain systemd USER
+# unit, not a rendered quadlet. deploy/install.sh installs it to
+# ~/.config/systemd/user/backup.timer and runs `systemctl --user enable
+# backup.timer`; it activates the backup.service that Quadlet generates from
+# backup.container.
+[Unit]
+Description=Nightly encrypted backup of the stack's irreplaceable state
+
+[Timer]
+# Nightly, off-hours, with jitter so it does not collide with other hosts.
+# Persistent=true catches up a run missed while the host was off.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=backup.service
+
+[Install]
+WantedBy=timers.target

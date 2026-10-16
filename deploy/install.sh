@@ -21,11 +21,19 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_DIR="$REPO_DIR/deploy"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 QUADLET_DIR="$CONFIG_HOME/containers/systemd"
+# Plain systemd user units live here, not in the quadlet dir: Quadlet generates
+# .service files from .container/.volume/.network/... but has no .timer type, so
+# backup.timer is installed as an ordinary user unit.
+USER_UNIT_DIR="$CONFIG_HOME/systemd/user"
 
 # shellcheck source=../scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
+# Where the backup job keeps its restic repository (mounted at /repo). Defined
+# in stack.conf; default here so install.sh works standalone too.
+STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
+export STACK_BACKUP_DIR
 
 # Every unit is rendered: all of them reference either the data dir or the
 # config dir, so none is a plain symlink any more. Pairs are "source:target".
@@ -44,6 +52,12 @@ UNITS=(
     "monero-node-mcp.container:monero-node-mcp.container"
     "monero-wallet-mcp.container:monero-wallet-mcp.container"
     "lightning-mcp.container:lightning-mcp.container"
+    "backup.container:backup.container"
+)
+
+# Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir).
+TIMERS=(
+    "backup.timer"
 )
 
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
@@ -254,6 +268,10 @@ chown_image_uid "$DATA_DIR/monero-wallet-rpc"
 
 mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 
+# The backup job's restic cache (regenerable) and its repository. The repo is
+# outside $DATA_DIR on purpose, so wiping the data dir does not delete it.
+mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
+
 # ---------------------------------------------------------------------------
 # 3. tor image + torrc
 # ---------------------------------------------------------------------------
@@ -416,6 +434,31 @@ EOF
     log "wrote $LN_ENV/spend.env (mode 600) with ENABLE_SPENDING=0"
 fi
 
+# Backup repository settings for deploy/backup.container. The unit is
+# secret-free and reads these through EnvironmentFile; the password is a real
+# secret, so it follows the same resolution order (an operator-supplied value
+# wins, so an offsite repo can be opened on a fresh host before this file
+# exists -- see scripts/backup.sh). Keep a copy off the data disk.
+BACKUP_ENV="$CONFIG_DIR/backup/backup.env"
+if ensure_secret "$BACKUP_ENV" "backup env"; then
+    restic_password=$(first_nonempty \
+        "$(read_secret RESTIC_PASSWORD)" \
+        "${RESTIC_PASSWORD:-}" \
+        "$(rand_hex)")
+    write_secret "$BACKUP_ENV" <<EOF
+# restic repository for the nightly backup (deploy/backup.container). The
+# local default is the STACK_BACKUP_DIR host dir mounted at /repo; point
+# RESTIC_REPOSITORY at an offsite target (s3:, b2:, sftp:) for real disaster
+# recovery. RESTIC_PASSWORD is the only key to the encrypted backups -- keep a
+# copy somewhere other than the data disk. See
+# deploy/examples/backup/backup.env.example.
+RESTIC_REPOSITORY=/repo
+RESTIC_PASSWORD=$restic_password
+RESTIC_CACHE_DIR=/cache
+EOF
+    log "wrote $BACKUP_ENV (mode 600)"
+fi
+
 # The runes need a running lightningd. install.sh is re-run by deploy.sh once
 # the daemon is up, so this is best-effort here and self-heals on re-run.
 rune_usable() {
@@ -503,6 +546,7 @@ render_unit() {
     tmp="$(mktemp)"
     sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
         -e "s|@CONFIG_DIR@|$(esc "$CONFIG_DIR")|g" \
+        -e "s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g" \
         -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
         -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
@@ -527,8 +571,27 @@ for pair in "${UNITS[@]}"; do
 done
 log "rendered ${#UNITS[@]} units (mode 600)"
 
+# Timers go to the user unit dir (see USER_UNIT_DIR): Quadlet will not generate
+# them. backup.timer activates the backup.service that the generator makes from
+# backup.container.
+mkdir -p "$USER_UNIT_DIR"
+for t in "${TIMERS[@]}"; do
+    target="$USER_UNIT_DIR/$t"
+    if [ -e "$target" ] && [ ! -L "$target" ] && [ ! -e "$target.bak" ]; then
+        mv -f "$target" "$target.bak"
+        log "backed up existing $t -> $t.bak"
+    fi
+    render_unit "$DEPLOY_DIR/$t" "$target"
+done
+log "installed ${#TIMERS[@]} timer(s) into $USER_UNIT_DIR"
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload
+    # enable --now so the schedule is live without waiting for a reboot. On a
+    # fresh host with Persistent=true this may run one backup immediately; it
+    # initialises the repository and is harmless.
+    systemctl --user enable --now backup.timer >/dev/null 2>&1 \
+        || log "could not enable backup.timer; run: systemctl --user enable --now backup.timer"
     log "systemd --user reloaded"
 fi
 
@@ -538,8 +601,12 @@ Done. Everything the stack owns lives under:
   $DATA_DIR
     bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/ npm/
     config/   <- all bearer tokens and secrets (mode 600)
+  $STACK_BACKUP_DIR
+    the restic repository the nightly backup writes (backup.timer)
 
 Next:  ./deploy.sh         # build images, start everything, verify
 Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
   $CONFIG_DIR/monero-wallet-mcp/spend.env  and  $CONFIG_DIR/lightning-mcp/spend.env
+Keep a copy of RESTIC_PASSWORD ($BACKUP_ENV) off the data disk: it is the only
+key to the backups.
 EOF

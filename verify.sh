@@ -132,6 +132,30 @@ for e in "${endpoints[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+head2 "Backups"
+BACKUP_TIMER="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/backup.timer"
+if [ -f "$BACKUP_TIMER" ]; then
+    pass "backup.timer installed"
+else
+    bad "backup.timer is not installed (run deploy/install.sh)"
+fi
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet backup.timer 2>/dev/null; then
+    pass "backup.timer is active"
+else
+    warn "backup.timer is not active (systemctl --user status backup.timer)"
+fi
+if [ "$DEEP" = 1 ]; then
+    # Freshness is best-effort and a fresh host legitimately has no snapshot, so
+    # this only warns. A failure means the repository or password is wrong.
+    if out=$("$REPO_DIR/scripts/backup.sh" snapshots 2>/dev/null) \
+        && printf '%s' "$out" | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+        pass "backup repository has snapshots"
+    else
+        warn "no backup snapshots yet (expected until the first backup runs)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 head2 "Summary"
 if [ "$fails" = 0 ]; then
     [ "$DEEP" = 1 ] || printf 'All shallow checks passed. Re-run with --deep once the chains are synced.\n'

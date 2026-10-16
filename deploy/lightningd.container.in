@@ -22,8 +22,11 @@ Network=npm-network.network
 # Peers reach us through the statictor onion service instead.
 #PublishPort=3010:3010
 
-# Volume mount using @DATA_DIR@/cln
-Volume=@DATA_DIR@/cln:/root/.lightning:Z
+# Volume mount using @DATA_DIR@/cln. `:z` (shared), not `:Z` (private): the
+# backup container mounts the same directory read-only, and two containers may
+# not share a path one labels private -- whichever starts last would relabel it
+# and lock the other out. bitcoind and monero-wallet-rpc already use `:z`.
+Volume=@DATA_DIR@/cln:/root/.lightning:z
 
 # Map host bitcoind directory into CLN
 Volume=@DATA_DIR@/bitcoin:/root/.bitcoin:z

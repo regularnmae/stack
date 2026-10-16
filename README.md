@@ -37,6 +37,11 @@ hosts by hand but is **not** in the request path for any MCP server.
 
 🔑 = a money-moving surface. Spending is **off** by default on both.
 
+A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
+`monero-wallet-rpc/`, `config/`, `npm/`) runs from `backup.timer` into
+`$STACK_BACKUP_DIR`. It is the one thing that recovers you if the data disk
+itself is lost — see [Backup & restore](#backup--restore).
+
 ## One-click install
 
 On a truly bare Rocky Linux 10 host (no git, no podman):
@@ -78,6 +83,7 @@ five MCP servers (a plain start would keep running a stale image). Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
+./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
 ./deploy.sh --no-wallets              # skip the interactive wallet prompts
 ./deploy.sh --dry-run                 # print the plan, change nothing
@@ -109,6 +115,11 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
   - `config/` — every bearer token and secret
+  - `backup-cache/` — restic's cache (regenerable)
+
+The backup *repository* lives outside `$DATA_DIR`, in `$STACK_BACKUP_DIR`
+(default `$HOME/data-backup`), so wiping the data dir does not delete it — see
+[Backup & restore](#backup--restore).
 
 Point it at a separate disk and an OS reinstall only has to keep that one
 directory. `deploy.sh` never uses `sudo`: it creates the path when its parent is
@@ -153,6 +164,69 @@ the path for containers if it has to) — so nothing re-syncs, the wallet still
 opens (its password is in `config/stack/secrets.env`), and the client tokens are
 unchanged.
 
+## Backup & restore
+
+`install.sh` installs a nightly, encrypted [restic](https://restic.net) backup of
+the four things in `$DATA_DIR` that cannot be re-downloaded:
+
+- `cln/` — the CLN node identity, channel state and onion keys
+- `monero-wallet-rpc/` — the Monero wallet (funds)
+- `config/` — every token, rune and secret
+- `npm/` — nginx-proxy-manager's config and TLS material
+
+The chains (`bitcoin/`, `monero/`) and `searxng/` are deliberately **excluded**:
+they are large and regenerable, so restic never walks them.
+
+- `deploy/backup.container` — the one-shot job (a Quadlet unit, rendered like
+  the rest).
+- `deploy/backup.timer` — the schedule (`*-*-* 03:30:00`, plus 30 min of
+  jitter). Quadlet has no `.timer` type, so this is an ordinary systemd **user**
+  unit at `~/.config/systemd/user/backup.timer`, enabled by `install.sh`.
+- `scripts/backup.sh` — run it by hand and inspect what you have:
+  `backup | init | list | check | forget | restore <snap> | unlock`.
+- `./deploy.sh --only backup` runs the job once, now.
+
+The repository defaults to the host directory `$STACK_BACKUP_DIR` (default
+`$HOME/data-backup`, from `stack.conf`) mounted at `/repo`. It sits outside
+`$DATA_DIR`, so wiping the data dir leaves it alone — but a same-disk repo will
+not survive the disk itself. For real disaster recovery point `RESTIC_REPOSITORY`
+in `$DATA_DIR/config/backup/backup.env` at an offsite target (`s3:`, `b2:`,
+`sftp:`) — restic works with all of them.
+
+**Keep a copy of `RESTIC_PASSWORD` (same file) somewhere other than the data
+disk.** It encrypts the whole repository: no password, no restore. The helper
+reads the repository and password from the **environment first**, then the file,
+which is what makes recovery possible at all — the backed-up `backup.env` lives
+inside the repository, so it cannot be the only source of the key that opens it.
+
+### Restoring onto a fresh host
+
+If the disk that held `$DATA_DIR` is gone (or you want a second host), restore
+from the repository **before** `./deploy.sh`:
+
+```sh
+export RESTIC_REPOSITORY=s3:…      # or /repo for the local default
+export RESTIC_PASSWORD=…           # from your password manager
+
+git clone https://github.com/regularnmae/stack ~/build/stack
+cd ~/build/stack
+./bootstrap.sh
+./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, config/, npm/
+./deploy.sh                        # adopts the restored secrets and wallet
+```
+
+This works because `install.sh` never overwrites an existing file and resolves
+secrets in the order `secrets.env → the installed unit → the daemon's config →
+generate`: a restored `config/` and wallet are adopted as-is instead of being
+regenerated. The Monero wallet directory comes back owned by the image uid
+(`scripts/backup.sh` fixes that up), so `monero-wallet-rpc` opens it directly.
+
+> **Consistency:** the job snapshots `cln/` and the wallet while their daemons
+> are running. CLN's `hsm_secret` and `emergency.recover` are static and restore
+> cleanly even if `lightningd.sqlite3` is torn, so the worst case is a
+> force-close and on-chain recovery, not lost funds; the wallet is written
+> periodically, so a live copy is safe in practice.
+
 ## How secrets are kept out of git
 
 No secret is committed. Everything real is generated or adopted on the host,
@@ -189,19 +263,22 @@ stack/
   bootstrap.sh            # bare host -> podman, linger, sysctl, firewall ports, dirs
   deploy.sh               # the one-click orchestrator (asks for the data dir)
   verify.sh               # health + endpoint checks
-  stack.conf              # repo / port / order manifest, data-dir defaults
+  stack.conf              # repo / port / order manifest, data-dir + backup defaults
   renovate.json           # Renovate policy (tor image base/image bumps)
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
   scripts/lib.sh          # data-dir resolution + SELinux labelling
   scripts/wallets.sh      # Monero + Bitcoin create/restore
+  scripts/backup.sh       # restic backup / restore / inspect the repository
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
     *.container.in        # lightningd and monero-wallet-rpc, rendered (secrets)
+    *.timer               # backup.timer (plain user unit; Quadlet has no .timer)
     npm-network.network
     searxng/{settings.yml,limiter.toml}
     examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by hand
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
+    examples/backup/*.example     # backup.env shape
   tor/Containerfile
 ```
 

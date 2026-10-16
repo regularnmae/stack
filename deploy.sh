@@ -332,6 +332,11 @@ if [ -n "$ONLY" ]; then
         fetch_repos "$ONLY"
         install_units
         deploy_app "$ONLY"
+    elif [ "$ONLY" = backup ]; then
+        # A one-shot job: install.sh has just (re)enabled the timer; this also
+        # runs it once now instead of waiting for the schedule.
+        install_units
+        start_unit backup
     else
         install_units
         restart_unit "$ONLY"
@@ -383,6 +388,7 @@ Stack deployed.
                     monero-node-mcp :8102, monero-wallet-mcp :8103,
                     lightning-mcp :8104
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
+  Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR
 
 Chain sync continues in the background (bitcoind is pruned; monerod is
 pruned). Re-run ./deploy.sh once the chains are current to finish anything

@@ -1,0 +1,47 @@
+# Quadlet unit for the nightly backup: an encrypted, deduplicating restic
+# repository holding everything in $DATA_DIR that cannot be re-downloaded --
+# the CLN identity and channel state, the Monero wallet, every token/secret,
+# and the nginx-proxy-manager config and TLS material.
+#
+# The chain data (bitcoin/, monero/) and searxng/ are deliberately NOT backed
+# up: they are huge and regenerable. Only the four directories below are
+# mounted, so restic never walks a 600 GB chain.
+#
+# This file is secret-free on purpose: the repository location and the restic
+# password arrive through backup.env (EnvironmentFile), not as @PLACEHOLDERS@,
+# so it renders like the other non-secret units. deploy/install.sh seeds it.
+#
+# It is a one-shot job, not a service: it has no [Install] and no
+# RemainAfterExit, because backup.timer -- a plain systemd user unit, since
+# Quadlet has no .timer type -- activates the backup.service this generates.
+# (RemainAfterExit=yes would leave the job "started" and stop the timer from
+# ever firing again.)
+[Unit]
+Description=Encrypted backup of the stack's irreplaceable state (restic)
+
+[Container]
+ContainerName=stack-backup
+Image=docker.io/restic/restic:latest
+
+# The repo location + password. deploy/install.sh writes this to
+# $DATA_DIR/config/backup/backup.env (mode 600); it is never committed.
+EnvironmentFile=@CONFIG_DIR@/backup/backup.env
+
+# Read-only state, mounted at paths that mirror $DATA_DIR so a restore can
+# target the data dir directly. `:z` (shared) because lightningd and
+# nginx-proxy-manager mount these same directories.
+Volume=@DATA_DIR@/cln:/data/cln:ro,z
+Volume=@DATA_DIR@/monero-wallet-rpc:/data/monero-wallet-rpc:ro,z
+Volume=@DATA_DIR@/config:/data/config:ro,z
+Volume=@DATA_DIR@/npm:/data/npm:ro,z
+
+# The repository (writable) and restic's cache. The image's ENTRYPOINT is
+# /usr/bin/restic, so it is replaced with a shell to allow init-if-missing and
+# forget --prune in one run.
+Volume=@BACKUP_DIR@:/repo:z
+Volume=@DATA_DIR@/backup-cache:/cache:z
+Entrypoint=/bin/sh
+Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup /data/cln /data/monero-wallet-rpc /data/config /data/npm --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
+
+[Service]
+Type=oneshot

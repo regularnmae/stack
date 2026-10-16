@@ -27,9 +27,11 @@ PublishPort=80:80
 PublishPort=443:443
 PublishPort=81:81
 
-# Volume mounts with :Z flag for SELinux labelling.
-Volume=@DATA_DIR@/npm/data:/data:Z
-Volume=@DATA_DIR@/npm/letsencrypt:/etc/letsencrypt:Z
+# Volume mounts with :z (shared) for SELinux labelling. Shared, not private
+# (:Z): the backup container mounts these same directories read-only, and a
+# path one container labels private cannot be shared with another.
+Volume=@DATA_DIR@/npm/data:/data:z
+Volume=@DATA_DIR@/npm/letsencrypt:/etc/letsencrypt:z
 
 # Environment settings.
 Environment=DISABLE_IPV6=true

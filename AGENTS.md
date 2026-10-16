@@ -35,10 +35,12 @@ the wallet is unreachable from the MCP server.
 ./bootstrap.sh                      # bare host -> podman, linger, sysctl, firewall ports, dirs
 ./deploy.sh                         # fetch repos, build, start, verify
 ./deploy.sh --only <name>           # one service; --dry-run to plan
+./deploy.sh --only backup           # run the backup job now
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health + MCP handshakes
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh  # the CI lint
+./scripts/backup.sh                 # restic backup / restore / inspect
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh  # the CI lint
 ```
 
 ## Facts that are easy to get wrong
@@ -63,6 +65,23 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `install.sh` does `podman unshare chown -R 1000:1000` for them. `monerod`'s
   entrypoint does re-own its own directory. `$DATA_DIR/cln` and `$DATA_DIR/tor` are
   written by container root, which is the host user under rootless podman.
+- **Backup is a one-shot Quadlet job plus a plain user timer.** `backup.container`
+  is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
+  stop the timer from ever firing again); `backup.timer` is not Quadlet at all --
+  Quadlet has no `.timer` type -- so `install.sh` renders it into
+  `~/.config/systemd/user/` and `systemctl --user enable --now`s it. It activates
+  the `backup.service` the generator makes from `backup.container`.
+- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/` only.** The chains and
+  `searxng/` are re-downloadable and stay out, so restic never walks them. The repo
+  lives in `$STACK_BACKUP_DIR` (stack.conf), outside `$DATA_DIR`, and the unit is
+  secret-free: the repo path and `RESTIC_PASSWORD` reach it through `backup.env`
+  (`EnvironmentFile`). `scripts/backup.sh` reads them from the **environment first,
+  then the file** -- the only order that can recover a fresh host, since the file
+  lives inside the repository.
+- **Shared bind mounts use `:z`, not `:Z`.** The backup container mounts `cln/` and
+  `npm/` read-only alongside `lightningd` and `nginx-proxy-manager`; two containers
+  cannot share a path one labels private (whichever starts last relabels it and
+  locks the other out). Those two units were flipped from `:Z` to `:z` for this.
 - **`sudo` lives only in `bootstrap.sh`.** `deploy.sh`, `deploy/install.sh`,
   `verify.sh` and the `scripts/` helpers never call it; privileged host setup
   (packages, linger, the unprivileged-port sysctl, firewalld ports) is bootstrap's

@@ -16,10 +16,10 @@ jobs:
         run: |
           shellcheck -x -P SCRIPTDIR -S info \
             bootstrap.sh deploy.sh verify.sh \
-            deploy/install.sh scripts/lib.sh scripts/wallets.sh
+            deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh
       - name: syntax check
         run: |
           for f in bootstrap.sh deploy.sh verify.sh \
-                   deploy/install.sh scripts/lib.sh scripts/wallets.sh; do
+                   deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh; do
             bash -n "$f"
           done
