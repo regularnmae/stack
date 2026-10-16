@@ -428,7 +428,6 @@ if [ -n "$ONLY" ]; then
     else
         install_units
         restart_unit "$ONLY"
-        local only_port
         only_port=$(app_port "$ONLY")
         if [ -n "$only_port" ]; then
             wait_http "$ONLY health" "$APP_HEALTH_WAIT" "http://127.0.0.1:$only_port/health" || true
