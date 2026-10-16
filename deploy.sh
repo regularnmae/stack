@@ -83,19 +83,13 @@ preflight() {
         warn "net.ipv4.ip_unprivileged_port_start=$portstart: nginx-proxy-manager cannot bind 80/443/81. Run ./bootstrap.sh."
     fi
 
-    # Prompt for sudo now rather than later, where the timestamp may already
-    # have expired. Creating a data dir on a separate disk and labelling it for
-    # SELinux need sudo (the firewalld ports are bootstrap.sh's job). A dry run
-    # changes nothing, so it must not prompt or touch the filesystem.
-    if [ "$DRY_RUN" != 1 ] && ! sudo -n true 2>/dev/null; then
-        log "some steps use sudo; you may be prompted once"
-        sudo -v || warn "sudo unavailable; a data dir on a separate disk may not be created automatically"
-    fi
-
     # Choose where the stack keeps its data (asked once, then remembered) and
     # make sure it is usable: owned by us (containers write as this uid) and
-    # labelled for containers. resolve_data_dir only persists the answer, which
-    # it skips on a dry run; creating/labelling the dirs is a real change.
+    # labelled for containers. deploy.sh never uses sudo -- bootstrap.sh owns
+    # the privileged host setup, and a data dir we cannot prepare is a clear
+    # error from lib.sh rather than an implicit prompt here. resolve_data_dir
+    # only persists the answer, which it skips on a dry run; creating/labelling
+    # the dirs is a real change.
     resolve_data_dir
     log "data directory: $DATA_DIR"
     if [ "$DRY_RUN" = 1 ]; then

@@ -63,6 +63,14 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `install.sh` does `podman unshare chown -R 1000:1000` for them. `monerod`'s
   entrypoint does re-own its own directory. `$DATA_DIR/cln` and `$DATA_DIR/tor` are
   written by container root, which is the host user under rootless podman.
+- **`sudo` lives only in `bootstrap.sh`.** `deploy.sh`, `deploy/install.sh`,
+  `verify.sh` and the `scripts/` helpers never call it; privileged host setup
+  (packages, linger, the unprivileged-port sysctl, firewalld ports) is bootstrap's
+  job. A data dir the deploy cannot prepare is an error carrying the one-time
+  commands, not an implicit prompt. SELinux labelling is best-effort unprivileged
+  (`chcon` on the top dir only -- the image-uid subdirs are not ours to relabel,
+  and podman's `:z` labels the mounted subdirs); the `semanage`/`restorecon` form is
+  printed only when the path is not ours to relabel.
 - **The network subnet is pinned** (`10.89.0.0/24` in
   `deploy/npm-network.network`) because `tor.container` pins `--ip=10.89.0.240`
   and both `bitcoin.conf` (`rpcallowip`) and `torrc` (`SocksPolicy`) allow that

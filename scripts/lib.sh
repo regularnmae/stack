@@ -63,10 +63,13 @@ persist_data_dir() {
     printf 'STACK_DATA_DIR=%s\n' "$DATA_DIR" > "$STACK_DATA_ENV"
 }
 
-# If the data dir is not somewhere containers may read, give it a container
-# label. A freshly formatted/extra disk is often unlabeled_t, and then podman's
-# `:z` relabel fails ("lsetxattr ... operation not permitted") and every
-# container that mounts it is denied.
+# Give the data dir a container label when SELinux is enforcing and it does not
+# have one. The units mount their subdirectories with `:z`/`:Z`, which podman
+# relabels rootlessly on every start, so only a path podman cannot relabel (one
+# the login user does not own -- a freshly formatted disk is often unlabeled_t)
+# needs help. We attempt an unprivileged label and, if even that fails, print
+# the exact root commands instead of running sudo: nothing here (or in
+# deploy.sh, install.sh, verify.sh) uses sudo.
 ensure_data_dir_selinux() {
     [ -d "$DATA_DIR" ] || return 0
     command -v getenforce >/dev/null 2>&1 || return 0
@@ -78,39 +81,37 @@ ensure_data_dir_selinux() {
         *container_file_t*|*svirt_sandbox_file_t*) return 0 ;;
     esac
 
+    # Not recursive on purpose: the image-uid subdirs (bitcoin, monero-wallet-rpc)
+    # are not ours to relabel, and podman's `:z` covers the mounted subdirs.
     log "SELinux: $DATA_DIR is '$ctx'; labelling it for containers"
-    local regex
-    regex="$(printf '%s' "$DATA_DIR" | sed -e 's/[][\.^$*+?(){}|]/\\&/g')(/.*)?"
-    if command -v semanage >/dev/null 2>&1; then
-        sudo semanage fcontext -a -t container_file_t "$regex" 2>/dev/null \
-            || sudo semanage fcontext -m -t container_file_t "$regex" 2>/dev/null || true
-        sudo restorecon -RF "$DATA_DIR" 2>/dev/null || true
-    else
-        sudo chcon -Rt container_file_t "$DATA_DIR" 2>/dev/null || true
-    fi
+    chcon -t container_file_t "$DATA_DIR" 2>/dev/null || true
 
     ctx=$(stat -c '%C' "$DATA_DIR" 2>/dev/null || true)
     case "$ctx" in
         *container_file_t*|*svirt_sandbox_file_t*) log "SELinux: $DATA_DIR labelled for containers" ;;
-        *) warn "could not label $DATA_DIR for containers (context is still $ctx); containers may be denied" ;;
+        *)
+            local regex
+            regex="$(printf '%s' "$DATA_DIR" | sed -e 's/[][\.^$*+?(){}|]/\\&/g')(/.*)?"
+            warn "$DATA_DIR is '$ctx', not labelled for containers and not ours to relabel; containers may be denied"
+            warn "fix it once, as root, then re-run:"
+            printf '    sudo semanage fcontext -a -t container_file_t "%s"\n    sudo restorecon -RF "%s"\n' "$regex" "$DATA_DIR" >&2
+            ;;
     esac
 }
 
-# Create the data dir (and its config / npm subdirs) if missing. A data dir on
-# a separate disk (e.g. /data/stack) needs sudo to create, and it must be owned
-# by this user: rootless containers write as this uid, so a root-owned data dir
-# yields "Permission denied" no matter how it is labelled. Only the top-level
-# data dir is chowned -- subdirs like bitcoin are deliberately the image uid.
+# Create the data dir (and its config / npm subdirs) if missing. A data dir on a
+# separate disk must already be created and owned by you (the README shows the
+# one-time commands); a path we cannot prepare is a clear error rather than an
+# implicit sudo. Only the top-level data dir is owned by us -- subdirs like
+# bitcoin are deliberately the image uid.
 ensure_data_dirs() {
     if [ ! -d "$DATA_DIR" ]; then
-        # Plain mkdir covers the common case ($HOME/data); a path like
-        # /data/stack has a root-owned parent and needs sudo.
-        mkdir -p "$DATA_DIR" 2>/dev/null \
-            || { log "creating $DATA_DIR (needs sudo)"; sudo mkdir -p "$DATA_DIR" || die "could not create $DATA_DIR"; }
+        mkdir -p "$DATA_DIR" 2>/dev/null || die "cannot create $DATA_DIR: its parent is not writable by $(id -un). Create it first:
+    sudo mkdir -p \"$DATA_DIR\" && sudo chown \"$(id -u):$(id -g)\" \"$DATA_DIR\""
     fi
-    if [ "$(stat -c '%u' "$DATA_DIR" 2>/dev/null)" != "$(id -u)" ]; then
-        sudo chown "$(id -u):$(id -g)" "$DATA_DIR" 2>/dev/null \
-            || warn "could not take ownership of $DATA_DIR; containers may not be able to write"
+    if [ ! -w "$DATA_DIR" ]; then
+        die "$DATA_DIR is not writable by $(id -un). Take ownership first:
+    sudo chown \"$(id -u):$(id -g)\" \"$DATA_DIR\""
     fi
     mkdir -p "$CONFIG_DIR" "$NPM_DIR/data" "$NPM_DIR/letsencrypt" \
         || die "could not create the data subdirectories under $DATA_DIR"

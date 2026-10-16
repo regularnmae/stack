@@ -63,8 +63,10 @@ cd ~/build/stack
 ./deploy.sh           # or: ./deploy.sh --bootstrap to do both in one step
 ```
 
-`sudo` needs a terminal to prompt for its password, so run these from an
-interactive shell (over SSH, `ssh -t`).
+`bootstrap.sh` uses `sudo` for the privileged host setup (packages, linger, the
+sysctl, firewalld); `sudo` needs a terminal to prompt, so run it from an
+interactive shell (over SSH, `ssh -t`). `deploy.sh` and `verify.sh` never use
+`sudo`.
 
 On the first run, `deploy.sh` asks **where the stack keeps its data** (default
 `$HOME/data`) and remembers the answer; point it at a separate disk to survive
@@ -109,11 +111,24 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `config/` — every bearer token and secret
 
 Point it at a separate disk and an OS reinstall only has to keep that one
-directory. `deploy.sh` creates the path if needed, takes ownership of it
-(containers run rootless and write as you), and labels it for containers when
-SELinux has no rule for it — a freshly formatted disk is often `unlabeled_t`,
-and then podman's `:z` relabel fails with `EPERM` and every container that
-mounts it is denied.
+directory. `deploy.sh` never uses `sudo`: it creates the path when its parent is
+writable, and for a path it cannot prepare (a separate disk with a root-owned
+parent) it prints the one-time commands instead:
+
+```sh
+sudo mkdir -p /data/stack && sudo chown "$(id -u):$(id -g)" /data/stack
+```
+
+When SELinux is enforcing, the dir must be labelled for containers. The units
+mount their subdirectories with `:z`/`:Z`, which podman relabels rootlessly on
+every start, so `deploy.sh` only needs a top-level label and attempts it
+unprivileged. If the path is not yours to relabel (a freshly formatted disk is
+often `unlabeled_t`), it prints the root commands:
+
+```sh
+sudo semanage fcontext -a -t container_file_t "/data/stack(/.*)?"
+sudo restorecon -RF /data/stack
+```
 
 ## Reinstalling the host without re-syncing
 
@@ -132,10 +147,11 @@ the system disk keeps the chains, wallets, CLN identity and every token:
    ./verify.sh --deep
    ```
 
-`deploy.sh` takes ownership of the path, labels it for containers, and finds
-the existing `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ npm/ config/`
-there — so nothing re-syncs, the wallet still opens (its password is in
-`config/stack/secrets.env`), and the client tokens are unchanged.
+`deploy.sh` finds the existing
+`bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ npm/ config/` there (labelling
+the path for containers if it has to) — so nothing re-syncs, the wallet still
+opens (its password is in `config/stack/secrets.env`), and the client tokens are
+unchanged.
 
 ## How secrets are kept out of git
 
