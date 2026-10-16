@@ -48,10 +48,11 @@ curl -fsSL https://raw.githubusercontent.com/regularnmae/stack/main/bootstrap.sh
 
 `bootstrap.sh` installs podman/firewalld/git, enables user linger, sets
 `net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
-80/443/81 rootless), creates the build dir and the quadlet directory, and clones
-this repo to `~/build/stack`. `deploy.sh` then resolves and creates the data
-directories, clones the app repos, builds every image, starts everything in
-order, opens firewalld and verifies.
+80/443/81 rootless), opens the stack's ports (`FIREWALL_PORTS`) in firewalld,
+creates the build dir and the quadlet directory, and clones this repo to
+`~/build/stack`. `deploy.sh` then resolves and creates the data directories,
+clones the app repos, builds every image, starts everything in order and
+verifies.
 
 With git already present, the equivalent is:
 
@@ -169,7 +170,7 @@ through the container: `podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf`
 
 ```
 stack/
-  bootstrap.sh            # bare host -> podman, linger, sysctl, firewalld, dirs
+  bootstrap.sh            # bare host -> podman, linger, sysctl, firewall ports, dirs
   deploy.sh               # the one-click orchestrator (asks for the data dir)
   verify.sh               # health + endpoint checks
   stack.conf              # repo / port / order manifest, data-dir defaults

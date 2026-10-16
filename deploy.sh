@@ -2,7 +2,7 @@
 # One-click deploy for the whole stack.
 #
 #   ./deploy.sh                    # fetch repos, install, build every image,
-#                                  # start everything, open firewalld, verify
+#                                  # start everything, verify
 #   ./deploy.sh --bootstrap        # also provision a bare Rocky 10 host first
 #   ./deploy.sh --only <name>      # redeploy a single service (app or unit)
 #   ./deploy.sh --skip-apps        # infrastructure only (daemons, searxng, NPM)
@@ -83,12 +83,13 @@ preflight() {
         warn "net.ipv4.ip_unprivileged_port_start=$portstart: nginx-proxy-manager cannot bind 80/443/81. Run ./bootstrap.sh."
     fi
 
-    # Prompt for sudo now rather than twenty minutes from now at the firewalld
-    # step, where the timestamp would already have expired. A dry run changes
-    # nothing, so it must not prompt or touch the filesystem.
+    # Prompt for sudo now rather than later, where the timestamp may already
+    # have expired. Creating a data dir on a separate disk and labelling it for
+    # SELinux need sudo (the firewalld ports are bootstrap.sh's job). A dry run
+    # changes nothing, so it must not prompt or touch the filesystem.
     if [ "$DRY_RUN" != 1 ] && ! sudo -n true 2>/dev/null; then
         log "some steps use sudo; you may be prompted once"
-        sudo -v || warn "sudo unavailable; firewalld ports will not be opened automatically"
+        sudo -v || warn "sudo unavailable; a data dir on a separate disk may not be created automatically"
     fi
 
     # Choose where the stack keeps its data (asked once, then remembered) and
@@ -311,31 +312,17 @@ deploy_apps() {
 # ---------------------------------------------------------------------------
 # 7. firewalld
 # ---------------------------------------------------------------------------
-open_firewall() {
+# bootstrap.sh opens FIREWALL_PORTS: it owns every privileged host setting, so
+# deploy.sh stays rootless here. Querying firewalld needs privilege, so this can
+# only report on it, never check it -- a notice, not a gate.
+note_firewall() {
     if ! command -v firewall-cmd >/dev/null 2>&1; then
-        warn "firewall-cmd not found; open ${FIREWALL_PORTS[*]}/tcp yourself"
-        return 0
+        warn "firewall-cmd not found; run ./bootstrap.sh to open ${FIREWALL_PORTS[*]}/tcp"
+    elif ! systemctl is-active --quiet firewalld; then
+        warn "firewalld is not running; run ./bootstrap.sh to enable it and open ${FIREWALL_PORTS[*]}/tcp"
+    else
+        log "firewalld ports (${FIREWALL_PORTS[*]}/tcp) are opened by ./bootstrap.sh; re-run it if you changed FIREWALL_PORTS"
     fi
-    # `firewall-cmd --state` needs privilege (it talks to firewalld over D-Bus)
-    # and fails as a normal user even when the daemon is running, so it can't be
-    # used as the check here. systemctl answers the same question unprivileged.
-    if ! systemctl is-active --quiet firewalld; then
-        warn "firewalld is not running; open ${FIREWALL_PORTS[*]}/tcp yourself"
-        return 0
-    fi
-    # A deploy easily outlasts sudo's timestamp (5 minutes by default), so
-    # refresh it here instead of failing at the last step. If sudo cannot
-    # prompt (no terminal), warn rather than aborting an otherwise good deploy.
-    # A dry run never opens ports, so it must not prompt for sudo.
-    if [ "$DRY_RUN" != 1 ] && ! sudo -n true 2>/dev/null; then
-        sudo -v || { warn "sudo unavailable; open ${FIREWALL_PORTS[*]}/tcp yourself"; return 0; }
-    fi
-    local p args=()
-    for p in "${FIREWALL_PORTS[@]}"; do args+=(--add-port="$p/tcp"); done
-    log "opening ${FIREWALL_PORTS[*]}/tcp in firewalld"
-    run sudo firewall-cmd --permanent "${args[@]}" >/dev/null \
-        || warn "could not open ports; run: sudo firewall-cmd --permanent ${args[*]} && sudo firewall-cmd --reload"
-    run sudo firewall-cmd --reload >/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -366,7 +353,7 @@ start_infra
 setup_wallets
 start_daemons
 [ "$SKIP_APPS" = 1 ] || deploy_apps
-open_firewall
+note_firewall
 
 if [ "$DRY_RUN" = 1 ]; then
     log "dry run complete; nothing was changed"

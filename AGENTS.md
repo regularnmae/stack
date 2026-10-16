@@ -32,8 +32,8 @@ the wallet is unreachable from the MCP server.
 ## Commands
 
 ```sh
-./bootstrap.sh                      # bare host -> podman, linger, sysctl, firewalld, dirs
-./deploy.sh                         # fetch repos, build, start, firewall, verify
+./bootstrap.sh                      # bare host -> podman, linger, sysctl, firewall ports, dirs
+./deploy.sh                         # fetch repos, build, start, verify
 ./deploy.sh --only <name>           # one service; --dry-run to plan
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health + MCP handshakes

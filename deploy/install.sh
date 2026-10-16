@@ -539,7 +539,7 @@ Done. Everything the stack owns lives under:
     bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/ npm/
     config/   <- all bearer tokens and secrets (mode 600)
 
-Next:  ./deploy.sh         # build images, start everything, open firewalld, verify
+Next:  ./deploy.sh         # build images, start everything, verify
 Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
   $CONFIG_DIR/monero-wallet-mcp/spend.env  and  $CONFIG_DIR/lightning-mcp/spend.env
 EOF

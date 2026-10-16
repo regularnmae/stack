@@ -5,7 +5,7 @@
 #   * systemd user linger, so the containers survive logout
 #   * net.ipv4.ip_unprivileged_port_start=80, so nginx-proxy-manager can bind
 #     80/443/81 without root
-#   * firewalld enabled (deploy.sh opens the specific ports)
+#   * firewalld enabled and the stack's ports opened (FIREWALL_PORTS)
 #   * the build dir and the quadlet directory (deploy.sh creates the data dirs)
 #
 # Run as your normal login user -- it uses sudo for the privileged parts. The
@@ -13,6 +13,10 @@
 set -euo pipefail
 
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || printf '%s' "$PWD")"
+# FIREWALL_PORTS comes from stack.conf. Default it empty so `set -u` is happy
+# when this script runs standalone (curl | bash) with no manifest yet; step 8
+# reads it from the clone when there was none at the top.
+FIREWALL_PORTS=()
 # The manifest is optional: this script also runs standalone (curl | bash) on a
 # host that has no clone yet, where REPO_DIR is just the current directory.
 if [ -r "$REPO_DIR/stack.conf" ]; then
@@ -130,6 +134,39 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# 8. firewalld ports
+# ---------------------------------------------------------------------------
+# The list lives in stack.conf. From a checkout it was sourced at the top; under
+# `curl | bash` there was no manifest until the clone above, so read it from
+# there now. Opening the ports only needs firewalld, not the running stack.
+if [ "${#FIREWALL_PORTS[@]}" -eq 0 ]; then
+    MANIFEST="$REPO_DIR/stack.conf"
+    [ -r "$MANIFEST" ] || MANIFEST="$BUILD_DIR/stack/stack.conf"
+    if [ -r "$MANIFEST" ]; then
+        # shellcheck source=stack.conf
+        . "$MANIFEST"
+    fi
+fi
+
+if [ "${#FIREWALL_PORTS[@]}" -eq 0 ]; then
+    warn "no stack.conf found; open the stack's ports yourself"
+elif ! command -v firewall-cmd >/dev/null 2>&1; then
+    warn "firewall-cmd not found; open ${FIREWALL_PORTS[*]}/tcp yourself"
+elif ! systemctl is-active --quiet firewalld; then
+    warn "firewalld is not running; open ${FIREWALL_PORTS[*]}/tcp yourself"
+else
+    # firewall-cmd needs privilege (it talks to firewalld over D-Bus), and this
+    # is the last sudo use -- sudo was primed at the top. --add-port is
+    # idempotent, so a re-run is a no-op.
+    args=()
+    for p in "${FIREWALL_PORTS[@]}"; do args+=(--add-port="$p/tcp"); done
+    log "opening ${FIREWALL_PORTS[*]}/tcp in firewalld"
+    sudo firewall-cmd --permanent "${args[@]}" >/dev/null \
+        || warn "could not open ports; run: sudo firewall-cmd --permanent ${args[*]} && sudo firewall-cmd --reload"
+    sudo firewall-cmd --reload >/dev/null || true
+fi
+
 cat <<EOF
 
 Bootstrap complete.
@@ -137,6 +174,7 @@ Bootstrap complete.
   podman      $(podman --version 2>/dev/null || echo missing)
   linger      $(loginctl show-user "$USER_NAME" 2>/dev/null | sed -n 's/^Linger=//p')
   port start  $(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null)
+  firewall    $(systemctl is-active firewalld 2>/dev/null || echo unknown) (${#FIREWALL_PORTS[@]} ports)
   build       $BUILD_DIR
 
 Next:
