@@ -181,6 +181,5 @@ Next:
   $NEXT
 
 That asks where the stack keeps its data (default \$HOME/data). Point it at a
-separate disk to survive an OS reinstall; it will take ownership of the path
-and label it for containers.
+separate disk to survive an OS reinstall.
 EOF
