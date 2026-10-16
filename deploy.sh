@@ -32,9 +32,15 @@ SKIP_APPS=0
 SKIP_DAEMONS=0
 
 BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
+# lightningd's bcli plugin starts with RPC while bitcoind is still loading its
+# wallet, and dies on the first timeout ("The Bitcoin backend died"). Require
+# wallet-level RPC before it depends on bitcoind; the chain RPC alone answers
+# long before that (getblockchaininfo is served mid-init).
+BITCOIND_WALLET_WAIT="${BITCOIND_WALLET_WAIT:-120}"
 MONEROD_WAIT="${MONEROD_WAIT:-300}"
 LIGHTNINGD_WAIT="${LIGHTNINGD_WAIT:-900}"
 APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"
+BITCOIND_READY=0
 
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
@@ -182,6 +188,43 @@ wait_cmd() { # description timeout cmd...
     done
 }
 
+wait_http() { # description timeout url
+    local desc="$1" t="$2" url="$3"
+    local deadline
+    [ "$DRY_RUN" = 1 ] && return 0
+    deadline=$(( $(date +%s) + t ))
+    while :; do
+        if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then log "$desc ready"; return 0; fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            warn "$desc not ready after ${t}s"
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+# The host-side loopback port of each MCP server (the interface contract in the
+# README: NPM terminates TLS and forwards to these; the servers themselves are
+# still 0.0.0.0 inside the container).
+app_port() {
+    case "$1" in
+        searxng-mcp)       echo 8000 ;;
+        bitcoin-node-mcp)  echo 8101 ;;
+        monero-node-mcp)   echo 8102 ;;
+        monero-wallet-mcp) echo 8103 ;;
+        lightning-mcp)     echo 8104 ;;
+    esac
+}
+
+# Print the last lines of a container's log with an indent. Used when a wait
+# times out, so the deploy output shows *why* instead of just spinning.
+dump_tail() { # container [lines]
+    local c="$1" n="${2:-30}"
+    [ "$DRY_RUN" = 1 ] && return 0
+    warn "last $n log lines from $c:"
+    podman logs --tail "$n" "$c" 2>&1 | sed 's/^/  | /'
+}
+
 # True while bitcoind is in initial block download. CLN cannot finish starting
 # until it is caught up, so waiting on lightningd then is wasted time.
 bitcoind_syncing() {
@@ -230,8 +273,11 @@ start_infra() {
     fi
 
     # RPC-level readiness, not sync: getblockchaininfo answers while syncing.
-    wait_cmd "bitcoind RPC" "$BITCOIND_WAIT" podman exec bitcoind bitcoin-cli getblockchaininfo \
-        || warn "continuing without bitcoind RPC (it may still be starting)"
+    if wait_cmd "bitcoind RPC" "$BITCOIND_WAIT" podman exec bitcoind bitcoin-cli getblockchaininfo; then
+        BITCOIND_READY=1
+    else
+        warn "continuing without bitcoind RPC (it may still be starting)"
+    fi
     wait_healthy monerod "$MONEROD_WAIT" || warn "continuing; monerod may still be syncing"
 }
 
@@ -256,16 +302,41 @@ setup_wallets() {
 start_daemons() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping the chain daemons (--skip-daemons)"; return 0; fi
 
-    start_unit lightningd
+    # The lightningd image's entrypoint stays alive as PID 1 even after the
+    # daemon dies (e.g. its bcli plugin backed into a bitcoind that was still
+    # loading its wallet), so the quadlet unit reads "active" and systemd's
+    # Restart=always never sees anything to restart. An active unit whose
+    # container healthcheck reports unhealthy is exactly that zombie; restart
+    # it instead of leaving it in place for the wait below.
+    if [ "$DRY_RUN" = 0 ] && systemctl --user is-active --quiet lightningd.service \
+        && [ "$(podman inspect -f '{{.State.Health.Status}}' lightningd 2>/dev/null)" = unhealthy ]; then
+        warn "lightningd container is up but the daemon is dead inside; restarting it"
+        restart_unit lightningd
+    else
+        start_unit lightningd
+    fi
+
+    if [ "$BITCOIND_READY" != 1 ]; then
+        warn "bitcoind RPC is not up; not waiting on lightningd"
+        warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
     # CLN does not finish starting until bitcoind is caught up, so during
     # initial block download the wait below would burn the whole timeout for
     # nothing. Skip it and let a later re-run create the runes.
-    if bitcoind_syncing; then
+    elif bitcoind_syncing; then
         warn "bitcoind is still in initial block download; not waiting on lightningd"
         warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
+    # bitcoind was observed to serve chain-level RPC while still loading its
+    # wallet; lightningd's bcli timed out on exactly that window and killed
+    # lightningd. Wait for wallet-level RPC before anything depends on it.
+    elif ! wait_cmd "bitcoind wallet RPC" "$BITCOIND_WALLET_WAIT" \
+            podman exec bitcoind bitcoin-cli getwalletinfo; then
+        warn "bitcoind wallet RPC not up; not waiting on lightningd"
+        warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
+        dump_tail bitcoind 20
     else
         wait_cmd "lightningd RPC" "$LIGHTNINGD_WAIT" podman exec lightningd lightning-cli getinfo \
-            || warn "lightningd RPC not up; runes are created on a later ./deploy.sh run"
+            || { warn "lightningd RPC not up; runes are created on a later ./deploy.sh run"
+                 dump_tail lightningd 40; }
     fi
 
     # monero-wallet-rpc opens the wallet at startup, so it only starts once the
@@ -292,7 +363,19 @@ deploy_app() { # repo name
     log "building $image"
     run podman build -t "$image" "$dir"
     restart_unit "$r"
-    wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
+    # The app images define no podman healthcheck (the app repos own their
+    # Containerfiles), so podman never reports "(healthy)" and wait_healthy
+    # would burn the whole timeout and then verify. Poll the stack's /health
+    # contract on the host loopback port instead -- it answers the moment the
+    # server is actually accepting connections.
+    local port
+    port=$(app_port "$r")
+    if [ -n "$port" ]; then
+        wait_http "$r health" "$APP_HEALTH_WAIT" "http://127.0.0.1:$port/health" \
+            || { warn "$r did not report healthy"; return 1; }
+    else
+        wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
+    fi
 }
 
 deploy_apps() {
@@ -345,7 +428,13 @@ if [ -n "$ONLY" ]; then
     else
         install_units
         restart_unit "$ONLY"
-        wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
+        local only_port
+        only_port=$(app_port "$ONLY")
+        if [ -n "$only_port" ]; then
+            wait_http "$ONLY health" "$APP_HEALTH_WAIT" "http://127.0.0.1:$only_port/health" || true
+        else
+            wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
+        fi
     fi
     log "done (--only $ONLY)"
     exit 0

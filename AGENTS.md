@@ -68,6 +68,15 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   reported healthy while every tool call failed with 1503).
 - **`monero-wallet-rpc` cannot start before the wallet exists.** `deploy.sh`
   runs the wallet step between `monerod` and the wallet RPC for that reason.
+- **lightningd needs bitcoind's *wallet* RPC, and it dies with the container
+  left "Up".** Lightningd's bcli plugin can time out on its first RPC while
+  bitcoind is still loading its wallet ("The Bitcoin backend died"); the
+  lightningd image's entrypoint then keeps PID 1 alive, so the quadlet unit
+  reads "active", `Restart=always` never fires, and the RPC is gone until the
+  unit is restarted by hand. deploy.sh therefore restarts a still-active
+  lightningd whose container health reports `unhealthy`, waits for
+  wallet-level RPC (`getwalletinfo`) before waiting on lightningd, and dumps
+  the container log when any of those waits time out.
 - **Data-dir ownership.** `bitcoind` and `monero-wallet-rpc` run as the image's
   uid (host 525287 = in-container 1000) and do **not** re-own their bind mounts;
   `install.sh` does `podman unshare chown -R 1000:1000` for them. `monerod`'s
@@ -125,6 +134,11 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `caronc/apprise` container) and the `MONITOR_PING_URL` dead-man's-switch
   heartbeat (plain `curl` to healthchecks.io; the only thing that notices a dead
   *host*). Its record lives in `$DATA_DIR/audit/`, which is in the backup set.
+- **App health is polled by port, not podman status.** The five MCP images
+  define no podman healthcheck (their app repos own the Containerfiles), so
+  podman never reports `(healthy)` for them and `wait_healthy` would burn its
+  whole timeout. `deploy.sh` polls each server's `/health` contract on its host
+  loopback port (`app_port` in `deploy.sh`) before verification runs.
 - MCP test suites live in their own repos; `./verify.sh` is the runtime check
   (health, 401-without-token, authenticated handshake per endpoint) and also
   reports whether `monitor.timer` is installed and active.
