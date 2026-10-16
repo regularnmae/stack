@@ -12,7 +12,7 @@ stack runs and one script that fixes a deployment problem.
 
 ## What runs
 
-| Unit | Image | Published on the LAN | Data |
+| Unit | Image | Published on the host | Data |
 | --- | --- | --- | --- |
 | `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — (RPC stays on `npm-network`) | `$DATA_DIR/bitcoin` |
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
@@ -20,20 +20,33 @@ stack runs and one script that fixes a deployment problem.
 | `lightningd` | `docker.io/elementsproject/lightningd:latest` | — (onion over Tor) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | `127.0.0.1:9050-9051` | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:latest` | `8080` | `$DATA_DIR/searxng` |
+| `searxng` | `docker.io/searxng/searxng:latest` | `127.0.0.1:8080` (via NPM) | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
-| `searxng-mcp` | `localhost/searxng-mcp:latest` | `8000` | — |
-| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `8101` | — |
-| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `8102` | — |
-| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `8103` 🔑 | — |
-| `lightning-mcp` | `localhost/lightning-mcp:latest` | `8104` 🔑 | — |
+| `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8000` (via NPM) | — |
+| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` (via NPM) | — |
+| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` (via NPM) | — |
+| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` 🔑 (via NPM) | — |
+| `lightning-mcp` | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` 🔑 (via NPM) | — |
 
 No daemon RPC port is published on the LAN: the daemons address each other by
 container name on `npm-network` (`10.89.0.0/24`, pinned in
 `deploy/npm-network.network` because `tor.container` pins `--ip=10.89.0.240` and
-both `bitcoin.conf` and `torrc` allow that subnet). The MCP servers publish
-their own raw ports; `nginx-proxy-manager` is available for you to add proxy
-hosts by hand but is **not** in the request path for any MCP server.
+both `bitcoin.conf` and `torrc` allow that subnet). The MCP servers and searxng
+bind **loopback only** (`127.0.0.1`), and those loopback ports are **not** opened
+in firewalld: `nginx-proxy-manager` terminates TLS and is the sole path in,
+reaching each container by name on `npm-network`. The proxy hosts are added by
+hand in the NPM admin UI (`81`) and live in NPM's database, not in this repo.
+
+Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
+`stack.conf`). If you adopted an older host that still had `8000`/`8080`/
+`8101-8104` open, close them once by hand — `bootstrap.sh` only ever opens ports,
+it never closes them:
+
+```sh
+sudo firewall-cmd --permanent --remove-port=8000/tcp --remove-port=8080/tcp \
+  --remove-port=8101/tcp --remove-port=8102/tcp --remove-port=8103/tcp \
+  --remove-port=8104/tcp && sudo firewall-cmd --reload
+```
 
 🔑 = a money-moving surface. Spending is **off** by default on both.
 

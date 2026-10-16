@@ -114,13 +114,19 @@ the shared contract; the app repos' docs own the *meaning* of the variables,
 this repo owns everything about *how they get set*. If a container name, port or
 variable name changes, it changes on both sides at once.
 
-| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | Host port | Bind + health |
+| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | Host port (loopback) | Bind + health |
 | --- | --- | --- | --- | --- | --- |
-| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `8000` | `0.0.0.0:8000`, `/health` |
-| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `8101` | `0.0.0.0:8000`, `/health` |
-| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `8102` | `0.0.0.0:8000`, `/health` |
-| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `8103` | `0.0.0.0:8000`, `/health` |
-| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `8104` | `0.0.0.0:8000`, `/health` |
+| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `127.0.0.1:8000` | `0.0.0.0:8000`, `/health` |
+| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `127.0.0.1:8101` | `0.0.0.0:8000`, `/health` |
+| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `127.0.0.1:8102` | `0.0.0.0:8000`, `/health` |
+| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `127.0.0.1:8103` | `0.0.0.0:8000`, `/health` |
+| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `127.0.0.1:8104` | `0.0.0.0:8000`, `/health` |
+
+The host ports are **loopback only** and are not opened in firewalld: NPM
+terminates TLS and is the sole path to every MCP server (reaching it by container
+name on `npm-network`). `Bind + health` is the bind and health path *inside* the
+container, which is still `0.0.0.0` — the app's `MCP_HOST`/`MCP_PORT` contract is
+unchanged.
 
 The variables the apps read (names and defaults are the app repos' contract):
 `SEARXNG_URL`/`SEARXNG_MCP_TOKEN`; `BITCOIN_RPC_URL`/`BITCOIN_RPC_USER`/

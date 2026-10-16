@@ -17,9 +17,11 @@ Network=npm-network.network
 EnvironmentFile=@CONFIG_DIR@/monero-node-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/monero-node-mcp/upstream.env
 
-# Host 8102 -> container 8000 (the app's default). LAN-published like
-# searxng-mcp on 8000; open 8102/tcp in firewalld.
-PublishPort=8102:8000
+# Loopback only: NPM is the sole path in (it reaches the container as
+# monero-node-mcp:8000 on npm-network). Host 8102 -> container 8000 (the
+# app's default). The loopback bind keeps verify.sh working; nothing on the
+# LAN can reach 8102.
+PublishPort=127.0.0.1:8102:8000
 
 HealthCmd=python /app/healthcheck.py
 HealthInterval=30s

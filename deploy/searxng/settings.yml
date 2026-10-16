@@ -93,8 +93,8 @@ outgoing:
 
 # NOTE: a `plugins:` block replaces the packaged plugin defaults wholesale,
 # so every plugin we keep must be re-listed here. self_info is the only
-# change -- it discloses the SearXNG version on /info, and :8080 is
-# published on the LAN.
+# change -- it discloses the SearXNG version on /info, which is reachable
+# via nginx-proxy-manager.
 plugins:
   searx.plugins.calculator.SXNGPlugin:
     active: true

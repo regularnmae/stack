@@ -370,11 +370,13 @@ if [ "$SKIP_DAEMONS" = 1 ]; then
 Stack deployed (chain daemons skipped).
 
   Web and MCP:  valkey, searxng, nginx-proxy-manager (80/443/81),
-                searxng-mcp :8000, bitcoin-node-mcp :8101,
-                monero-node-mcp :8102, monero-wallet-mcp :8103,
-                lightning-mcp :8104
+                searxng-mcp 127.0.0.1:8000, bitcoin-node-mcp 127.0.0.1:8101,
+                monero-node-mcp 127.0.0.1:8102, monero-wallet-mcp 127.0.0.1:8103,
+                lightning-mcp 127.0.0.1:8104
 
-The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
+The MCP servers and searxng bind loopback only -- nginx-proxy-manager is the
+sole path in (add a proxy host per server by hand in the admin UI on 81). The
+MCP tools error until their daemons exist. Drop --skip-daemons to bring up
 bitcoind, monerod, lightningd and monero-wallet-rpc.
 EOF
 else
@@ -384,9 +386,10 @@ Stack deployed.
 
   Daemons and web:  bitcoind, monerod, monero-wallet-rpc, lightningd, tor,
                     valkey, searxng, nginx-proxy-manager
-  MCP servers:      searxng-mcp :8000, bitcoin-node-mcp :8101,
-                    monero-node-mcp :8102, monero-wallet-mcp :8103,
-                    lightning-mcp :8104
+  MCP servers:      searxng-mcp 127.0.0.1:8000, bitcoin-node-mcp 127.0.0.1:8101,
+                    monero-node-mcp 127.0.0.1:8102, monero-wallet-mcp 127.0.0.1:8103,
+                    lightning-mcp 127.0.0.1:8104
+  Exposure:         loopback only; nginx-proxy-manager (80/443/81) is the way in
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR
 

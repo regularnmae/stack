@@ -5,7 +5,11 @@
 ipv4_prefix = 32
 ipv6_prefix = 48
 
-# Granian serves :8080 directly -- no reverse proxy in front.
+# NPM now sits in front of searxng (loopback-published; NPM proxies it as
+# searxng:8080 on npm-network). trusted_proxies stays empty on purpose: the
+# limiter counts the connecting peer rather than an X-Forwarded-For header a
+# client could spoof. NPM's traffic arrives from npm-network, which is already
+# pass-listed below, so normal use is unaffected.
 trusted_proxies = []
 
 [botdetection.ip_limit]
@@ -15,13 +19,10 @@ link_token = false
 [botdetection.ip_lists]
 block_ip = []
 pass_ip = [
-  # Traffic arriving via podman port publishing is NAT'd and appears
-  # to the container as coming from the npm-network gateway (10.89.0.1):
-  # that covers the host (MCP server, curl), every LAN client hitting
-  # 0.0.0.0:8080, and all containers on npm-network (incl. NPM later).
-  # Internet clients (if ever exposed) still get full botdetection.
+  # NPM reaches searxng as searxng:8080 on npm-network, and the loopback
+  # publish (127.0.0.1:8080) is NAT'd so the host (verify.sh, curl) appears as
+  # the npm-network gateway (10.89.0.1). Both are covered here.
   '10.89.0.0/24',
   '127.0.0.0/8',        # loopback inside the netns
-  '192.168.1.0/24',     # LAN, for direct-routed setups
 ]
 pass_searxng_org = true

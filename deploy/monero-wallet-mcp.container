@@ -20,10 +20,11 @@ EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/upstream.env
 EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/spend.env
 
-# Host 8103 -> container 8000. LAN-published like searxng-mcp; open
-# 8103/tcp in firewalld. This is a money-moving surface: the bearer tokens
-# are the only gate.
-PublishPort=8103:8000
+# Host 8103 -> container 8000. Loopback only: NPM is the sole path in (it
+# reaches the container as monero-wallet-mcp:8000 on npm-network). This is a
+# money-moving surface: NPM's TLS plus the bearer tokens are the gate, and
+# nothing on the LAN can reach 8103.
+PublishPort=127.0.0.1:8103:8000
 
 HealthCmd=python /app/healthcheck.py
 HealthInterval=30s

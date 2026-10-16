@@ -18,9 +18,11 @@ Network=npm-network.network
 EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/upstream.env
 
-# Host 8101 -> container 8000 (the app's default). LAN-published like
-# searxng-mcp on 8000; open 8101/tcp in firewalld.
-PublishPort=8101:8000
+# Loopback only: NPM is the sole path in (it reaches the container as
+# bitcoin-node-mcp:8000 on npm-network). Host 8101 -> container 8000 (the
+# app's default). The loopback bind keeps verify.sh working; nothing on the
+# LAN can reach 8101.
+PublishPort=127.0.0.1:8101:8000
 
 # Healthcheck: MCP initialize probe (authenticated). Makes a wedged
 # server visible/restartable instead of silently erroring.

@@ -18,9 +18,10 @@ Network=npm-network.network
 # the Authorization header of ~/.config/opencode/opencode.json.
 EnvironmentFile=@CONFIG_DIR@/searxng-mcp/token.env
 
-# LAN access on 8000 (free on the host). Can be proxied
-# through NPM later like your other boltmesh.mooo.com hosts.
-PublishPort=8000:8000
+# Loopback only: NPM is the sole path in (it reaches the container as
+# searxng-mcp:8000 on npm-network). The loopback bind keeps verify.sh and
+# local debugging working; nothing on the LAN can reach 8000.
+PublishPort=127.0.0.1:8000:8000
 
 # Healthcheck: MCP initialize probe (authenticated). Makes a
 # wedged server visible/restartable instead of silently erroring.
