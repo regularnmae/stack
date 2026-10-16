@@ -227,7 +227,7 @@ notify() { # title body
     local -a urls=()
     read -r -a urls <<< "$MONITOR_APPRISE_URLS"
     [ "${#urls[@]}" -gt 0 ] || return 0
-    podman run --rm "$APPRISE_IMAGE" -t "$1" -b "$2" "${urls[@]}" >/dev/null 2>&1 \
+    podman run --rm "$APPRISE_IMAGE" apprise -t "$1" -b "$2" "${urls[@]}" >/dev/null 2>&1 \
         || soft "apprise notification failed"
 }
 

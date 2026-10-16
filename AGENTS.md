@@ -133,7 +133,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `MONITOR_APPRISE_URLS` Apprise targets (sent through a one-shot
   `caronc/apprise` container) and the `MONITOR_PING_URL` dead-man's-switch
   heartbeat (plain `curl` to healthchecks.io; the only thing that notices a dead
-  *host*). Its record lives in `$DATA_DIR/audit/`, which is in the backup set.
+  *host*). Two Apprise traps: the image defines no ENTRYPOINT, so the call is
+  `podman run --rm caronc/apprise apprise -t TITLE -b BODY URL...` (the CLI must
+  be named or the runtime tries to exec `-t`), and a `mailto://` URL on port 587
+  needs `?mode=starttls` (`465` uses `?mode=ssl`) -- anything else fails with a
+  bare "Connection error", not an SMTP auth failure. URLs are space-separated in
+  `MONITOR_APPRISE_URLS` and go on the container's command line.
+  Its record lives in `$DATA_DIR/audit/`, which is in the backup set.
 - **App health is polled by port, not podman status.** The five MCP images
   define no podman healthcheck (their app repos own the Containerfiles), so
   podman never reports `(healthy)` for them and `wait_healthy` would burn its
