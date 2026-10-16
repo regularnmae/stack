@@ -1,0 +1,18 @@
+# The schedule for the health monitor in deploy/monitor.service.
+#
+# Quadlet has no .timer type, so this is a plain systemd USER unit (like
+# backup.timer). deploy/install.sh installs it to ~/.config/systemd/user/ and
+# runs `systemctl --user enable --now monitor.timer`; it activates
+# monitor.service.
+[Unit]
+Description=Run the stack health monitor and spend tripwire
+
+[Timer]
+# Every five minutes, jittered so many hosts do not beat in step.
+OnCalendar=*:0/5
+RandomizedDelaySec=30s
+Persistent=true
+Unit=monitor.service
+
+[Install]
+WantedBy=timers.target

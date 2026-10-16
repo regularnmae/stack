@@ -16,6 +16,39 @@ env_value() {
     sed -n "s/^$key=//p" "$file" | head -n1 | tr -d '\r'
 }
 
+# Call one tool on an MCP streamable-HTTP endpoint and print the response body.
+# Does the authenticated initialize handshake, reuses the session id, then
+# calls the tool; read-only from the server's point of view. Prints nothing and
+# returns 1 when the handshake fails. Used by scripts/monitor.sh and
+# scripts/spend-audit.sh (verify.sh keeps its own copy, which also drives the
+# 401-gate and header checks).
+#   mcp_call URL TOKEN TOOL ARGS_JSON [timeout]
+mcp_call() {
+    local url="$1" token="$2" tool="$3" args="$4" t="${5:-20}"
+    local hdr body sid call
+    local -a hdr_args=()
+    hdr=$(mktemp) || return 1
+    body=$(curl -s -D "$hdr" -m "$t" -X POST "$url/mcp" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        -H "Authorization: Bearer $token" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"monitor","version":"0"}}}' 2>/dev/null) || { rm -f "$hdr"; return 1; }
+    if ! printf '%s' "$body" | grep -q '"serverInfo"'; then
+        rm -f "$hdr"
+        return 1
+    fi
+    sid=$(tr -d '\r' < "$hdr" | sed -n 's/^[Mm]cp-[Ss]ession-[Ii]d: *//p')
+    rm -f "$hdr"
+    [ -n "$sid" ] && hdr_args=(-H "mcp-session-id: $sid")
+    call=$(printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$tool" "$args")
+    curl -s -m "$t" -X POST "$url/mcp" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        -H "Authorization: Bearer $token" \
+        ${hdr_args[@]+"${hdr_args[@]}"} \
+        -d "$call" 2>/dev/null
+}
+
 # Print a script's leading comment block (shebang excluded) for --help. Stops at
 # the first non-comment line, so keep each script's header one contiguous block.
 usage_header() {

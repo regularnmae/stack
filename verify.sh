@@ -156,6 +156,26 @@ if [ "$DEEP" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+head2 "Monitoring"
+MONITOR_TIMER="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/monitor.timer"
+if [ -f "$MONITOR_TIMER" ]; then
+    pass "monitor.timer installed"
+else
+    bad "monitor.timer is not installed (run deploy/install.sh)"
+fi
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet monitor.timer 2>/dev/null; then
+    pass "monitor.timer is active"
+else
+    warn "monitor.timer is not active (systemctl --user status monitor.timer)"
+fi
+AUDIT_DIR="$DATA_DIR/audit"
+if [ -d "$AUDIT_DIR" ]; then
+    pass "audit dir present ($AUDIT_DIR)"
+else
+    warn "no audit dir yet ($AUDIT_DIR); the first monitor run creates it"
+fi
+
+# ---------------------------------------------------------------------------
 head2 "Summary"
 if [ "$fails" = 0 ]; then
     [ "$DEEP" = 1 ] || printf 'All shallow checks passed. Re-run with --deep once the chains are synced.\n'

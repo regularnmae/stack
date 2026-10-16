@@ -337,6 +337,11 @@ if [ -n "$ONLY" ]; then
         # runs it once now instead of waiting for the schedule.
         install_units
         start_unit backup
+    elif [ "$ONLY" = monitor ]; then
+        # Like backup: install.sh has (re)enabled monitor.timer; run the sweep
+        # once now. monitor.service is oneshot and takes no arguments.
+        install_units
+        start_unit monitor
     else
         install_units
         restart_unit "$ONLY"
@@ -392,6 +397,8 @@ Stack deployed.
   Exposure:         loopback only; nginx-proxy-manager (80/443/81) is the way in
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR
+  Monitoring:       every 5 min (monitor.timer) + spend tripwire; both alert
+                    only once $DATA_DIR/config/monitoring/monitor.env is filled in
 
 Chain sync continues in the background (bitcoind is pruned; monerod is
 pruned). Re-run ./deploy.sh once the chains are current to finish anything

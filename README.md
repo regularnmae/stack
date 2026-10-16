@@ -51,9 +51,14 @@ sudo firewall-cmd --permanent --remove-port=8000/tcp --remove-port=8080/tcp \
 🔑 = a money-moving surface. Spending is **off** by default on both.
 
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
-`monero-wallet-rpc/`, `config/`, `npm/`) runs from `backup.timer` into
+`monero-wallet-rpc/`, `config/`, `npm/`, `audit/`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`. It is the one thing that recovers you if the data disk
 itself is lost — see [Backup & restore](#backup--restore).
+
+A health monitor and spend tripwire run every five minutes from `monitor.timer`;
+they alert (and fail a dead-man's-switch heartbeat) once you fill in
+`$DATA_DIR/config/monitoring/monitor.env`. See
+[Monitoring & the spend tripwire](#monitoring--the-spend-tripwire).
 
 ## One-click install
 
@@ -97,10 +102,12 @@ five MCP servers (a plain start would keep running a stale image). Common flags:
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
 ./deploy.sh --only backup             # run the backup job now
+./deploy.sh --only monitor            # run the health + spend checks now
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
 ./deploy.sh --no-wallets              # skip the interactive wallet prompts
 ./deploy.sh --dry-run                 # print the plan, change nothing
 ./verify.sh                           # container health + MCP handshakes
+./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
 ```
 
 Chain sync takes hours to days on a truly bare host (`bitcoind` is pruned, so
@@ -128,6 +135,7 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
   - `config/` — every bearer token and secret
+  - `audit/` — the monitor's log and the spend tripwire baselines
   - `backup-cache/` — restic's cache (regenerable)
 
 The backup *repository* lives outside `$DATA_DIR`, in `$STACK_BACKUP_DIR`
@@ -180,12 +188,14 @@ unchanged.
 ## Backup & restore
 
 `install.sh` installs a nightly, encrypted [restic](https://restic.net) backup of
-the four things in `$DATA_DIR` that cannot be re-downloaded:
+the five things in `$DATA_DIR` that cannot be re-downloaded:
 
 - `cln/` — the CLN node identity, channel state and onion keys
 - `monero-wallet-rpc/` — the Monero wallet (funds)
 - `config/` — every token, rune and secret
 - `npm/` — nginx-proxy-manager's config and TLS material
+- `audit/` — the monitor's log and the spend tripwire baselines (see
+  [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire))
 
 The chains (`bitcoin/`, `monero/`) and `searxng/` are deliberately **excluded**:
 they are large and regenerable, so restic never walks them.
@@ -224,7 +234,7 @@ export RESTIC_PASSWORD=…           # from your password manager
 git clone https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
 ./bootstrap.sh
-./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, config/, npm/
+./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, config/, npm/, audit/
 ./deploy.sh                        # adopts the restored secrets and wallet
 ```
 
@@ -239,6 +249,61 @@ regenerated. The Monero wallet directory comes back owned by the image uid
 > cleanly even if `lightningd.sqlite3` is torn, so the worst case is a
 > force-close and on-chain recovery, not lost funds; the wallet is written
 > periodically, so a live copy is safe in practice.
+
+## Monitoring & the spend tripwire
+
+Nothing in the stack pages on its own: a container has a healthcheck and
+`Restart=always` (so a crash restarts), but a crash-loop, an offline channel, a
+stalled chain or a spend is otherwise silent. `install.sh` installs a monitor
+that closes that gap.
+
+- `scripts/monitor.sh` — runs every five minutes from
+  `deploy/monitor.timer`. Read-only: it starts nothing and rewrites no config.
+  It runs `verify.sh` for the container/MCP base checks and adds the ones
+  nothing else does — bitcoind freshness, CLN peers and **offline channels**,
+  the Monero wallet's lag behind `monerod` — then the spend tripwire.
+- `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
+  unit (Quadlet has no `.timer` type) and its one-shot service, installed to
+  `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
+- `scripts/spend-audit.sh` — the spend tripwire (below); also runnable alone.
+
+**Alerting is off until you fill in
+`$DATA_DIR/config/monitoring/monitor.env`** (mode 600, seeded empty):
+
+  - `MONITOR_APPRISE_URLS` — [Apprise](https://github.com/caronc/apprise)
+    targets, space-separated (`mailto://…`, `ntfy://…`, `json://…`), sent
+    through a one-shot `caronc/apprise` container. One alert per state
+    **change**, plus a recovery notice.
+  - `MONITOR_PING_URL` — a dead-man's-switch heartbeat (a healthchecks.io ping
+    URL): a plain `curl` hits the URL on success and `<url>/fail` with the
+    failure list on failure. This is the only thing that notices when the
+    **whole host** is down, which is why it is not an Apprise target. Set the
+    check's period to the timer interval (5 minutes).
+
+With both empty the monitor still runs and records to
+`$DATA_DIR/audit/audit.log`, and `verify.sh` reports whether the timer is
+installed and active.
+
+### The spend tripwire
+
+Spending is **off** (`ENABLE_SPENDING=0`) on both money servers, and the
+tripwire is what makes that impossible to change or spend, silently:
+
+1. **Policy drift.** `scripts/spend-audit.sh` keeps a hash baseline
+   (`$DATA_DIR/audit/spend-baseline.tsv`) of both `spend.env` files, both token
+   files and `lightning-mcp/node.env` (the spend rune). Any edit or removal
+   trips, and `ENABLE_SPENDING` is asserted to read `0` on every run whatever
+   the baseline says. A trip repeats until you accept the change with
+   `./scripts/spend-audit.sh --rebaseline` (a deliberate act).
+2. **Activity.** It reads outgoing payments (`lightning listpays`) and outgoing
+   transfers (monero-wallet `get_transfers`, outgoing only) through the **read**
+   tokens and diffs them against `$DATA_DIR/audit/outgoing-baseline.txt`. A new
+   outgoing entry trips — independent of what the servers log.
+
+Trips are appended to `$DATA_DIR/audit/spend.log` (so there is a record even
+with no alert configured) and folded into the monitor's alert and heartbeat. It
+is **not** a gate: it cannot stop a spend, only make one impossible to miss.
+`audit/` is part of the [backup set](#backup--restore).
 
 ## How secrets are kept out of git
 
@@ -279,19 +344,24 @@ stack/
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
   renovate.json           # Renovate policy (tor image base/image bumps)
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
-  scripts/lib.sh          # data-dir resolution + SELinux labelling
+  scripts/lib.sh          # data-dir resolution + SELinux labelling + MCP call helper
   scripts/wallets.sh      # Monero + Bitcoin create/restore
   scripts/backup.sh       # restic backup / restore / inspect the repository
+  scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
+  scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
     *.container.in        # lightningd and monero-wallet-rpc, rendered (secrets)
-    *.timer               # backup.timer (plain user unit; Quadlet has no .timer)
+    *.timer               # backup.timer, monitor.timer (plain user units;
+                          #   Quadlet has no .timer type)
+    monitor.service       # the monitor script as a plain user unit
     npm-network.network
     searxng/{settings.yml,limiter.toml}
     examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by hand
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
     examples/backup/*.example     # backup.env shape
+    examples/monitoring/*.example # monitor.env shape (Apprise targets + heartbeat)
   tor/Containerfile
 ```
 

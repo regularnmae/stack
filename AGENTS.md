@@ -1,7 +1,9 @@
 # stack — agent notes
 
 Not a program: `bootstrap.sh`, `deploy.sh`, `verify.sh`, `deploy/install.sh`,
-`scripts/wallets.sh`, and every quadlet unit the host runs. This repo is the
+`scripts/{lib,wallets,backup,monitor,spend-audit}.sh`, and every unit the host
+runs (quadlet, plus the plain systemd user units `backup.timer`,
+`monitor.service`, `monitor.timer`). This repo is the
 **single owner of the runtime** for the whole stack. The application repos
 (`searxng-mcp`, `bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`,
 `lightning-mcp`) ship only code, tests, CI and a `Containerfile` — no unit, no
@@ -17,7 +19,8 @@ env file. Two answers, and the split is deliberate:
 - secret-free units (`bitcoind`, `monerod`, `tor`, `valkey`, `searxng`, NPM and
   the five MCP units) are **rendered** too, but their `@PLACEHOLDERS@` are only
   `@DATA_DIR@`/`@CONFIG_DIR@` — their secrets live in the daemons' own files or
-  in `EnvironmentFile=`;
+  in `EnvironmentFile=`. The plain user units additionally use `@REPO_DIR@` to
+  reach the scripts (`monitor.service` runs `@REPO_DIR@/scripts/monitor.sh`);
 - secret-bearing units (`lightningd`, `monero-wallet-rpc`) are **rendered** from
   a `.container.in` by `install.sh`, substituting `@PLACEHOLDERS@` from
   `$DATA_DIR/config/stack/secrets.env` as well. The rendered units are mode 600,
@@ -36,18 +39,23 @@ the wallet is unreachable from the MCP server.
 ./deploy.sh                         # fetch repos, build, start, verify
 ./deploy.sh --only <name>           # one service; --dry-run to plan
 ./deploy.sh --only backup           # run the backup job now
+./deploy.sh --only monitor          # run the health + spend checks now
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health + MCP handshakes
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / inspect
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh  # the CI lint
+./scripts/monitor.sh                # the monitor.timer sweep, by hand
+./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh  # the CI lint
 ```
 
 ## Facts that are easy to get wrong
 
 - **`install.sh` is the only installer.** It seeds every env file and renders
-  every unit. Adding a service means adding its unit to the `UNITS` array and its
-  env seeding to `install.sh` — nothing in the app repos.
+  every unit. Adding a service means adding its unit to the `UNITS` array (or the
+  plain-user-unit `USER_UNITS`/`USER_TIMERS` arrays) and its env seeding to
+  `install.sh` — nothing in the app repos. It also creates `$DATA_DIR/audit` and
+  seeds `config/monitoring/monitor.env` (empty: journal-only until filled in).
 - **Secret resolution order** is `secrets.env` → the currently-installed unit
   (`flag_value`) → the daemon's config (`bitcoin_conf_value`) → generate. Keep
   that order: it is what makes adoption on a running host a no-op.
@@ -71,13 +79,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   Quadlet has no `.timer` type -- so `install.sh` renders it into
   `~/.config/systemd/user/` and `systemctl --user enable --now`s it. It activates
   the `backup.service` the generator makes from `backup.container`.
-- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/` only.** The chains and
-  `searxng/` are re-downloadable and stay out, so restic never walks them. The repo
-  lives in `$STACK_BACKUP_DIR` (stack.conf), outside `$DATA_DIR`, and the unit is
-  secret-free: the repo path and `RESTIC_PASSWORD` reach it through `backup.env`
-  (`EnvironmentFile`). `scripts/backup.sh` reads them from the **environment first,
-  then the file** -- the only order that can recover a fresh host, since the file
-  lives inside the repository.
+- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/ audit/` only.** The
+  chains and `searxng/` are re-downloadable and stay out, so restic never walks
+  them. The repo lives in `$STACK_BACKUP_DIR` (stack.conf), outside `$DATA_DIR`,
+  and the unit is secret-free: the repo path and `RESTIC_PASSWORD` reach it through
+  `backup.env` (`EnvironmentFile`). `scripts/backup.sh` reads them from the
+  **environment first, then the file** -- the only order that can recover a fresh
+  host, since the file lives inside the repository.
 - **Shared bind mounts use `:z`, not `:Z`.** The backup container mounts `cln/` and
   `npm/` read-only alongside `lightningd` and `nginx-proxy-manager`; two containers
   cannot share a path one labels private (whichever starts last relabels it and
@@ -102,9 +110,24 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `TOR_SERVICE_PASSWORD`; `install.sh` derives it with `tor --hash-password` on a
   fresh host (after building the tor image) and otherwise leaves `torrc` alone.
 - **Spending stays off**: `install.sh` writes `ENABLE_SPENDING=0` to both money
-  servers' `spend.env`. Never seed it to 1.
+  servers' `spend.env`. Never seed it to 1. `scripts/spend-audit.sh` (run by the
+  monitor) then asserts it on every run, hash-baselines both `spend.env`, both
+  token files and `node.env` (the spend rune), and diffs outgoing `listpays` /
+  `get_transfers` against a baseline -- so a flip or a spend cannot pass
+  unnoticed.
+- **The monitor is a host script, not a container.** `monitor.timer` (plain user
+  unit; Quadlet has no `.timer`) activates `monitor.service`, which runs
+  `scripts/monitor.sh` with `EnvironmentFile=@CONFIG_DIR@/monitoring/monitor.env`.
+  It reuses `verify.sh` for the base checks and adds chain freshness, CLN
+  peers/channels and the spend tripwire. It is **alert-only** (never restarts a
+  unit) and read-only. Alerting is **off until `monitor.env` is filled in**: the
+  `MONITOR_APPRISE_URLS` Apprise targets (sent through a one-shot
+  `caronc/apprise` container) and the `MONITOR_PING_URL` dead-man's-switch
+  heartbeat (plain `curl` to healthchecks.io; the only thing that notices a dead
+  *host*). Its record lives in `$DATA_DIR/audit/`, which is in the backup set.
 - MCP test suites live in their own repos; `./verify.sh` is the runtime check
-  (health, 401-without-token, authenticated handshake per endpoint).
+  (health, 401-without-token, authenticated handshake per endpoint) and also
+  reports whether `monitor.timer` is installed and active.
 
 ## Interface contract with the app repos
 

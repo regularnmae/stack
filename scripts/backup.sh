@@ -81,12 +81,14 @@ data_ro=(
     -v "$DATA_DIR/monero-wallet-rpc:/data/monero-wallet-rpc:ro,z"
     -v "$DATA_DIR/config:/data/config:ro,z"
     -v "$DATA_DIR/npm:/data/npm:ro,z"
+    -v "$DATA_DIR/audit:/data/audit:ro,z"
 )
 data_rw=(
     -v "$DATA_DIR/cln:/data/cln:z"
     -v "$DATA_DIR/monero-wallet-rpc:/data/monero-wallet-rpc:z"
     -v "$DATA_DIR/config:/data/config:z"
     -v "$DATA_DIR/npm:/data/npm:z"
+    -v "$DATA_DIR/audit:/data/audit:z"
 )
 
 restic() { podman run "${common[@]}" "$RESTIC_IMAGE" "$@"; }
@@ -96,19 +98,21 @@ restic() { podman run "${common[@]}" "$RESTIC_IMAGE" "$@"; }
 # is exactly the case where they are missing, so create them.
 ensure_mount_dirs() {
     mkdir -p "$STACK_BACKUP_DIR" "$DATA_DIR/backup-cache" \
-        "$DATA_DIR/cln" "$DATA_DIR/monero-wallet-rpc" "$DATA_DIR/config" "$DATA_DIR/npm"
+        "$DATA_DIR/cln" "$DATA_DIR/monero-wallet-rpc" "$DATA_DIR/config" "$DATA_DIR/npm" \
+        "$DATA_DIR/audit"
 }
 ensure_mount_dirs
 
-# The exact set the nightly unit copies: identity, wallet, secrets, NPM. The
-# chains and searxng are regenerable and stay out.
-backup_paths=(/data/cln /data/monero-wallet-rpc /data/config /data/npm)
+# The exact set the nightly unit copies: identity, wallet, secrets, NPM, and the
+# monitor's audit log + spend baselines. The chains and searxng are regenerable
+# and stay out.
+backup_paths=(/data/cln /data/monero-wallet-rpc /data/config /data/npm /data/audit)
 
 # Mirrors the Exec= in deploy/backup.container; keep the two in step.
 read -r -d '' job_script <<'SH' || true
 set -e
 restic snapshots >/dev/null 2>&1 || restic init
-restic backup /data/cln /data/monero-wallet-rpc /data/config /data/npm --host stack --tag stack
+restic backup /data/cln /data/monero-wallet-rpc /data/config /data/npm /data/audit --host stack --tag stack
 restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
 SH
 
