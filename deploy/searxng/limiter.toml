@@ -5,11 +5,11 @@
 ipv4_prefix = 32
 ipv6_prefix = 48
 
-# NPM now sits in front of searxng (loopback-published; NPM proxies it as
-# searxng:8080 on npm-network). trusted_proxies stays empty on purpose: the
-# limiter counts the connecting peer rather than an X-Forwarded-For header a
-# client could spoof. NPM's traffic arrives from npm-network, which is already
-# pass-listed below, so normal use is unaffected.
+# NPM sits in front of searxng, proxying it as searxng:8080 on npm-network, and
+# searxng publishes no host port of its own. trusted_proxies stays empty on
+# purpose: the limiter counts the connecting peer rather than an X-Forwarded-For
+# header a client could spoof. NPM's traffic arrives from npm-network, which is
+# already pass-listed below, so normal use is unaffected.
 trusted_proxies = []
 
 [botdetection.ip_limit]
@@ -19,9 +19,9 @@ link_token = false
 [botdetection.ip_lists]
 block_ip = []
 pass_ip = [
-  # NPM reaches searxng as searxng:8080 on npm-network, and the loopback
-  # publish (127.0.0.1:8080) is NAT'd so the host (verify.sh, curl) appears as
-  # the npm-network gateway (10.89.0.1). Both are covered here.
+  # NPM reaches searxng as searxng:8080 on npm-network, and so do the host-side
+  # checks (scripts/lib.sh's net_curl); nothing arrives from the host's own
+  # loopback any more, since searxng publishes no port.
   '10.89.0.0/24',
   '127.0.0.0/8',        # loopback inside the netns
 ]

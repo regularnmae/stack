@@ -114,9 +114,18 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   (`podman run --rm caronc/apprise apprise -t TITLE -b BODY URL...`), and a
   `mailto://` URL on 587 needs `?mode=starttls` (`465` → `?mode=ssl`) or it
   fails with a bare "Connection error".
-- **App health is polled by port, not podman status** — the five MCP images
-  define no healthcheck, so podman never reports `(healthy)` and `wait_healthy`
-  would burn its timeout; `deploy.sh` polls each `/health` on its loopback port.
+- **Only nginx-proxy-manager publishes a port, and health comes from podman** —
+  the sole `PublishPort=` left in `deploy/` is NPM's 80/443/81. Everything else
+  is reached by container name on `npm-network`: NPM for a client, and the
+  host-side checks through `net_curl` — a throwaway `localhost/netcheck:local`
+  container (`netcheck/Containerfile`, built by `install.sh`) — because the MCP
+  images are `python:3.14-alpine` and carry no curl. The units *do* set
+  `HealthCmd=`/`HealthInterval=`, so podman really does report `(healthy)` for
+  them and `deploy.sh` waits with `wait_healthy`; the MCP probe is an
+  authenticated `initialize`, i.e. strictly stronger than a `/health` GET.
+- **The bearer tokens never reach the host's argv** — `mcp_initialize` /
+  `mcp_tool_call` pass them in a curl config on stdin (`-K -`), so `ps` cannot
+  read a token out of a running verify/monitor/audit sweep.
 
 ## Interface contract with the app repos
 
@@ -126,19 +135,19 @@ the shared contract; the app repos' docs own the *meaning* of the variables,
 this repo owns everything about *how they get set*. If a container name, port or
 variable name changes, it changes on both sides at once.
 
-| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | Host port (loopback) | Bind + health |
+| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | Reached as (npm-network) | Bind + health |
 | --- | --- | --- | --- | --- | --- |
-| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `127.0.0.1:8100` | `0.0.0.0:8000`, `/health` |
-| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `127.0.0.1:8101` | `0.0.0.0:8000`, `/health` |
-| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `127.0.0.1:8102` | `0.0.0.0:8000`, `/health` |
-| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `127.0.0.1:8103` | `0.0.0.0:8000`, `/health` |
-| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `127.0.0.1:8104` | `0.0.0.0:8000`, `/health` |
+| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `searxng-mcp:8000` | `0.0.0.0:8000`, `/health` |
+| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `bitcoin-node-mcp:8000` | `0.0.0.0:8000`, `/health` |
+| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `monero-node-mcp:8000` | `0.0.0.0:8000`, `/health` |
+| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `monero-wallet-mcp:8000` | `0.0.0.0:8000`, `/health` |
+| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `0.0.0.0:8000`, `/health` |
 
-The host ports are **loopback only** and are not opened in firewalld: NPM
-terminates TLS and is the sole path to every MCP server (reaching it by container
-name on `npm-network`). `Bind + health` is the bind and health path *inside* the
-container, which is still `0.0.0.0` — the app's `MCP_HOST`/`MCP_PORT` contract is
-unchanged.
+Nothing here publishes a host port: NPM terminates TLS and is the sole path to
+every MCP server for a client, and the host-side checks read the very same
+`<container>:8000` through `net_curl`. `Bind + health` is the bind and health
+path *inside* the container, which is still `0.0.0.0` — the app's
+`MCP_HOST`/`MCP_PORT` contract is unchanged.
 
 The variables the apps read (names and defaults are the app repos' contract):
 `SEARXNG_URL`/`SEARXNG_MCP_TOKEN`; `BITCOIN_RPC_URL`/`BITCOIN_RPC_USER`/
@@ -157,15 +166,15 @@ that server — treat this section as the thing to check when either side moves.
 ### The BoltMesh app tier
 
 Not MCP servers, so they are absent from the table above. Same rule applies
-though: the container name, host loopback port and env file paths below are the
-shared contract with the `boltmesh-labs` repos.
+though: the container name and env file paths below are the shared contract with
+the `boltmesh-labs` repos.
 
-| Unit | Image | Env files (`$DATA_DIR/config/boltmesh/`) | Upstream it reaches | Host port (loopback) | Health |
+| Unit | Image | Env files (`$DATA_DIR/config/boltmesh/`) | Upstream it reaches | Reached as (npm-network) | Health |
 | --- | --- | --- | --- | --- | --- |
 | `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` (`POSTGRES_*`) | — | — | `pg_isready -h 127.0.0.1` |
-| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `gateway.env` | `postgres:5432`, `valkey:6379`, `lightningd:3010`, `monero-wallet-rpc:18083` | `127.0.0.1:8105` | `0.0.0.0:8000`, `/health` (deep) |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `gateway.env` | `postgres:5432`, `valkey:6379`, `lightningd:3010`, `monero-wallet-rpc:18083` | `boltmesh-backend:8000` | `0.0.0.0:8000`, `/health` (deep) |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | the same four | the same | — | liveness file `/tmp/arq-worker-liveness` |
-| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `127.0.0.1:8106` | `0.0.0.0:80`, `/` |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `boltmesh-frontend:80` | `0.0.0.0:80`, `/` |
 
 The four env files are `db.env`/`secrets.env` (generated), `app.env`
 (operator-editable, seeded from `BOLTMESH_*` in `stack.conf`) and `gateway.env`

@@ -1,0 +1,22 @@
+# netcheck image: a curl client that lives on npm-network.
+#
+# No stack service publishes an HTTP port to the host any more (only
+# nginx-proxy-manager publishes 80/443/81, on the LAN). Everything the host-side
+# scripts need to read -- verify.sh, scripts/monitor.sh, scripts/spend-audit.sh
+# -- is therefore read the way nginx-proxy-manager reads it: by container name,
+# as <container>:<port> on npm-network. net_curl in scripts/lib.sh runs this
+# image as a throwaway container to do exactly that, the same shape as the
+# apprise image monitor.sh already runs.
+#
+# Both the base and the package are pinned -- tag *and* digest for the base, an
+# exact apk version for curl -- so Renovate can bump them (and so a rebuild
+# ships the same bits). The local tag is deliberately versionless
+# (localhost/netcheck:local): the versions live only here, not duplicated
+# across stack.conf, the scripts and the README.
+#
+# No ENTRYPOINT/CMD: every use names its own command (net_curl passes the curl
+# argv straight through), so there is nothing to override.
+#
+# Build:  podman build -t localhost/netcheck:local netcheck/
+FROM docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+RUN apk add --no-cache curl=8.22.0-r0

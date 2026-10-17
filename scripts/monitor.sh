@@ -133,13 +133,14 @@ else
 fi
 
 # Monero heights are read through the node MCP and the wallet MCP (there is no
-# curl/wget guaranteed inside the daemons). Missing/unparseable output is a
-# warning only -- verify.sh already fails if the endpoint itself is down.
+# curl/wget guaranteed inside the daemons, and neither publishes a host port:
+# mcp_call reaches them as containers on npm-network). Missing/unparseable
+# output is a warning only -- verify.sh already fails if the endpoint is down.
 node_h=""
 sync=""
 xmrnode_token=$(env_value "$CONFIG_DIR/monero-node-mcp/token.env" MONERO_MCP_TOKEN)
 if [ -n "$xmrnode_token" ]; then
-    node_body=$(mcp_call "http://127.0.0.1:8102" "$xmrnode_token" get_info '{}') || node_body=""
+    node_body=$(mcp_call monero-node-mcp "$xmrnode_token" get_info '{}') || node_body=""
     node_h=$(printf '%s' "$node_body" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
     sync=$(printf '%s' "$node_body" | grep -oE '\\?"synchronized\\?":[[:space:]]*(true|false)' | grep -oE '(true|false)' | head -n1)
     if [ "$sync" = false ] && [ "$MONITOR_GRACE_SYNC" != 1 ]; then
@@ -153,7 +154,7 @@ fi
 
 xmrwallet_token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
 if [ -n "$xmrwallet_token" ]; then
-    w_body=$(mcp_call "http://127.0.0.1:8103" "$xmrwallet_token" get_height '{}') || w_body=""
+    w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
     w_h=$(printf '%s' "$w_body" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
     if [ -n "$node_h" ] && [ -n "$w_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
         soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"

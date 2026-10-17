@@ -15,38 +15,38 @@ stack runs and one script that fixes a deployment problem.
 
 | Unit | Image | Published on the host | Data |
 | --- | --- | --- | --- |
-| `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — (RPC stays on `npm-network`) | `$DATA_DIR/bitcoin` |
+| `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — | `$DATA_DIR/bitcoin` |
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
-| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
+| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | — | `$DATA_DIR/monero-wallet-rpc` |
 | `lightningd` | `docker.io/elementsproject/lightningd:latest` | — (onion over Tor) | `$DATA_DIR/cln` |
-| `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | `127.0.0.1:9050-9051` | `$DATA_DIR/tor` |
+| `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:latest` | `127.0.0.1:8080` (via NPM) | `$DATA_DIR/searxng` |
+| `searxng` | `docker.io/searxng/searxng:latest` | — | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
-| `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` (via NPM) | — |
-| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` (via NPM) | — |
-| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` (via NPM) | — |
-| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` 🔑 (via NPM) | — |
-| `lightning-mcp` | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` 🔑 (via NPM) | — |
+| `searxng-mcp` | `localhost/searxng-mcp:latest` | — | — |
+| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | — | — |
+| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | — | — |
+| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | — 🔑 | — |
+| `lightning-mcp` | `localhost/lightning-mcp:latest` | — 🔑 | — |
 | `postgres` | `docker.io/library/postgres:18-alpine` | — | `$DATA_DIR/postgres` |
-| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` (via NPM) | — |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | — | — |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
-| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` (via NPM) | — |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — | — |
 
-No daemon RPC port is published on the LAN: the daemons address each other by
-container name on `npm-network` (`10.89.0.0/24`, pinned in
+**`nginx-proxy-manager` is the only unit that publishes a port.** Every other
+service is reached by container name on `npm-network` (`10.89.0.0/24`, pinned in
 `deploy/npm-network.network` because `tor.container` pins `--ip=10.89.0.240` and
-both `bitcoin.conf` and `torrc` allow that subnet). The MCP servers, searxng and
-the BoltMesh app tier bind **loopback only** (`127.0.0.1`), and those loopback
-ports are **not** opened in firewalld: `nginx-proxy-manager` terminates TLS and
-is the sole path in, reaching each container by name on `npm-network`. The proxy
-hosts are added by hand in the NPM admin UI (`81`) and live in NPM's database,
-not in this repo.
+both `bitcoin.conf` and `torrc` allow that subnet): NPM terminates TLS and is
+the one way in for a client, and the host-side checks (`verify.sh`, the monitor)
+read the same addresses through a throwaway curl container on that network —
+`netcheck/Containerfile`, run by `net_curl` in `scripts/lib.sh`. The proxy hosts
+are added by hand in the NPM admin UI (`81`) and live in NPM's database, not in
+this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
-`stack.conf`). If you adopted an older host that still had `8000`/`8080`/
-`8100-8106` open, close them once by hand — `bootstrap.sh` only ever opens ports,
-it never closes them:
+`stack.conf`), and there is nothing to reach on loopback either: if you cloned an
+older host that still had `8000`/`8080`/`8100-8106` published or open, close
+them once by hand — `bootstrap.sh` only ever opens ports, it never closes them:
 
 ```sh
 sudo firewall-cmd --permanent --remove-port=8000/tcp --remove-port=8080/tcp \
@@ -414,7 +414,8 @@ stack/
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
   renovate.json           # Renovate policy (tor image base/image bumps)
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
-  scripts/lib.sh          # data-dir resolution + SELinux labelling + MCP call helper
+  scripts/lib.sh          # data-dir resolution + SELinux labelling + the
+                          #   net_curl / mcp_* helpers every check goes through
   scripts/wallets.sh      # Monero + Bitcoin create/restore
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
@@ -433,7 +434,8 @@ stack/
     examples/backup/*.example     # backup.env shape
     examples/monitoring/*.example # monitor.env shape (Apprise targets + heartbeat)
     examples/boltmesh/*.example   # db/secrets/app/gateway env shapes
-  tor/Containerfile
+  tor/Containerfile       # built by install.sh: the Tor proxy
+  netcheck/Containerfile  # built by install.sh: the curl client the host checks run
 ```
 
 ## Rollback

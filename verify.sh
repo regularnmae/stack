@@ -9,6 +9,10 @@
 #   ./verify.sh --no-nodes      # the chain daemons were skipped (deploy.sh
 #                               # --skip-daemons); don't call them missing
 #
+# Run it on the host: it reads the containers with podman and reaches each MCP
+# server the way nginx-proxy-manager does -- as <container>:8000 on npm-network,
+# from a throwaway netcheck container (no service publishes a host port).
+#
 # Read-only. Exits non-zero if anything is wrong.
 set -uo pipefail
 
@@ -70,26 +74,27 @@ done
 
 # ---------------------------------------------------------------------------
 head2 "MCP endpoints"
-# name|port|env-file|token-var|deep-tool|deep-args|needs-nodes
+# name|env-file|token-var|deep-tool|deep-args|needs-nodes
+# The name is both the container name and the host nginx-proxy-manager proxies
+# to, so this checks the request path a real client takes.
 endpoints=(
-    "searxng-mcp|8100|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
-    "bitcoin-node-mcp|8101|$CONFIG_DIR/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
-    "monero-node-mcp|8102|$CONFIG_DIR/monero-node-mcp/token.env|MONERO_MCP_TOKEN|get_info|{}|1"
-    "monero-wallet-mcp|8103|$CONFIG_DIR/monero-wallet-mcp/token.env|MONERO_MCP_TOKEN|get_balance|{}|1"
-    "lightning-mcp|8104|$CONFIG_DIR/lightning-mcp/token.env|LIGHTNING_MCP_TOKEN|getinfo|{}|1"
+    "searxng-mcp|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
+    "bitcoin-node-mcp|$CONFIG_DIR/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
+    "monero-node-mcp|$CONFIG_DIR/monero-node-mcp/token.env|MONERO_MCP_TOKEN|get_info|{}|1"
+    "monero-wallet-mcp|$CONFIG_DIR/monero-wallet-mcp/token.env|MONERO_MCP_TOKEN|get_balance|{}|1"
+    "lightning-mcp|$CONFIG_DIR/lightning-mcp/token.env|LIGHTNING_MCP_TOKEN|getinfo|{}|1"
 )
-read -r -d '' init_body <<'JSON' || true
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}
-JSON
 
 for e in "${endpoints[@]}"; do
-    IFS='|' read -r name port envfile var tool args needs_nodes <<<"$e"
-    base="http://${VERIFY_HOST:-127.0.0.1}:$port"
+    IFS='|' read -r name envfile var tool args needs_nodes <<<"$e"
 
-    health=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$base/health" 2>/dev/null || echo 000)
+    # Read from a throwaway curl container on npm-network: no service publishes
+    # a host port, so this is also the path nginx-proxy-manager takes (net_curl
+    # and the mcp_* helpers live in scripts/lib.sh).
+    health=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 "http://$name:8000/health" 2>/dev/null || echo 000)
     if [ "$health" = "200" ]; then pass "$name /health 200"; else bad "$name /health -> $health"; fi
 
-    gated=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "$base/mcp" \
+    gated=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://$name:8000/mcp" \
         -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)
     if [ "$gated" = "401" ]; then pass "$name /mcp is token-gated (401)"; else bad "$name /mcp without a token -> $gated (expected 401)"; fi
 
@@ -99,12 +104,7 @@ for e in "${endpoints[@]}"; do
         continue
     fi
 
-    hdr=$(mktemp)
-    body=$(curl -s -D "$hdr" -m 15 -X POST "$base/mcp" \
-        -H 'Content-Type: application/json' \
-        -H 'Accept: application/json, text/event-stream' \
-        -H "Authorization: Bearer $token" -d "$init_body" 2>/dev/null || true)
-    if printf '%s' "$body" | grep -q '"serverInfo"'; then
+    if mcp_initialize "$name" "$token" 15 >/dev/null; then
         pass "$name authenticated MCP handshake"
     else
         bad "$name authenticated handshake failed"
@@ -114,13 +114,8 @@ for e in "${endpoints[@]}"; do
         if [ "$NO_NODES" = 1 ] && [ "$needs_nodes" = 1 ]; then
             warn "$name deep check skipped (needs a chain node)"
         else
-            sid=$(tr -d '\r' < "$hdr" | sed -n 's/^[Mm]cp-[Ss]ession-[Ii]d: *//p')
-            call_body=$(printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$tool" "$args")
-            resp=$(curl -s -m 30 -X POST "$base/mcp" \
-                -H 'Content-Type: application/json' \
-                -H 'Accept: application/json, text/event-stream' \
-                -H "Authorization: Bearer $token" \
-                ${sid:+-H "mcp-session-id: $sid"} -d "$call_body" 2>/dev/null || true)
+            # mcp_tool_call reuses the session mcp_initialize just opened.
+            resp=$(mcp_tool_call "$name" "$token" "$tool" "$args" 30 || true)
             if printf '%s' "$resp" | grep -q '"isError":true'; then
                 bad "$name deep call $tool returned an error"
             elif printf '%s' "$resp" | grep -q '"result"'; then
@@ -130,21 +125,19 @@ for e in "${endpoints[@]}"; do
             fi
         fi
     fi
-    rm -f "$hdr"
 done
 
 # ---------------------------------------------------------------------------
 head2 "BoltMesh"
 # The API's /health is deep: 200 only when it can reach postgres and valkey.
-be_port=8105
-fe_port=8106
-be_body=$(curl -s -m 10 "http://${VERIFY_HOST:-127.0.0.1}:$be_port/health" 2>/dev/null || true)
+# Read as a peer on npm-network, the same address nginx-proxy-manager uses.
+be_body=$(net_curl -s -m 10 "http://boltmesh-backend:8000/health" 2>/dev/null || true)
 if printf '%s' "$be_body" | grep -q '"status": *"healthy"'; then
     pass "boltmesh-backend /health healthy"
 else
     bad "boltmesh-backend /health not healthy"
 fi
-fe_code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://${VERIFY_HOST:-127.0.0.1}:$fe_port/" 2>/dev/null || echo 000)
+fe_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 "http://boltmesh-frontend:80/" 2>/dev/null || echo 000)
 if [ "$fe_code" = "200" ]; then pass "boltmesh-frontend / 200"; else bad "boltmesh-frontend / -> $fe_code"; fi
 
 # ---------------------------------------------------------------------------

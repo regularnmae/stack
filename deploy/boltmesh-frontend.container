@@ -18,9 +18,9 @@ Network=npm-network.network
 # into the bundle at build time. The image runs nginx on :80 with the SPA
 # fallback from frontend/deploy/nginx.conf.
 
-# Host 8106 -> container 80. Loopback only: NPM terminates TLS and reaches the
-# container as boltmesh-frontend:80 on npm-network.
-PublishPort=127.0.0.1:8106:80
+# No PublishPort: nginx listens on :80 inside the container and nothing is
+# exposed to the host. NPM terminates TLS and reaches it as
+# boltmesh-frontend:80 on npm-network.
 
 # nginx:alpine has no curl but does have busybox wget.
 HealthCmd=wget -q -O /dev/null http://127.0.0.1/

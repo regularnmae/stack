@@ -19,10 +19,9 @@ Image=ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest
 Network=npm-network.network
 
 # The wallet RPC can open wallets and move funds, so it is
-# protected twice over: authenticated (--rpc-login below) AND
-# published on host loopback only, mirroring tor's
-# 127.0.0.1:9050-9051. It is never reachable from the LAN.
-PublishPort=127.0.0.1:18083:18083
+# authenticated (--rpc-login below) and publishes nothing: no host
+# port at all, not even on loopback. The other containers reach it
+# as monero-wallet-rpc:18083 on npm-network.
 
 # Ownership NOTE: unlike monerod's entrypoint, this image's
 # entrypoint checks /home/monero (image-owned, uid 1000)

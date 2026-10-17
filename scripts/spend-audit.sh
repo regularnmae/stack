@@ -116,7 +116,7 @@ lightning_outgoing() {
     local token body
     token=$(env_value "$CONFIG_DIR/lightning-mcp/token.env" LIGHTNING_MCP_TOKEN)
     [ -n "$token" ] || { note "no LIGHTNING_MCP_TOKEN; skipping lightning activity"; return 0; }
-    body=$(mcp_call "http://127.0.0.1:8104" "$token" listpays '{}') || body=""
+    body=$(mcp_call lightning-mcp "$token" listpays '{}') || body=""
     [ -n "$body" ] || { note "lightning listpays unavailable"; return 0; }
     printf '%s' "$body" \
         | grep -oE 'payment_hash\\?":[[:space:]]*\\?"[0-9a-f]{64}' \
@@ -127,7 +127,7 @@ monero_outgoing() {
     local token body
     token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
     [ -n "$token" ] || { note "no MONERO_MCP_TOKEN; skipping monero activity"; return 0; }
-    body=$(mcp_call "http://127.0.0.1:8103" "$token" get_transfers \
+    body=$(mcp_call monero-wallet-mcp "$token" get_transfers \
         '{"incoming":false,"pool":false,"pending":false,"failed":false,"outgoing":true}') || body=""
     [ -n "$body" ] || { note "monero get_transfers unavailable"; return 0; }
     printf '%s' "$body" \

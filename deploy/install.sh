@@ -314,7 +314,21 @@ mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/postgres-dump"
 mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
 
 # ---------------------------------------------------------------------------
-# 3. tor image + torrc
+# 3. netcheck image (the curl client the host-side checks run)
+# ---------------------------------------------------------------------------
+# Built here, not pulled, and left alone once it exists -- same reasoning as
+# the tor image below. scripts/lib.sh's net_curl runs it as a throwaway
+# container to read a service by name on npm-network, because nothing in the
+# stack publishes a host port for the host to reach.
+if command -v podman >/dev/null 2>&1 && ! podman image exists "$NETCHECK_IMAGE" 2>/dev/null; then
+    if [ -f "$REPO_DIR/netcheck/Containerfile" ]; then
+        log "building $NETCHECK_IMAGE"
+        podman build -t "$NETCHECK_IMAGE" "$REPO_DIR/netcheck/" >/dev/null
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. tor image + torrc
 # ---------------------------------------------------------------------------
 if command -v podman >/dev/null 2>&1 && ! podman image exists "$TOR_IMAGE" 2>/dev/null; then
     if [ -f "$REPO_DIR/tor/Containerfile" ]; then
@@ -355,7 +369,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 4. SearXNG config (seed only; never clobber a live file)
+# 5. SearXNG config (seed only; never clobber a live file)
 # ---------------------------------------------------------------------------
 mkdir -p "$SEARXNG_DATA_DIR"
 if [ -s "$SEARXNG_DATA_DIR/settings.yml" ]; then
@@ -374,7 +388,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. per-application env files (under the data dir)
+# 6. per-application env files (under the data dir)
 # ---------------------------------------------------------------------------
 
 SEARXNG_ENV="$CONFIG_DIR/searxng-mcp/token.env"
@@ -732,7 +746,7 @@ EOF
 log "wrote $BOLT_GATEWAY (mode 600)"
 
 # ---------------------------------------------------------------------------
-# 6. units: render every one (they all reference the data or config dir)
+# 7. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
 render_unit() {
     local src="$1" target="$2" tmp

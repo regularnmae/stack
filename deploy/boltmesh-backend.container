@@ -24,11 +24,10 @@ EnvironmentFile=@CONFIG_DIR@/boltmesh/secrets.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/app.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/gateway.env
 
-# Host 8105 -> container 8000. Loopback only: NPM is the sole path in (it
-# reaches the container as boltmesh-backend:8000 on npm-network). The app
-# serves /health (deep: database + valkey), which is what deploy.sh and
-# verify.sh poll.
-PublishPort=127.0.0.1:8105:8000
+# No PublishPort: nothing is exposed to the host. NPM is the sole path in,
+# reaching the container as boltmesh-backend:8000 on npm-network. The app serves
+# /health (deep: database + valkey), which is what the HealthCmd below gates on
+# and what verify.sh reads through scripts/lib.sh's net_curl.
 
 HealthCmd=curl -fsS http://127.0.0.1:8000/health
 HealthInterval=30s

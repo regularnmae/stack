@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Helpers shared by deploy.sh, bootstrap.sh and deploy/install.sh. Sourced, not
-# executed. bootstrap.sh stays self-contained because it must run standalone
-# (curl | bash) on a host with no checkout, so it does not use this file.
+# Helpers shared by deploy.sh, deploy/install.sh, verify.sh and the scripts/
+# helpers. Sourced, not executed. bootstrap.sh stays self-contained because it
+# must run standalone (curl | bash) on a host with no checkout, so it does not
+# use this file.
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -16,37 +17,80 @@ env_value() {
     sed -n "s/^$key=//p" "$file" | head -n1 | tr -d '\r'
 }
 
-# Call one tool on an MCP streamable-HTTP endpoint and print the response body.
-# Does the authenticated initialize handshake, reuses the session id, then
-# calls the tool; read-only from the server's point of view. Prints nothing and
-# returns 1 when the handshake fails. Used by scripts/monitor.sh and
-# scripts/spend-audit.sh (verify.sh keeps its own copy, which also drives the
-# 401-gate and header checks).
-#   mcp_call URL TOKEN TOOL ARGS_JSON [timeout]
-mcp_call() {
-    local url="$1" token="$2" tool="$3" args="$4" t="${5:-20}"
-    local hdr body sid call
-    local -a hdr_args=()
-    hdr=$(mktemp) || return 1
-    body=$(curl -s -D "$hdr" -m "$t" -X POST "$url/mcp" \
-        -H 'Content-Type: application/json' \
-        -H 'Accept: application/json, text/event-stream' \
-        -H "Authorization: Bearer $token" \
-        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"monitor","version":"0"}}}' 2>/dev/null) || { rm -f "$hdr"; return 1; }
-    if ! printf '%s' "$body" | grep -q '"serverInfo"'; then
-        rm -f "$hdr"
-        return 1
+# The image the host-side checks speak through: a curl client on npm-network
+# (see netcheck/Containerfile), built by deploy/install.sh. Nothing in the stack
+# publishes a host port, so this is how a host script reaches a service -- by
+# container name, exactly as nginx-proxy-manager does. stack.conf sets it; the
+# default here covers a script run with a stale environment.
+NETCHECK_IMAGE="${NETCHECK_IMAGE:-localhost/netcheck:local}"
+
+# Run curl against a container on npm-network, from a throwaway container.
+# Arguments are curl's, verbatim, so call sites read exactly as they did when
+# this was a host curl against a published loopback port:
+#   net_curl -s -o /dev/null -w '%{http_code}' http://searxng-mcp:8000/health
+# -i keeps stdin attached, which is how a caller passes a secret in a curl
+# config (`-K -`) rather than on a command line that `ps` can read.
+net_curl() {
+    if ! podman image exists "$NETCHECK_IMAGE" 2>/dev/null; then
+        printf 'ERROR: %s is missing; run deploy/install.sh to build it\n' "$NETCHECK_IMAGE" >&2
+        return 127
     fi
-    sid=$(tr -d '\r' < "$hdr" | sed -n 's/^[Mm]cp-[Ss]ession-[Ii]d: *//p')
-    rm -f "$hdr"
-    [ -n "$sid" ] && hdr_args=(-H "mcp-session-id: $sid")
+    podman run --rm -i --network npm-network "$NETCHECK_IMAGE" curl "$@"
+}
+
+# The session id the last mcp_initialize was given, and the marker that -w uses
+# to put it after the response body rather than mixed into it.
+MCP_SESSION_ID=""
+MCP_SID_MARKER='__mcp_session_id__'
+
+# The handshake every MCP streamable-HTTP session starts with. The version is
+# the protocol revision, not this stack's.
+MCP_INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"monitor","version":"0"}}}'
+
+# Authenticate against CONTAINER's MCP endpoint: do the initialize handshake,
+# print the response body and record the session id in MCP_SESSION_ID. Returns 1
+# when the server did not answer with a serverInfo result. The bearer token goes
+# in a curl config on stdin, so it never reaches the host's argv.
+#   mcp_initialize CONTAINER TOKEN [timeout]
+mcp_initialize() {
+    local c="$1" token="$2" t="${3:-20}" resp
+    MCP_SESSION_ID=""
+    resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | \
+        net_curl -s -m "$t" -K - \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -w "\n$MCP_SID_MARKER%header{mcp-session-id}" \
+            -X POST "http://$c:8000/mcp" -d "$MCP_INIT_BODY" 2>/dev/null) || return 1
+    case "$resp" in *"$MCP_SID_MARKER"*) ;; *) return 1 ;; esac
+    MCP_SESSION_ID="${resp##*"$MCP_SID_MARKER"}"
+    resp="${resp%%"$MCP_SID_MARKER"*}"
+    printf '%s' "$resp" | grep -q '"serverInfo"' || return 1
+    printf '%s\n' "$resp"
+}
+
+# Call one tool once the handshake above has run (mcp_call does both). Prints the
+# response body; read-only from the server's point of view.
+#   mcp_tool_call CONTAINER TOKEN TOOL ARGS_JSON [timeout]
+mcp_tool_call() {
+    local c="$1" token="$2" tool="$3" args="$4" t="${5:-20}" call
     call=$(printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$tool" "$args")
-    curl -s -m "$t" -X POST "$url/mcp" \
-        -H 'Content-Type: application/json' \
-        -H 'Accept: application/json, text/event-stream' \
-        -H "Authorization: Bearer $token" \
-        ${hdr_args[@]+"${hdr_args[@]}"} \
-        -d "$call" 2>/dev/null
+    printf 'header = "Authorization: Bearer %s"\n' "$token" | \
+        net_curl -s -m "$t" -K - \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            ${MCP_SESSION_ID:+-H "mcp-session-id: $MCP_SESSION_ID"} \
+            -X POST "http://$c:8000/mcp" -d "$call" 2>/dev/null
+}
+
+# Call one tool on an MCP streamable-HTTP endpoint and print the response body.
+# Prints nothing and returns 1 when the handshake fails. Used by
+# scripts/monitor.sh and scripts/spend-audit.sh; verify.sh calls the two halves
+# itself, because it also proves the 401 gate and reports the session id.
+#   mcp_call CONTAINER TOKEN TOOL ARGS_JSON [timeout]
+mcp_call() {
+    local c="$1" token="$2" tool="$3" args="$4" t="${5:-20}"
+    mcp_initialize "$c" "$token" "$t" >/dev/null || return 1
+    mcp_tool_call "$c" "$token" "$tool" "$args" "$t"
 }
 
 # Print a script's leading comment block (shebang excluded) for --help. Stops at

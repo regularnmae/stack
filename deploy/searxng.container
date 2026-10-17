@@ -12,10 +12,8 @@ ContainerName=searxng
 Image=docker.io/searxng/searxng:latest
 Network=npm-network.network
 
-# Loopback only: NPM is the sole path in. It proxies it as searxng:8080
-# on npm-network without touching this file, and the loopback bind keeps
-# verify.sh and local debugging working. Nothing on the LAN can reach 8080.
-PublishPort=127.0.0.1:8080:8080
+# No PublishPort: nothing is exposed to the host. NPM is the sole path in,
+# proxying it as searxng:8080 on npm-network without touching this file.
 
 # Image entrypoint generates a default settings.yml with a
 # random secret_key on first start if the mount is empty.

@@ -18,11 +18,10 @@ Network=npm-network.network
 # the Authorization header of ~/.config/opencode/opencode.json.
 EnvironmentFile=@CONFIG_DIR@/searxng-mcp/token.env
 
-# Loopback only: NPM is the sole path in (it reaches the container as
-# searxng-mcp:8000 on npm-network). The loopback bind keeps verify.sh and
-# local debugging working; nothing on the LAN can reach 8100. Host 8100 ->
-# container 8000, so the whole MCP block reads 8100-8104.
-PublishPort=127.0.0.1:8100:8000
+# No PublishPort: nothing is exposed to the host, not even on loopback. NPM is
+# the sole path in for a client (it reaches the container as searxng-mcp:8000
+# on npm-network), and the host-side checks read it as a peer on that same
+# network, through scripts/lib.sh's net_curl.
 
 # Healthcheck: MCP initialize probe (authenticated). Makes a
 # wedged server visible/restartable instead of silently erroring.

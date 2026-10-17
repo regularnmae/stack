@@ -216,37 +216,6 @@ wait_cmd() { # description timeout cmd...
     done
 }
 
-wait_http() { # description timeout url
-    local desc="$1" t="$2" url="$3"
-    local deadline
-    [ "$DRY_RUN" = 1 ] && return 0
-    deadline=$(( $(date +%s) + t ))
-    while :; do
-        if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then log "$desc ready"; return 0; fi
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-            warn "$desc not ready after ${t}s"
-            return 1
-        fi
-        sleep 2
-    done
-}
-
-# The host-side loopback port of each HTTP service that answers /health (the
-# interface contract in the README: NPM terminates TLS and forwards to these;
-# the servers themselves are still 0.0.0.0 inside the container). Only the MCP
-# servers and boltmesh-backend serve a /health path; the other units are polled
-# through their podman healthcheck instead, so an empty result is meaningful.
-app_port() {
-    case "$1" in
-        searxng-mcp)       echo 8100 ;;
-        bitcoin-node-mcp)  echo 8101 ;;
-        monero-node-mcp)   echo 8102 ;;
-        monero-wallet-mcp) echo 8103 ;;
-        lightning-mcp)     echo 8104 ;;
-        boltmesh-backend)  echo 8105 ;;
-    esac
-}
-
 # Print the last lines of a container's log with an indent. Used when a wait
 # times out, so the deploy output shows *why* instead of just spinning.
 dump_tail() { # container [lines]
@@ -395,18 +364,12 @@ deploy_app() { # repo name
     run podman build -t "$image" "$dir"
     restart_unit "$r"
     # The app images define no podman healthcheck (the app repos own their
-    # Containerfiles), so podman never reports "(healthy)" and wait_healthy
-    # would burn the whole timeout and then verify. Poll the stack's /health
-    # contract on the host loopback port instead -- it answers the moment the
-    # server is actually accepting connections.
-    local port
-    port=$(app_port "$r")
-    if [ -n "$port" ]; then
-        wait_http "$r health" "$APP_HEALTH_WAIT" "http://127.0.0.1:$port/health" \
-            || { warn "$r did not report healthy"; return 1; }
-    else
-        wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
-    fi
+    # Containerfiles), but every unit here sets HealthCmd/HealthInterval: the
+    # MCP servers probe their own /mcp with an authenticated initialize, the
+    # BoltMesh tier its own /health. So podman's health status IS the readiness
+    # signal, and nothing has to be polled from the host -- which is just as
+    # well, because no service publishes a port for the host to poll.
+    wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
 }
 
 deploy_apps() {
@@ -505,7 +468,7 @@ deploy_boltmesh() {
     run_boltmesh_migrations || warn "migrations failed; the API may not start cleanly"
 
     restart_unit boltmesh-backend
-    wait_http "boltmesh-backend health" "$APP_HEALTH_WAIT" "http://127.0.0.1:8105/health" \
+    wait_healthy boltmesh-backend "$APP_HEALTH_WAIT" \
         || { warn "boltmesh-backend did not report healthy"; dump_tail boltmesh-backend 40; }
 
     restart_unit boltmesh-worker
@@ -563,12 +526,7 @@ if [ -n "$ONLY" ]; then
     else
         install_units
         restart_unit "$ONLY"
-        only_port=$(app_port "$ONLY")
-        if [ -n "$only_port" ]; then
-            wait_http "$ONLY health" "$APP_HEALTH_WAIT" "http://127.0.0.1:$only_port/health" || true
-        else
-            wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
-        fi
+        wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
     fi
     log "done (--only $ONLY)"
     exit 0
@@ -599,16 +557,16 @@ if [ "$SKIP_DAEMONS" = 1 ]; then
 Stack deployed (chain daemons skipped).
 
   Web and MCP:  valkey, searxng, nginx-proxy-manager (80/443/81),
-                searxng-mcp 127.0.0.1:8100, bitcoin-node-mcp 127.0.0.1:8101,
-                monero-node-mcp 127.0.0.1:8102, monero-wallet-mcp 127.0.0.1:8103,
-                lightning-mcp 127.0.0.1:8104
-  BoltMesh app:     postgres, boltmesh-backend 127.0.0.1:8105,
-                    boltmesh-worker, boltmesh-frontend 127.0.0.1:8106
+                searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
+                monero-wallet-mcp, lightning-mcp
+  BoltMesh app: postgres, boltmesh-backend, boltmesh-worker,
+                boltmesh-frontend
 
-The MCP servers and searxng bind loopback only -- nginx-proxy-manager is the
-sole path in (add a proxy host per server by hand in the admin UI on 81). The
-MCP tools error until their daemons exist. Drop --skip-daemons to bring up
-bitcoind, monerod, lightningd and monero-wallet-rpc.
+Nothing but nginx-proxy-manager publishes a host port: it reaches every service
+by container name on npm-network, and so do ./verify.sh and the monitoring
+scripts (add a proxy host per server by hand in the admin UI on 81). The MCP
+tools error until their daemons exist. Drop --skip-daemons to bring up bitcoind,
+monerod, lightningd and monero-wallet-rpc.
 EOF
 else
     cat <<EOF
@@ -617,12 +575,12 @@ Stack deployed.
 
   Daemons and web:  bitcoind, monerod, monero-wallet-rpc, lightningd, tor,
                     valkey, searxng, nginx-proxy-manager
-  MCP servers:      searxng-mcp 127.0.0.1:8100, bitcoin-node-mcp 127.0.0.1:8101,
-                    monero-node-mcp 127.0.0.1:8102, monero-wallet-mcp 127.0.0.1:8103,
-                    lightning-mcp 127.0.0.1:8104
-  BoltMesh app:     postgres, boltmesh-backend 127.0.0.1:8105,
-                    boltmesh-worker, boltmesh-frontend 127.0.0.1:8106
-  Exposure:         loopback only; nginx-proxy-manager (80/443/81) is the way in
+  MCP servers:      searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
+                    monero-wallet-mcp, lightning-mcp
+  BoltMesh app:     postgres, boltmesh-backend, boltmesh-worker,
+                    boltmesh-frontend
+  Exposure:         nothing but nginx-proxy-manager (80/443/81); every service
+                    is reached by container name on npm-network
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR
   Monitoring:       every 5 min (monitor.timer) + spend tripwire; both alert

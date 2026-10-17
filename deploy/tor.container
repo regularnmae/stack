@@ -19,8 +19,10 @@ Network=npm-network.network
 # stable address that is referenced by IP.
 PodmanArgs=--ip=10.89.0.240
 
-PublishPort=127.0.0.1:9050:9050
-PublishPort=127.0.0.1:9051:9051
+# No PublishPort: neither the SOCKS port nor the control port is exposed to the
+# host. lightningd reaches tor at 10.89.0.240:9050 on npm-network (the pinned
+# PodmanArgs IP below), and torrc's SocksPolicy would reject a connection from
+# the host's loopback anyway.
 Volume=@DATA_DIR@/tor/torrc:/etc/tor/torrc:ro,Z
 
 Exec=tor -f /etc/tor/torrc
