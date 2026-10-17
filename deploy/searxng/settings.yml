@@ -52,6 +52,9 @@ use_default_settings:
       - bing images
       - wikicommons.images
 
+general:
+  instance_name: "BoltMesh"
+
 # The package ships these off (mojeek/swisscows inactive: true, yahoo and
 # discuss.python disabled: true). keep_only alone keeps them out, so
 # re-enable them explicitly -- all verified responding before this change.
