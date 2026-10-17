@@ -341,15 +341,19 @@ NPM_HOSTS=(
     "${BOLTMESH_FRONTEND_HOST}|boltmesh-frontend:80|ws,block"
     "${BOLTMESH_API_HOST}|boltmesh-backend:8000|ws,block"
     "${SEARXNG_HOST}|searxng:8080|ws,block"
+    "${CLNREST_HOST}|https://lightningd:3010|ws,block"
+    "${XMR_RPC_HOST}|monero-wallet-rpc:18083|ws,block"
     "${MCP_HOST}|searxng-mcp:8000|mcp,force-ssl,http2"
 )
 ```
 
-`flags` is a comma-separated subset of `force-ssl` (redirect `:80` to `:443`),
-`http2`, `ws` (websocket upgrade), `block` (block common exploits) and `mcp`.
-`--dry-run` prints the API payloads without changing anything, and `--prune`
-additionally **deletes** hosts and certificates that `NPM_HOSTS` does not
-declare — the only destructive mode.
+Each entry is `domain | forward | flags`, where `forward` is
+`[scheme://]host:port` (scheme defaults to `http`; `https` for an upstream that
+speaks TLS, like `clnrest`) and `flags` is a comma-separated subset of
+`force-ssl` (redirect `:80` to `:443`), `http2`, `ws` (websocket upgrade),
+`block` (block common exploits) and `mcp`. `--dry-run` prints the API payloads
+without changing anything, and `--prune` additionally **deletes** hosts and
+certificates that `NPM_HOSTS` does not declare — the only destructive mode.
 
 The credentials for the API are in `$DATA_DIR/config/npm/api.env` (mode 600,
 seeded by `deploy/install.sh`):

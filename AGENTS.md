@@ -130,7 +130,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   read a token out of a running verify/monitor/audit sweep. `npm-hosts.sh`
   does the same with the NPM admin password and the API token it mints.
 - **Every proxy host is declared, not hand-clicked:** `NPM_HOSTS` in
-  `stack.conf` (`domain | forward_host:port | flags`) is the whole public
+  `stack.conf` (`domain | [scheme://]host:port | flags`) is the whole public
   surface, and `scripts/npm-hosts.sh` (run by `deploy.sh`, or `--only npm-hosts`)
   reconciles it through nginx-proxy-manager's admin API on `81` — update in
   place by `domain_names`, else create, plus a Let's Encrypt certificate per
@@ -144,7 +144,9 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `proxy_read_timeout` — the transport is SSE, and a buffered body hangs the
   client. `verify.sh` re-checks that path through NPM's `:80` (following the
   force-SSL redirect to `:443`) by connecting the public host to NPM itself with
-  `--connect-to`, so the certificate still validates.
+  `--connect-to`, so the certificate still validates. Proxying a daemon's own
+  API (`clnrest`, `xmr-rpc`) is gated only by that daemon's RPC credentials, not
+  by an MCP token.
 
 ## Interface contract with the app repos
 

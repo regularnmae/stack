@@ -8,9 +8,11 @@
 #
 # NPM_HOSTS in stack.conf is the declaration; each entry is
 #
-#   domain | forward_host:port | flags
+#   domain | forward | flags
 #
-# where `flags` is a comma-separated subset of
+# where `forward` is `[scheme://]host:port` (scheme defaults to http; use https
+# for an upstream that speaks TLS, e.g. clnrest), and `flags` is a comma-
+# separated subset of
 #
 #   force-ssl  redirect :80 to :443 (needs a certificate)
 #   http2      negotiate HTTP/2
@@ -143,14 +145,14 @@ mcp_locations() {
     printf '%s' "$locations"
 }
 
-build_payload() { # domain forward_host forward_port cert_id flags advanced locations
-    printf '{"domain_names":["%s"],"forward_scheme":"http","forward_host":"%s","forward_port":%s,"certificate_id":%s,"ssl_forced":%s,"http2_support":%s,"block_exploits":%s,"caching_enabled":false,"allow_websocket_upgrade":%s,"access_list_id":0,"enabled":true,"advanced_config":"%s","locations":[%s]}' \
-        "$1" "$2" "$3" "$4" \
-        "$(has_flag "$5" force-ssl && echo true || echo false)" \
-        "$(has_flag "$5" http2 && echo true || echo false)" \
-        "$(has_flag "$5" block && echo true || echo false)" \
-        "$(has_flag "$5" ws && echo true || echo false)" \
-        "$6" "$7"
+build_payload() { # domain forward_scheme forward_host forward_port cert_id flags advanced locations
+    printf '{"domain_names":["%s"],"forward_scheme":"%s","forward_host":"%s","forward_port":%s,"certificate_id":%s,"ssl_forced":%s,"http2_support":%s,"block_exploits":%s,"caching_enabled":false,"allow_websocket_upgrade":%s,"access_list_id":0,"enabled":true,"advanced_config":"%s","locations":[%s]}' \
+        "$1" "$2" "$3" "$4" "$5" \
+        "$(has_flag "$6" force-ssl && echo true || echo false)" \
+        "$(has_flag "$6" http2 && echo true || echo false)" \
+        "$(has_flag "$6" block && echo true || echo false)" \
+        "$(has_flag "$6" ws && echo true || echo false)" \
+        "$7" "$8"
 }
 
 # --- certificate for a domain ---------------------------------------------
@@ -196,8 +198,18 @@ declared=()
 for entry in "${NPM_HOSTS[@]}"; do
     IFS='|' read -r domain forward flags <<<"$entry"
     if [ -z "$domain" ] || [ -z "$forward" ]; then
-        die "bad NPM_HOSTS entry: $entry (want \"domain|forward_host:port|flags\")"
+        die "bad NPM_HOSTS entry: $entry (want \"domain|[scheme://]forward_host:port|flags\")"
     fi
+    # `forward` may carry a scheme; the upstream of a TLS-speaking daemon
+    # (clnrest) needs https. Everything else is plain http inside npm-network.
+    scheme="http"
+    case "$forward" in
+        *://*) scheme="${forward%%://*}"; forward="${forward#*://}" ;;
+    esac
+    case "$scheme" in
+        http|https) ;;
+        *) die "bad forward scheme in NPM_HOSTS entry: $entry" ;;
+    esac
     fhost="${forward%:*}"
     fport="${forward##*:}"
     declared+=("$domain")
@@ -216,7 +228,7 @@ for entry in "${NPM_HOSTS[@]}"; do
         flags="$(printf '%s' "$flags" | sed -e 's/force-ssl//' -e 's/,,*/,/g' -e 's/^,//' -e 's/,$//')"
     fi
 
-    payload=$(build_payload "$domain" "$fhost" "$fport" "$cert_id" "$flags" "$advanced" "$locations")
+    payload=$(build_payload "$domain" "$scheme" "$fhost" "$fport" "$cert_id" "$flags" "$advanced" "$locations")
 
     existing_id=$(printf '%s' "$hosts" | jq -r --arg d "$domain" \
         '[.[]? | select((.domain_names // []) | index($d)) | .id] | (.[0] // empty)' 2>/dev/null || true)
@@ -234,7 +246,7 @@ for entry in "${NPM_HOSTS[@]}"; do
     if [ -n "$existing_id" ]; then
         resp=$(npm_call PUT "/api/nginx/proxy-hosts/$existing_id" "$payload")
         if printf '%s' "$resp" | jq -e '.id' >/dev/null 2>&1; then
-            log "updated proxy host $existing_id ($domain -> $fhost:$fport)"
+            log "updated proxy host $existing_id ($domain -> $scheme://$fhost:$fport)"
         else
             die "could not update proxy host $existing_id ($domain): $(printf '%s' "$resp" | head -c 400)"
         fi
@@ -242,7 +254,7 @@ for entry in "${NPM_HOSTS[@]}"; do
         resp=$(npm_call POST /api/nginx/proxy-hosts "$payload")
         new_id=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null || true)
         [ -n "$new_id" ] || die "could not create the proxy host for $domain: $(printf '%s' "$resp" | head -c 400)"
-        log "created proxy host $new_id ($domain -> $fhost:$fport)"
+        log "created proxy host $new_id ($domain -> $scheme://$fhost:$fport)"
     fi
 
     if has_flag "$flags" mcp; then
