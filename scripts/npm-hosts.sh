@@ -137,7 +137,9 @@ mcp_locations() {
     for pair in "${MCP_HOSTS[@]}"; do
         prefix="${pair%%:*}"
         host="${pair##*:}"
-        [ -n "$prefix" ] && [ -n "$host" ] || die "bad MCP_HOSTS entry: $pair (want \"/prefix:container\")"
+        if [ -z "$prefix" ] || [ -z "$host" ]; then
+            die "bad MCP_HOSTS entry: $pair (want \"/prefix:container\")"
+        fi
         obj=$(printf '{"path":"%s","forward_scheme":"http","forward_host":"%s","forward_port":%s,"forward_path":"/mcp","access_list_id":0}' \
             "$prefix" "$host" "$MCP_PORT")
         locations="${locations:+$locations,}$obj"
