@@ -9,11 +9,12 @@
 # bootstrap.sh sets. Its SQLite database and TLS material live in
 # $DATA_DIR/npm/{data,letsencrypt}; back those up -- install.sh never overwrites them.
 #
-# NPM IS the request path for every MCP server and for searxng: they bind
-# 127.0.0.1 only, so NPM (reaching them by container name on npm-network) is
-# the sole way in, terminating TLS. The MCP bearer tokens still gate them.
-# Add a proxy host per server by hand in the admin UI (81); those hosts live
-# in the SQLite database below, not in this repo.
+# NPM IS the request path for every service: nothing else here publishes a host
+# port, not even on loopback, so reaching a container by name on npm-network is
+# the sole way in for a client and NPM is what terminates TLS in front of it.
+# The MCP bearer tokens still gate them. Add a proxy host per server by hand in
+# the admin UI (81); those hosts live in the SQLite database below, not in this
+# repo.
 [Unit]
 Description=Nginx Proxy Manager
 After=network-online.target npm-network-network.service
