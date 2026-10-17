@@ -171,11 +171,15 @@ wait_healthy() { # container timeout
 
     # Prefer podman's own health wait: it wakes the instant the state changes
     # instead of a shell `sleep 5` loop that spawns podman and date per tick.
-    # Only when the container actually defines a healthcheck, else podman has
-    # nothing to wait on.
-    if podman wait --help 2>/dev/null | grep -q -- '--condition' \
+    # `podman wait` has no --timeout of its own (it was never a flag -- passing
+    # one made every wait fail instantly, so the caller always saw "not
+    # healthy"), so coreutils `timeout` bounds it; killing the client leaves the
+    # container alone. Only when the container defines a healthcheck, else
+    # podman has nothing to wait on.
+    if command -v timeout >/dev/null 2>&1 \
+        && podman wait --help 2>/dev/null | grep -q -- '--condition' \
         && [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$c" 2>/dev/null)" = yes ]; then
-        podman wait --condition=healthy --condition=unhealthy --interval 2 --timeout "$t" "$c" >/dev/null 2>&1 || true
+        timeout "$t" podman wait --condition=healthy --condition=unhealthy --interval 2 "$c" >/dev/null 2>&1 || true
         st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
         case "$st" in
             *"(healthy)"*) log "$c is healthy"; return 0 ;;
