@@ -105,15 +105,18 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **BoltMesh is a tier of four units, not an MCP server.** `postgres`,
   `boltmesh-backend`, `boltmesh-worker`, `boltmesh-frontend`. It is built by
   `deploy_boltmesh` in `deploy.sh`, not `deploy_app`: the repos live under a
-  second org (`GITHUB_ORG_BOLTMESH`) and the frontend needs `--target prod` plus
-  the `VITE_*` build args (baked into the bundle, so a hostname change is a
-  rebuild). It brings no chains: the backend points at the stack's `lightningd`
-  (clnrest) and `monero-wallet-rpc`. Its rune is deliberately minimal
-  (`getinfo`/`listinvoices`/`invoice`), so BoltMesh can bill but never move funds.
-  Its four env files live under `$DATA_DIR/config/boltmesh/`: `db.env` and
-  `secrets.env` are generated, `app.env` is operator-editable, `gateway.env` is
-  machine-written from the running daemons. `install.sh` seeds `app.env` from the
-  `BOLTMESH_*` values in `stack.conf`.
+  second org (`GITHUB_ORG_BOLTMESH`) **and are private**, so they are cloned over
+  SSH (`GITHUB_SSH_HOST`) -- the host must authenticate to GitHub, and
+  `deploy.sh` exports `GIT_TERMINAL_PROMPT=0`/`GIT_SSH_COMMAND=ssh -o BatchMode=yes`
+  so a missing key is a clear error, not a prompt. The frontend also needs
+  `--target prod` plus the `VITE_*` build args (baked into the bundle, so a
+  hostname change is a rebuild). It brings no chains: the backend points at the
+  stack's `lightningd` (clnrest) and `monero-wallet-rpc`. Its rune is
+  deliberately minimal (`getinfo`/`listinvoices`/`invoice`), so BoltMesh can bill
+  but never move funds. Its four env files live under `$DATA_DIR/config/boltmesh/`:
+  `db.env` and `secrets.env` are generated, `app.env` is operator-editable,
+  `gateway.env` is machine-written from the running daemons. `install.sh` seeds
+  `app.env` from the `BOLTMESH_*` values in `stack.conf`.
 - **Shared bind mounts use `:z`, not `:Z`.** The backup container mounts `cln/` and
   `npm/` read-only alongside `lightningd` and `nginx-proxy-manager`; two containers
   cannot share a path one labels private (whichever starts last relabels it and

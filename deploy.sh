@@ -26,6 +26,16 @@ DRY_RUN=0
 . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
+
+# git must never prompt mid-deploy: on a host with no credentials that is a
+# one-time setup step, not a question, and a prompt would hang the run.
+# BatchMode makes ssh fail fast too (no passphrase or host-key prompt). An
+# operator-provided GIT_SSH_COMMAND wins.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
+# Appended to a fetch failure. The public $GITHUB_ORG repos clone over HTTPS,
+# but the private boltmesh-labs ones need SSH.
+GIT_CRED_HINT="git could not authenticate (it is not allowed to prompt). The $GITHUB_ORG_BOLTMESH repos are private: run 'ssh -T $GITHUB_SSH_HOST' -- it must greet you -- then re-run ./deploy.sh"
 ONLY=""
 DO_BOOTSTRAP=0
 DO_WALLETS=1
@@ -111,19 +121,31 @@ preflight() {
 # ---------------------------------------------------------------------------
 # 1. fetch the application repos
 # ---------------------------------------------------------------------------
+# One repo, cloned or fast-forwarded into $BUILD_DIR/<dir> from <url>. git must
+# never prompt (GIT_TERMINAL_PROMPT/GIT_SSH_COMMAND are exported below): on a
+# host without credentials that is a one-time setup step, and a prompt would
+# hang the deploy. The remote URL is re-set on every run so a checkout that was
+# first cloned over a different protocol (HTTPS -> SSH) heals itself.
+fetch_repo() { # url dir label
+    local url="$1" dir="$2" label="$3"
+    if [ -d "$dir/.git" ]; then
+        log "updating $label"
+        run git -C "$dir" remote set-url origin "$url"
+        run git -C "$dir" pull --ff-only -q \
+            || die "could not update $label from $url -- $GIT_CRED_HINT"
+    else
+        log "cloning $label"
+        run git clone -q "$url" "$dir" \
+            || die "could not clone $label from $url -- $GIT_CRED_HINT"
+    fi
+}
+
 fetch_repos() { # [repo...]  (default: every APP_REPOS entry)
     mkdir -p "$BUILD_DIR"
-    local repos=("$@") r dir
+    local repos=("$@") r
     [ "${#repos[@]}" -gt 0 ] || repos=("${APP_REPOS[@]}")
     for r in "${repos[@]}"; do
-        dir="$BUILD_DIR/$r"
-        if [ -d "$dir/.git" ]; then
-            log "updating $r"
-            run git -C "$dir" pull --ff-only -q
-        else
-            log "cloning $r"
-            run git clone -q "https://github.com/$GITHUB_ORG/$r.git" "$dir"
-        fi
+        fetch_repo "https://github.com/$GITHUB_ORG/$r.git" "$BUILD_DIR/$r" "$r"
     done
 }
 
@@ -397,19 +419,15 @@ deploy_apps() {
 # Not deploy_app: the BoltMesh repos live in a second org and, while they ship a
 # Containerfile, the frontend needs an explicit build target and VITE_* build
 # args (inlined into the bundle at build time) that deploy_app does not pass.
+# The private boltmesh-labs repos are fetched over SSH (GITHUB_SSH_HOST), unlike
+# the public $GITHUB_ORG ones. Same repo:dir pairs as stack.conf.
 fetch_boltmesh() { # every BOLTMESH_REPOS entry ("repo:dir" pairs)
     mkdir -p "$BUILD_DIR"
     local pair repo dir
     for pair in "${BOLTMESH_REPOS[@]}"; do
         repo="${pair%%:*}"            # GitHub repo name
         dir="$BUILD_DIR/${pair##*:}"  # local build dir (namespaced)
-        if [ -d "$dir/.git" ]; then
-            log "updating $repo"
-            run git -C "$dir" pull --ff-only -q
-        else
-            log "cloning $repo"
-            run git clone -q "https://github.com/$GITHUB_ORG_BOLTMESH/$repo.git" "$dir"
-        fi
+        fetch_repo "$GITHUB_SSH_HOST:$GITHUB_ORG_BOLTMESH/$repo.git" "$dir" "$repo"
     done
 }
 

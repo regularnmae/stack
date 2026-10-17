@@ -331,6 +331,15 @@ is the one part of the stack that is not an MCP server, so it is built by its
 own step (`deploy_boltmesh` in `deploy.sh`): the images need a build target and
 `VITE_*` build arguments the generic app path does not pass.
 
+Those two repos are **private** (the `$GITHUB_ORG` ones are public), so they are
+cloned over **SSH**, not HTTPS: the host must authenticate to GitHub as a user
+with access (`ssh -T git@github.com` must greet you). `deploy.sh` exports
+`GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"`, so a
+missing key is a clear error rather than a username prompt hanging the deploy.
+Set `GITHUB_SSH_HOST` to an `~/.ssh/config` alias if `git@github.com` is not the
+key's host. An existing HTTPS checkout is re-pointed at the SSH URL on the next
+run.
+
 It does not bring its own chains. The backend is pointed at the stack's own
 `lightningd` (clnrest) and `monero-wallet-rpc`:
 
@@ -344,6 +353,10 @@ It does not bring its own chains. The backend is pointed at the stack's own
 
 ### Before it works
 
+0. (once per host) The `boltmesh-labs` repos are private, so the host needs
+   GitHub **SSH** access before the first `./deploy.sh`: `ssh -T git@github.com`
+   must greet you. Without it the clone fails fast with a clear error (git is
+   not allowed to prompt).
 1. Point `boltmesh.net` and `api.boltmesh.net` at the host (`BOLTMESH_FRONTEND_HOST`
    / `BOLTMESH_API_HOST` in `stack.conf`), and make `:80` reachable for the
    Let's Encrypt challenge.
