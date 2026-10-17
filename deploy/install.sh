@@ -3,8 +3,8 @@
 # data directories the containers need.
 #
 # This is the **only** installer. The application repos (searxng-mcp and the
-# four crypto MCP servers) ship code, tests, CI and their Containerfile; their
-# units and env wiring live here.
+# four crypto MCP servers, plus BoltMesh's backend and frontend) ship code,
+# tests, CI and their Containerfile; their units and env wiring live here.
 #
 # EVERYTHING persistent lives under one data dir ($STACK_DATA_DIR, default
 # $HOME/data): the daemon data, the nginx-proxy-manager data, and the
@@ -53,6 +53,11 @@ UNITS=(
     "monero-node-mcp.container:monero-node-mcp.container"
     "monero-wallet-mcp.container:monero-wallet-mcp.container"
     "lightning-mcp.container:lightning-mcp.container"
+    "postgres.container:postgres.container"
+    "boltmesh-backend.container:boltmesh-backend.container"
+    "boltmesh-worker.container:boltmesh-worker.container"
+    "boltmesh-frontend.container:boltmesh-frontend.container"
+    "postgres-dump.container:postgres-dump.container"
     "backup.container:backup.container"
 )
 
@@ -72,6 +77,10 @@ USER_TIMERS=(
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
 READ_METHODS='"method^getinfo","method^listfunds","method^listchannels","method^listpeers","method^listinvoices","method^listpays","method^decode"'
 SPEND_METHODS="$READ_METHODS,\"method^invoice\",\"method^pay\",\"method^keysend\",\"method^withdraw\",\"method^close\""
+# BoltMesh's Lightning gateway only creates invoices and reads them back (the
+# clnrest calls are /v1/invoice and /v1/listinvoices), so its rune is a subset:
+# no pay/keysend/withdraw/close. getinfo is included so `checkrune` proves it.
+BOLTMESH_METHODS='"method^getinfo","method^listinvoices","method^invoice"'
 
 # ---------------------------------------------------------------------------
 # where the data lives
@@ -120,6 +129,23 @@ new_or_reused_token() {
         printf '==> reused %s from the running %s\n' "$var" "$container" >&2
     else
         printf '==> generated a new %s -- update clients to match\n' "$var" >&2
+        val=$(rand_hex)
+    fi
+    printf '%s' "$val"
+}
+
+# Like new_or_reused_token, but for a value nobody has to present (a JWT
+# signing key, the bootstrap pepper): reuse whatever the running container
+# already carries so adopting a host keeps existing sessions and node tokens
+# valid, otherwise generate. Prints the value on stdout, never the reverse.
+new_or_reused_secret() {
+    local container="$1" var="$2" val=""
+    if command -v podman >/dev/null 2>&1; then
+        val=$(podman exec "$container" printenv "$var" 2>/dev/null || true)
+    fi
+    if [ -n "$val" ]; then
+        printf '==> reused %s from the running %s\n' "$var" "$container" >&2
+    else
         val=$(rand_hex)
     fi
     printf '%s' "$val"
@@ -276,6 +302,12 @@ fi
 chown_image_uid "$DATA_DIR/monero-wallet-rpc"
 
 mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
+
+# BoltMesh's data: the postgres cluster (fresh on a new host) and the directory
+# the pre-backup pg_dumpall writes into. The dump container runs as the image's
+# root (the host user under rootless podman) and the postgres image chowns its
+# own PGDATA, so neither dir needs the image-uid chown the other apps need.
+mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/postgres-dump"
 
 # The backup job's restic cache (regenerable) and its repository. The repo is
 # outside $DATA_DIR on purpose, so wiping the data dir does not delete it.
@@ -443,6 +475,106 @@ EOF
     log "wrote $LN_ENV/spend.env (mode 600) with ENABLE_SPENDING=0"
 fi
 
+# ---------------------------------------------------------------------------
+# BoltMesh env files (under the data dir, like every other app's)
+# ---------------------------------------------------------------------------
+# The app reads one flat environment, so the split here is by who owns each
+# value: install.sh generates the database and the signing keys, the operator
+# fills in the third-party credentials, and gateway.env is derived from the
+# running daemons (written further down, once lightningd can be reached).
+BOLT_DB="$CONFIG_DIR/boltmesh"
+
+if ensure_secret "$BOLT_DB/db.env" "boltmesh db env"; then
+    pg_password=$(rand_hex)
+    write_secret "$BOLT_DB/db.env" <<EOF
+# The BoltMesh database. Read by the postgres unit (POSTGRES_*) and by the
+# backend/worker (DATABASE_URL, same password). The server ignores DATABASE_URL.
+POSTGRES_DB=vpndb
+POSTGRES_USER=vpnuser
+POSTGRES_PASSWORD=$pg_password
+DATABASE_URL=postgresql+asyncpg://vpnuser:$pg_password@postgres:5432/vpndb
+EOF
+    log "wrote $BOLT_DB/db.env (mode 600)"
+fi
+
+# The pre-backup dump's connection settings, read back from db.env so a second
+# run keeps the same password.
+pg_password=$(env_value "$BOLT_DB/db.env" POSTGRES_PASSWORD)
+if ensure_secret "$BOLT_DB/dump.env" "boltmesh dump env"; then
+    write_secret "$BOLT_DB/dump.env" <<EOF
+# libpq settings for deploy/postgres-dump.container (the pre-backup pg_dumpall).
+# Deliberately NOT in db.env: PGHOST/PGUSER in the postgres server's own
+# environment would break its socket-based entrypoint bootstrap.
+PGHOST=postgres
+PGUSER=vpnuser
+PGPASSWORD=$pg_password
+EOF
+    log "wrote $BOLT_DB/dump.env (mode 600)"
+fi
+
+if ensure_secret "$BOLT_DB/secrets.env" "boltmesh secrets env"; then
+    write_secret "$BOLT_DB/secrets.env" <<EOF
+# JWT signing keys and the node-bootstrap pepper (each min 32 chars, distinct).
+# Generated once; regenerating them invalidates every session and node token.
+SECRET_KEY=$(new_or_reused_secret boltmesh-backend SECRET_KEY)
+REFRESH_SECRET_KEY=$(new_or_reused_secret boltmesh-backend REFRESH_SECRET_KEY)
+NODE_SECRET_KEY=$(new_or_reused_secret boltmesh-backend NODE_SECRET_KEY)
+BOOTSTRAP_SECRET_PEPPER=$(new_or_reused_secret boltmesh-backend BOOTSTRAP_SECRET_PEPPER)
+EOF
+    log "wrote $BOLT_DB/secrets.env (mode 600)"
+fi
+
+if ensure_secret "$BOLT_DB/app.env" "boltmesh app env"; then
+    write_secret "$BOLT_DB/app.env" <<EOF
+# BoltMesh API + worker configuration. Operator-editable: the app reads one flat
+# environment, so the credentials YOU supply (OAuth, SMTP, the agent deploy
+# token) live here beside the URLs. The stack-owned values (database, JWT keys,
+# payment gateways) are in db.env/secrets.env/gateway.env -- do not duplicate
+# them here.
+#
+# APP_ENV=prod: the app derives Secure + SameSite=None cookies from it (the SPA
+# and the API are on different hosts) and stops loading any .env file.
+APP_ENV=prod
+APP_DEBUG=0
+CACHE_URL=redis://valkey:6379/0
+
+# Public URLs. API_BASE_URL is also the base of every OAuth redirect_uri, so it
+# must match the provider consoles and the nginx-proxy-manager proxy host.
+API_BASE_URL=https://$BOLTMESH_API_HOST
+FRONTEND_URL=https://$BOLTMESH_FRONTEND_HOST
+CORS_ALLOW_ORIGINS=https://$BOLTMESH_FRONTEND_HOST
+COMPANY_NAME=$BOLTMESH_COMPANY_NAME
+TRUST_PROXY_HEADERS=1
+
+# OAuth: register https://<api host>/v1/auth/google/callback and
+# https://<api host>/v1/auth/github/callback in each provider's console.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+
+# SMTP for activation and password-reset mail.
+MAIL_SERVER=
+MAIL_PORT=587
+MAIL_USERNAME=
+MAIL_PASSWORD=
+MAIL_FROM=$BOLTMESH_SUPPORT_EMAIL
+MAIL_STARTTLS=true
+MAIL_SSL_TLS=false
+SUPPRESS_EMAIL=false
+TEMPLATES_DIR=templates
+
+# Node provisioning: the agent repo and a token that can read it.
+GITHUB_REPO=$BOLTMESH_AGENT_REPO
+GITHUB_TOKEN=
+AWS_IID_ACCOUNT_ID=
+AWS_IID_SIGNER_FINGERPRINTS=
+MANUAL_BOOTSTRAP_SECRET_TTL_DAYS=30
+SERVER_STALE_SECONDS=120
+EOF
+    log "wrote $BOLT_DB/app.env (mode 600) -- fill in OAuth/SMTP/GitHub before use"
+fi
+
 # Backup repository settings for deploy/backup.container. The unit is
 # secret-free and reads these through EnvironmentFile; the password is a real
 # secret, so it follows the same resolution order (an operator-supplied value
@@ -569,6 +701,36 @@ EOF
     log "wrote $LN_ENV/node.env (mode 600)"
 fi
 
+# BoltMesh's payment gateway wiring, derived from the running daemons: the CLN
+# rune (created here, so it lands on the run that sees a live lightningd) and
+# the Monero wallet's RPC login from secrets.env. Rewritten every run -- the
+# file is machine-owned, never hand-edited.
+BOLT_GATEWAY="$BOLT_DB/gateway.env"
+bolt_rune=$(env_value "$BOLT_GATEWAY" LIGHTNING_API_KEY)
+if command -v podman >/dev/null 2>&1 && ! rune_usable "$bolt_rune"; then
+    if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
+        new_bolt_rune=$(create_rune "[[$BOLTMESH_METHODS]]")
+        if [ -n "$new_bolt_rune" ]; then
+            bolt_rune="$new_bolt_rune"
+            log "created a usable BoltMesh rune"
+        fi
+    else
+        log "lightningd not reachable yet; the BoltMesh rune is created by a later install.sh run"
+    fi
+fi
+write_secret "$BOLT_GATEWAY" <<EOF
+# Derived by deploy/install.sh; do not hand-edit. The URL is clnrest over the
+# podman network and the rune permits only invoice + listinvoices (+ getinfo for
+# the reachability probe), so BoltMesh cannot move funds through CLN.
+LIGHTNING_GATEWAY_URL=https://lightningd:3010
+LIGHTNING_API_KEY=$bolt_rune
+LIGHTNING_TLS_INSECURE=1
+MONERO_RPC_URL=http://monero-wallet-rpc:18083/json_rpc
+MONERO_RPC_USER=${MONERO_RPC_LOGIN%%:*}
+MONERO_RPC_PASSWORD=${MONERO_RPC_LOGIN#*:}
+EOF
+log "wrote $BOLT_GATEWAY (mode 600)"
+
 # ---------------------------------------------------------------------------
 # 6. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
@@ -633,14 +795,18 @@ cat <<EOF
 Done. Everything the stack owns lives under:
   $DATA_DIR
     bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/ npm/
-    config/   <- all bearer tokens and secrets (mode 600)
-    audit/    <- the monitor's log and the spend tripwire baselines
+    postgres/       <- the BoltMesh cluster (dumped, not backed up raw)
+    postgres-dump/  <- the pre-backup pg_dumpall
+    config/         <- all bearer tokens and secrets (mode 600)
+    audit/          <- the monitor's log and the spend tripwire baselines
   $STACK_BACKUP_DIR
     the restic repository the nightly backup writes (backup.timer)
 
 Next:  ./deploy.sh         # build images, start everything, verify
 Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
   $CONFIG_DIR/monero-wallet-mcp/spend.env  and  $CONFIG_DIR/lightning-mcp/spend.env
+BoltMesh is wired to the stack's lightningd and monero-wallet-rpc; fill in the
+  OAuth / SMTP / GitHub values in $CONFIG_DIR/boltmesh/app.env before first use.
 The monitor runs every 5 minutes (monitor.timer) and alerts only once
   $CONFIG_DIR/monitoring/monitor.env has an Apprise target and/or a heartbeat.
 Keep a copy of RESTIC_PASSWORD ($BACKUP_ENV) off the data disk: it is the only

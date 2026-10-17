@@ -4,7 +4,8 @@
 #   ./deploy.sh                    # fetch repos, install, build every image,
 #                                  # start everything, verify
 #   ./deploy.sh --bootstrap        # also provision a bare Rocky 10 host first
-#   ./deploy.sh --only <name>      # redeploy a single service (app or unit)
+#   ./deploy.sh --only <name>      # redeploy a single service (app or unit);
+#                                  # --only boltmesh rebuilds the whole app tier
 #   ./deploy.sh --skip-apps        # infrastructure only (daemons, searxng, NPM)
 #   ./deploy.sh --skip-daemons     # everything except the chain nodes: no
 #                                  # bitcoind/monerod/lightningd/monero-wallet-rpc,
@@ -39,6 +40,7 @@ BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
 BITCOIND_WALLET_WAIT="${BITCOIND_WALLET_WAIT:-120}"
 MONEROD_WAIT="${MONEROD_WAIT:-300}"
 LIGHTNINGD_WAIT="${LIGHTNINGD_WAIT:-900}"
+POSTGRES_WAIT="${POSTGRES_WAIT:-180}"
 APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"
 BITCOIND_READY=0
 
@@ -203,16 +205,19 @@ wait_http() { # description timeout url
     done
 }
 
-# The host-side loopback port of each MCP server (the interface contract in the
-# README: NPM terminates TLS and forwards to these; the servers themselves are
-# still 0.0.0.0 inside the container).
+# The host-side loopback port of each HTTP service that answers /health (the
+# interface contract in the README: NPM terminates TLS and forwards to these;
+# the servers themselves are still 0.0.0.0 inside the container). Only the MCP
+# servers and boltmesh-backend serve a /health path; the other units are polled
+# through their podman healthcheck instead, so an empty result is meaningful.
 app_port() {
     case "$1" in
-        searxng-mcp)       echo 8000 ;;
+        searxng-mcp)       echo 8100 ;;
         bitcoin-node-mcp)  echo 8101 ;;
         monero-node-mcp)   echo 8102 ;;
         monero-wallet-mcp) echo 8103 ;;
         lightning-mcp)     echo 8104 ;;
+        boltmesh-backend)  echo 8105 ;;
     esac
 }
 
@@ -387,6 +392,108 @@ deploy_apps() {
 }
 
 # ---------------------------------------------------------------------------
+# 6b. the BoltMesh app tier (postgres + backend + worker + frontend)
+# ---------------------------------------------------------------------------
+# Not deploy_app: the BoltMesh repos live in a second org and, while they ship a
+# Containerfile, the frontend needs an explicit build target and VITE_* build
+# args (inlined into the bundle at build time) that deploy_app does not pass.
+fetch_boltmesh() { # every BOLTMESH_REPOS entry ("repo:dir" pairs)
+    mkdir -p "$BUILD_DIR"
+    local pair repo dir
+    for pair in "${BOLTMESH_REPOS[@]}"; do
+        repo="${pair%%:*}"            # GitHub repo name
+        dir="$BUILD_DIR/${pair##*:}"  # local build dir (namespaced)
+        if [ -d "$dir/.git" ]; then
+            log "updating $repo"
+            run git -C "$dir" pull --ff-only -q
+        else
+            log "cloning $repo"
+            run git clone -q "https://github.com/$GITHUB_ORG_BOLTMESH/$repo.git" "$dir"
+        fi
+    done
+}
+
+# Prefer Containerfile (the stack's contract); Dockerfile is the pre-rename
+# name, kept working so a host that pinned an older checkout still builds.
+boltmesh_containerfile() { # dir
+    if [ -f "$1/Containerfile" ]; then printf '%s' "$1/Containerfile"; else printf '%s' "$1/Dockerfile"; fi
+}
+
+build_boltmesh_backend() {
+    local dir="$BUILD_DIR/boltmesh-backend" df
+    [ -d "$dir" ] || { warn "boltmesh-backend is not cloned under $BUILD_DIR"; return 1; }
+    df=$(boltmesh_containerfile "$dir")
+    [ -f "$df" ] || { warn "boltmesh-backend has no Containerfile"; return 1; }
+    log "building localhost/boltmesh-backend:latest (API and worker share it)"
+    run podman build -t localhost/boltmesh-backend:latest -f "$df" "$dir"
+}
+
+build_boltmesh_frontend() {
+    local dir="$BUILD_DIR/boltmesh-frontend" df
+    [ -d "$dir" ] || { warn "boltmesh-frontend is not cloned under $BUILD_DIR"; return 1; }
+    df=$(boltmesh_containerfile "$dir")
+    [ -f "$df" ] || { warn "boltmesh-frontend has no Containerfile"; return 1; }
+    log "building localhost/boltmesh-frontend:latest (target prod, VITE_* baked in)"
+    run podman build --target prod \
+        --build-arg "VITE_API_URL=https://$BOLTMESH_API_HOST/v1" \
+        --build-arg "VITE_APP_COMPANY_NAME=$BOLTMESH_COMPANY_NAME" \
+        --build-arg "VITE_APP_SUPPORT_EMAIL=$BOLTMESH_SUPPORT_EMAIL" \
+        -t localhost/boltmesh-frontend:latest -f "$df" "$dir"
+}
+
+# The four env files the backend/worker read; passed to the one-off migration
+# container below. install.sh wrote them, so they exist by the time we run.
+boltmesh_env_args() {
+    printf '%s\n' \
+        "--env-file" "$CONFIG_DIR/boltmesh/db.env" \
+        "--env-file" "$CONFIG_DIR/boltmesh/secrets.env" \
+        "--env-file" "$CONFIG_DIR/boltmesh/app.env" \
+        "--env-file" "$CONFIG_DIR/boltmesh/gateway.env"
+}
+
+run_boltmesh_migrations() {
+    log "applying BoltMesh database migrations"
+    local -a envs=()
+    # shellcheck disable=SC2207
+    envs=($(boltmesh_env_args))
+    run podman run --rm --network npm-network \
+        "${envs[@]}" \
+        localhost/boltmesh-backend:latest alembic upgrade head
+}
+
+deploy_boltmesh() {
+    # Failures warn and return 0, exactly like deploy_apps: the deploy brings up
+    # as much as it can and verify.sh reports what is actually broken, so one
+    # bad build does not abort the rest of the run (or a --dry-run).
+    fetch_boltmesh
+
+    if ! build_boltmesh_backend; then
+        warn "the BoltMesh backend image did not build; skipping the tier"
+        return 0
+    fi
+    if ! build_boltmesh_frontend; then
+        warn "the BoltMesh frontend image did not build; starting the API/worker anyway"
+    fi
+
+    start_unit postgres
+    wait_healthy postgres "${POSTGRES_WAIT:-180}" \
+        || { warn "postgres not healthy"; dump_tail postgres 20; return 0; }
+
+    # Migrations run before the API so it never serves against a missing schema.
+    run_boltmesh_migrations || warn "migrations failed; the API may not start cleanly"
+
+    restart_unit boltmesh-backend
+    wait_http "boltmesh-backend health" "$APP_HEALTH_WAIT" "http://127.0.0.1:8105/health" \
+        || { warn "boltmesh-backend did not report healthy"; dump_tail boltmesh-backend 40; }
+
+    restart_unit boltmesh-worker
+    wait_healthy boltmesh-worker "$APP_HEALTH_WAIT" || warn "boltmesh-worker not healthy"
+
+    restart_unit boltmesh-frontend
+    wait_healthy boltmesh-frontend 60 || warn "boltmesh-frontend not healthy"
+}
+
+# ---------------------------------------------------------------------------
 # 7. firewalld
 # ---------------------------------------------------------------------------
 # bootstrap.sh opens FIREWALL_PORTS: it owns every privileged host setting, so
@@ -425,6 +532,12 @@ if [ -n "$ONLY" ]; then
         # once now. monitor.service is oneshot and takes no arguments.
         install_units
         start_unit monitor
+    elif [ "$ONLY" = boltmesh ]; then
+        # The whole app tier: fetch, build, migrate, start. Individual members
+        # (postgres, boltmesh-backend/-worker/-frontend) fall through to the
+        # generic branch below, which restarts the one unit and waits.
+        install_units
+        deploy_boltmesh
     else
         install_units
         restart_unit "$ONLY"
@@ -445,6 +558,7 @@ start_infra
 setup_wallets
 start_daemons
 [ "$SKIP_APPS" = 1 ] || deploy_apps
+[ "$SKIP_APPS" = 1 ] || deploy_boltmesh
 note_firewall
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -463,9 +577,11 @@ if [ "$SKIP_DAEMONS" = 1 ]; then
 Stack deployed (chain daemons skipped).
 
   Web and MCP:  valkey, searxng, nginx-proxy-manager (80/443/81),
-                searxng-mcp 127.0.0.1:8000, bitcoin-node-mcp 127.0.0.1:8101,
+                searxng-mcp 127.0.0.1:8100, bitcoin-node-mcp 127.0.0.1:8101,
                 monero-node-mcp 127.0.0.1:8102, monero-wallet-mcp 127.0.0.1:8103,
                 lightning-mcp 127.0.0.1:8104
+  BoltMesh app:     postgres, boltmesh-backend 127.0.0.1:8105,
+                    boltmesh-worker, boltmesh-frontend 127.0.0.1:8106
 
 The MCP servers and searxng bind loopback only -- nginx-proxy-manager is the
 sole path in (add a proxy host per server by hand in the admin UI on 81). The
@@ -479,9 +595,11 @@ Stack deployed.
 
   Daemons and web:  bitcoind, monerod, monero-wallet-rpc, lightningd, tor,
                     valkey, searxng, nginx-proxy-manager
-  MCP servers:      searxng-mcp 127.0.0.1:8000, bitcoin-node-mcp 127.0.0.1:8101,
+  MCP servers:      searxng-mcp 127.0.0.1:8100, bitcoin-node-mcp 127.0.0.1:8101,
                     monero-node-mcp 127.0.0.1:8102, monero-wallet-mcp 127.0.0.1:8103,
                     lightning-mcp 127.0.0.1:8104
+  BoltMesh app:     postgres, boltmesh-backend 127.0.0.1:8105,
+                    boltmesh-worker, boltmesh-frontend 127.0.0.1:8106
   Exposure:         loopback only; nginx-proxy-manager (80/443/81) is the way in
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR

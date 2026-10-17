@@ -45,12 +45,14 @@ if [ "$NO_NODES" = 1 ]; then
     containers=(
         tor valkey searxng nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
+        postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 else
     containers=(
         bitcoind monerod monero-wallet-rpc lightningd
         tor valkey searxng nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
+        postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 fi
 for c in "${containers[@]}"; do
@@ -70,7 +72,7 @@ done
 head2 "MCP endpoints"
 # name|port|env-file|token-var|deep-tool|deep-args|needs-nodes
 endpoints=(
-    "searxng-mcp|8000|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
+    "searxng-mcp|8100|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
     "bitcoin-node-mcp|8101|$CONFIG_DIR/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
     "monero-node-mcp|8102|$CONFIG_DIR/monero-node-mcp/token.env|MONERO_MCP_TOKEN|get_info|{}|1"
     "monero-wallet-mcp|8103|$CONFIG_DIR/monero-wallet-mcp/token.env|MONERO_MCP_TOKEN|get_balance|{}|1"
@@ -130,6 +132,20 @@ for e in "${endpoints[@]}"; do
     fi
     rm -f "$hdr"
 done
+
+# ---------------------------------------------------------------------------
+head2 "BoltMesh"
+# The API's /health is deep: 200 only when it can reach postgres and valkey.
+be_port=8105
+fe_port=8106
+be_body=$(curl -s -m 10 "http://${VERIFY_HOST:-127.0.0.1}:$be_port/health" 2>/dev/null || true)
+if printf '%s' "$be_body" | grep -q '"status": *"healthy"'; then
+    pass "boltmesh-backend /health healthy"
+else
+    bad "boltmesh-backend /health not healthy"
+fi
+fe_code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://${VERIFY_HOST:-127.0.0.1}:$fe_port/" 2>/dev/null || echo 000)
+if [ "$fe_code" = "200" ]; then pass "boltmesh-frontend / 200"; else bad "boltmesh-frontend / -> $fe_code"; fi
 
 # ---------------------------------------------------------------------------
 head2 "Backups"

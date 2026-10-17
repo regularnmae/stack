@@ -1,0 +1,44 @@
+# Quadlet unit for the BoltMesh API (FastAPI under gunicorn). deploy/install.sh
+# renders this into ~/.config/containers/systemd/, where quadlet turns it into
+# boltmesh-backend.service. The arq worker runs the same image (see
+# boltmesh-worker.container).
+[Unit]
+Description=BoltMesh API (FastAPI/gunicorn)
+After=network-online.target npm-network-network.service postgres.service
+Requires=npm-network-network.service postgres.service
+
+[Container]
+ContainerName=boltmesh-backend
+Image=localhost/boltmesh-backend:latest
+Network=npm-network.network
+
+# Four env files, all OUTSIDE this repo under $DATA_DIR/config/boltmesh/
+# (mode 600), written by deploy/install.sh so no secret is committed:
+#   db.env      -- POSTGRES_* and DATABASE_URL
+#   secrets.env -- the JWT signing keys and the bootstrap pepper
+#   app.env     -- operator-editable: URLs, CORS, OAuth, SMTP, TTLs
+#   gateway.env -- the CLN rune and the Monero RPC login, derived from the
+#                  running lightningd/monero-wallet-rpc
+EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
+EnvironmentFile=@CONFIG_DIR@/boltmesh/secrets.env
+EnvironmentFile=@CONFIG_DIR@/boltmesh/app.env
+EnvironmentFile=@CONFIG_DIR@/boltmesh/gateway.env
+
+# Host 8105 -> container 8000. Loopback only: NPM is the sole path in (it
+# reaches the container as boltmesh-backend:8000 on npm-network). The app
+# serves /health (deep: database + valkey), which is what deploy.sh and
+# verify.sh poll.
+PublishPort=127.0.0.1:8105:8000
+
+HealthCmd=curl -fsS http://127.0.0.1:8000/health
+HealthInterval=30s
+HealthStartPeriod=60s
+HealthRetries=3
+HealthOnFailure=restart
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

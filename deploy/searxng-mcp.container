@@ -20,8 +20,9 @@ EnvironmentFile=@CONFIG_DIR@/searxng-mcp/token.env
 
 # Loopback only: NPM is the sole path in (it reaches the container as
 # searxng-mcp:8000 on npm-network). The loopback bind keeps verify.sh and
-# local debugging working; nothing on the LAN can reach 8000.
-PublishPort=127.0.0.1:8000:8000
+# local debugging working; nothing on the LAN can reach 8100. Host 8100 ->
+# container 8000, so the whole MCP block reads 8100-8104.
+PublishPort=127.0.0.1:8100:8000
 
 # Healthcheck: MCP initialize probe (authenticated). Makes a
 # wedged server visible/restartable instead of silently erroring.

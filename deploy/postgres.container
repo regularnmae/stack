@@ -1,0 +1,41 @@
+# Quadlet unit for the BoltMesh database. deploy/install.sh renders this into
+# ~/.config/containers/systemd/, where quadlet turns it into postgres.service.
+#
+# The cluster is the one piece of BoltMesh state that cannot be recreated, so
+# it is the only app-tier data dir: the nightly backup takes a pg_dumpall of it
+# (deploy/postgres-dump.container), not a raw copy of a live PGDATA.
+[Unit]
+Description=BoltMesh PostgreSQL
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=postgres
+Image=docker.io/library/postgres:18-alpine
+Network=npm-network.network
+
+# Only the backend/worker reach it, as postgres:5432 on npm-network, so it
+# publishes nothing. The image's PGDATA is /var/lib/postgresql/18/docker, a
+# subdirectory of the mount point (the same layout the BoltMesh compose file
+# used). `:z` because the host runs SELinux enforcing.
+Volume=@DATA_DIR@/postgres:/var/lib/postgresql:z
+
+# POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD, plus the DATABASE_URL the
+# backend reads (same password). deploy/install.sh writes it (mode 600); the
+# server ignores DATABASE_URL.
+EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
+
+# The image ships no HEALTHCHECK. Probe over TCP rather than the Unix socket so
+# the check is meaningful and needs no shell or environment expansion -- a
+# $VAR here would be expanded by the systemd generator, not the container.
+HealthCmd=pg_isready -h 127.0.0.1
+HealthInterval=30s
+HealthStartPeriod=30s
+HealthRetries=5
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,38 @@
+# Quadlet unit for the BoltMesh database dump: a one-shot pg_dumpall that
+# deploy/backup.container pulls in before the nightly restic job.
+#
+# Why a dump and not the raw cluster: a copy of a live PGDATA taken file by
+# file is only crash-recoverable, so the backup set holds this SQL instead of
+# $DATA_DIR/postgres. Like the backup job it has no [Install]: backup.service
+# activates it (backup.container Wants=/After= this service, so a failed dump
+# never blocks the restic run).
+[Unit]
+Description=BoltMesh database dump (pg_dumpall) for the nightly backup
+After=network-online.target npm-network-network.service postgres.service
+Requires=npm-network-network.service postgres.service
+
+[Container]
+ContainerName=postgres-dump
+Image=docker.io/library/postgres:18-alpine
+Network=npm-network.network
+
+# libpq connection settings, in their own file and NOT in db.env: exporting
+# PGHOST/PGUSER into the postgres server's own environment would make its
+# entrypoint's socket-based bootstrap connect over TCP to a server that is not
+# up yet. Only this unit reads it.
+EnvironmentFile=@CONFIG_DIR@/boltmesh/dump.env
+
+# The dump destination; backup.container mounts this same directory read-only.
+Volume=@DATA_DIR@/postgres-dump:/dump:z
+
+# The image's ENTRYPOINT is docker-entrypoint.sh, so it is replaced with a
+# shell. There is no $VAR anywhere: the systemd generator expands $ in Exec,
+# not the container, so PGHOST/PGUSER/PGPASSWORD are read by libpq directly.
+# The write is a rename within one directory, so the backup never sees a
+# half-written file.
+Entrypoint=/bin/sh
+Exec=-c "pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
+
+[Service]
+Type=oneshot
+TimeoutStartSec=900

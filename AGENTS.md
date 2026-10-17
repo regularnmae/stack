@@ -6,8 +6,9 @@ runs (quadlet, plus the plain systemd user units `backup.timer`,
 `monitor.service`, `monitor.timer`). This repo is the
 **single owner of the runtime** for the whole stack. The application repos
 (`searxng-mcp`, `bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`,
-`lightning-mcp`) ship only code, tests, CI and a `Containerfile` — no unit, no
-`deploy/`, no `deploy.sh`. If a unit or an env file changes, it changes here.
+`lightning-mcp`, and BoltMesh's `backend`/`frontend`) ship only code, tests, CI
+and a `Containerfile` — no unit, no `deploy/`, no `deploy.sh`. If a unit or an
+env file changes, it changes here.
 
 ## The one rule that shapes everything
 
@@ -88,13 +89,31 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   Quadlet has no `.timer` type -- so `install.sh` renders it into
   `~/.config/systemd/user/` and `systemctl --user enable --now`s it. It activates
   the `backup.service` the generator makes from `backup.container`.
-- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/ audit/` only.** The
-  chains and `searxng/` are re-downloadable and stay out, so restic never walks
-  them. The repo lives in `$STACK_BACKUP_DIR` (stack.conf), outside `$DATA_DIR`,
+- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/ audit/ postgres-dump/` only.**
+  The chains, `searxng/` and the raw `postgres/` cluster are re-downloadable (or,
+  for postgres, only crash-recoverable) and stay out, so restic never walks them.
+  `deploy/postgres-dump.container` is a oneshot that `backup.container`
+  `Wants=`/`After=`; it runs `pg_dumpall` into `$DATA_DIR/postgres-dump` (the
+  only thing the backup mounts for BoltMesh). Its libpq settings are in
+  `config/boltmesh/dump.env`, **not** `db.env`: `PGHOST`/`PGUSER` in the postgres
+  server's own environment would break its socket-based entrypoint bootstrap. The
+  repo lives in `$STACK_BACKUP_DIR` (stack.conf), outside `$DATA_DIR`,
   and the unit is secret-free: the repo path and `RESTIC_PASSWORD` reach it through
   `backup.env` (`EnvironmentFile`). `scripts/backup.sh` reads them from the
   **environment first, then the file** -- the only order that can recover a fresh
   host, since the file lives inside the repository.
+- **BoltMesh is a tier of four units, not an MCP server.** `postgres`,
+  `boltmesh-backend`, `boltmesh-worker`, `boltmesh-frontend`. It is built by
+  `deploy_boltmesh` in `deploy.sh`, not `deploy_app`: the repos live under a
+  second org (`GITHUB_ORG_BOLTMESH`) and the frontend needs `--target prod` plus
+  the `VITE_*` build args (baked into the bundle, so a hostname change is a
+  rebuild). It brings no chains: the backend points at the stack's `lightningd`
+  (clnrest) and `monero-wallet-rpc`. Its rune is deliberately minimal
+  (`getinfo`/`listinvoices`/`invoice`), so BoltMesh can bill but never move funds.
+  Its four env files live under `$DATA_DIR/config/boltmesh/`: `db.env` and
+  `secrets.env` are generated, `app.env` is operator-editable, `gateway.env` is
+  machine-written from the running daemons. `install.sh` seeds `app.env` from the
+  `BOLTMESH_*` values in `stack.conf`.
 - **Shared bind mounts use `:z`, not `:Z`.** The backup container mounts `cln/` and
   `npm/` read-only alongside `lightningd` and `nginx-proxy-manager`; two containers
   cannot share a path one labels private (whichever starts last relabels it and
@@ -159,7 +178,7 @@ variable name changes, it changes on both sides at once.
 
 | Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | Host port (loopback) | Bind + health |
 | --- | --- | --- | --- | --- | --- |
-| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `127.0.0.1:8000` | `0.0.0.0:8000`, `/health` |
+| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `127.0.0.1:8100` | `0.0.0.0:8000`, `/health` |
 | `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `127.0.0.1:8101` | `0.0.0.0:8000`, `/health` |
 | `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `127.0.0.1:8102` | `0.0.0.0:8000`, `/health` |
 | `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `127.0.0.1:8103` | `0.0.0.0:8000`, `/health` |
@@ -184,3 +203,25 @@ The variables the apps read (names and defaults are the app repos' contract):
 Because the upstream names/ports are compiler-baked defaults, renaming a daemon
 in `deploy/` without updating this table (and the app's default) silently breaks
 that server — treat this section as the thing to check when either side moves.
+
+### The BoltMesh app tier
+
+Not MCP servers, so they are absent from the table above. Same rule applies
+though: the container name, host loopback port and env file paths below are the
+shared contract with the `boltmesh-labs` repos.
+
+| Unit | Image | Env files (`$DATA_DIR/config/boltmesh/`) | Upstream it reaches | Host port (loopback) | Health |
+| --- | --- | --- | --- | --- | --- |
+| `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` (`POSTGRES_*`) | — | — | `pg_isready -h 127.0.0.1` |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `gateway.env` | `postgres:5432`, `valkey:6379`, `lightningd:3010`, `monero-wallet-rpc:18083` | `127.0.0.1:8105` | `0.0.0.0:8000`, `/health` (deep) |
+| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | the same four | the same | — | liveness file `/tmp/arq-worker-liveness` |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `127.0.0.1:8106` | `0.0.0.0:80`, `/` |
+
+The backend reads the app repos' variables (`DATABASE_URL`, `CACHE_URL`,
+`SECRET_KEY`/`REFRESH_SECRET_KEY`/`NODE_SECRET_KEY`/`BOOTSTRAP_SECRET_PEPPER`,
+`LIGHTNING_GATEWAY_URL`/`LIGHTNING_API_KEY`/`LIGHTNING_TLS_INSECURE`,
+`MONERO_RPC_URL`/`MONERO_RPC_USER`/`MONERO_RPC_PASSWORD`, `APP_ENV`,
+`API_BASE_URL`/`FRONTEND_URL`/`CORS_ALLOW_ORIGINS`, `GOOGLE_*`/`GITHUB_*`,
+`MAIL_*`, `GITHUB_REPO`/`GITHUB_TOKEN`). `APP_ENV=prod` is what makes the
+refresh cookie `Secure` + `SameSite=None`, which the split
+`boltmesh.net`/`api.boltmesh.net` hosting needs.

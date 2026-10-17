@@ -5,8 +5,9 @@ unit, every secret/env wiring, and a one-click deploy that can rebuild the host
 from scratch.
 
 The application code lives in sibling repos — `searxng-mcp`,
-`bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`, `lightning-mcp` —
-each of which ships only its code, tests, CI and `Containerfile`. **Their units
+`bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`, `lightning-mcp`,
+plus BoltMesh's `backend` and `frontend` (under the `boltmesh-labs` org) — each
+of which ships only its code, tests, CI and `Containerfile`. **Their units
 and env files live here**, so there is exactly one place that defines how the
 stack runs and one script that fixes a deployment problem.
 
@@ -22,36 +23,43 @@ stack runs and one script that fixes a deployment problem.
 | `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
 | `searxng` | `docker.io/searxng/searxng:latest` | `127.0.0.1:8080` (via NPM) | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
-| `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8000` (via NPM) | — |
+| `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` (via NPM) | — |
 | `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` (via NPM) | — |
 | `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` (via NPM) | — |
 | `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` 🔑 (via NPM) | — |
 | `lightning-mcp` | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` 🔑 (via NPM) | — |
+| `postgres` | `docker.io/library/postgres:18-alpine` | — | `$DATA_DIR/postgres` |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` (via NPM) | — |
+| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` (via NPM) | — |
 
 No daemon RPC port is published on the LAN: the daemons address each other by
 container name on `npm-network` (`10.89.0.0/24`, pinned in
 `deploy/npm-network.network` because `tor.container` pins `--ip=10.89.0.240` and
-both `bitcoin.conf` and `torrc` allow that subnet). The MCP servers and searxng
-bind **loopback only** (`127.0.0.1`), and those loopback ports are **not** opened
-in firewalld: `nginx-proxy-manager` terminates TLS and is the sole path in,
-reaching each container by name on `npm-network`. The proxy hosts are added by
-hand in the NPM admin UI (`81`) and live in NPM's database, not in this repo.
+both `bitcoin.conf` and `torrc` allow that subnet). The MCP servers, searxng and
+the BoltMesh app tier bind **loopback only** (`127.0.0.1`), and those loopback
+ports are **not** opened in firewalld: `nginx-proxy-manager` terminates TLS and
+is the sole path in, reaching each container by name on `npm-network`. The proxy
+hosts are added by hand in the NPM admin UI (`81`) and live in NPM's database,
+not in this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
 `stack.conf`). If you adopted an older host that still had `8000`/`8080`/
-`8101-8104` open, close them once by hand — `bootstrap.sh` only ever opens ports,
+`8100-8106` open, close them once by hand — `bootstrap.sh` only ever opens ports,
 it never closes them:
 
 ```sh
 sudo firewall-cmd --permanent --remove-port=8000/tcp --remove-port=8080/tcp \
-  --remove-port=8101/tcp --remove-port=8102/tcp --remove-port=8103/tcp \
-  --remove-port=8104/tcp && sudo firewall-cmd --reload
+  --remove-port=8100/tcp --remove-port=8101/tcp --remove-port=8102/tcp \
+  --remove-port=8103/tcp --remove-port=8104/tcp --remove-port=8105/tcp \
+  --remove-port=8106/tcp && sudo firewall-cmd --reload
 ```
 
 🔑 = a money-moving surface. Spending is **off** by default on both.
 
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
-`monero-wallet-rpc/`, `config/`, `npm/`, `audit/`) runs from `backup.timer` into
+`monero-wallet-rpc/`, `config/`, `npm/`, `audit/`, and the BoltMesh database as
+a `pg_dumpall`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`. It is the one thing that recovers you if the data disk
 itself is lost — see [Backup & restore](#backup--restore).
 
@@ -97,10 +105,12 @@ an OS reinstall. See [Where the data lives](#where-the-data-lives).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds + restarts the
-five MCP servers (a plain start would keep running a stale image). Common flags:
+five MCP servers and the BoltMesh app tier (a plain start would keep running a
+stale image). Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
+./deploy.sh --only boltmesh           # rebuild + migrate the whole BoltMesh tier
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only monitor            # run the health + spend checks now
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
@@ -134,6 +144,8 @@ remembers the answer in `~/.config/stack/data-dir.env`:
 
   - `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
+  - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
+  - `postgres-dump/` — the pre-backup `pg_dumpall`
   - `config/` — every bearer token and secret
   - `audit/` — the monitor's log and the spend tripwire baselines
   - `backup-cache/` — restic's cache (regenerable)
@@ -188,7 +200,7 @@ unchanged.
 ## Backup & restore
 
 `install.sh` installs a nightly, encrypted [restic](https://restic.net) backup of
-the five things in `$DATA_DIR` that cannot be re-downloaded:
+the things in `$DATA_DIR` that cannot be re-downloaded:
 
 - `cln/` — the CLN node identity, channel state and onion keys
 - `monero-wallet-rpc/` — the Monero wallet (funds)
@@ -196,9 +208,14 @@ the five things in `$DATA_DIR` that cannot be re-downloaded:
 - `npm/` — nginx-proxy-manager's config and TLS material
 - `audit/` — the monitor's log and the spend tripwire baselines (see
   [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire))
+- `postgres-dump/` — `pg_dumpall` of the BoltMesh database, taken by
+  `deploy/postgres-dump.container` immediately before each backup run (the raw
+  `postgres/` cluster is not copied: a file-by-file copy of a live `PGDATA` is
+  only crash-recoverable)
 
-The chains (`bitcoin/`, `monero/`) and `searxng/` are deliberately **excluded**:
-they are large and regenerable, so restic never walks them.
+The chains (`bitcoin/`, `monero/`), `searxng/` and the raw `postgres/` cluster
+are deliberately **excluded**: they are large and regenerable, so restic never
+walks them.
 
 - `deploy/backup.container` — the one-shot job (a Quadlet unit, rendered like
   the rest).
@@ -305,6 +322,46 @@ with no alert configured) and folded into the monitor's alert and heartbeat. It
 is **not** a gate: it cannot stop a spend, only make one impossible to miss.
 `audit/` is part of the [backup set](#backup--restore).
 
+## BoltMesh
+
+The application tier — `postgres`, `boltmesh-backend`, `boltmesh-worker` and
+`boltmesh-frontend` — is deployed by the same `./deploy.sh` as everything else,
+from the `boltmesh-labs` GitHub org (`GITHUB_ORG_BOLTMESH` in `stack.conf`). It
+is the one part of the stack that is not an MCP server, so it is built by its
+own step (`deploy_boltmesh` in `deploy.sh`): the images need a build target and
+`VITE_*` build arguments the generic app path does not pass.
+
+It does not bring its own chains. The backend is pointed at the stack's own
+`lightningd` (clnrest) and `monero-wallet-rpc`:
+
+| Value | Source |
+| --- | --- |
+| `DATABASE_URL`, `POSTGRES_*` | `$DATA_DIR/config/boltmesh/db.env` (generated) |
+| `SECRET_KEY`, `REFRESH_SECRET_KEY`, `NODE_SECRET_KEY`, `BOOTSTRAP_SECRET_PEPPER` | `$DATA_DIR/config/boltmesh/secrets.env` (generated) |
+| `LIGHTNING_GATEWAY_URL`, `LIGHTNING_API_KEY` | `$DATA_DIR/config/boltmesh/gateway.env` — a rune `install.sh` creates on `lightningd` that permits only `getinfo`, `listinvoices`, `invoice`, so BoltMesh can bill but never move funds |
+| `MONERO_RPC_URL`, `MONERO_RPC_USER`, `MONERO_RPC_PASSWORD` | the same `gateway.env`, from the wallet's `--rpc-login` |
+| URLs, CORS, OAuth, SMTP, `GITHUB_REPO`/`GITHUB_TOKEN` | `$DATA_DIR/config/boltmesh/app.env` — **operator-editable**, fill it in before first use |
+
+### Before it works
+
+1. Point `boltmesh.net` and `api.boltmesh.net` at the host (`BOLTMESH_FRONTEND_HOST`
+   / `BOLTMESH_API_HOST` in `stack.conf`), and make `:80` reachable for the
+   Let's Encrypt challenge.
+2. In the NPM admin UI (`81`) add two proxy hosts, both with a TLS certificate:
+   `boltmesh.net` → `boltmesh-frontend:80` and `api.boltmesh.net` →
+   `boltmesh-backend:8000`.
+3. Fill in `$DATA_DIR/config/boltmesh/app.env` (OAuth client id/secret, SMTP,
+   the agent `GITHUB_TOKEN`) and register
+   `https://api.boltmesh.net/v1/auth/google/callback` and `…/github/callback`
+   in the provider consoles — `API_BASE_URL` is the base of every redirect_uri.
+4. Re-run `./deploy.sh` (or `./deploy.sh --only boltmesh`). `VITE_API_URL` is
+   baked into the frontend bundle at build time, so a hostname change means a
+   rebuild, not an env edit.
+
+The database is dumped (`pg_dumpall`) into `$DATA_DIR/postgres-dump/` by
+`postgres-dump.container` immediately before each restic run, and the dump — not
+the raw cluster — is what the [backup set](#backup--restore) holds.
+
 ## How secrets are kept out of git
 
 No secret is committed. Everything real is generated or adopted on the host,
@@ -362,6 +419,7 @@ stack/
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
     examples/backup/*.example     # backup.env shape
     examples/monitoring/*.example # monitor.env shape (Apprise targets + heartbeat)
+    examples/boltmesh/*.example   # db/secrets/app/gateway env shapes
   tor/Containerfile
 ```
 

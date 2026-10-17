@@ -1,0 +1,36 @@
+# Quadlet unit for the BoltMesh SPA. deploy.sh builds this image with
+# `--target prod` and the three VITE_* build args, so the bundle is static and
+# the VITE_API_URL is baked in at build time -- changing the API hostname means
+# re-running deploy.sh, not editing a unit. deploy/install.sh renders this into
+# ~/.config/containers/systemd/, where quadlet turns it into
+# boltmesh-frontend.service.
+[Unit]
+Description=BoltMesh frontend (static SPA served by nginx)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=boltmesh-frontend
+Image=localhost/boltmesh-frontend:latest
+Network=npm-network.network
+
+# No env files: the app reads no runtime config, the VITE_* values are inlined
+# into the bundle at build time. The image runs nginx on :80 with the SPA
+# fallback from frontend/deploy/nginx.conf.
+
+# Host 8106 -> container 80. Loopback only: NPM terminates TLS and reaches the
+# container as boltmesh-frontend:80 on npm-network.
+PublishPort=127.0.0.1:8106:80
+
+# nginx:alpine has no curl but does have busybox wget.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1/
+HealthInterval=30s
+HealthStartPeriod=10s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
