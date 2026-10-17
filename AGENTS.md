@@ -138,8 +138,10 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   credentials live in `$DATA_DIR/config/npm/api.env`. Its nginx config must keep
   `proxy_buffering off` and a long `proxy_read_timeout`: the transport is SSE,
   and a buffered body hangs the client. `jq` is a host dependency (bootstrap);
-  `verify.sh` re-checks the same path a client takes, through NPM's `:80` with a
-  `Host:` header. The BoltMesh hosts are still hand-added.
+  `verify.sh` re-checks the same path a client takes, through NPM's `:80`
+  (following the force-SSL redirect to `:443`) by connecting the public host to
+  NPM itself with `--connect-to`, so the certificate still validates. The
+  BoltMesh hosts are still hand-added.
 
 ## Interface contract with the app repos
 

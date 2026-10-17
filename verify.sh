@@ -148,18 +148,22 @@ if [ "${MCP_HOSTS+x}" != x ] || [ "${#MCP_HOSTS[@]}" -eq 0 ]; then
 else
     for pair in "${MCP_HOSTS[@]}"; do
         prefix="${pair%%:*}"; name="${pair##*:}"
-        # Probe NPM's own :80 with the Host header, so this works before public
-        # DNS and TLS exist. `-k` is inert on http and covers the https retry
-        # below, whose SNI is the container name rather than the host.
-        url="http://nginx-proxy-manager$prefix"
-        code=$(net_curl -s -k -o /dev/null -w '%{http_code}' -m 10 -H "Host: $MCP_HOST" \
-            -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)
+        # Probe the public URL but connect to NPM itself (--connect-to), so this
+        # works before public DNS exists and the certificate still validates:
+        # SNI and Host are the real host, only the connection target changes.
+        url="http://$MCP_HOST$prefix"
+        connect="$MCP_HOST:80:nginx-proxy-manager:80"
+        code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
+            -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
+        [ -n "$code" ] || code=000
         # Force-SSL makes the :80 vhost redirect; follow it to the :443 one.
         case "$code" in
             301|308)
-                url="https://nginx-proxy-manager$prefix"
-                code=$(net_curl -s -k -o /dev/null -w '%{http_code}' -m 10 -H "Host: $MCP_HOST" \
-                    -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000) ;;
+                url="https://$MCP_HOST$prefix"
+                connect="$MCP_HOST:443:nginx-proxy-manager:443"
+                code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
+                    -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
+                [ -n "$code" ] || code=000 ;;
         esac
         case "$code" in
             401) ;;
@@ -173,7 +177,7 @@ else
         token=$(env_value "${EP_ENV[$name]:-}" "${EP_VAR[$name]:-}")
         if [ -z "$token" ]; then bad "$name has no token; cannot handshake through NPM"; continue; fi
         resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
-            | net_curl -s -k -m 15 -K - -H "Host: $MCP_HOST" \
+            | net_curl -s -m 15 -K - --connect-to "$connect" \
                 -H 'Content-Type: application/json' \
                 -H 'Accept: application/json, text/event-stream' \
                 -X POST "$url" -d "$MCP_INIT_BODY" 2>/dev/null || true)

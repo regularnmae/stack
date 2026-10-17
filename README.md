@@ -372,9 +372,9 @@ The script requests a Let's Encrypt certificate for the host when none covers it
 reachable); set `NPM_CERT_ID` to pin an existing certificate instead, or
 `NPM_REQUEST_CERT=0` to leave TLS to the UI. `scripts/npm-mcp-hosts.sh
 --dry-run` prints the exact API payload without changing anything, and
-`./verify.sh` checks the same path a client takes — a `Host:` header to NPM's
-`:80`, following its redirect to `:443` once TLS is on, so it works before
-public DNS exists.
+`./verify.sh` checks the same path a client takes — the public URL connected to
+NPM itself (`--connect-to`), following its redirect to `:443` once TLS is on, so
+it works before public DNS exists.
 
 ## BoltMesh
 
