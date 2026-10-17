@@ -61,12 +61,15 @@ log "provisioning on ${PRETTY_NAME:-this host}"
 # 2. packages
 # ---------------------------------------------------------------------------
 if ! command -v podman >/dev/null 2>&1; then
-    log "installing podman, firewalld, git, openssl"
-    sudo dnf install -y podman firewalld git openssl
+    log "installing podman, firewalld, git, openssl, jq"
+    sudo dnf install -y podman firewalld git openssl jq
 else
     log "podman already installed ($(podman --version))"
 fi
 command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y git; }
+# jq parses the nginx-proxy-manager admin API responses in
+# scripts/npm-mcp-hosts.sh (the host has no curl either; netcheck carries it).
+command -v jq >/dev/null 2>&1 || { log "installing jq"; sudo dnf install -y jq; }
 
 # Rootless networking needs one of these; both are optional per release.
 command -v slirp4netns >/dev/null 2>&1 || sudo dnf install -y slirp4netns >/dev/null 2>&1 || true

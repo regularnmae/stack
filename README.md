@@ -39,9 +39,12 @@ service is reached by container name on `npm-network` (`10.89.0.0/24`, pinned in
 both `bitcoin.conf` and `torrc` allow that subnet): NPM terminates TLS and is
 the one way in for a client, and the host-side checks (`verify.sh`, the monitor)
 read the same addresses through a throwaway curl container on that network —
-`netcheck/Containerfile`, run by `net_curl` in `scripts/lib.sh`. The proxy hosts
-are added by hand in the NPM admin UI (`81`) and live in NPM's database, not in
-this repo.
+`netcheck/Containerfile`, run by `net_curl` in `scripts/lib.sh`. The five MCP
+servers share one proxy host, created from this repo by
+`scripts/npm-mcp-hosts.sh` through the NPM admin API (`81`) — see
+[MCP over nginx-proxy-manager](#mcp-over-nginx-proxy-manager). The BoltMesh
+hosts are still added by hand. Either way, the proxy hosts live in NPM's
+database, not in this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
 `stack.conf`), and there is nothing to reach on loopback either: if you cloned an
@@ -77,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/regularnmae/stack/main/bootstrap.sh
 ~/build/stack/deploy.sh
 ```
 
-`bootstrap.sh` installs podman/firewalld/git, enables user linger, sets
+`bootstrap.sh` installs podman/firewalld/git/jq, enables user linger, sets
 `net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
 80/443/81 rootless), opens the stack's ports (`FIREWALL_PORTS`) in firewalld,
 creates the build dir and the quadlet directory, and clones this repo to
@@ -113,6 +116,7 @@ stale image). Common flags:
 ./deploy.sh --only boltmesh           # rebuild + migrate the whole BoltMesh tier
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only monitor            # run the health + spend checks now
+./deploy.sh --only npm-mcp-hosts      # re-apply the MCP proxy host in NPM
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
 ./deploy.sh --no-wallets              # skip the interactive wallet prompts
 ./deploy.sh --dry-run                 # print the plan, change nothing
@@ -322,6 +326,56 @@ with no alert configured) and folded into the monitor's alert and heartbeat. It
 is **not** a gate: it cannot stop a spend, only make one impossible to miss.
 `audit/` is part of the [backup set](#backup--restore).
 
+## MCP over nginx-proxy-manager
+
+Every MCP server speaks the Streamable HTTP transport at `/mcp` (the SDK's
+default); nginx-proxy-manager publishes the one host port and is the only way in,
+so a client reaches them through it. Each server gets a **path prefix** on one
+TLS hostname:
+
+| Public URL | Container |
+| --- | --- |
+| `https://mcp.boltmesh.net/searxng` | `searxng-mcp:8000` |
+| `https://mcp.boltmesh.net/bitcoin` | `bitcoin-node-mcp:8000` |
+| `https://mcp.boltmesh.net/monero` | `monero-node-mcp:8000` |
+| `https://mcp.boltmesh.net/monero-wallet` | `monero-wallet-mcp:8000` |
+| `https://mcp.boltmesh.net/lightning` | `lightning-mcp:8000` |
+
+The prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
+client's URL. The host and the prefixes are `MCP_HOST`/`MCP_HOSTS` in
+`stack.conf`; each server's bearer token still gates it (the tokens are the
+`token.env` files under `$DATA_DIR/config/<server>/`).
+
+The proxy host is **created by the deploy**, not by hand:
+`scripts/npm-mcp-hosts.sh` talks to the NPM admin API on `81`, updates the host
+in place if it exists and creates it otherwise, and `./deploy.sh` runs it after
+the app tier. Its nginx config turns buffering off and sets a long read timeout,
+because Streamable HTTP answers with `text/event-stream` and a buffered SSE body
+just hangs the MCP client.
+
+It needs the admin login, in `$DATA_DIR/config/npm/api.env` (mode 600, seeded by
+`deploy/install.sh`):
+
+```sh
+NPM_EMAIL=you@example.com
+NPM_PASSWORD=…        # the password you set on the NPM UI's first visit (81)
+```
+
+With that in place, point `mcp.boltmesh.net` at this host and run:
+
+```sh
+./deploy.sh --only npm-mcp-hosts
+```
+
+The script requests a Let's Encrypt certificate for the host when none covers it
+(the same HTTP-01 requirement as the BoltMesh hosts: DNS pointing here and `:80`
+reachable); set `NPM_CERT_ID` to pin an existing certificate instead, or
+`NPM_REQUEST_CERT=0` to leave TLS to the UI. `scripts/npm-mcp-hosts.sh
+--dry-run` prints the exact API payload without changing anything, and
+`./verify.sh` checks the same path a client takes — a `Host:` header to NPM's
+`:80`, following its redirect to `:443` once TLS is on, so it works before
+public DNS exists.
+
 ## BoltMesh
 
 The application tier — `postgres`, `boltmesh-backend`, `boltmesh-worker` and
@@ -391,6 +445,10 @@ under `$DATA_DIR/config/`, mode 600.
   tokens, upstream credentials, spend policy and CLN runes. The unit reads them
   with `EnvironmentFile=`; the shapes are documented in
   `deploy/examples/<name>/`.
+- **`$DATA_DIR/config/npm/api.env`** holds the nginx-proxy-manager admin login
+  that `scripts/npm-mcp-hosts.sh` uses to create the MCP proxy host through the
+  API on `81` (or an API token instead). The script sends the password in a curl
+  config on stdin, so it never reaches the host's argv.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
 `lightningd` and `monero-wallet-rpc` are *rendered* from `deploy/*.container.in`
@@ -420,6 +478,7 @@ stack/
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
+  scripts/npm-mcp-hosts.sh # the MCP proxy host in NPM, via its admin API
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
@@ -433,6 +492,7 @@ stack/
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
     examples/backup/*.example     # backup.env shape
     examples/monitoring/*.example # monitor.env shape (Apprise targets + heartbeat)
+    examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
     examples/boltmesh/*.example   # db/secrets/app/gateway env shapes
   tor/Containerfile       # built by install.sh: the Tor proxy
   netcheck/Containerfile  # built by install.sh: the curl client the host checks run

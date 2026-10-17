@@ -631,6 +631,37 @@ EOF
     log "wrote $MON_ENV (mode 600) -- empty: journal-only until filled in"
 fi
 
+# nginx-proxy-manager's admin API, for scripts/npm-mcp-hosts.sh: it creates the
+# one proxy host that serves every MCP server under https://$MCP_HOST/<prefix>.
+# The admin login (or a pre-created API token) is a secret, so the file is mode
+# 600; empty means the script logs a one-line skip rather than failing a deploy.
+NPM_ENV="$CONFIG_DIR/npm/api.env"
+if ensure_secret "$NPM_ENV" "nginx-proxy-manager api env"; then
+    write_secret "$NPM_ENV" <<'EOF'
+# Credentials for the nginx-proxy-manager admin API (port 81), used by
+# scripts/npm-mcp-hosts.sh to create the proxy host that serves every MCP
+# server as https://<MCP_HOST>/<prefix>. The host, the prefixes and the
+# containers come from MCP_HOST/MCP_HOSTS in stack.conf. See
+# deploy/examples/npm/api.env.example.
+#
+# The admin login (as set on first access to the UI on port 81). Preferred: a
+# token minted from it is short-lived and refreshed on every run.
+NPM_EMAIL=
+NPM_PASSWORD=
+# Optional: an API token from the UI (Settings -> API Tokens). Use this only if
+# you would rather not store the admin login; it expires, so re-runs after that
+# need a fresh one.
+NPM_TOKEN=
+# Optional: pin an existing certificate (SSL Certificates -> its id). Empty
+# means "reuse a Let's Encrypt cert for the host, or request a new one".
+NPM_CERT_ID=
+# Request a Let's Encrypt certificate for the host when none exists (1/0). It
+# needs the host's DNS and port 80 to reach this machine.
+NPM_REQUEST_CERT=1
+EOF
+    log "wrote $NPM_ENV (mode 600) -- fill in NPM_EMAIL/NPM_PASSWORD (or NPM_TOKEN)"
+fi
+
 # The monitor's record: the audit log, the spend baseline and its state file.
 # Deliberately NOT under config/ (it is not secret); deploy/backup.container
 # backs it up. scripts/spend-audit.sh seeds its own baselines on the first run.
@@ -823,6 +854,9 @@ BoltMesh is wired to the stack's lightningd and monero-wallet-rpc; fill in the
   OAuth / SMTP / GitHub values in $CONFIG_DIR/boltmesh/app.env before first use.
 The monitor runs every 5 minutes (monitor.timer) and alerts only once
   $CONFIG_DIR/monitoring/monitor.env has an Apprise target and/or a heartbeat.
+The MCP servers are served as https://$MCP_HOST/<prefix> once
+  $CONFIG_DIR/npm/api.env has the nginx-proxy-manager admin login
+  (scripts/npm-mcp-hosts.sh, which ./deploy.sh runs).
 Keep a copy of RESTIC_PASSWORD ($BACKUP_ENV) off the data disk: it is the only
 key to the backups.
 EOF

@@ -24,6 +24,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The tokens live under the data dir now, so resolving it is how we find them.
 resolve_data_dir
 
+# The public host the MCP servers are proxied under (path prefix per server).
+MCP_HOST="${MCP_HOST:-mcp.boltmesh.net}"
+
 DEEP=0
 NO_NODES=0
 while [ $# -gt 0 ]; do
@@ -85,8 +88,14 @@ endpoints=(
     "lightning-mcp|$CONFIG_DIR/lightning-mcp/token.env|LIGHTNING_MCP_TOKEN|getinfo|{}|1"
 )
 
+# The token each container's endpoint needs, keyed by container name, so the
+# through-nginx-proxy-manager section below can reuse it.
+declare -A EP_ENV=() EP_VAR=()
+
 for e in "${endpoints[@]}"; do
     IFS='|' read -r name envfile var tool args needs_nodes <<<"$e"
+    EP_ENV["$name"]="$envfile"
+    EP_VAR["$name"]="$var"
 
     # Read from a throwaway curl container on npm-network: no service publishes
     # a host port, so this is also the path nginx-proxy-manager takes (net_curl
@@ -126,6 +135,55 @@ for e in "${endpoints[@]}"; do
         fi
     fi
 done
+
+# ---------------------------------------------------------------------------
+head2 "MCP through nginx-proxy-manager"
+# The path a real client takes: https://$MCP_HOST/<prefix> -> <container>:8000/mcp.
+# Read through NPM's own :80 with the Host header, so this works before public
+# DNS and TLS exist. A configured host answers 401 without a token and a
+# serverInfo handshake with one; an unconfigured one (NPM's default host) does
+# neither, which is a warning rather than a failure until it is set up.
+if [ "${MCP_HOSTS+x}" != x ] || [ "${#MCP_HOSTS[@]}" -eq 0 ]; then
+    warn "MCP_HOSTS is not set in stack.conf; skipping the proxy checks"
+else
+    for pair in "${MCP_HOSTS[@]}"; do
+        prefix="${pair%%:*}"; name="${pair##*:}"
+        # Probe NPM's own :80 with the Host header, so this works before public
+        # DNS and TLS exist. `-k` is inert on http and covers the https retry
+        # below, whose SNI is the container name rather than the host.
+        url="http://nginx-proxy-manager$prefix"
+        code=$(net_curl -s -k -o /dev/null -w '%{http_code}' -m 10 -H "Host: $MCP_HOST" \
+            -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)
+        # Force-SSL makes the :80 vhost redirect; follow it to the :443 one.
+        case "$code" in
+            301|308)
+                url="https://nginx-proxy-manager$prefix"
+                code=$(net_curl -s -k -o /dev/null -w '%{http_code}' -m 10 -H "Host: $MCP_HOST" \
+                    -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000) ;;
+        esac
+        case "$code" in
+            401) ;;
+            000|404|502|503)
+                warn "$MCP_HOST$prefix is not proxied yet ($code); run scripts/npm-mcp-hosts.sh"
+                continue ;;
+            *) bad "$MCP_HOST$prefix without a token -> $code (expected 401)"; continue ;;
+        esac
+        pass "$MCP_HOST$prefix is token-gated (401)"
+
+        token=$(env_value "${EP_ENV[$name]:-}" "${EP_VAR[$name]:-}")
+        if [ -z "$token" ]; then bad "$name has no token; cannot handshake through NPM"; continue; fi
+        resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+            | net_curl -s -k -m 15 -K - -H "Host: $MCP_HOST" \
+                -H 'Content-Type: application/json' \
+                -H 'Accept: application/json, text/event-stream' \
+                -X POST "$url" -d "$MCP_INIT_BODY" 2>/dev/null || true)
+        if printf '%s' "$resp" | grep -q '"serverInfo"'; then
+            pass "$MCP_HOST$prefix authenticated handshake"
+        else
+            bad "$MCP_HOST$prefix authenticated handshake failed"
+        fi
+    done
+fi
 
 # ---------------------------------------------------------------------------
 head2 "BoltMesh"

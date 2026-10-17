@@ -32,13 +32,15 @@ server.
 ./deploy.sh --only <name>           # one service; --dry-run to plan
 ./deploy.sh --only backup           # run the backup job now
 ./deploy.sh --only monitor          # run the health + spend checks now
+./deploy.sh --only npm-mcp-hosts    # (re)create the MCP proxy host in nginx-proxy-manager
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health + MCP handshakes
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / inspect
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh  # the CI lint
+./scripts/npm-mcp-hosts.sh           # the MCP proxy host, via the NPM admin API
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh scripts/npm-mcp-hosts.sh  # the CI lint
 ```
 
 ## Facts that are easy to get wrong
@@ -125,7 +127,19 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   authenticated `initialize`, i.e. strictly stronger than a `/health` GET.
 - **The bearer tokens never reach the host's argv** — `mcp_initialize` /
   `mcp_tool_call` pass them in a curl config on stdin (`-K -`), so `ps` cannot
-  read a token out of a running verify/monitor/audit sweep.
+  read a token out of a running verify/monitor/audit sweep. `npm-mcp-hosts.sh`
+  does the same with the NPM admin password and the API token it mints.
+- **The MCP proxy host is created, not hand-clicked:** `scripts/npm-mcp-hosts.sh`
+  (run by `deploy.sh`, or `--only npm-mcp-hosts`) drives nginx-proxy-manager's
+  admin API on `81` to serve one host — `MCP_HOST` — with a path prefix per
+  server from `MCP_HOSTS` in `stack.conf`, each prefix rewritten onto the
+  upstream `/mcp` (the MCP SDK's streamable-HTTP default; the apps expose no
+  path knob). It is idempotent (update-in-place by `domain_names`) and its
+  credentials live in `$DATA_DIR/config/npm/api.env`. Its nginx config must keep
+  `proxy_buffering off` and a long `proxy_read_timeout`: the transport is SSE,
+  and a buffered body hangs the client. `jq` is a host dependency (bootstrap);
+  `verify.sh` re-checks the same path a client takes, through NPM's `:80` with a
+  `Host:` header. The BoltMesh hosts are still hand-added.
 
 ## Interface contract with the app repos
 
@@ -147,7 +161,10 @@ Nothing here publishes a host port: NPM terminates TLS and is the sole path to
 every MCP server for a client, and the host-side checks read the very same
 `<container>:8000` through `net_curl`. `Bind + health` is the bind and health
 path *inside* the container, which is still `0.0.0.0` — the app's
-`MCP_HOST`/`MCP_PORT` contract is unchanged.
+`MCP_HOST`/`MCP_PORT` contract is unchanged. For a client, the servers appear as
+one host with a path prefix each — `https://$MCP_HOST/<prefix>`, mapped onto the
+container's `/mcp` by the proxy host `scripts/npm-mcp-hosts.sh` creates; the
+prefix and container come from `MCP_HOSTS` in `stack.conf`.
 
 The variables the apps read (names and defaults are the app repos' contract):
 `SEARXNG_URL`/`SEARXNG_MCP_TOKEN`; `BITCOIN_RPC_URL`/`BITCOIN_RPC_USER`/
