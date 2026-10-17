@@ -479,20 +479,20 @@ deploy_boltmesh() {
 }
 
 # ---------------------------------------------------------------------------
-# 6c. the MCP proxy host (one TLS hostname, a path prefix per server)
+# 6c. the nginx-proxy-manager proxy hosts
 # ---------------------------------------------------------------------------
-# Not a unit: nginx-proxy-manager already serves, and every MCP container is
+# Not a unit: nginx-proxy-manager already serves, and every backend it fronts is
 # already on npm-network. This only configures NPM, through its admin API, to
-# serve them as https://$MCP_HOST/<prefix>. It self-skips with a one-line note
-# when $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
+# serve the hosts declared in NPM_HOSTS. It self-skips with a one-line note when
+# $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
 # before the admin login exists.
-configure_mcp_proxy() {
+configure_npm_hosts() {
     if [ "$DRY_RUN" = 1 ]; then
-        printf '  [dry-run] %s\n' "$REPO_DIR/scripts/npm-mcp-hosts.sh"
+        printf '  [dry-run] %s\n' "$REPO_DIR/scripts/npm-hosts.sh"
         return 0
     fi
-    "$REPO_DIR/scripts/npm-mcp-hosts.sh" \
-        || warn "the MCP proxy host was not (re)configured; see scripts/npm-mcp-hosts.sh"
+    "$REPO_DIR/scripts/npm-hosts.sh" \
+        || warn "the proxy hosts were not (re)configured; see scripts/npm-hosts.sh"
 }
 
 # ---------------------------------------------------------------------------
@@ -540,11 +540,11 @@ if [ -n "$ONLY" ]; then
         # generic branch below, which restarts the one unit and waits.
         install_units
         deploy_boltmesh
-    elif [ "$ONLY" = npm-mcp-hosts ]; then
-        # Re-apply the MCP proxy host after a stack.conf change, or after
-        # filling in $DATA_DIR/config/npm/api.env. Touches no container.
+    elif [ "$ONLY" = npm-hosts ]; then
+        # Re-apply the proxy hosts after a stack.conf change, or after filling
+        # in $DATA_DIR/config/npm/api.env. Touches no container.
         install_units
-        configure_mcp_proxy
+        configure_npm_hosts
     else
         install_units
         restart_unit "$ONLY"
@@ -561,7 +561,7 @@ setup_wallets
 start_daemons
 [ "$SKIP_APPS" = 1 ] || deploy_apps
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
-configure_mcp_proxy
+configure_npm_hosts
 note_firewall
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -588,7 +588,8 @@ Stack deployed (chain daemons skipped).
 Nothing but nginx-proxy-manager publishes a host port: it reaches every service
 by container name on npm-network, and so do ./verify.sh and the monitoring
 scripts. The MCP servers are served as https://$MCP_HOST/<prefix> once
-  $DATA_DIR/config/npm/api.env has the NPM admin login (scripts/npm-mcp-hosts.sh).
+  $DATA_DIR/config/npm/api.env has the NPM admin login (scripts/npm-hosts.sh
+  applies every proxy host in NPM_HOSTS).
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
 bitcoind, monerod, lightningd and monero-wallet-rpc.
 EOF

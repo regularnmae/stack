@@ -12,12 +12,12 @@
 # NPM IS the request path for every service: nothing else here publishes a host
 # port, not even on loopback, so reaching a container by name on npm-network is
 # the sole way in for a client and NPM is what terminates TLS in front of it.
-# The MCP bearer tokens still gate them. The five MCP servers share one proxy
-# host, served as https://<MCP_HOST>/<prefix> by scripts/npm-mcp-hosts.sh
+# The MCP bearer tokens still gate them. The proxy hosts -- the BoltMesh and
+# SearXNG web hosts and the one path-prefix host serving the five MCP servers --
+# are declared in NPM_HOSTS (stack.conf) and reconciled by scripts/npm-hosts.sh
 # through the admin API (81); its credentials come from
-# $DATA_DIR/config/npm/api.env. The BoltMesh hosts are still added by hand in
-# the admin UI. Either way those hosts live in the SQLite database below, not in
-# this repo.
+# $DATA_DIR/config/npm/api.env. Those hosts live in the SQLite database below,
+# not in this repo.
 [Unit]
 Description=Nginx Proxy Manager
 After=network-online.target npm-network-network.service

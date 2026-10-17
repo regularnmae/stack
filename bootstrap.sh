@@ -68,7 +68,7 @@ else
 fi
 command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y git; }
 # jq parses the nginx-proxy-manager admin API responses in
-# scripts/npm-mcp-hosts.sh (the host has no curl either; netcheck carries it).
+# scripts/npm-hosts.sh (the host has no curl either; netcheck carries it).
 command -v jq >/dev/null 2>&1 || { log "installing jq"; sudo dnf install -y jq; }
 
 # Rootless networking needs one of these; both are optional per release.

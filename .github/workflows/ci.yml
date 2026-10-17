@@ -17,11 +17,11 @@ jobs:
           shellcheck -x -P SCRIPTDIR -S info \
             bootstrap.sh deploy.sh verify.sh \
             deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
-            scripts/monitor.sh scripts/spend-audit.sh scripts/npm-mcp-hosts.sh
+            scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh
       - name: syntax check
         run: |
           for f in bootstrap.sh deploy.sh verify.sh \
                    deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
-                   scripts/monitor.sh scripts/spend-audit.sh scripts/npm-mcp-hosts.sh; do
+                   scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh; do
             bash -n "$f"
           done

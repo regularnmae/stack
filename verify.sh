@@ -168,7 +168,7 @@ else
         case "$code" in
             401) ;;
             000|404|502|503)
-                warn "$MCP_HOST$prefix is not proxied yet ($code); run scripts/npm-mcp-hosts.sh"
+                warn "$MCP_HOST$prefix is not proxied yet ($code); run scripts/npm-hosts.sh"
                 continue ;;
             *) bad "$MCP_HOST$prefix without a token -> $code (expected 401)"; continue ;;
         esac

@@ -39,12 +39,11 @@ service is reached by container name on `npm-network` (`10.89.0.0/24`, pinned in
 both `bitcoin.conf` and `torrc` allow that subnet): NPM terminates TLS and is
 the one way in for a client, and the host-side checks (`verify.sh`, the monitor)
 read the same addresses through a throwaway curl container on that network —
-`netcheck/Containerfile`, run by `net_curl` in `scripts/lib.sh`. The five MCP
-servers share one proxy host, created from this repo by
-`scripts/npm-mcp-hosts.sh` through the NPM admin API (`81`) — see
-[MCP over nginx-proxy-manager](#mcp-over-nginx-proxy-manager). The BoltMesh
-hosts are still added by hand. Either way, the proxy hosts live in NPM's
-database, not in this repo.
+`netcheck/Containerfile`, run by `net_curl` in `scripts/lib.sh`. The proxy hosts
+are declared in `NPM_HOSTS` (`stack.conf`) and reconciled from this repo by
+`scripts/npm-hosts.sh` through the NPM admin API (`81`) — see
+[Proxy hosts (nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager). The hosts
+themselves live in NPM's database, not in this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
 `stack.conf`), and there is nothing to reach on loopback either: if you cloned an
@@ -116,7 +115,7 @@ stale image). Common flags:
 ./deploy.sh --only boltmesh           # rebuild + migrate the whole BoltMesh tier
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only monitor            # run the health + spend checks now
-./deploy.sh --only npm-mcp-hosts      # re-apply the MCP proxy host in NPM
+./deploy.sh --only npm-hosts           # re-apply every proxy host in NPM
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
 ./deploy.sh --no-wallets              # skip the interactive wallet prompts
 ./deploy.sh --dry-run                 # print the plan, change nothing
@@ -326,12 +325,45 @@ with no alert configured) and folded into the monitor's alert and heartbeat. It
 is **not** a gate: it cannot stop a spend, only make one impossible to miss.
 `audit/` is part of the [backup set](#backup--restore).
 
-## MCP over nginx-proxy-manager
+## Proxy hosts (nginx-proxy-manager)
+
+nginx-proxy-manager publishes the stack's only host ports, so every public
+hostname is a proxy host in NPM. They are declared in `NPM_HOSTS` in
+`stack.conf` — `domain | forward_host:port | flags` — and reconciled from this
+repo by `scripts/npm-hosts.sh` through the NPM admin API on `81`: a host already
+serving the domain is updated in place, otherwise it is created, and a Let's
+Encrypt certificate is requested for any host that has none. `./deploy.sh` runs
+it after the app tier (so a fresh host deploys before the admin login exists),
+and `./deploy.sh --only npm-hosts` re-applies it after a change.
+
+```sh
+NPM_HOSTS=(
+    "${BOLTMESH_FRONTEND_HOST}|boltmesh-frontend:80|ws,block"
+    "${BOLTMESH_API_HOST}|boltmesh-backend:8000|ws,block"
+    "${SEARXNG_HOST}|searxng:8080|ws,block"
+    "${MCP_HOST}|searxng-mcp:8000|mcp,force-ssl,http2"
+)
+```
+
+`flags` is a comma-separated subset of `force-ssl` (redirect `:80` to `:443`),
+`http2`, `ws` (websocket upgrade), `block` (block common exploits) and `mcp`.
+`--dry-run` prints the API payloads without changing anything, and `--prune`
+additionally **deletes** hosts and certificates that `NPM_HOSTS` does not
+declare — the only destructive mode.
+
+The credentials for the API are in `$DATA_DIR/config/npm/api.env` (mode 600,
+seeded by `deploy/install.sh`):
+
+```sh
+NPM_EMAIL=you@example.com
+NPM_PASSWORD=…        # the password you set on the NPM UI's first visit (81)
+```
+
+### The MCP host
 
 Every MCP server speaks the Streamable HTTP transport at `/mcp` (the SDK's
-default); nginx-proxy-manager publishes the one host port and is the only way in,
-so a client reaches them through it. Each server gets a **path prefix** on one
-TLS hostname:
+default). Rather than one hostname per server, they share one, each on a **path
+prefix** (`mcp` flag above):
 
 | Public URL | Container |
 | --- | --- |
@@ -341,38 +373,16 @@ TLS hostname:
 | `https://mcp.boltmesh.net/monero-wallet` | `monero-wallet-mcp:8000` |
 | `https://mcp.boltmesh.net/lightning` | `lightning-mcp:8000` |
 
-The prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
+Each prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
 client's URL. The host and the prefixes are `MCP_HOST`/`MCP_HOSTS` in
 `stack.conf`; each server's bearer token still gates it (the tokens are the
-`token.env` files under `$DATA_DIR/config/<server>/`).
+`token.env` files under `$DATA_DIR/config/<server>/`). The host's nginx config
+turns buffering off and sets a long read timeout, because Streamable HTTP answers
+with `text/event-stream` and a buffered SSE body just hangs the MCP client.
 
-The proxy host is **created by the deploy**, not by hand:
-`scripts/npm-mcp-hosts.sh` talks to the NPM admin API on `81`, updates the host
-in place if it exists and creates it otherwise, and `./deploy.sh` runs it after
-the app tier. Its nginx config turns buffering off and sets a long read timeout,
-because Streamable HTTP answers with `text/event-stream` and a buffered SSE body
-just hangs the MCP client.
-
-It needs the admin login, in `$DATA_DIR/config/npm/api.env` (mode 600, seeded by
-`deploy/install.sh`):
-
-```sh
-NPM_EMAIL=you@example.com
-NPM_PASSWORD=…        # the password you set on the NPM UI's first visit (81)
-```
-
-With that in place, point `mcp.boltmesh.net` at this host and run:
-
-```sh
-./deploy.sh --only npm-mcp-hosts
-```
-
-The script requests a Let's Encrypt certificate for the host when none covers it
-(the same HTTP-01 requirement as the BoltMesh hosts: DNS pointing here and `:80`
-reachable); set `NPM_CERT_ID` to pin an existing certificate instead, or
-`NPM_REQUEST_CERT=0` to leave TLS to the UI. `scripts/npm-mcp-hosts.sh
---dry-run` prints the exact API payload without changing anything, and
-`./verify.sh` checks the same path a client takes — the public URL connected to
+Each declared host needs its DNS pointing here and `:80` reachable for the
+HTTP-01 challenge; set `NPM_REQUEST_CERT=0` to leave TLS to the UI instead.
+`./verify.sh` checks the MCP path a client takes — the public URL connected to
 NPM itself (`--connect-to`), following its redirect to `:443` once TLS is on, so
 it works before public DNS exists.
 
@@ -414,9 +424,10 @@ It does not bring its own chains. The backend is pointed at the stack's own
 1. Point `boltmesh.net` and `api.boltmesh.net` at the host (`BOLTMESH_FRONTEND_HOST`
    / `BOLTMESH_API_HOST` in `stack.conf`), and make `:80` reachable for the
    Let's Encrypt challenge.
-2. In the NPM admin UI (`81`) add two proxy hosts, both with a TLS certificate:
-   `boltmesh.net` → `boltmesh-frontend:80` and `api.boltmesh.net` →
-   `boltmesh-backend:8000`.
+2. Fill in `$DATA_DIR/config/npm/api.env` with the NPM admin login and re-run
+   `./deploy.sh --only npm-hosts`: the two hosts (`boltmesh.net` →
+   `boltmesh-frontend:80`, `api.boltmesh.net` → `boltmesh-backend:8000`) come
+   from `NPM_HOSTS` in `stack.conf`, each with its own TLS certificate.
 3. Fill in `$DATA_DIR/config/boltmesh/app.env` (OAuth client id/secret, SMTP,
    the agent `GITHUB_TOKEN`) and register
    `https://api.boltmesh.net/v1/auth/google/callback` and `…/github/callback`
@@ -446,9 +457,9 @@ under `$DATA_DIR/config/`, mode 600.
   with `EnvironmentFile=`; the shapes are documented in
   `deploy/examples/<name>/`.
 - **`$DATA_DIR/config/npm/api.env`** holds the nginx-proxy-manager admin login
-  that `scripts/npm-mcp-hosts.sh` uses to create the MCP proxy host through the
-  API on `81` (or an API token instead). The script sends the password in a curl
-  config on stdin, so it never reaches the host's argv.
+  that `scripts/npm-hosts.sh` uses to reconcile every proxy host (`NPM_HOSTS`)
+  through the API on `81` (or an API token instead). The script sends the
+  password in a curl config on stdin, so it never reaches the host's argv.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
 `lightningd` and `monero-wallet-rpc` are *rendered* from `deploy/*.container.in`
@@ -478,7 +489,7 @@ stack/
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
-  scripts/npm-mcp-hosts.sh # the MCP proxy host in NPM, via its admin API
+  scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
