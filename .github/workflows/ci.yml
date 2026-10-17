@@ -8,13 +8,23 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    env:
+      # The runner's shellcheck is older and disagrees on some checks (SC2015
+      # among them), so a lint that passes locally can fail here for no reason.
+      # Pin the version the developer tools carry (see the shellcheck line in
+      # AGENTS.md); bump both together.
+      SHELLCHECK_VERSION: v0.11.0
     steps:
       - uses: actions/checkout@v4
       # -P SCRIPTDIR makes the `# shellcheck source=…` directives resolve
       # relative to each script, and -S info gates on every finding.
       - name: shellcheck
         run: |
-          shellcheck -x -P SCRIPTDIR -S info \
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" --version
+          "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x -P SCRIPTDIR -S info \
             bootstrap.sh deploy.sh verify.sh \
             deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
             scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh

@@ -40,7 +40,7 @@ server.
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh  # the CI lint
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong

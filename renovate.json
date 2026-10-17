@@ -11,6 +11,16 @@
       "groupName": "python dependencies"
     }
   ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "the shellcheck release CI pins and downloads (SHELLCHECK_VERSION in .github/workflows/ci.yml)",
+      "fileMatch": ["^\\.github/workflows/ci\\.yml$"],
+      "matchStrings": ["SHELLCHECK_VERSION: (?<currentValue>v[0-9.]+)"],
+      "depNameTemplate": "koalaman/shellcheck",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
   "lockFileMaintenance": {
     "enabled": true
   }
