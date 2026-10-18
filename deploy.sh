@@ -22,6 +22,12 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
+# Where deploy/install.sh renders the units. Read here to compare a running
+# container's network mode with the one its unit asks for (see sync_npm_network),
+# and to notice a unit whose definition changed (restart_changed_units).
+QUADLET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
+# Set by restart_changed_units when nginx-proxy-manager's unit changed.
+NPM_UNIT_CHANGED=0
 # shellcheck source=stack.conf
 . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
@@ -155,6 +161,43 @@ fetch_repos() { # [repo...]  (default: every APP_REPOS entry)
 install_units() {
     log "installing units, seeding secrets and data dirs"
     run "$REPO_DIR/deploy/install.sh"
+}
+
+# A *running* container keeps the definition it started with: re-rendering a unit
+# changes nothing until that unit restarts. Digest the rendered files either side
+# of install.sh so deploy.sh can restart exactly the units whose definition
+# changed -- and only those, because a redeploy must not bounce bitcoind for an
+# untouched unit.
+unit_digest() {
+    [ -d "$QUADLET_DIR" ] || return 0
+    ( cd "$QUADLET_DIR" && sha256sum -- *.container 2>/dev/null ) || true
+}
+
+# .container only, never *.network: a network cannot be restarted under the
+# containers that use it. A oneshot unit is inactive and gets skipped by the
+# is-active check; a unit that is not running yet is started later, in order, by
+# start_infra/start_daemons -- restarting it here would jump that order (e.g.
+# lightningd before bitcoind). nginx-proxy-manager is only flagged: its restart
+# has to follow the proxy-host rewrite (sync_npm_network).
+restart_changed_units() { # before-digest after-digest
+    local before="$1" after="$2" file unit
+    [ -n "$before" ] && [ -n "$after" ] || return 0
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        unit="${file%.*}"
+        if [ "$unit" = nginx-proxy-manager ]; then
+            NPM_UNIT_CHANGED=1
+            continue
+        fi
+        systemctl --user is-active --quiet "$unit.service" 2>/dev/null || continue
+        log "$unit.service changed; restarting it to pick up the new unit"
+        restart_unit "$unit"
+        if [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$unit" 2>/dev/null)" = yes ]; then
+            wait_healthy "$unit" "$APP_HEALTH_WAIT" || warn "$unit did not report healthy"
+        fi
+    done < <(awk 'NR==FNR { old[$2] = $1; next }
+                  ($2 in old) && old[$2] != $1 { print $2 }' \
+                 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
 }
 
 # ---------------------------------------------------------------------------
@@ -367,8 +410,7 @@ deploy_app() { # repo name
     # Containerfiles), but every unit here sets HealthCmd/HealthInterval: the
     # MCP servers probe their own /mcp with an authenticated initialize, the
     # BoltMesh tier its own /health. So podman's health status IS the readiness
-    # signal, and nothing has to be polled from the host -- which is just as
-    # well, because no service publishes a port for the host to poll.
+    # signal, and this never polls an app through nginx-proxy-manager.
     wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
 }
 
@@ -482,9 +524,10 @@ deploy_boltmesh() {
 # 6c. the nginx-proxy-manager proxy hosts
 # ---------------------------------------------------------------------------
 # Not a unit: nginx-proxy-manager already serves, and every backend it fronts is
-# already on npm-network. This only configures NPM, through its admin API, to
-# serve the hosts declared in NPM_HOSTS. It self-skips with a one-line note when
-# $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
+# already up -- each publishing its port on the host's loopback, where NPM (on
+# the host network) forwards. This only configures NPM, through its admin API,
+# to serve the hosts declared in NPM_HOSTS. It self-skips with a one-line note
+# when $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
 # before the admin login exists.
 configure_npm_hosts() {
     if [ "$DRY_RUN" = 1 ]; then
@@ -493,6 +536,31 @@ configure_npm_hosts() {
     fi
     "$REPO_DIR/scripts/npm-hosts.sh" \
         || warn "the proxy hosts were not (re)configured; see scripts/npm-hosts.sh"
+}
+
+# ---------------------------------------------------------------------------
+# 6d. nginx-proxy-manager's network mode
+# ---------------------------------------------------------------------------
+# A unit change is not picked up by an already-running container, so a host that
+# served from the old published-port layout keeps doing so until NPM restarts.
+# That restart must come *after* the rewrite above and never before: NPM's nginx
+# resolves every upstream at start and refuses to come up when a saved host names
+# something it cannot resolve -- on the host network, a container name. That also
+# takes the admin API on :81 down (same nginx), leaving the rewrite with nothing
+# to talk to, so the order is load-bearing.
+sync_npm_network() {
+    local want got why=""
+    want=$(sed -n 's/^Network=//p' "$QUADLET_DIR/nginx-proxy-manager.container" 2>/dev/null | head -n1 || true)
+    [ -n "$want" ] || return 0
+    got=$(podman inspect nginx-proxy-manager --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)
+    [ -n "$got" ] || return 0    # not running: whenever it starts, it starts on the new unit
+    if [ "$got" != "$want" ]; then why="its unit asks for '$want', not '$got'"
+    elif [ "$NPM_UNIT_CHANGED" = 1 ]; then why="its unit changed"
+    else return 0
+    fi
+    log "restarting nginx-proxy-manager: $why"
+    restart_unit nginx-proxy-manager
+    wait_healthy nginx-proxy-manager 120 || warn "nginx-proxy-manager did not report healthy"
 }
 
 # ---------------------------------------------------------------------------
@@ -555,13 +623,16 @@ if [ -n "$ONLY" ]; then
 fi
 
 fetch_repos
+units_before=$(unit_digest)
 install_units
+restart_changed_units "$units_before" "$(unit_digest)"
 start_infra
 setup_wallets
 start_daemons
 [ "$SKIP_APPS" = 1 ] || deploy_apps
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
 configure_npm_hosts
+sync_npm_network
 note_firewall
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -585,9 +656,12 @@ Stack deployed (chain daemons skipped).
   BoltMesh app: postgres, boltmesh-backend, boltmesh-worker,
                 boltmesh-frontend
 
-Nothing but nginx-proxy-manager publishes a host port: it reaches every service
-by container name on npm-network, and so do ./verify.sh and the monitoring
-scripts. The MCP servers are served as https://$MCP_HOST/<prefix> once
+nginx-proxy-manager is the only service a client reaches: it runs on the host
+network, so it binds 80/443/81 itself and every request keeps the client's real
+address. Every other service publishes its port on the host's loopback, which is
+where NPM's proxy hosts point; nothing else is reachable from the LAN. ./verify.sh
+and the monitoring scripts read the services by container name on npm-network.
+The MCP servers are served as https://$MCP_HOST/<prefix> once
   $DATA_DIR/config/npm/api.env has the NPM admin login (scripts/npm-hosts.sh
   applies every proxy host in NPM_HOSTS).
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
@@ -604,8 +678,10 @@ Stack deployed.
                     monero-wallet-mcp, lightning-mcp
   BoltMesh app:     postgres, boltmesh-backend, boltmesh-worker,
                     boltmesh-frontend
-  Exposure:         nothing but nginx-proxy-manager (80/443/81); every service
-                    is reached by container name on npm-network
+  Exposure:         nothing but nginx-proxy-manager (80/443/81) is reachable
+                    from the LAN; it runs on the host network, so it keeps
+                    clients' real addresses. Every service it fronts is on the
+                    host's loopback (see NPM_HOSTS in stack.conf)
   MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)

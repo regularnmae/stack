@@ -10,8 +10,10 @@
 #                               # --skip-daemons); don't call them missing
 #
 # Run it on the host: it reads the containers with podman and reaches each MCP
-# server the way nginx-proxy-manager does -- as <container>:8000 on npm-network,
-# from a throwaway netcheck container (no service publishes a host port).
+# server on npm-network as <container>:8000, from a throwaway netcheck container
+# (the app images carry no curl). The one exception is nginx-proxy-manager,
+# which is on the host network -- it is read on 127.0.0.1, the same place it
+# listens.
 #
 # Read-only. Exits non-zero if anything is wrong.
 set -uo pipefail
@@ -75,11 +77,25 @@ for c in "${containers[@]}"; do
     fi
 done
 
+# The exposure model in one line: NPM on the host network is what makes a
+# client's real address reach its logs, fail2ban surface and X-Forwarded-For. A
+# rootless published port cannot (rootlessport forwards from inside the rootless
+# namespace, so NPM would see its own address), and that is also why every
+# service it fronts publishes its port on the host's loopback instead.
+npm_net=$(podman inspect nginx-proxy-manager --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)
+if [ -z "$npm_net" ]; then
+    warn "nginx-proxy-manager is not running; skipping the host-network check"
+elif [ "$npm_net" = "host" ]; then
+    pass "nginx-proxy-manager is on the host network (clients' real addresses)"
+else
+    bad "nginx-proxy-manager network mode is '$npm_net', expected host: NPM would log its own IP for every client"
+fi
+
 # ---------------------------------------------------------------------------
 head2 "MCP endpoints"
 # name|env-file|token-var|deep-tool|deep-args|needs-nodes
-# The name is both the container name and the host nginx-proxy-manager proxies
-# to, so this checks the request path a real client takes.
+# The name is the container name; it is read by name on npm-network, and it
+# names the MCP_HOSTS entry whose loopback publish nginx-proxy-manager fronts.
 endpoints=(
     "searxng-mcp|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
     "bitcoin-node-mcp|$CONFIG_DIR/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
@@ -97,9 +113,10 @@ for e in "${endpoints[@]}"; do
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"
 
-    # Read from a throwaway curl container on npm-network: no service publishes
-    # a host port, so this is also the path nginx-proxy-manager takes (net_curl
-    # and the mcp_* helpers live in scripts/lib.sh).
+    # Read from a throwaway curl container on npm-network (net_curl and the
+    # mcp_* helpers live in scripts/lib.sh). This is the container's own
+    # address; nginx-proxy-manager, on the host network, reaches the same
+    # server through the loopback publish the unit declares.
     health=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 "http://$name:8000/health" 2>/dev/null || echo 000)
     if [ "$health" = "200" ]; then pass "$name /health 200"; else bad "$name /health -> $health"; fi
 
@@ -138,30 +155,32 @@ done
 
 # ---------------------------------------------------------------------------
 head2 "MCP through nginx-proxy-manager"
-# The path a real client takes: https://$MCP_HOST/<prefix> -> <container>:8000/mcp.
-# Read through NPM's own :80 with the Host header, so this works before public
-# DNS and TLS exist. A configured host answers 401 without a token and a
+# The path a real client takes: https://$MCP_HOST/<prefix> -> 127.0.0.1:<port>/mcp
+# (NPM is on the host network, so the upstream is the loopback publish of that
+# unit). Read through NPM's own :80 with the Host header, so this works before
+# public DNS and TLS exist. A configured host answers 401 without a token and a
 # serverInfo handshake with one; an unconfigured one (NPM's default host) does
 # neither, which is a warning rather than a failure until it is set up.
 if [ "${MCP_HOSTS+x}" != x ] || [ "${#MCP_HOSTS[@]}" -eq 0 ]; then
     warn "MCP_HOSTS is not set in stack.conf; skipping the proxy checks"
 else
     for pair in "${MCP_HOSTS[@]}"; do
-        prefix="${pair%%:*}"; name="${pair##*:}"
+        prefix="${pair%%:*}"; rest="${pair#*:}"; name="${rest%%:*}"
         # Probe the public URL but connect to NPM itself (--connect-to), so this
         # works before public DNS exists and the certificate still validates:
         # SNI and Host are the real host, only the connection target changes.
+        # NPM binds :80/:443 on the host itself, hence 127.0.0.1 here.
         url="http://$MCP_HOST$prefix"
-        connect="$MCP_HOST:80:nginx-proxy-manager:80"
-        code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
+        connect="$MCP_HOST:80:127.0.0.1:80"
+        code=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
             -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
         [ -n "$code" ] || code=000
         # Force-SSL makes the :80 vhost redirect; follow it to the :443 one.
         case "$code" in
             301|308)
                 url="https://$MCP_HOST$prefix"
-                connect="$MCP_HOST:443:nginx-proxy-manager:443"
-                code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
+                connect="$MCP_HOST:443:127.0.0.1:443"
+                code=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
                     -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
                 [ -n "$code" ] || code=000 ;;
         esac
@@ -177,7 +196,7 @@ else
         token=$(env_value "${EP_ENV[$name]:-}" "${EP_VAR[$name]:-}")
         if [ -z "$token" ]; then bad "$name has no token; cannot handshake through NPM"; continue; fi
         resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
-            | net_curl -s -m 15 -K - --connect-to "$connect" \
+            | net_curl_host -s -m 15 -K - --connect-to "$connect" \
                 -H 'Content-Type: application/json' \
                 -H 'Accept: application/json, text/event-stream' \
                 -X POST "$url" -d "$MCP_INIT_BODY" 2>/dev/null || true)
@@ -192,7 +211,8 @@ fi
 # ---------------------------------------------------------------------------
 head2 "BoltMesh"
 # The API's /health is deep: 200 only when it can reach postgres and valkey.
-# Read as a peer on npm-network, the same address nginx-proxy-manager uses.
+# Read as a peer on npm-network; nginx-proxy-manager, on the host network,
+# reaches the same server through the unit's loopback publish.
 be_body=$(net_curl -s -m 10 "http://boltmesh-backend:8000/health" 2>/dev/null || true)
 if printf '%s' "$be_body" | grep -q '"status": *"healthy"'; then
     pass "boltmesh-backend /health healthy"

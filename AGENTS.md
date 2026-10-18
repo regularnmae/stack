@@ -54,6 +54,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **`deploy.sh` runs `install.sh` twice** — up front, then again after
   `lightningd` is up, because the CLN runes need a running node. Don't collapse
   them.
+- **A re-render alone does not change a running container** (systemd keeps the
+  old one), so `deploy.sh` digest-compares the rendered `.container` files
+  either side of the first `install.sh` (`unit_digest` /
+  `restart_changed_units`) and restarts exactly the units whose definition
+  changed — never ones that are inactive, since those are started later in
+  order. `nginx-proxy-manager` is only flagged there: its restart is deferred to
+  `sync_npm_network`, after the proxy hosts are rewritten.
 - **CLN runes are verified, not trusted:** `createrune` can return a rune whose
   `unique_id` the node blacklisted, so `install.sh` proves each with `checkrune`
   and retries on a fresh id.
@@ -116,35 +123,58 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   (`podman run --rm caronc/apprise apprise -t TITLE -b BODY URL...`), and a
   `mailto://` URL on 587 needs `?mode=starttls` (`465` → `?mode=ssl`) or it
   fails with a bare "Connection error".
-- **Only nginx-proxy-manager publishes a port, and health comes from podman** —
-  the sole `PublishPort=` left in `deploy/` is NPM's 80/443/81. Everything else
-  is reached by container name on `npm-network`: NPM for a client, and the
-  host-side checks through `net_curl` — a throwaway `localhost/netcheck:local`
-  container (`netcheck/Containerfile`, built by `install.sh`) — because the MCP
-  images are `python:3.14-alpine` and carry no curl. The units *do* set
-  `HealthCmd=`/`HealthInterval=`, so podman really does report `(healthy)` for
-  them and `deploy.sh` waits with `wait_healthy`; the MCP probe is an
-  authenticated `initialize`, i.e. strictly stronger than a `/health` GET.
+- **nginx-proxy-manager runs on the host network, and health comes from podman** —
+  `deploy/nginx-proxy-manager.container` sets `Network=host` and has no
+  `PublishPort=`, so NPM's own nginx binds :80/:443/:81 in the host's namespace
+  and every request carries the client's real address. That is the *reason* it is
+  not published: rootless podman forwards a published port with `rootlessport`, a
+  userspace proxy that dials the container from inside the rootless namespace, so
+  NPM logged its own container IP (`10.89.0.5`) as the client for every request.
+  Podman ≥ 6.0 can forward with `pasta` instead (`rootless_port_forwarder="pasta"`
+  under `[network]` in `~/.config/containers/containers.conf`), which does
+  preserve the source address, but Rocky 10 ships podman 5.8 with no such key and
+  no `pesto` — so don't "simplify" NPM back to `PublishPort=80:80`. Restart
+  order is load-bearing too: `deploy.sh` rewrites the proxy hosts and only then
+  restarts NPM (`sync_npm_network`), because its nginx resolves every upstream at
+  start and refuses to come up while a saved host still names a container — which
+  also takes the admin API on `:81` down, so the reverse order cannot be
+  recovered through the API (park `$DATA_DIR/npm/data/nginx/proxy_host/*.conf`,
+  then re-run). The price of
+  `Network=host` is that NPM can no longer resolve a container name: every unit it
+  fronts publishes its port on the host's **loopback**
+  (`PublishPort=127.0.0.1:<port>:…`), those are the `127.0.0.1:` targets in
+  `NPM_HOSTS`/`MCP_HOSTS`, and only 80/443/81 stay LAN-reachable. The host-side
+  checks still read the services by container name on `npm-network` through
+  `net_curl` — a throwaway `localhost/netcheck:local` container
+  (`netcheck/Containerfile`, built by `install.sh`) — with `net_curl_host` the
+  same image on the host network, for NPM's own admin API on `127.0.0.1:81`. The
+  units *do* set `HealthCmd=`/`HealthInterval=`, so podman really does report
+  `(healthy)` for them and `deploy.sh` waits with `wait_healthy`; the MCP probe is
+  an authenticated `initialize`, i.e. strictly stronger than a `/health` GET.
 - **The bearer tokens never reach the host's argv** — `mcp_initialize` /
   `mcp_tool_call` pass them in a curl config on stdin (`-K -`), so `ps` cannot
   read a token out of a running verify/monitor/audit sweep. `npm-hosts.sh`
   does the same with the NPM admin password and the API token it mints.
 - **Every proxy host is declared, not hand-clicked:** `NPM_HOSTS` in
-  `stack.conf` (`domain | [scheme://]host:port | flags`) is the whole public
-  surface, and `scripts/npm-hosts.sh` (run by `deploy.sh`, or `--only npm-hosts`)
-  reconciles it through nginx-proxy-manager's admin API on `81` — update in
-  place by `domain_names`, else create, plus a Let's Encrypt certificate per
-  host. It needs the admin login in `$DATA_DIR/config/npm/api.env` and `jq` on
-  the host (bootstrap); it self-skips when the login is absent. `--prune` (the
-  only destructive mode) deletes hosts and certificates `NPM_HOSTS` does not
-  declare. The `mcp` flag is the exception to "one forward": that host serves a
-  location per `MCP_HOSTS` entry, each prefix rewritten onto the container's
-  `/mcp` (the MCP SDK's streamable-HTTP default; the apps expose no path knob),
-  and its nginx config must keep `proxy_buffering off` and a long
-  `proxy_read_timeout` — the transport is SSE, and a buffered body hangs the
-  client. `verify.sh` re-checks that path through NPM's `:80` (following the
+  `stack.conf` (`domain | [scheme://]host:port | flags`, where host is always
+  `127.0.0.1` — the loopback publish of the unit being fronted) is the whole
+  public surface, and `scripts/npm-hosts.sh` (run by `deploy.sh`, or
+  `--only npm-hosts`) reconciles it through nginx-proxy-manager's admin API on
+  `127.0.0.1:81` — update in place by `domain_names`, else create, plus a Let's
+  Encrypt certificate per host. It needs the admin login in
+  `$DATA_DIR/config/npm/api.env` and `jq` on the host (bootstrap); it self-skips
+  when the login is absent. `--prune` (the only destructive mode) deletes hosts
+  and certificates `NPM_HOSTS` does not declare. The `mcp` flag is the exception
+  to "one forward": that host serves a location per `MCP_HOSTS` entry
+  (`/prefix:container:port` — the container names the `token.env` that is the
+  prefix's credential, the port is its loopback publish), each prefix rewritten
+  onto the container's `/mcp` (the MCP SDK's streamable-HTTP default; the apps
+  expose no path knob), and its nginx config must keep `proxy_buffering off` and
+  a long `proxy_read_timeout` — the transport is SSE, and a buffered body hangs
+  the client. `verify.sh` re-checks that path through NPM's `:80` (following the
   force-SSL redirect to `:443`) by connecting the public host to NPM itself with
-  `--connect-to`, so the certificate still validates. Proxying a daemon's own
+  `--connect-to` — onto `127.0.0.1`, since NPM binds those ports in the host
+  namespace — so the certificate still validates. Proxying a daemon's own
   API (`clnrest`, `xmr-rpc`) is gated only by that daemon's RPC credentials, not
   by an MCP token.
 
@@ -156,22 +186,26 @@ the shared contract; the app repos' docs own the *meaning* of the variables,
 this repo owns everything about *how they get set*. If a container name, port or
 variable name changes, it changes on both sides at once.
 
-| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | Reached as (npm-network) | Bind + health |
-| --- | --- | --- | --- | --- | --- |
-| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `searxng-mcp:8000` | `0.0.0.0:8000`, `/health` |
-| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `bitcoin-node-mcp:8000` | `0.0.0.0:8000`, `/health` |
-| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `monero-node-mcp:8000` | `0.0.0.0:8000`, `/health` |
-| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `monero-wallet-mcp:8000` | `0.0.0.0:8000`, `/health` |
-| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `0.0.0.0:8000`, `/health` |
+| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | On npm-network | NPM target | Bind + health |
+| --- | --- | --- | --- | --- | --- | --- |
+| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `searxng-mcp:8000` | `127.0.0.1:8100` | `0.0.0.0:8000`, `/health` |
+| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `bitcoin-node-mcp:8000` | `127.0.0.1:8101` | `0.0.0.0:8000`, `/health` |
+| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `monero-node-mcp:8000` | `127.0.0.1:8102` | `0.0.0.0:8000`, `/health` |
+| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `monero-wallet-mcp:8000` | `127.0.0.1:8103` | `0.0.0.0:8000`, `/health` |
+| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `127.0.0.1:8104` | `0.0.0.0:8000`, `/health` |
 
-Nothing here publishes a host port: NPM terminates TLS and is the sole path to
-every MCP server for a client, and the host-side checks read the very same
-`<container>:8000` through `net_curl`. `Bind + health` is the bind and health
-path *inside* the container, which is still `0.0.0.0` — the app's
+None of them is reachable from the LAN. NPM terminates TLS on :80/:443 (its own
+bind, on the host network) and is the sole path to every MCP server for a client;
+`NPM target` is the unit's loopback publish — `PublishPort=127.0.0.1:<port>:...`
+in that unit — which is what `NPM_HOSTS`/`MCP_HOSTS` point at, because NPM can no
+longer resolve a container name. The host-side checks read the very same
+`<container>:8000` (`On npm-network`) through `net_curl`. `Bind + health` is the
+bind and health path *inside* the container, which is still `0.0.0.0` — the app's
 `MCP_HOST`/`MCP_PORT` contract is unchanged. For a client, the servers appear as
 one host with a path prefix each — `https://$MCP_HOST/<prefix>`, mapped onto the
 container's `/mcp` by the `mcp` proxy host `scripts/npm-hosts.sh` reconciles
-from `NPM_HOSTS`; the prefix and container come from `MCP_HOSTS`.
+from `NPM_HOSTS`; each `MCP_HOSTS` entry is `/prefix:container:port` (the
+container names the `token.env`, the port is the loopback publish).
 
 The variables the apps read (names and defaults are the app repos' contract):
 `SEARXNG_URL`/`SEARXNG_MCP_TOKEN`; `BITCOIN_RPC_URL`/`BITCOIN_RPC_USER`/
@@ -193,12 +227,12 @@ Not MCP servers, so they are absent from the table above. Same rule applies
 though: the container name and env file paths below are the shared contract with
 the `boltmesh-labs` repos.
 
-| Unit | Image | Env files (`$DATA_DIR/config/boltmesh/`) | Upstream it reaches | Reached as (npm-network) | Health |
-| --- | --- | --- | --- | --- | --- |
-| `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` (`POSTGRES_*`) | — | — | `pg_isready -h 127.0.0.1` |
-| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `gateway.env` | `postgres:5432`, `valkey:6379`, `lightningd:3010`, `monero-wallet-rpc:18083` | `boltmesh-backend:8000` | `0.0.0.0:8000`, `/health` (deep) |
-| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | the same four | the same | — | liveness file `/tmp/arq-worker-liveness` |
-| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `boltmesh-frontend:80` | `0.0.0.0:80`, `/` |
+| Unit | Image | Env files (`$DATA_DIR/config/boltmesh/`) | Upstream it reaches | On npm-network | NPM target | Health |
+| --- | --- | --- | --- | --- | --- | --- |
+| `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` (`POSTGRES_*`) | — | — | — | `pg_isready -h 127.0.0.1` |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `gateway.env` | `postgres:5432`, `valkey:6379`, `lightningd:3010`, `monero-wallet-rpc:18083` | `boltmesh-backend:8000` | `127.0.0.1:8105` | `0.0.0.0:8000`, `/health` (deep) |
+| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | the same four | the same | — | — | liveness file `/tmp/arq-worker-liveness` |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `boltmesh-frontend:80` | `127.0.0.1:8106` | `0.0.0.0:80`, `/` |
 
 The four env files are `db.env`/`secrets.env` (generated), `app.env`
 (operator-editable, seeded from `BOLTMESH_*` in `stack.conf`) and `gateway.env`

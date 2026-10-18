@@ -19,9 +19,13 @@ Image=ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest
 Network=npm-network.network
 
 # The wallet RPC can open wallets and move funds, so it is
-# authenticated (--rpc-login below) and publishes nothing: no host
-# port at all, not even on loopback. The other containers reach it
-# as monero-wallet-rpc:18083 on npm-network.
+# authenticated (--rpc-login below) and its one host port is the
+# loopback bind nginx-proxy-manager reaches it on (xmr-rpc.<host>
+# in NPM_HOSTS): NPM runs on the host network and can no longer
+# resolve the container name. 127.0.0.1 keeps it off the LAN -- the
+# firewall opens nothing for it. The other containers reach it as
+# monero-wallet-rpc:18083 on npm-network.
+PublishPort=127.0.0.1:18083:18083
 
 # Ownership NOTE: unlike monerod's entrypoint, this image's
 # entrypoint checks /home/monero (image-owned, uid 1000)

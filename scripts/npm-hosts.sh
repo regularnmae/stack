@@ -22,8 +22,8 @@
 #              per MCP_HOSTS entry, each rewritten onto that container's /mcp,
 #              with the streaming nginx settings an SSE transport needs
 #
-# nginx-proxy-manager publishes the stack's only host port and is the only way
-# in, so its configuration is applied through the admin API on 81 rather than by
+# nginx-proxy-manager runs on the host network and is the only way in, so its
+# configuration is applied through the admin API on 127.0.0.1:81 rather than by
 # hand. Credentials live in $DATA_DIR/config/npm/api.env (mode 600), seeded by
 # deploy/install.sh. A Let's Encrypt certificate is requested for any declared
 # host that has none (its DNS must point here and :80 must reach this machine);
@@ -51,10 +51,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-MCP_PORT="${MCP_PORT:-8000}"
-# The admin API answers on the container's published 81; read it by container
-# name the way every other host-side check reads a service (net_curl).
-NPM_API="${NPM_API_URL:-http://nginx-proxy-manager:81}"
+# nginx-proxy-manager is on the host network, so its own nginx owns :81 in the
+# host's namespace: the admin API is reached on the loopback, not as a peer on
+# npm-network (net_curl_host runs curl in that namespace).
+NPM_API="${NPM_API_URL:-http://127.0.0.1:81}"
 
 # jq parses the API's JSON responses; net_curl is only curl. bootstrap.sh
 # installs it -- this is the clear error for a host provisioned before that.
@@ -80,6 +80,20 @@ if [ -z "$NPM_TOKEN" ] && { [ -z "$NPM_EMAIL" ] || [ -z "$NPM_PASSWORD" ]; }; th
     exit 0
 fi
 
+# One curl at the API root, before any credential is used, so "NPM is not
+# answering" never reads as "your password is wrong". The failure it guards
+# against is specific: NPM's nginx resolves every upstream when it starts, so a
+# saved proxy host that names a container keeps nginx from coming up at all once
+# NPM is on the host network -- and the admin UI on 81 is served by that same
+# nginx. The fix is to park the generated configs (the database is the source of
+# truth, so the host is rewritten normally afterwards) and let nginx start.
+api_probe=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 15 "$NPM_API/" 2>/dev/null || true)
+case "$api_probe" in
+    000|"")
+        die "no answer from $NPM_API. If nginx-proxy-manager is running but unhealthy, its nginx is refusing to start (on Network=host a saved proxy host naming a container no longer resolves). Park the generated configs and re-run:
+    mkdir -p /tmp/npm-proxy-host-parked && mv $DATA_DIR/npm/data/nginx/proxy_host/*.conf /tmp/npm-proxy-host-parked/" ;;
+esac
+
 # --- JSON / curl-config escaping ------------------------------------------
 # The token request carries the admin password in the BODY, so it goes out as a
 # curl config on stdin (`-K -`), never on a command line `ps` can read. Two
@@ -104,7 +118,7 @@ fi
 # a token. On success NPM_TOKEN holds a bearer token (both paths end there).
 npm_login() {
     local resp
-    resp=$(printf '%s' "$TOKEN_CFG" | net_curl -s -m 60 -K - 2>/dev/null) || return 1
+    resp=$(printf '%s' "$TOKEN_CFG" | net_curl_host -s -m 60 -K - 2>/dev/null) || return 1
     NPM_TOKEN=$(printf '%s' "$resp" | jq -r '.token // empty' 2>/dev/null)
     [ -n "$NPM_TOKEN" ]
 }
@@ -116,11 +130,11 @@ npm_call() { # METHOD PATH [JSON_BODY]
     local method="$1" path="$2" body="${3:-}"
     if [ -n "$body" ]; then
         printf 'header = "Authorization: Bearer %s"\n' "$NPM_TOKEN" \
-            | net_curl -s -m 120 -K - -H 'Content-Type: application/json' \
+            | net_curl_host -s -m 120 -K - -H 'Content-Type: application/json' \
                 -X "$method" "$NPM_API$path" -d "$body" || true
     else
         printf 'header = "Authorization: Bearer %s"\n' "$NPM_TOKEN" \
-            | net_curl -s -m 120 -K - -X "$method" "$NPM_API$path" || true
+            | net_curl_host -s -m 120 -K - -X "$method" "$NPM_API$path" || true
     fi
 }
 
@@ -133,15 +147,24 @@ has_flag() { case ",$1," in *",$2,"*) return 0 ;; *) return 1 ;; esac; }
 ADVANCED_JSON='proxy_buffering off;\nproxy_cache off;\ngzip off;\nproxy_read_timeout 3600s;\nproxy_send_timeout 3600s;\nproxy_http_version 1.1;\nproxy_set_header Connection \"\";\nchunked_transfer_encoding on;'
 
 mcp_locations() {
-    local locations="" prefix host pair
+    local locations="" prefix rest host port obj pair
     for pair in "${MCP_HOSTS[@]}"; do
         prefix="${pair%%:*}"
-        host="${pair##*:}"
+        rest="${pair#*:}"
+        host="${rest%%:*}"
+        port="${rest##*:}"
+        # Three fields: /prefix:container:loopback-port. The container name is
+        # kept for the credential path (see the endpoint list below), but NPM
+        # forwards to the loopback publish, not to a container name -- it is on
+        # the host network and cannot resolve one.
         if [ -z "$prefix" ] || [ -z "$host" ]; then
-            die "bad MCP_HOSTS entry: $pair (want \"/prefix:container\")"
+            die "bad MCP_HOSTS entry: $pair (want \"/prefix:container:loopback-port\")"
         fi
-        obj=$(printf '{"path":"%s","forward_scheme":"http","forward_host":"%s","forward_port":%s,"forward_path":"/mcp","access_list_id":0}' \
-            "$prefix" "$host" "$MCP_PORT")
+        case "$port" in
+            ''|*[!0-9]*) die "bad MCP_HOSTS entry: $pair (want \"/prefix:container:loopback-port\")" ;;
+        esac
+        obj=$(printf '{"path":"%s","forward_scheme":"http","forward_host":"127.0.0.1","forward_port":%s,"forward_path":"/mcp","access_list_id":0}' \
+            "$prefix" "$port")
         locations="${locations:+$locations,}$obj"
     done
     printf '%s' "$locations"
@@ -262,8 +285,9 @@ for entry in "${NPM_HOSTS[@]}"; do
     if has_flag "$flags" mcp; then
         log "  MCP endpoints (Authorization: Bearer <token from the file named below>):"
         for pair in "${MCP_HOSTS[@]}"; do
+            rest="${pair#*:}"
             printf '    https://%s%s  (%s/%s/token.env)\n' \
-                "$domain" "${pair%%:*}" "$CONFIG_DIR" "${pair##*:}"
+                "$domain" "${pair%%:*}" "$CONFIG_DIR" "${rest%%:*}"
         done
     fi
 done

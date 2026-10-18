@@ -132,9 +132,9 @@ else
     fi
 fi
 
-# Monero heights are read through the node MCP and the wallet MCP (there is no
-# curl/wget guaranteed inside the daemons, and neither publishes a host port:
-# mcp_call reaches them as containers on npm-network). Missing/unparseable
+# Monero heights are read through the node MCP and the wallet MCP (the daemons
+# carry no curl/wget of their own, so this goes through the MCP servers, which
+# mcp_call reaches as containers on npm-network). Missing/unparseable
 # output is a warning only -- verify.sh already fails if the endpoint is down.
 node_h=""
 sync=""

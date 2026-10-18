@@ -1,12 +1,14 @@
 # netcheck image: a curl client that lives on npm-network.
 #
-# No stack service publishes an HTTP port to the host any more (only
-# nginx-proxy-manager publishes 80/443/81, on the LAN). Everything the host-side
-# scripts need to read -- verify.sh, scripts/monitor.sh, scripts/spend-audit.sh
-# -- is therefore read the way nginx-proxy-manager reads it: by container name,
-# as <container>:<port> on npm-network. net_curl in scripts/lib.sh runs this
-# image as a throwaway container to do exactly that, the same shape as the
-# apprise image monitor.sh already runs.
+# Everything the host-side scripts need to read -- verify.sh,
+# scripts/monitor.sh, scripts/spend-audit.sh -- is read by container name, as
+# <container>:<port> on npm-network, because the app images vary and several
+# carry no curl. net_curl in scripts/lib.sh runs this image as a throwaway
+# container to do exactly that, the same shape as the apprise image monitor.sh
+# already runs. net_curl_host, next to it, runs the same image on the host
+# network: nginx-proxy-manager is the one service that is not a peer here -- it
+# runs on the host network (so clients' real addresses reach its logs) and binds
+# :80/:443/:81 itself, so it is read on 127.0.0.1.
 #
 # Both the base and the package are pinned -- tag *and* digest for the base, an
 # exact apk version for curl -- so Renovate can bump them (and so a rebuild

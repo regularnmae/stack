@@ -17,12 +17,23 @@ env_value() {
     sed -n "s/^$key=//p" "$file" | head -n1 | tr -d '\r'
 }
 
-# The image the host-side checks speak through: a curl client on npm-network
-# (see netcheck/Containerfile), built by deploy/install.sh. Nothing in the stack
-# publishes a host port, so this is how a host script reaches a service -- by
-# container name, exactly as nginx-proxy-manager does. stack.conf sets it; the
-# default here covers a script run with a stale environment.
+# The image the host-side checks speak through: a curl client (see
+# netcheck/Containerfile), built by deploy/install.sh. It is a throwaway
+# container rather than a host package, so the host needs only podman for a
+# check to reach a service (the app images vary, and several carry no curl).
+# stack.conf sets it; the default here covers a script run with a stale
+# environment.
 NETCHECK_IMAGE="${NETCHECK_IMAGE:-localhost/netcheck:local}"
+
+# Fail before podman does, so a host that has not run deploy/install.sh reads as
+# one clear error rather than a podman stack trace.
+netcheck_ready() {
+    if podman image exists "$NETCHECK_IMAGE" 2>/dev/null; then
+        return 0
+    fi
+    printf 'ERROR: %s is missing; run deploy/install.sh to build it\n' "$NETCHECK_IMAGE" >&2
+    return 127
+}
 
 # Run curl against a container on npm-network, from a throwaway container.
 # Arguments are curl's, verbatim, so call sites read exactly as they did when
@@ -31,11 +42,21 @@ NETCHECK_IMAGE="${NETCHECK_IMAGE:-localhost/netcheck:local}"
 # -i keeps stdin attached, which is how a caller passes a secret in a curl
 # config (`-K -`) rather than on a command line that `ps` can read.
 net_curl() {
-    if ! podman image exists "$NETCHECK_IMAGE" 2>/dev/null; then
-        printf 'ERROR: %s is missing; run deploy/install.sh to build it\n' "$NETCHECK_IMAGE" >&2
-        return 127
-    fi
+    netcheck_ready || return 127
     podman run --rm -i --network npm-network "$NETCHECK_IMAGE" curl "$@"
+}
+
+# The same, from the host's own network namespace. It is for the one service
+# that is not on npm-network: nginx-proxy-manager runs on the host network
+# (deploy/nginx-proxy-manager.container) so that its logs and the
+# X-Forwarded-For it sets carry a client's real address. That also means it
+# binds :80/:443/:81 itself and speaks to the app tier on the loopback publishes
+# its units declare, so its admin API is 127.0.0.1:81 and a host name it fronts
+# is reached by looping back to this host:
+#   net_curl_host -s -o /dev/null -w '%{http_code}' http://127.0.0.1:81/
+net_curl_host() {
+    netcheck_ready || return 127
+    podman run --rm -i --network host "$NETCHECK_IMAGE" curl "$@"
 }
 
 # The session id the last mcp_initialize was given, and the marker that -w uses

@@ -18,10 +18,13 @@ Network=npm-network.network
 # the Authorization header of ~/.config/opencode/opencode.json.
 EnvironmentFile=@CONFIG_DIR@/searxng-mcp/token.env
 
-# No PublishPort: nothing is exposed to the host, not even on loopback. NPM is
-# the sole path in for a client (it reaches the container as searxng-mcp:8000
-# on npm-network), and the host-side checks read it as a peer on that same
-# network, through scripts/lib.sh's net_curl.
+# Loopback only: nginx-proxy-manager runs on the host network, so host 8100 is
+# how it reaches this server (NPM_HOSTS/MCP_HOSTS in stack.conf) -- NPM can no
+# longer resolve the container name. Bind 127.0.0.1, never a LAN address: the
+# firewall opens nothing for it and NPM is still the only way in for a client.
+# The host-side checks keep reading the container by name on npm-network
+# through scripts/lib.sh's net_curl.
+PublishPort=127.0.0.1:8100:8000
 
 # Healthcheck: MCP initialize probe (authenticated). Makes a
 # wedged server visible/restartable instead of silently erroring.

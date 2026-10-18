@@ -12,8 +12,11 @@ ContainerName=searxng
 Image=docker.io/searxng/searxng:latest
 Network=npm-network.network
 
-# No PublishPort: nothing is exposed to the host. NPM is the sole path in,
-# proxying it as searxng:8080 on npm-network without touching this file.
+# Loopback only: nginx-proxy-manager runs on the host network, so host 8080 is
+# how it reaches SearXNG (NPM_HOSTS in stack.conf). Binding 127.0.0.1 keeps it
+# off the LAN -- the firewall opens nothing for it, and NPM is still the only way
+# in for a client. The MCP server reaches it as searxng:8080 on npm-network.
+PublishPort=127.0.0.1:8080:8080
 
 # Image entrypoint generates a default settings.yml with a
 # random secret_key on first start if the mount is empty.

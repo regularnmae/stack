@@ -318,8 +318,9 @@ mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
 # ---------------------------------------------------------------------------
 # Built here, not pulled, and left alone once it exists -- same reasoning as
 # the tor image below. scripts/lib.sh's net_curl runs it as a throwaway
-# container to read a service by name on npm-network, because nothing in the
-# stack publishes a host port for the host to reach.
+# container to read a service by name on npm-network, and net_curl_host the
+# same image on the host network for nginx-proxy-manager, which binds
+# 127.0.0.1:81 there.
 if command -v podman >/dev/null 2>&1 && ! podman image exists "$NETCHECK_IMAGE" 2>/dev/null; then
     if [ -f "$REPO_DIR/netcheck/Containerfile" ]; then
         log "building $NETCHECK_IMAGE"

@@ -4,34 +4,43 @@
 # version control before. deploy/install.sh renders this into
 # ~/.config/containers/systemd/ and creates its data dirs under $DATA_DIR/npm.
 #
-# Publishes 80/443 (proxied sites) and 81 (the admin UI) on the LAN. Binding
-# :80 rootless needs net.ipv4.ip_unprivileged_port_start<=80, which
-# bootstrap.sh sets. Its SQLite database and TLS material live in
+# Serves 80/443 (proxied sites) and 81 (the admin UI) on the LAN. Binding :80
+# rootless needs net.ipv4.ip_unprivileged_port_start<=80, which bootstrap.sh
+# sets. Its SQLite database and TLS material live in
 # $DATA_DIR/npm/{data,letsencrypt}; back those up -- install.sh never overwrites them.
 #
-# NPM IS the request path for every service: nothing else here publishes a host
-# port, not even on loopback, so reaching a container by name on npm-network is
-# the sole way in for a client and NPM is what terminates TLS in front of it.
-# The MCP bearer tokens still gate them. The proxy hosts -- the BoltMesh and
+# Network=host, and NOT a PublishPort, because a rootless published port is
+# forwarded by rootlessport: a userspace proxy that dials the container over a
+# fresh connection from inside the rootless network namespace, so NPM saw its
+# own address (10.89.0.5) as $remote_addr for every request -- real client IPs
+# never reached its logs, its fail2ban surface or the X-Forwarded-For it sets
+# on the way to the app tier. Only pasta (Podman >= 6.0,
+# rootless_port_forwarder="pasta") preserves the source IP for a published port
+# on a user-defined network, and that is not in Rocky 10's podman 5.8 yet.
+#
+# On the host network NPM's own nginx binds :80/:443/:81, so the client's
+# address is the client's. The price is reachability: NPM is no longer a peer on
+# npm-network, so it cannot resolve a container name. Every unit it proxies to
+# therefore publishes its port on the host's loopback (PublishPort=127.0.0.1:...)
+# and NPM_HOSTS/MCP_HOSTS in stack.conf name 127.0.0.1, not the container. The
+# loopback binds are invisible to the LAN -- the firewall opens nothing for them
+# and NPM is still the only way in for a client.
+#
+# NPM IS the request path for every service: it terminates TLS, and the MCP
+# bearer tokens gate the services behind it. The proxy hosts -- the BoltMesh and
 # SearXNG web hosts and the one path-prefix host serving the five MCP servers --
-# are declared in NPM_HOSTS (stack.conf) and reconciled by scripts/npm-hosts.sh
-# through the admin API (81); its credentials come from
+# are declared in NPM_HOSTS (stack.conf) and reconciled by scripts/npm-hosts.sh,
+# which reads the admin API on 127.0.0.1:81; its credentials come from
 # $DATA_DIR/config/npm/api.env. Those hosts live in the SQLite database below,
 # not in this repo.
 [Unit]
 Description=Nginx Proxy Manager
-After=network-online.target npm-network-network.service
-Requires=npm-network-network.service
+After=network-online.target
 
 [Container]
 ContainerName=nginx-proxy-manager
 Image=docker.io/jc21/nginx-proxy-manager:latest
-Network=npm-network.network
-
-# Port mappings: HTTP, HTTPS, and Admin Web UI.
-PublishPort=80:80
-PublishPort=443:443
-PublishPort=81:81
+Network=host
 
 # Volume mounts with :z (shared) for SELinux labelling. Shared, not private
 # (:Z): the backup container mounts these same directories read-only, and a

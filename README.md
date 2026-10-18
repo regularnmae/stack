@@ -17,38 +17,56 @@ stack runs and one script that fixes a deployment problem.
 | --- | --- | --- | --- |
 | `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — | `$DATA_DIR/bitcoin` |
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
-| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | — | `$DATA_DIR/monero-wallet-rpc` |
-| `lightningd` | `docker.io/elementsproject/lightningd:latest` | — (onion over Tor) | `$DATA_DIR/cln` |
+| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
+| `lightningd` | `docker.io/elementsproject/lightningd:latest` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:latest` | — | `$DATA_DIR/searxng` |
+| `searxng` | `docker.io/searxng/searxng:latest` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
-| `searxng-mcp` | `localhost/searxng-mcp:latest` | — | — |
-| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | — | — |
-| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | — | — |
-| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | — 🔑 | — |
-| `lightning-mcp` | `localhost/lightning-mcp:latest` | — 🔑 | — |
+| `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` | — |
+| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` | — |
+| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` | — |
+| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` 🔑 | — |
+| `lightning-mcp` | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` 🔑 | — |
 | `postgres` | `docker.io/library/postgres:18-alpine` | — | `$DATA_DIR/postgres` |
-| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | — | — |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` | — |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
-| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — | — |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` | — |
 
-**`nginx-proxy-manager` is the only unit that publishes a port.** Every other
-service is reached by container name on `npm-network` (`10.89.0.0/24`, pinned in
+**Only `nginx-proxy-manager` is reachable from the LAN.** It runs on the **host
+network** (`Network=host`), so its own nginx binds `80`/`443`/`81` in the host's
+namespace — nothing is port-forwarded for it, and a request therefore arrives
+with the client's real address. That is what its access log, its fail2ban surface
+and the `X-Forwarded-For` it sets on the way to an app need. A *published* port
+cannot do that on a rootless build: podman's `rootlessport` forwards from inside
+the rootless namespace, so NPM logged its own container IP (`10.89.0.5`) for
+every client. Podman ≥ 6.0 can forward with `pasta` instead
+(`rootless_port_forwarder="pasta"` under `[network]` in
+`~/.config/containers/containers.conf`), which does preserve the source address,
+but Rocky 10's podman 5.8 has no such key.
+
+Because NPM is no longer a peer on `npm-network` (`10.89.0.0/24`, pinned in
 `deploy/npm-network.network` because `tor.container` pins `--ip=10.89.0.240` and
-both `bitcoin.conf` and `torrc` allow that subnet): NPM terminates TLS and is
-the one way in for a client, and the host-side checks (`verify.sh`, the monitor)
-read the same addresses through a throwaway curl container on that network —
-`netcheck/Containerfile`, run by `net_curl` in `scripts/lib.sh`. The proxy hosts
-are declared in `NPM_HOSTS` (`stack.conf`) and reconciled from this repo by
-`scripts/npm-hosts.sh` through the NPM admin API (`81`) — see
+both `bitcoin.conf` and `torrc` allow that subnet), it cannot resolve a container
+name. Every unit it proxies to therefore publishes its port on the **host's
+loopback** only — the `127.0.0.1:…` entries above, i.e.
+`PublishPort=127.0.0.1:…` in that unit — and `NPM_HOSTS`/`MCP_HOSTS` in
+`stack.conf` name `127.0.0.1`, not a container. A loopback bind is invisible to
+the LAN, so NPM (which terminates TLS) plus each server's bearer token are still
+the one way in for a client. The host-side checks (`verify.sh`, the monitor) read
+the services by container name on `npm-network`, through a throwaway curl
+container on that network — `netcheck/Containerfile`, run by `net_curl` in
+`scripts/lib.sh`; `net_curl_host` is that same container on the host network, for
+NPM's own admin API on `127.0.0.1:81`. The proxy hosts are declared in `NPM_HOSTS`
+(`stack.conf`) and reconciled from this repo by `scripts/npm-hosts.sh` — see
 [Proxy hosts (nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager). The hosts
 themselves live in NPM's database, not in this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
-`stack.conf`), and there is nothing to reach on loopback either: if you cloned an
-older host that still had `8000`/`8080`/`8100-8106` published or open, close
-them once by hand — `bootstrap.sh` only ever opens ports, it never closes them:
+`stack.conf`); the loopback publishes are not, and another machine cannot reach
+them. If you cloned an older host that still had `8000`/`8080`/`8100-8106` opened
+in firewalld, close them once by hand — `bootstrap.sh` only ever opens ports, it
+never closes them:
 
 ```sh
 sudo firewall-cmd --permanent --remove-port=8000/tcp --remove-port=8080/tcp \
@@ -56,6 +74,23 @@ sudo firewall-cmd --permanent --remove-port=8000/tcp --remove-port=8080/tcp \
   --remove-port=8103/tcp --remove-port=8104/tcp --remove-port=8105/tcp \
   --remove-port=8106/tcp && sudo firewall-cmd --reload
 ```
+
+> **Upgrading from the published-port layout.** The proxy hosts are rewritten to
+> `127.0.0.1` upstreams, which only work once NPM itself is on the host network,
+> so `./deploy.sh` rewrites them *first* and restarts NPM afterwards. That order
+> is load-bearing: NPM's nginx resolves every upstream when it starts, so a saved
+> host still naming a container keeps its nginx down — and the admin UI on `81`
+> is served by that same nginx. A plain `./deploy.sh` also restarts every unit
+> whose rendered file changed (`searxng`, the daemons, the whole app tier), so it
+> is the only command needed. If NPM was restarted by hand first, park the
+> generated configs (the database is the real source of truth; the next reconcile
+> rewrites them) and re-run:
+>
+> ```sh
+> mkdir -p /tmp/npm-proxy-host-parked
+> mv "$DATA_DIR"/npm/data/nginx/proxy_host/*.conf /tmp/npm-proxy-host-parked/
+> ./deploy.sh --only npm-hosts
+> ```
 
 🔑 = a money-moving surface. Spending is **off** by default on both.
 
@@ -327,23 +362,24 @@ is **not** a gate: it cannot stop a spend, only make one impossible to miss.
 
 ## Proxy hosts (nginx-proxy-manager)
 
-nginx-proxy-manager publishes the stack's only host ports, so every public
+nginx-proxy-manager is the stack's only LAN-facing unit, so every public
 hostname is a proxy host in NPM. They are declared in `NPM_HOSTS` in
 `stack.conf` — `domain | forward_host:port | flags` — and reconciled from this
-repo by `scripts/npm-hosts.sh` through the NPM admin API on `81`: a host already
-serving the domain is updated in place, otherwise it is created, and a Let's
-Encrypt certificate is requested for any host that has none. `./deploy.sh` runs
-it after the app tier (so a fresh host deploys before the admin login exists),
-and `./deploy.sh --only npm-hosts` re-applies it after a change.
+repo by `scripts/npm-hosts.sh` through the NPM admin API on `127.0.0.1:81` (NPM
+binds it on the host network): a host already serving the domain is updated in
+place, otherwise it is created, and a Let's Encrypt certificate is requested for
+any host that has none. `./deploy.sh` runs it after the app tier (so a fresh host
+deploys before the admin login exists), and `./deploy.sh --only npm-hosts`
+re-applies it after a change.
 
 ```sh
 NPM_HOSTS=(
-    "${BOLTMESH_FRONTEND_HOST}|boltmesh-frontend:80|ws,block"
-    "${BOLTMESH_API_HOST}|boltmesh-backend:8000|ws,block"
-    "${SEARXNG_HOST}|searxng:8080|ws,block"
-    "${CLNREST_HOST}|https://lightningd:3010|ws,block"
-    "${XMR_RPC_HOST}|monero-wallet-rpc:18083|ws,block"
-    "${MCP_HOST}|searxng-mcp:8000|mcp,force-ssl,http2"
+    "${BOLTMESH_FRONTEND_HOST}|127.0.0.1:8106|ws,block"
+    "${BOLTMESH_API_HOST}|127.0.0.1:8105|ws,block"
+    "${SEARXNG_HOST}|127.0.0.1:8080|ws,block"
+    "${CLNREST_HOST}|https://127.0.0.1:3010|ws,block"
+    "${XMR_RPC_HOST}|127.0.0.1:18083|ws,block"
+    "${MCP_HOST}|127.0.0.1:8100|mcp,force-ssl,http2"
 )
 ```
 
@@ -351,9 +387,11 @@ Each entry is `domain | forward | flags`, where `forward` is
 `[scheme://]host:port` (scheme defaults to `http`; `https` for an upstream that
 speaks TLS, like `clnrest`) and `flags` is a comma-separated subset of
 `force-ssl` (redirect `:80` to `:443`), `http2`, `ws` (websocket upgrade),
-`block` (block common exploits) and `mcp`. `--dry-run` prints the API payloads
-without changing anything, and `--prune` additionally **deletes** hosts and
-certificates that `NPM_HOSTS` does not declare — the only destructive mode.
+`block` (block common exploits) and `mcp`. The host is always `127.0.0.1`: it is
+the loopback publish of the unit the host fronts — NPM runs on the host network
+and cannot resolve a container name. `--dry-run` prints the API payloads without
+changing anything, and `--prune` additionally **deletes** hosts and certificates
+that `NPM_HOSTS` does not declare — the only destructive mode.
 
 The credentials for the API are in `$DATA_DIR/config/npm/api.env` (mode 600,
 seeded by `deploy/install.sh`):
@@ -369,20 +407,23 @@ Every MCP server speaks the Streamable HTTP transport at `/mcp` (the SDK's
 default). Rather than one hostname per server, they share one, each on a **path
 prefix** (`mcp` flag above):
 
-| Public URL | Container |
+| Public URL | NPM forwards to |
 | --- | --- |
-| `https://mcp.boltmesh.net/searxng` | `searxng-mcp:8000` |
-| `https://mcp.boltmesh.net/bitcoin` | `bitcoin-node-mcp:8000` |
-| `https://mcp.boltmesh.net/monero` | `monero-node-mcp:8000` |
-| `https://mcp.boltmesh.net/monero-wallet` | `monero-wallet-mcp:8000` |
-| `https://mcp.boltmesh.net/lightning` | `lightning-mcp:8000` |
+| `https://mcp.boltmesh.net/searxng` | `127.0.0.1:8100` |
+| `https://mcp.boltmesh.net/bitcoin` | `127.0.0.1:8101` |
+| `https://mcp.boltmesh.net/monero` | `127.0.0.1:8102` |
+| `https://mcp.boltmesh.net/monero-wallet` | `127.0.0.1:8103` |
+| `https://mcp.boltmesh.net/lightning` | `127.0.0.1:8104` |
 
 Each prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
 client's URL. The host and the prefixes are `MCP_HOST`/`MCP_HOSTS` in
-`stack.conf`; each server's bearer token still gates it (the tokens are the
-`token.env` files under `$DATA_DIR/config/<server>/`). The host's nginx config
-turns buffering off and sets a long read timeout, because Streamable HTTP answers
-with `text/event-stream` and a buffered SSE body just hangs the MCP client.
+`stack.conf`; each entry is `prefix:container:port`, where the port is that
+server's loopback publish (the container name is kept because it also names the
+`token.env` that is the prefix's credential). Each server's bearer token still
+gates it (the tokens are the `token.env` files under
+`$DATA_DIR/config/<server>/`). The host's nginx config turns buffering off and
+sets a long read timeout, because Streamable HTTP answers with `text/event-stream`
+and a buffered SSE body just hangs the MCP client.
 
 Each declared host needs its DNS pointing here and `:80` reachable for the
 HTTP-01 challenge; set `NPM_REQUEST_CERT=0` to leave TLS to the UI instead.
@@ -430,7 +471,7 @@ It does not bring its own chains. The backend is pointed at the stack's own
    Let's Encrypt challenge.
 2. Fill in `$DATA_DIR/config/npm/api.env` with the NPM admin login and re-run
    `./deploy.sh --only npm-hosts`: the two hosts (`boltmesh.net` →
-   `boltmesh-frontend:80`, `api.boltmesh.net` → `boltmesh-backend:8000`) come
+   `127.0.0.1:8106`, `api.boltmesh.net` → `127.0.0.1:8105`) come
    from `NPM_HOSTS` in `stack.conf`, each with its own TLS certificate.
 3. Fill in `$DATA_DIR/config/boltmesh/app.env` (OAuth client id/secret, SMTP,
    the agent `GITHUB_TOKEN`) and register

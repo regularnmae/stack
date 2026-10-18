@@ -20,10 +20,13 @@ EnvironmentFile=@CONFIG_DIR@/lightning-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/lightning-mcp/node.env
 EnvironmentFile=@CONFIG_DIR@/lightning-mcp/spend.env
 
-# No PublishPort: nothing is exposed to the host, not even on loopback. This is
-# a money-moving surface, so the only way in is NPM (TLS, reaching the container
-# as lightning-mcp:8000 on npm-network) plus the bearer tokens. The host-side
-# checks read it as a peer on that network, through scripts/lib.sh's net_curl.
+# Loopback only: nginx-proxy-manager runs on the host network and reaches this
+# server on host 8104 (NPM_HOSTS in stack.conf) -- it can no longer resolve the
+# container name. This is a money-moving surface, so the loopback bind is the
+# only host-visible port there is; NPM (TLS) plus the bearer and spend tokens are
+# still the only way in. The host-side checks read the container by name on
+# npm-network, through scripts/lib.sh's net_curl.
+PublishPort=127.0.0.1:8104:8000
 
 HealthCmd=python /app/healthcheck.py
 HealthInterval=30s
