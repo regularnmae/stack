@@ -64,16 +64,7 @@ themselves live in NPM's database, not in this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
 `stack.conf`); the loopback publishes are not, and another machine cannot reach
-them. If you cloned an older host that still had `8000`/`8080`/`8100-8106` opened
-in firewalld, close them once by hand — `bootstrap.sh` only ever opens ports, it
-never closes them:
-
-```sh
-sudo firewall-cmd --permanent --remove-port=8000/tcp --remove-port=8080/tcp \
-  --remove-port=8100/tcp --remove-port=8101/tcp --remove-port=8102/tcp \
-  --remove-port=8103/tcp --remove-port=8104/tcp --remove-port=8105/tcp \
-  --remove-port=8106/tcp && sudo firewall-cmd --reload
-```
+them.
 
 > **Upgrading from the published-port layout.** The proxy hosts are rewritten to
 > `127.0.0.1` upstreams, which only work once NPM itself is on the host network,
