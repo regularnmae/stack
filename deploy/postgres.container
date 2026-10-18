@@ -28,7 +28,7 @@ EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 # The image ships no HEALTHCHECK. Probe over TCP rather than the Unix socket so
 # the check is meaningful and needs no shell or environment expansion -- a
 # $VAR here would be expanded by the systemd generator, not the container.
-HealthCmd=pg_isready -h 127.0.0.1
+HealthCmd=pg_isready -h 127.0.0.1 -U vpnuser -d vpndb
 HealthInterval=30s
 HealthStartPeriod=30s
 HealthRetries=5
