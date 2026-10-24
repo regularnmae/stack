@@ -23,6 +23,7 @@ stack runs and one script that fixes a deployment problem.
 | `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
 | `searxng` | `docker.io/searxng/searxng:latest` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
+| `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
 | `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` | — |
 | `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` | — |
 | `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` | — |
@@ -173,6 +174,7 @@ remembers the answer in `~/.config/stack/data-dir.env`:
 
   - `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
+  - `uptime-kuma/` — the status page's state (sqlite, history; configured in its UI)
   - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
   - `postgres-dump/` — the pre-backup `pg_dumpall`
   - `config/` — every bearer token and secret
@@ -237,6 +239,8 @@ the things in `$DATA_DIR` that cannot be re-downloaded:
 - `npm/` — nginx-proxy-manager's config and TLS material
 - `audit/` — the monitor's log and the spend tripwire baselines (see
   [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire))
+- `uptime-kuma/` — the status page's own state (its monitors, history and login;
+  UI-configured, see [Status page](#status-page))
 - `postgres-dump/` — `pg_dumpall` of the BoltMesh database, taken by
   `deploy/postgres-dump.container` immediately before each backup run (the raw
   `postgres/` cluster is not copied: a file-by-file copy of a live `PGDATA` is
@@ -280,7 +284,7 @@ export RESTIC_PASSWORD=…           # from your password manager
 git clone https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
 ./bootstrap.sh
-./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, config/, npm/, audit/
+./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, config/, npm/, audit/, uptime-kuma/
 ./deploy.sh                        # adopts the restored secrets and wallet
 ```
 
@@ -351,6 +355,48 @@ with no alert configured) and folded into the monitor's alert and heartbeat. It
 is **not** a gate: it cannot stop a spend, only make one impossible to miss.
 `audit/` is part of the [backup set](#backup--restore).
 
+## Status page
+
+`uptime-kuma` serves a public status page on
+`https://status.boltmesh.net` (`UPTIME_KUMA_HOST` in `stack.conf`, proxied by
+nginx-proxy-manager like every public hostname). It complements the monitor
+above, not replaces it: the monitor is the host-side, alert-only sweep that
+knows the tokens and the wallets, while the status page watches the public
+surface — the sites and the token-gated endpoints — and shows it to the world.
+
+The **monitors are declared, like the proxy hosts**: `KUMA_MONITORS` in
+`stack.conf` — `name | url [| accepted-status-codes [| interval [| retries ]]]`
+— is reconciled into Uptime-Kuma by `scripts/kuma-monitors.sh` (which
+`./deploy.sh` runs after the proxy hosts): a missing monitor is created, one
+whose *declared* fields changed is updated in place, notifications and other
+UI-tuned settings an existing monitor has picked up are carried over
+untouched, and `--prune` is the only destructive mode. The script creates the
+status page (`KUMA_STATUS_SLUG`) with one group holding every declared
+monitor — and only while the page has nothing on it yet: an existing page's
+layout is never rewritten, so rearranging it in the UI is safe.
+
+Uptime-Kuma has no REST write API, so the reconciler speaks its socket.io
+API from the `kuma-ctl` image (built by `deploy/install.sh` from `kuma-ctl/`,
+like `tor` and `netcheck`). The admin login lives in
+`$DATA_DIR/config/uptime-kuma/api.env` (mode 600, seeded empty — fill in what
+the setup wizard asked for and re-run `./deploy.sh --only kuma-monitors`); the
+reconciler self-skips until it is filled in. The login never reaches a command
+line: it travels to the container through the environment. The page's
+**notifications** (an Apprise or SMTP target) stay UI-configured — they are
+set once in kuma's own settings; kuma embeds Apprise, so the monitor's
+Apprise URLs are reusable there.
+
+Notes:
+
+- **No tokens enter kuma's database.** Everything the declared monitors check
+  is on the public surface (a token-gated endpoint answering 401 counts as
+  up); the authenticated MCP handshakes stay in `verify.sh`/`monitor.sh`.
+- Its state (`$DATA_DIR/uptime-kuma`) is part of the [backup set](#backup--restore).
+- `verify.sh` checks the dashboard through nginx-proxy-manager and by container
+  name on `npm-network`, and probes the published page's public data endpoint.
+- The websockets it serves for its dashboard are why the proxy host carries the
+  `ws` flag in `NPM_HOSTS`.
+
 ## Proxy hosts (nginx-proxy-manager)
 
 nginx-proxy-manager is the stack's only LAN-facing unit, so every public
@@ -370,6 +416,7 @@ NPM_HOSTS=(
     "${SEARXNG_HOST}|127.0.0.1:8080|ws,block"
     "${CLNREST_HOST}|https://127.0.0.1:3010|ws,block"
     "${XMR_RPC_HOST}|127.0.0.1:18083|ws,block"
+    "${UPTIME_KUMA_HOST}|127.0.0.1:8107|ws,block"
     "${MCP_HOST}|127.0.0.1:8100|mcp,force-ssl,http2"
 )
 ```
@@ -526,6 +573,7 @@ stack/
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
+  scripts/kuma-monitors.sh # the status page's monitors (KUMA_MONITORS) + page, via socket.io
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)

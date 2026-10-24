@@ -1,0 +1,30 @@
+# kuma-ctl: a socket.io client that reconciles Uptime-Kuma's monitors and
+# status page against the declarations in stack.conf, driven by
+# scripts/kuma-monitors.sh.
+#
+# Uptime-Kuma has no REST write API -- its management surface is socket.io --
+# so the reconciler is a node script speaking that protocol. The image exists
+# to make the client dependency-free: it carries socket.io-client, matching the
+# engine.io version the server speaks, and the script is bind-mounted read-only
+# on every run so the repo owns the runtime code (same reasoning as the
+# host-side scripts).
+#
+# Both the base and the package are pinned -- tag *and* digest for the base,
+# an exact npm version for socket.io-client -- so a rebuild ships the same
+# bits. The local tag is deliberately versionless
+# (localhost/kuma-ctl:local): the versions live only here, not duplicated
+# across stack.conf and the scripts. Renovate bumps the base digest (the
+# Dockerfile manager); the client pin is bumped by hand alongside an
+# uptime-kuma major, since the protocol must match the server's.
+#
+# No ENTRYPOINT/CMD: scripts/kuma-monitors.sh names its command.
+#
+# Build:  podman build -t localhost/kuma-ctl:local kuma-ctl/
+FROM docker.io/library/node:22-alpine@sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284
+# A workdir of one's own: npm refuses `npm install <pkg>` without a
+# package.json and misbehaves at / ("Tracker idealTree already exists"), so the
+# dependency lives under its own directory -- inside the image only, the build
+# context stays just these two files.
+WORKDIR /kuma-ctl
+RUN npm init -y >/dev/null \
+    && npm install --omit=dev --save-exact socket.io-client@4.8.4

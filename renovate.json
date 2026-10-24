@@ -19,6 +19,14 @@
       "matchStrings": ["SHELLCHECK_VERSION: (?<currentValue>v[0-9.]+)"],
       "depNameTemplate": "koalaman/shellcheck",
       "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "the Uptime-Kuma image tag in its Quadlet unit (Renovate's managers cover Dockerfile FROM and compose files, not Image= lines; pinned to the v2 major, so only patches/minors within it are bumped)",
+      "fileMatch": ["^deploy/uptime-kuma\\.container$"],
+      "matchStrings": ["Image=docker\\.io/louislam/uptime-kuma:(?<currentValue>[^@\\s]+)"],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "louislam/uptime-kuma"
     }
   ],
   "lockFileMaintenance": {

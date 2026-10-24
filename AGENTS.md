@@ -40,7 +40,8 @@ server.
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
+./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong
@@ -74,15 +75,59 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **Data-dir ownership:** `bitcoind`/`monero-wallet-rpc` run as the image uid
   (host 525287 = in-container 1000) and do **not** re-own their bind mounts, so
   `install.sh` `podman unshare chown -R 1000:1000`s them; `monerod` re-owns its
-  own directory. `cln/` and `tor/` are written by container root (= the host user
-  under rootless podman).
+  own directory. `cln/`, `tor/` and `uptime-kuma/` are written by container root
+  (= the host user under rootless podman).
+- **`uptime-kuma` is UI-configured for its own account, declared for
+  everything else:** there is no env file in the unit and nothing is seeded
+  into its sqlite — but its monitors are `KUMA_MONITORS` in `stack.conf`,
+  reconciled by `scripts/kuma-monitors.sh` into the socket.io server (no REST
+  write API) through the `kuma-ctl` image (built like `netcheck`, from
+  `kuma-ctl/`). The admin login the setup wizard creates lives in
+  `$DATA_DIR/config/uptime-kuma/api.env` (UI-first like `npm/api.env`); the
+  reconciler, `deploy.sh` and `verify.sh` self-skip/warn until it is filled in.
+  The reconciler carries UI-tuned monitor settings over untouched (compare
+  declared fields only: url + accepted status codes) and only creates/fills
+  the status page while it has no monitors of its own. Two more socket.io
+  shape traps it lives with: multi-arg management events
+  (`addStatusPage(title, slug)`, `saveStatusPage(slug, config, imgDataUrl,
+  publicGroupList)`) are positional — send one object and the *ack callback*
+  takes the next data slot, the handler never answers, and the client burns
+  its whole ack timeout; and `imgDataUrl` must be a string (`null` throws in
+  `saveStatusPage`). Notifications stay UI-configured. Note v2
+  answers `/` with a **302 to `/dashboard`** — any probe must follow redirects
+  (`verify.sh` does); a bare 200 on `/` is not what kuma returns. All this repo
+  knows about it is the unit, the `8107` loopback publish, the
+  `status.boltmesh.net` proxy host (`ws` for the dashboard's socket.io) and the
+  backup dir. Don't "seed" its login into `config/` beyond `api.env`. Don't
+  "simplify" the reconcile into curl calls: `add`/`editMonitor` are socket.io
+  events, not REST endpoints. And anything sent over that socket.io — login
+  first of all — must wait for the server's `info` event first: v2.5 registers
+  its handlers only *after* `await sendInfo()`, so an event emitted straight
+  after `connect` is dropped, not queued, and the client sees only its own ack
+  timeout (`kuma-ctl/monitors.mjs` waits for `info` and retries). And the
+  `add`/`editMonitor` payloads are shape-sensitive: `accepted_statuscodes`
+  must be the **array** (the handler builds `accepted_statuscodes_json`
+  itself and `.every()`-checks the array — sending the `_json` string or
+  omitting it crashes server-side with "Cannot read properties of undefined
+  (reading 'every')"), and `conditions`/`kafkaProducerBrokers`/
+  `kafkaProducerSaslOptions`/`rabbitmqNodes` must arrive as raw arrays because
+  the handler `JSON.stringify`es them itself (`monitors.mjs` carries a
+  `rawArray()` helper). The `monitorList` push object is already in the shape
+  `editMonitor` reads — spread it and override only declared fields.
+  Renovate is
+  taught about the `louislam/
+  uptime-kuma` image tag by a custom `regex` manager in `renovate.json`
+  (Renovate has no Quadlet manager, and its other `Image=` lines —
+  `postgres:18-alpine`, `restic:latest` — are pinned deliberately, so the
+  manager is scoped to that one file); the `kuma-ctl` Containerfile's node
+  digest comes from the ordinary dockerfile manager.
 - **Backup is a oneshot Quadlet job plus a plain user timer.** `backup.container`
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
   type), so `install.sh` renders it into `~/.config/systemd/user/` and enables it.
-- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/ audit/ postgres-dump/`
-  only** — chains, `searxng/` and the raw `postgres/` cluster stay out so restic
-  never walks them. `postgres-dump.container` (a oneshot) `pg_dumpall`s into
+- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/ audit/
+  uptime-kuma/ postgres-dump/` only** — chains, `searxng/` and the raw
+  `postgres/` cluster stay out so restic never walks them. `postgres-dump.container` (a oneshot) `pg_dumpall`s into
   `$DATA_DIR/postgres-dump`; its libpq settings belong in
   `config/boltmesh/dump.env`, **not** `db.env` (`PGHOST`/`PGUSER` in the server's
   own env break its socket-based entrypoint bootstrap). The repo is

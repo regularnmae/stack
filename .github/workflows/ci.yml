@@ -27,11 +27,13 @@ jobs:
           "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x -P SCRIPTDIR -S info \
             bootstrap.sh deploy.sh verify.sh \
             deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
-            scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh
+            scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh \
+            scripts/kuma-monitors.sh
       - name: syntax check
         run: |
           for f in bootstrap.sh deploy.sh verify.sh \
                    deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
-                   scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh; do
+                   scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh \
+                   scripts/kuma-monitors.sh; do
             bash -n "$f"
           done

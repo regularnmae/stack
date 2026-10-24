@@ -308,6 +308,7 @@ start_infra() {
     fi
     start_unit valkey
     start_unit searxng
+    start_unit uptime-kuma
     start_unit nginx-proxy-manager
 
     if [ "$SKIP_DAEMONS" = 1 ]; then
@@ -538,6 +539,20 @@ configure_npm_hosts() {
         || warn "the proxy hosts were not (re)configured; see scripts/npm-hosts.sh"
 }
 
+# The status page's monitors: declared in KUMA_MONITORS (stack.conf), reconciled
+# into uptime-kuma by scripts/kuma-monitors.sh. Runs after the proxy hosts are
+# rewritten (the monitors probe the public URLs) and self-skips with a one-line
+# note while $DATA_DIR/config/uptime-kuma/api.env has no login -- like
+# configure_npm_hosts, a fresh host deploys before the UI-first registration.
+kuma_monitors() {
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  [dry-run] %s\n' "$REPO_DIR/scripts/kuma-monitors.sh"
+        return 0
+    fi
+    "$REPO_DIR/scripts/kuma-monitors.sh" \
+        || warn "the status-page monitors were not (re)reconciled; see scripts/kuma-monitors.sh"
+}
+
 # ---------------------------------------------------------------------------
 # 6d. nginx-proxy-manager's network mode
 # ---------------------------------------------------------------------------
@@ -613,6 +628,12 @@ if [ -n "$ONLY" ]; then
         # in $DATA_DIR/config/npm/api.env. Touches no container.
         install_units
         configure_npm_hosts
+    elif [ "$ONLY" = kuma-monitors ]; then
+        # Reconcile the status page's monitors after a KUMA_MONITORS change, or
+        # after filling in $DATA_DIR/config/uptime-kuma/api.env. Touches no
+        # container, but reaches uptime-kuma by name, so the network stays up.
+        install_units
+        kuma_monitors
     else
         install_units
         restart_unit "$ONLY"
@@ -633,6 +654,7 @@ start_daemons
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
 configure_npm_hosts
 sync_npm_network
+kuma_monitors
 note_firewall
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -664,6 +686,9 @@ and the monitoring scripts read the services by container name on npm-network.
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $DATA_DIR/config/npm/api.env has the NPM admin login (scripts/npm-hosts.sh
   applies every proxy host in NPM_HOSTS).
+The status page's monitors are reconciled once
+  $DATA_DIR/config/uptime-kuma/api.env has the Uptime-Kuma admin login
+  (scripts/kuma-monitors.sh applies every monitor in KUMA_MONITORS).
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
 bitcoind, monerod, lightningd and monero-wallet-rpc.
 EOF
@@ -684,6 +709,9 @@ Stack deployed.
                     host's loopback (see NPM_HOSTS in stack.conf)
   MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
+  Status page:      uptime-kuma on https://$UPTIME_KUMA_HOST, its monitors
+                    declared in KUMA_MONITORS in stack.conf and reconciled
+                    once $DATA_DIR/config/uptime-kuma/api.env has the login
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR
   Monitoring:       every 5 min (monitor.timer) + spend tripwire; both alert

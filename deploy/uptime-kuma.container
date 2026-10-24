@@ -1,0 +1,42 @@
+# Quadlet unit for Uptime-Kuma, the public status page. Owned by this repo so
+# the whole stack deploys whole. Its state (sqlite, history, monitor config)
+# lives in @DATA_DIR@/uptime-kuma; everything else is configured in its web UI
+# -- this unit reads no config file and no secret, so it is the one unit with
+# no env file. install.sh renders this into ~/.config/containers/systemd/,
+# where quadlet turns it into uptime-kuma.service.
+[Unit]
+Description=Uptime-Kuma (public status page)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=uptime-kuma
+Image=docker.io/louislam/uptime-kuma:2
+Network=npm-network.network
+
+# Loopback only: nginx-proxy-manager runs on the host network and reaches this
+# server on host 8107 (NPM_HOSTS in stack.conf) -- it can no longer resolve the
+# container name. Bind 127.0.0.1: the firewall opens nothing for it, so NPM
+# (which terminates TLS) stays the only way in for a client.
+PublishPort=127.0.0.1:8107:3001
+
+# kuma's sqlite + history. container root == the host user under rootless
+# podman (same as cln/ and tor/), so no unshare chown is needed -- install.sh
+# only mkdirs.
+# :z label required (SELinux enforcing host), same as monerod.
+Volume=@DATA_DIR@/uptime-kuma:/app/data:z
+
+# `extra/healthcheck` is the Go binary the image ships for exactly this; it
+# GETs http://127.0.0.1:3001 inside the container. The long start period
+# matters: on a version bump kuma migrates its sqlite before it opens :3001.
+HealthCmd=extra/healthcheck
+HealthInterval=60s
+HealthStartPeriod=180s
+HealthRetries=5
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

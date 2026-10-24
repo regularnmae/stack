@@ -54,6 +54,7 @@ UNITS=(
     "monero-wallet-mcp.container:monero-wallet-mcp.container"
     "lightning-mcp.container:lightning-mcp.container"
     "postgres.container:postgres.container"
+    "uptime-kuma.container:uptime-kuma.container"
     "boltmesh-backend.container:boltmesh-backend.container"
     "boltmesh-worker.container:boltmesh-worker.container"
     "boltmesh-frontend.container:boltmesh-frontend.container"
@@ -309,6 +310,13 @@ mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 # own PGDATA, so neither dir needs the image-uid chown the other apps need.
 mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/postgres-dump"
 
+# Uptime-Kuma's state (sqlite, history, monitor config): written by container
+# root -- the host user under rootless podman, same as cln/ and tor/ -- so a
+# plain mkdir, no uid chown. Nothing is seeded into the state itself: the admin
+# account is created in its web UI on first use, and the monitors are
+# reconciled by scripts/kuma-monitors.sh once the api.env has the login.
+mkdir -p "$DATA_DIR/uptime-kuma"
+
 # The backup job's restic cache (regenerable) and its repository. The repo is
 # outside $DATA_DIR on purpose, so wiping the data dir does not delete it.
 mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
@@ -325,6 +333,28 @@ if command -v podman >/dev/null 2>&1 && ! podman image exists "$NETCHECK_IMAGE" 
     if [ -f "$REPO_DIR/netcheck/Containerfile" ]; then
         log "building $NETCHECK_IMAGE"
         podman build -t "$NETCHECK_IMAGE" "$REPO_DIR/netcheck/" >/dev/null
+    fi
+fi
+
+# The socket.io client scripts/kuma-monitors.sh runs (kuma has no REST write
+# API); built the same way, left alone once it exists. The reconcile script is
+# bind-mounted on every run, so a change to kuma-ctl/monitors.mjs does not need
+# a rebuild -- only the pinned node/socket.io-client base does.
+if command -v podman >/dev/null 2>&1 && ! podman image exists "$KUMA_CTL_IMAGE" 2>/dev/null; then
+    if [ -f "$REPO_DIR/kuma-ctl/Containerfile" ]; then
+        log "building $KUMA_CTL_IMAGE"
+        podman build -t "$KUMA_CTL_IMAGE" "$REPO_DIR/kuma-ctl/" >/dev/null
+    fi
+fi
+
+# The socket.io client scripts/kuma-monitors.sh runs (kuma has no REST write
+# API); built the same way, left alone once it exists. The reconcile script is
+# bind-mounted on every run, so a change to kuma-ctl/monitors.mjs does not need
+# a rebuild -- only the pinned node/socket.io-client base does.
+if command -v podman >/dev/null 2>&1 && ! podman image exists "$KUMA_CTL_IMAGE" 2>/dev/null; then
+    if [ -f "$REPO_DIR/kuma-ctl/Containerfile" ]; then
+        log "building $KUMA_CTL_IMAGE"
+        podman build -t "$KUMA_CTL_IMAGE" "$REPO_DIR/kuma-ctl/" >/dev/null
     fi
 fi
 
@@ -660,6 +690,29 @@ EOF
     log "wrote $NPM_ENV (mode 600) -- fill in NPM_EMAIL/NPM_PASSWORD (or NPM_TOKEN)"
 fi
 
+# Uptime-Kuma's admin login, for scripts/kuma-monitors.sh: it reconciles the
+# status page's monitors (declared in KUMA_MONITORS in stack.conf) and creates
+# + publishes the public status page. Same UI-first flow as npm/api.env: the
+# account is created on the setup wizard's first visit, the login is recorded
+# here, and the reconciler self-skips until it is filled in.
+KUMA_ENV="$CONFIG_DIR/uptime-kuma/api.env"
+if ensure_secret "$KUMA_ENV" "uptime-kuma api env"; then
+    write_secret "$KUMA_ENV" <<'EOF'
+# Credentials for the Uptime-Kuma admin account, used by
+# scripts/kuma-monitors.sh to reconcile the status page's monitors (declared
+# in KUMA_MONITORS in stack.conf) and create + publish the status page. See
+# deploy/examples/kuma/api.env.example. Never committed.
+#
+# The username and password the setup wizard asked for on the first visit to
+# https://$UPTIME_KUMA_HOST (status.boltmesh.net) — kuma's login is
+# username-based, not email-based. Leave empty and the reconciler self-skips;
+# the monitors are still configurable in the UI.
+KUMA_USERNAME=
+KUMA_PASSWORD=
+EOF
+    log "wrote $KUMA_ENV (mode 600) -- fill in KUMA_USERNAME/KUMA_PASSWORD (or leave empty: the reconciler skips)"
+fi
+
 # The monitor's record: the audit log, the spend baseline and its state file.
 # Deliberately NOT under config/ (it is not secret); deploy/backup.container
 # backs it up. scripts/spend-audit.sh seeds its own baselines on the first run.
@@ -855,6 +908,9 @@ The monitor runs every 5 minutes (monitor.timer) and alerts only once
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $CONFIG_DIR/npm/api.env has the nginx-proxy-manager admin login
   (scripts/npm-hosts.sh, which ./deploy.sh runs).
+The status page's monitors are reconciled by scripts/kuma-monitors.sh once
+  $CONFIG_DIR/uptime-kuma/api.env has the login the setup wizard asked for;
+  the declaration is KUMA_MONITORS in stack.conf.
 Keep a copy of RESTIC_PASSWORD ($BACKUP_ENV) off the data disk: it is the only
 key to the backups.
 EOF

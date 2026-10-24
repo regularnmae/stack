@@ -52,14 +52,14 @@ head2 "Containers"
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
     containers=(
-        tor valkey searxng nginx-proxy-manager
+        tor valkey searxng uptime-kuma nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 else
     containers=(
         bitcoind monerod monero-wallet-rpc lightningd
-        tor valkey searxng nginx-proxy-manager
+        tor valkey searxng uptime-kuma nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -221,6 +221,56 @@ else
 fi
 fe_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 "http://boltmesh-frontend:80/" 2>/dev/null || echo 000)
 if [ "$fe_code" = "200" ]; then pass "boltmesh-frontend / 200"; else bad "boltmesh-frontend / -> $fe_code"; fi
+
+# ---------------------------------------------------------------------------
+head2 "Status page"
+# Uptime-Kuma serves its dashboard SPA at /; on npm-network it is a peer like
+# the rest. The public path through nginx-proxy-manager is checked like the MCP
+# hosts above, but it answers 200 (a login page) rather than 401 -- until the
+# admin account exists and a status page is published, any 200 from the SPA
+# still proves the proxy host is wired.
+#
+# A fresh v2 answers / with a 302 to /dashboard, so the probes follow
+# redirects: the SPA (login included) and every published status page return
+# 200 there. The scheme dance (80 -> 443, --connect-to pinned to NPM) is done
+# by hand first, as in the MCP section; -L answers only kuma's own redirects.
+kuma_code=$(net_curl -s -L -o /dev/null -w '%{http_code}' -m 15 "http://uptime-kuma:3001/" 2>/dev/null || echo 000)
+if [ "$kuma_code" = "200" ]; then pass "uptime-kuma / 200 (after redirects)"; else bad "uptime-kuma / (following redirects) -> $kuma_code"; fi
+
+if [ "${UPTIME_KUMA_HOST+x}" = x ] && [ -n "$UPTIME_KUMA_HOST" ]; then
+    kurl="http://$UPTIME_KUMA_HOST/"
+    kconnect="$UPTIME_KUMA_HOST:80:127.0.0.1:80"
+    kcode=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$kconnect" "$kurl" 2>/dev/null || true)
+    [ -n "$kcode" ] || kcode=000
+    case "$kcode" in
+        301|308)
+            kurl="https://$UPTIME_KUMA_HOST/"
+            kconnect="$UPTIME_KUMA_HOST:443:127.0.0.1:443" ;;
+    esac
+    kcode=$(net_curl_host -s -L -o /dev/null -w '%{http_code}' -m 20 --connect-to "$kconnect" "$kurl" 2>/dev/null || true)
+    [ -n "$kcode" ] || kcode=000
+    case "$kcode" in
+        200) pass "$UPTIME_KUMA_HOST serves the status page through nginx-proxy-manager" ;;
+        000|404|502|503)
+            warn "$UPTIME_KUMA_HOST is not proxied yet ($kcode); run scripts/npm-hosts.sh" ;;
+        *) bad "$UPTIME_KUMA_HOST -> $kcode (expected 200)" ;;
+    esac
+fi
+
+# A published status page answers its public data endpoint without auth -- so
+# the check runs from the host by container name and needs no token. A 404
+# means the page does not exist (yet), not that the monitor is broken: the
+# reconciler (scripts/kuma-monitors.sh) creates and publishes it, or it is
+# published in the UI.
+if [ "${KUMA_STATUS_SLUG+x}" = x ] && [ -n "$KUMA_STATUS_SLUG" ]; then
+    slug_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 \
+        "http://uptime-kuma:3001/api/status-page/$KUMA_STATUS_SLUG" 2>/dev/null || echo 000)
+    case "$slug_code" in
+        200) pass "status page '$KUMA_STATUS_SLUG' is published" ;;
+        404) warn "status page '$KUMA_STATUS_SLUG' is not published yet (run scripts/kuma-monitors.sh --dry-run, or publish it in the UI)" ;;
+        *)   warn "status page '$KUMA_STATUS_SLUG' -> $slug_code" ;;
+    esac
+fi
 
 # ---------------------------------------------------------------------------
 head2 "Backups"
