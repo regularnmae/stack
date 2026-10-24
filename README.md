@@ -67,6 +67,11 @@ Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
 `stack.conf`); the loopback publishes are not, and another machine cannot reach
 them.
 
+The same three public hostnames are also published as **Tor onion services** from
+the same `tor` unit that lightningd already uses as its SOCKS proxy — no extra
+container, no DNS and no certificate needed. See
+[Tor onion services](#tor-onion-services).
+
 > **Upgrading from the published-port layout.** The proxy hosts are rewritten to
 > `127.0.0.1` upstreams, which only work once NPM itself is on the host network,
 > so `./deploy.sh` rewrites them *first* and restarts NPM afterwards. That order
@@ -87,8 +92,8 @@ them.
 🔑 = a money-moving surface. Spending is **off** by default on both.
 
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
-`monero-wallet-rpc/`, `config/`, `npm/`, `audit/`, and the BoltMesh database as
-a `pg_dumpall`) runs from `backup.timer` into
+`monero-wallet-rpc/`, `tor/`, `config/`, `npm/`, `audit/`, and the BoltMesh
+database as a `pg_dumpall`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`. It is the one thing that recovers you if the data disk
 itself is lost — see [Backup & restore](#backup--restore).
 
@@ -143,10 +148,11 @@ stale image). Common flags:
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only monitor            # run the health + spend checks now
 ./deploy.sh --only npm-hosts           # re-apply every proxy host in NPM
+./deploy.sh --only tor                 # re-render the onion services and restart tor
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
 ./deploy.sh --no-wallets              # skip the interactive wallet prompts
 ./deploy.sh --dry-run                 # print the plan, change nothing
-./verify.sh                           # container health + MCP handshakes
+./verify.sh                           # container health, MCP handshakes, onion fetches
 ./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
 ```
 
@@ -173,6 +179,7 @@ Everything the stack must not lose sits under **one directory**, `$DATA_DIR`
 remembers the answer in `~/.config/stack/data-dir.env`:
 
   - `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
+    (`tor/onion/` holds the onion services' keys, `tor/torrc` the config)
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
   - `uptime-kuma/` — the status page's state (sqlite, history; configured in its UI)
   - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
@@ -235,6 +242,8 @@ the things in `$DATA_DIR` that cannot be re-downloaded:
 
 - `cln/` — the CLN node identity, channel state and onion keys
 - `monero-wallet-rpc/` — the Monero wallet (funds)
+- `tor/` — `torrc` and the onion services' keys, which are what make every
+  `.onion` address stable (see [Tor onion services](#tor-onion-services))
 - `config/` — every token, rune and secret
 - `npm/` — nginx-proxy-manager's config and TLS material
 - `audit/` — the monitor's log and the spend tripwire baselines (see
@@ -284,7 +293,7 @@ export RESTIC_PASSWORD=…           # from your password manager
 git clone https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
 ./bootstrap.sh
-./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, config/, npm/, audit/, uptime-kuma/
+./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, tor/, config/, npm/, audit/, uptime-kuma/
 ./deploy.sh                        # adopts the restored secrets and wallet
 ```
 
@@ -469,6 +478,75 @@ HTTP-01 challenge; set `NPM_REQUEST_CERT=0` to leave TLS to the UI instead.
 NPM itself (`--connect-to`), following its redirect to `:443` once TLS is on, so
 it works before public DNS exists.
 
+## Tor onion services
+
+The three public hostnames are also published as Tor v3 onion services, from the
+`tor` unit that already exists (lightningd's SOCKS proxy and CLN's own onion
+client). There is no extra container and nothing to open in the firewall: a
+hidden service is made of a few lines in `torrc` and outbound connections, which
+the stack already makes.
+
+The declaration is `ONION_SERVICES` in `stack.conf`:
+
+```sh
+ONION_SERVICES=(
+    "boltmesh|boltmesh-frontend:80|${BOLTMESH_FRONTEND_HOST}|/|200"
+    "api|boltmesh-backend:8000|${BOLTMESH_API_HOST}|/health|200"
+    "mcp|${ONION_NPM_TARGET}|${MCP_HOST}|/searxng|401"
+)
+```
+
+`deploy/install.sh` renders it into a marked block at the end of
+`$DATA_DIR/tor/torrc` — the rest of that file (the control-password hash, the
+SOCKS policy) is still seeded once and never rewritten — and `./deploy.sh` hashes
+`torrc` alongside the units, so editing `ONION_SERVICES` and re-running it is all
+it takes to add, remove or retarget a service.
+
+The address itself is key material, not configuration: tor writes it to
+`$DATA_DIR/tor/onion/<name>/` (mounted at `/var/lib/tor/onion`, mode 700), which
+is part of the [backup set](#backup--restore). Restore those keys and the
+addresses come back; lose them and every address changes.
+
+```sh
+cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
+./verify.sh                            # fetches each of them through tor
+./deploy.sh --only tor                 # just re-read torrc
+```
+
+| `ONION_SERVICES` name | Serves | Forwarded to |
+| --- | --- | --- |
+| `boltmesh` | the BoltMesh SPA | `http://<addr>.onion/` → `boltmesh-frontend:80` |
+| `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `boltmesh-backend:8000` |
+| `mcp` | the five MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning>` → NPM's `*.onion` host |
+
+Two of the three forward to their container by name: they are plain HTTP origins
+and tor is a peer on `npm-network`. The MCP host cannot — it is five servers
+split by *path*, which only nginx-proxy-manager does, and NPM is on the host
+network, where a container has no route (`10.89.0.1:80` is refused from
+`npm-network`). The one reachable name is `host.containers.internal` (pasta's
+host gateway, added by podman), so the mcp onion forwards there and NPM matches
+the wildcard `*.onion` proxy host. A wildcard is required because **tor cannot
+rewrite the `Host` header** and the address is not known when the proxy hosts are
+declared. That host is the only one without a certificate: tor already encrypts
+and authenticates the onion, Let's Encrypt cannot issue for `.onion`, and the
+hidden service reaches NPM over plain HTTP — `scripts/npm-hosts.sh` skips TLS for
+it on purpose.
+
+**What a browser can and cannot do over onion.** The API and the MCP servers are
+fully usable: point a client at the `.onion` address and everything above still
+holds, bearer tokens included (`verify.sh` proves the 401 gate through the onion).
+The BoltMesh SPA is not, on its own: `VITE_API_URL` is baked into the bundle at
+build time as `https://api.boltmesh.net/v1` and the refresh cookie is `Secure`,
+so a DNS-less browser loads the shell but cannot reach the API. An onion-native
+SPA means rebuilding it with the onion origin (`BOLTMESH_API_HOST=`) and adding
+the frontend's onion origin to `CORS_ALLOW_ORIGINS` in
+`$DATA_DIR/config/boltmesh/app.env` — a separate decision, not something the
+hidden service can do by itself.
+
+The onion checks therefore live in `./verify.sh` (it fetches each address through
+tor's SOCKS port); the status page cannot do them, because uptime-kuma has no
+SOCKS egress.
+
 ## BoltMesh
 
 The application tier — `postgres`, `boltmesh-backend`, `boltmesh-worker` and
@@ -589,7 +667,7 @@ stack/
     examples/monitoring/*.example # monitor.env shape (Apprise targets + heartbeat)
     examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
     examples/boltmesh/*.example   # db/secrets/app/gateway env shapes
-  tor/Containerfile       # built by install.sh: the Tor proxy
+  tor/Containerfile       # built by install.sh: the Tor proxy + onion services
   netcheck/Containerfile  # built by install.sh: the curl client the host checks run
 ```
 

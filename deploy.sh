@@ -171,6 +171,14 @@ install_units() {
 unit_digest() {
     [ -d "$QUADLET_DIR" ] || return 0
     ( cd "$QUADLET_DIR" && sha256sum -- *.container 2>/dev/null ) || true
+    # torrc is not a unit, but a running tor keeps the config it started with all
+    # the same -- and the onion services are declared in stack.conf and rendered
+    # into it. Hash it under a pseudo-name whose stem is the unit ("tor"), so
+    # restart_changed_units restarts tor when a hidden service was added, removed
+    # or retargeted.
+    if [ -s "$DATA_DIR/tor/torrc" ]; then
+        sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 " tor.unit" }'
+    fi
 }
 
 # .container only, never *.network: a network cannot be restarted under the
@@ -180,7 +188,7 @@ unit_digest() {
 # lightningd before bitcoind). nginx-proxy-manager is only flagged: its restart
 # has to follow the proxy-host rewrite (sync_npm_network).
 restart_changed_units() { # before-digest after-digest
-    local before="$1" after="$2" file unit
+    local before="$1" after="$2" file unit restarted=" "
     [ -n "$before" ] && [ -n "$after" ] || return 0
     while IFS= read -r file; do
         [ -n "$file" ] || continue
@@ -189,7 +197,11 @@ restart_changed_units() { # before-digest after-digest
             NPM_UNIT_CHANGED=1
             continue
         fi
+        # A unit can be named by two rendered files (tor.container and the torrc
+        # digest above, which both mean tor): restart it once.
+        case "$restarted" in *" $unit "*) continue ;; esac
         systemctl --user is-active --quiet "$unit.service" 2>/dev/null || continue
+        restarted="$restarted$unit "
         log "$unit.service changed; restarting it to pick up the new unit"
         restart_unit "$unit"
         if [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$unit" 2>/dev/null)" = yes ]; then
@@ -709,6 +721,9 @@ Stack deployed.
                     host's loopback (see NPM_HOSTS in stack.conf)
   MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
+  Onion (no DNS):   the same surface as http://<onion>.onion/ (ONION_SERVICES in
+                    stack.conf); the addresses are printed below once tor has
+                    published them
   Status page:      uptime-kuma on https://$UPTIME_KUMA_HOST, its monitors
                     declared in KUMA_MONITORS in stack.conf and reconciled
                     once $DATA_DIR/config/uptime-kuma/api.env has the login
@@ -721,4 +736,23 @@ Chain sync continues in the background (bitcoind is pruned; monerod is
 pruned). Re-run ./deploy.sh once the chains are current to finish anything
 that was waiting on them.
 EOF
+fi
+
+# The onion addresses are key material, not configuration (they appear only once
+# tor has started), so they cannot live in stack.conf or a README. Print them when
+# they exist; scripts/npm-hosts.sh prints the same list on its own.
+if [ "${ONION_SERVICES+x}" = x ] && [ "${#ONION_SERVICES[@]}" -gt 0 ]; then
+    onion_lines=""
+    for entry in "${ONION_SERVICES[@]}"; do
+        IFS='|' read -r name _target mirrors _rest <<<"$entry"
+        addrfile="$DATA_DIR/tor/onion/$name/hostname"
+        if [ -s "$addrfile" ]; then
+            onion_lines="${onion_lines}  http://$(tr -d '\r\n' < "$addrfile")  ($mirrors)"$'\n'
+        fi
+    done
+    if [ -n "$onion_lines" ]; then
+        printf '\nOnion services (no DNS, no certificates):\n%s' "$onion_lines"
+    else
+        printf '\nOnion services: tor has not published its addresses yet (see podman logs tor);\nscripts/npm-hosts.sh prints them once they exist.\n'
+    fi
 fi

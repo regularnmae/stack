@@ -3,7 +3,9 @@
 #
 #   ./verify.sh                 # shallow: container health + the MCP endpoints
 #                               # are gated (401 without a token) and answer an
-#                               # authenticated initialize handshake
+#                               # authenticated initialize handshake; every
+#                               # onion service in ONION_SERVICES answers through
+#                               # tor too
 #   ./verify.sh --deep          # additionally call one read tool per endpoint,
 #                               # proving the path through to the daemon
 #   ./verify.sh --no-nodes      # the chain daemons were skipped (deploy.sh
@@ -205,6 +207,44 @@ else
         else
             bad "$MCP_HOST$prefix authenticated handshake failed"
         fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+head2 "Onion services (tor)"
+# The same public surface without DNS or a certificate. tor publishes one hidden
+# service per ONION_SERVICES entry (stack.conf) and forwards it; the address is
+# read from tor's own data dir, because it is key material and not declared.
+# The probe goes through tor's SOCKS port from a throwaway container on
+# npm-network (torrc's SocksPolicy allows nothing else) and asks tor to resolve
+# the .onion name itself (--socks5-hostname), exactly as a client does. A fresh
+# service takes a minute to become reachable, so "no answer" is a warning.
+# The mcp entry expects 401: that proves the whole onion -> NPM -> container path
+# and the bearer-token gate, since NPM cannot match an onion by name (see
+# ONION_SERVICES).
+TOR_SOCKS="${TOR_SOCKS:-10.89.0.240:9050}"
+if [ "${ONION_SERVICES+x}" != x ] || [ "${#ONION_SERVICES[@]}" -eq 0 ]; then
+    warn "ONION_SERVICES is not set in stack.conf; skipping the onion checks"
+else
+    for entry in "${ONION_SERVICES[@]}"; do
+        IFS='|' read -r name _target mirrors path expect <<<"$entry"
+        addrfile="$DATA_DIR/tor/onion/$name/hostname"
+        if [ ! -s "$addrfile" ]; then
+            warn "onion $name ($mirrors): tor has published no address yet ($addrfile)"
+            continue
+        fi
+        addr=$(tr -d '\r\n' < "$addrfile")
+        code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 30 \
+            --socks5-hostname "$TOR_SOCKS" "http://$addr$path" 2>/dev/null || true)
+        [ -n "$code" ] || code=000
+        case "$code" in
+            "$expect")
+                pass "$mirrors served at http://$addr$path ($code)" ;;
+            000)
+                warn "no answer for $mirrors at $addr (tor still publishing? give it a minute)" ;;
+            *)
+                bad "$mirrors at $addr$path -> $code (expected $expect)" ;;
+        esac
     done
 fi
 

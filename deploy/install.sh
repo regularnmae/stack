@@ -304,6 +304,14 @@ chown_image_uid "$DATA_DIR/monero-wallet-rpc"
 
 mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 
+# The onion services' keys (ONION_SERVICES in stack.conf): mounted into tor at
+# /var/lib/tor/onion. Mode 700 here, because tor only checks the leaf
+# HiddenServiceDir it creates -- a world-listable parent leaks the service names
+# (not the keys). Written by tor as container root = the host user under rootless
+# podman, like cln/ and tor/torrc, so a plain mkdir and no uid chown.
+mkdir -p "$TOR_DIR/onion"
+chmod 700 "$TOR_DIR/onion"
+
 # BoltMesh's data: the postgres cluster (fresh on a new host) and the directory
 # the pre-backup pg_dumpall writes into. The dump container runs as the image's
 # root (the host user under rootless podman) and the postgres image chowns its
@@ -359,7 +367,7 @@ if command -v podman >/dev/null 2>&1 && ! podman image exists "$KUMA_CTL_IMAGE" 
 fi
 
 # ---------------------------------------------------------------------------
-# 4. tor image + torrc
+# 4. tor image + torrc (+ the onion services)
 # ---------------------------------------------------------------------------
 if command -v podman >/dev/null 2>&1 && ! podman image exists "$TOR_IMAGE" 2>/dev/null; then
     if [ -f "$REPO_DIR/tor/Containerfile" ]; then
@@ -367,6 +375,66 @@ if command -v podman >/dev/null 2>&1 && ! podman image exists "$TOR_IMAGE" 2>/de
         podman build -t "$TOR_IMAGE" "$REPO_DIR/tor/" >/dev/null
     fi
 fi
+
+# The onion services, rendered from ONION_SERVICES in stack.conf. Tor's own
+# config is a hand-tuned file (the control-password hash is derived once and the
+# SocksPolicy is deliberate), so it is seeded once and never rewritten as a
+# whole. The hidden-service part is the exception: it is a *declaration*, so it
+# lives in a marked region that this installer rewrites on every run. Changing
+# ONION_SERVICES is therefore enough -- deploy.sh digests torrc alongside the
+# units and restarts tor when it changed.
+ONION_BEGIN="# >>> onion services (rendered by deploy/install.sh from ONION_SERVICES)"
+ONION_END="# <<< onion services"
+
+onion_stanzas() {
+    local entry name target _rest
+    [ "${ONION_SERVICES+x}" = x ] || return 0
+    for entry in "${ONION_SERVICES[@]}"; do
+        IFS='|' read -r name target _rest <<<"$entry"
+        # HiddenServicePort applies to the HiddenServiceDir above it, and the
+        # directory must exist or be creatable: the mount is there, tor makes the
+        # per-service dir 700 itself.
+        printf 'HiddenServiceDir /var/lib/tor/onion/%s\n' "$name"
+        printf 'HiddenServicePort 80 %s\n' "$target"
+    done
+}
+
+# Replace the marked region in torrc with the current declaration, appending it
+# when absent (an adopted host predates it). Everything outside the markers --
+# the hash, the SOCKS policy, the log line -- is left byte for byte.
+sync_torrc_onions() { # torrc
+    local torrc="$1" tmp stanzas entry name target
+    [ -s "$torrc" ] || return 0
+    # Validated here, in the main shell: a die inside $(onion_stanzas) would only
+    # end the subshell and quietly install no services at all.
+    if [ "${ONION_SERVICES+x}" = x ]; then
+        for entry in "${ONION_SERVICES[@]}"; do
+            IFS='|' read -r name target _ <<<"$entry"
+            [ -n "$name" ] && [ -n "$target" ] \
+                || die "bad ONION_SERVICES entry: $entry (want \"name|target|mirrors|path|code\")"
+        done
+    fi
+    stanzas=$(onion_stanzas)
+    tmp=$(mktemp "$torrc.XXXXXX")
+    awk -v b="$ONION_BEGIN" -v e="$ONION_END" '
+        $0 == b { inblock = 1; next }
+        $0 == e { inblock = 0; next }
+        inblock { next }
+        { print }
+    ' "$torrc" > "$tmp"
+    # Drop the blank line(s) the removed region left behind, then re-append.
+    awk 'BEGIN { n = 0 }
+         { line[++n] = $0 }
+         END { last = n
+               while (last > 0 && line[last] == "") last--
+               for (i = 1; i <= last; i++) print line[i] }' "$tmp" > "$tmp.trim"
+    if [ -n "$stanzas" ]; then
+        printf '\n%s\n%s\n%s\n' "$ONION_BEGIN" "$stanzas" "$ONION_END" >> "$tmp.trim"
+    fi
+    # cat into the original path: keeps its mode (600) and ownership.
+    cat "$tmp.trim" > "$torrc"
+    rm -f "$tmp" "$tmp.trim"
+}
 
 if [ -s "$TOR_DIR/torrc" ]; then
     log "keeping existing $TOR_DIR/torrc"
@@ -398,6 +466,7 @@ EOF
         log "could not seed $TOR_DIR/torrc (tor image '$TOR_IMAGE' not built?) -- re-run after the build"
     fi
 fi
+sync_torrc_onions "$TOR_DIR/torrc"
 
 # ---------------------------------------------------------------------------
 # 5. SearXNG config (seed only; never clobber a live file)

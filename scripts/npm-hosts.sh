@@ -26,7 +26,8 @@
 # configuration is applied through the admin API on 127.0.0.1:81 rather than by
 # hand. Credentials live in $DATA_DIR/config/npm/api.env (mode 600), seeded by
 # deploy/install.sh. A Let's Encrypt certificate is requested for any declared
-# host that has none (its DNS must point here and :80 must reach this machine);
+# host that has none -- except a `.onion`: tor already encrypts and
+# authenticates the hidden service and Let's Encrypt cannot issue for an onion.
 # NPM_REQUEST_CERT=0 leaves TLS to the UI.
 #
 # Idempotent: a host already serving one of the domain's names is updated in
@@ -246,7 +247,15 @@ for entry in "${NPM_HOSTS[@]}"; do
         advanced="$ADVANCED_JSON"
     fi
 
-    ensure_cert "$domain"
+    # A `.onion` needs no certificate and must not be force-SSL: tor encrypts and
+    # authenticates the onion, Let's Encrypt cannot issue for it, and the hidden
+    # service reaches NPM in plain HTTP (through the host gateway -- see
+    # ONION_SERVICES in stack.conf). Skipping ensure_cert here also keeps the
+    # reconciler from burning a Let's Encrypt attempt on every run.
+    case "$domain" in
+        *.onion) CERT_ID="" ;;
+        *)       ensure_cert "$domain" ;;
+    esac
     cert_id="${CERT_ID:-0}"
     # A pinned certificate only forces SSL when the declaration asks for it.
     if [ "$cert_id" = 0 ]; then
@@ -284,10 +293,16 @@ for entry in "${NPM_HOSTS[@]}"; do
 
     if has_flag "$flags" mcp; then
         log "  MCP endpoints (Authorization: Bearer <token from the file named below>):"
+        # An onion host has no URL to print (its address is key material) and is
+        # plain HTTP: say so rather than showing https://*.onion.
+        case "$domain" in
+            *.onion) base="http://<onion>" ;;
+            *)       base="https://$domain" ;;
+        esac
         for pair in "${MCP_HOSTS[@]}"; do
             rest="${pair#*:}"
-            printf '    https://%s%s  (%s/%s/token.env)\n' \
-                "$domain" "${pair%%:*}" "$CONFIG_DIR" "${rest%%:*}"
+            printf '    %s%s  (%s/%s/token.env)\n' \
+                "$base" "${pair%%:*}" "$CONFIG_DIR" "${rest%%:*}"
         done
     fi
 done
@@ -320,6 +335,23 @@ if [ "$PRUNE" = 1 ]; then
             fi
         done
     fi
+fi
+
+# --- the onion addresses, once tor has published them ---------------------
+# Read from tor's own files: the address is key material, not configuration, so
+# it exists only after tor has started (the keys live in $DATA_DIR/tor/onion and
+# are backed up, which is what keeps the address stable).
+if [ "${ONION_SERVICES+x}" = x ] && [ "${#ONION_SERVICES[@]}" -gt 0 ]; then
+    log "onion services (no DNS, no Let's Encrypt -- give tor a minute after a first start):"
+    for entry in "${ONION_SERVICES[@]}"; do
+        IFS='|' read -r name _target mirrors _rest <<<"$entry"
+        addrfile="$DATA_DIR/tor/onion/$name/hostname"
+        if [ -s "$addrfile" ]; then
+            printf '    http://%s  (%s)\n' "$(tr -d '\r\n' < "$addrfile")" "$mirrors"
+        else
+            printf '    %s: no address yet -- tor has not written %s\n' "$mirrors" "$addrfile"
+        fi
+    done
 fi
 
 log "done"

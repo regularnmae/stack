@@ -1,9 +1,12 @@
 # Quadlet unit for Tor, used by lightningd for its onion service and to
-# reach the network over a proxy. No secrets: tor's own configuration
-# (including the control-port password hash) lives in $DATA_DIR/tor/torrc,
-# which is outside the repo and never committed.
+# reach the network over a proxy, and by the stack itself as an onion-service
+# *publisher* (the public surface without DNS or Let's Encrypt). No secrets:
+# tor's own configuration (including the control-port password hash) lives in
+# $DATA_DIR/tor/torrc, which is outside the repo and never committed, and the
+# hidden services' keys live in $DATA_DIR/tor/onion (see ONION_SERVICES in
+# stack.conf).
 [Unit]
-Description=Tor SOCKS5 & Control Proxy
+Description=Tor SOCKS5 & Control Proxy + onion services
 After=network-online.target npm-network-network.service
 Requires=npm-network-network.service
 Before=lightningd.service
@@ -24,6 +27,14 @@ PodmanArgs=--ip=10.89.0.240
 # PodmanArgs IP below), and torrc's SocksPolicy would reject a connection from
 # the host's loopback anyway.
 Volume=@DATA_DIR@/tor/torrc:/etc/tor/torrc:ro,Z
+
+# The hidden services' onion keys. `:z` (shared, not `:Z`) because the backup
+# container mounts $DATA_DIR/tor read-only alongside this unit, and two
+# containers cannot share a path one of them labelled private. Losing this
+# directory does not break the stack, but it does change every .onion address,
+# so it is part of the backup set. Tor creates each <name> subdirectory mode 700
+# itself; install.sh creates the parent 700 so nothing can list the names.
+Volume=@DATA_DIR@/tor/onion:/var/lib/tor/onion:z
 
 Exec=tor -f /etc/tor/torrc
 

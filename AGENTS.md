@@ -33,8 +33,9 @@ server.
 ./deploy.sh --only backup           # run the backup job now
 ./deploy.sh --only monitor          # run the health + spend checks now
 ./deploy.sh --only npm-hosts        # (re)reconcile every proxy host in nginx-proxy-manager
+./deploy.sh --only tor              # re-render the onion services into torrc and restart tor
 ./deploy/install.sh                 # units + secrets + data dirs only
-./verify.sh                         # container health + MCP handshakes
+./verify.sh                         # container health, MCP handshakes, onion fetches
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / inspect
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
@@ -125,9 +126,11 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
   type), so `install.sh` renders it into `~/.config/systemd/user/` and enables it.
-- **The backup set is `cln/ monero-wallet-rpc/ config/ npm/ audit/
+- **The backup set is `cln/ monero-wallet-rpc/ tor/ config/ npm/ audit/
   uptime-kuma/ postgres-dump/` only** — chains, `searxng/` and the raw
-  `postgres/` cluster stay out so restic never walks them. `postgres-dump.container` (a oneshot) `pg_dumpall`s into
+  `postgres/` cluster stay out so restic never walks them. `tor/` is in it for
+  `tor/onion/` (the hidden services' keys: a lost key is a new `.onion` address).
+  `postgres-dump.container` (a oneshot) `pg_dumpall`s into
   `$DATA_DIR/postgres-dump`; its libpq settings belong in
   `config/boltmesh/dump.env`, **not** `db.env` (`PGHOST`/`PGUSER` in the server's
   own env break its socket-based entrypoint bootstrap). The repo is
@@ -156,6 +159,24 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **`torrc`'s `HashedControlPassword` must hash to `TOR_SERVICE_PASSWORD`**;
   `install.sh` derives it with `tor --hash-password` on a fresh host and
   otherwise leaves `torrc` alone.
+- **`tor` is also the onion publisher, and the onion side does not go through NPM
+  the way the clearweb side does.** `ONION_SERVICES` in `stack.conf` is the
+  declaration; `install.sh` rewrites only the marked region at the end of
+  `torrc` (`# >>> onion services` … `# <<< onion services`) so the hash and the
+  `SocksPolicy` are never touched, and `deploy.sh`'s `unit_digest` hashes `torrc`
+  as `tor.unit` so a changed declaration restarts tor. The `.onion` address is
+  key material, not config: it comes from `$DATA_DIR/tor/onion/<name>/` (mounted
+  `/var/lib/tor/onion`, hence `tor/` in the backup set), so never "clean up"
+  that directory and never seed the address anywhere. The frontend and API onion
+  services forward to their **containers**; the mcp one cannot, because the
+  five-servers-by-path split is nginx-proxy-manager's job and NPM is on the host
+  network — a container has no route to it (`10.89.0.1:80` is refused from
+  `npm-network`; `host.containers.internal`, pasta's gateway, is the one reachable
+  name). Tor cannot rewrite `Host` and the address is unknown at install time,
+  so NPM gets a **wildcard `*.onion`** proxy host (the only host with no
+  certificate — `npm-hosts.sh` skips Let's Encrypt for `.onion`, and `force-ssl`
+  must never be added to it). Don't "fix" the mcp target to a container name or
+  give the wildcard a cert.
 - **Spending stays off:** `install.sh` writes `ENABLE_SPENDING=0` to both money
   servers' `spend.env` (never seed `1`); `scripts/spend-audit.sh` asserts it,
   hash-baselines both `spend.env`, both token files and `node.env` (the spend
