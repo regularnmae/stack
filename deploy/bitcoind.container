@@ -1,7 +1,7 @@
-# Quadlet unit for the Bitcoin Core node. Owned by this repo so the node
-# config is version-controlled in one place; the secrets are not here --
-# bitcoind keeps its RPC credentials in bitcoin.conf under the data
-# directory, which is never committed.
+# Quadlet unit for the Bitcoin Core full (archival) node. Owned by this repo so
+# the node config is version-controlled in one place; the secrets are not here --
+# bitcoind keeps its RPC credentials in bitcoin.conf under the data directory,
+# which is never committed.
 [Unit]
 Description=Bitcoin Core Node
 After=network-online.target npm-network-network.service

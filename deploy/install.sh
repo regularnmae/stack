@@ -45,6 +45,7 @@ UNITS=(
     "searxng.container:searxng.container"
     "bitcoind.container:bitcoind.container"
     "monerod.container:monerod.container"
+    "fulcrum.container.in:fulcrum.container"
     "tor.container:tor.container"
     "lightningd.container.in:lightningd.container"
     "monero-wallet-rpc.container.in:monero-wallet-rpc.container"
@@ -276,8 +277,11 @@ if [ ! -s "$DATA_DIR/bitcoin/bitcoin.conf" ]; then
 server=1
 daemon=0
 
-# Rolling prune keeps the node small. Incompatible with -txindex.
-prune=20000
+# Full (archival) node: keep and validate the whole chain. Leave prune at 0:
+# reverting it requires re-downloading the blockchain (README: "Full nodes and
+# disk"). txindex stays off; the MCP server and lightningd do not need it, and
+# it costs another index.
+prune=0
 txindex=0
 
 # RPC. rpcallowip is the podman subnet only, so a re-added PublishPort would
@@ -303,6 +307,11 @@ fi
 chown_image_uid "$DATA_DIR/monero-wallet-rpc"
 
 mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
+
+# Fulcrum's index, self-signed cert and admin latch. The Fulcrum image runs as
+# container root (the host user under rootless podman, like cln/ and tor/), so
+# this stays user-owned; only the directory has to exist for the :z mount.
+mkdir -p "$DATA_DIR/fulcrum"
 
 # The onion services' keys (ONION_SERVICES in stack.conf): mounted into tor at
 # /var/lib/tor/onion. Mode 700 here, because tor only checks the leaf
@@ -959,7 +968,7 @@ cat <<EOF
 
 Done. Everything the stack owns lives under:
   $DATA_DIR
-    bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/ npm/
+    bitcoin/ monero/ fulcrum/ monero-wallet-rpc/ cln/ tor/ searxng/ npm/
     postgres/       <- the BoltMesh cluster (dumped, not backed up raw)
     postgres-dump/  <- the pre-backup pg_dumpall
     config/         <- all bearer tokens and secrets (mode 600)

@@ -331,6 +331,10 @@ start_infra() {
     # RPC-level readiness, not sync: getblockchaininfo answers while syncing.
     if wait_cmd "bitcoind RPC" "$BITCOIND_WAIT" podman exec bitcoind bitcoin-cli getblockchaininfo; then
         BITCOIND_READY=1
+        # Fulcrum indexes from bitcoind's RPC and follows it through IBD, so it
+        # can be started now; it opens its Electrum ports only once caught up.
+        start_unit fulcrum
+        wait_healthy fulcrum 60 || warn "fulcrum is still starting; check: podman logs fulcrum"
     else
         warn "continuing without bitcoind RPC (it may still be starting)"
     fi
@@ -690,11 +694,13 @@ Stack deployed (chain daemons skipped).
   BoltMesh app: postgres, boltmesh-backend, boltmesh-worker,
                 boltmesh-frontend
 
-nginx-proxy-manager is the only service a client reaches: it runs on the host
-network, so it binds 80/443/81 itself and every request keeps the client's real
-address. Every other service publishes its port on the host's loopback, which is
-where NPM's proxy hosts point; nothing else is reachable from the LAN. ./verify.sh
-and the monitoring scripts read the services by container name on npm-network.
+nginx-proxy-manager is the only HTTP service a client reaches: it runs on the
+host network, so it binds 80/443/81 itself and every request keeps the client's
+real address. Every service it fronts publishes its port on the host's loopback,
+which is where NPM's proxy hosts point. Fulcrum's Electrum ports 50001 (TCP) and
+50002 (SSL) are the one non-HTTP exception, opened directly on the LAN because
+NPM cannot proxy the Electrum protocol. ./verify.sh and the monitoring scripts
+read the other services by container name on npm-network.
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $DATA_DIR/config/npm/api.env has the NPM admin login (scripts/npm-hosts.sh
   applies every proxy host in NPM_HOSTS).
@@ -702,23 +708,28 @@ The status page's monitors are reconciled once
   $DATA_DIR/config/uptime-kuma/api.env has the Uptime-Kuma admin login
   (scripts/kuma-monitors.sh applies every monitor in KUMA_MONITORS).
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
-bitcoind, monerod, lightningd and monero-wallet-rpc.
+bitcoind, monerod, fulcrum, lightningd and monero-wallet-rpc.
 EOF
 else
     cat <<EOF
 
 Stack deployed.
 
-  Daemons and web:  bitcoind, monerod, monero-wallet-rpc, lightningd, tor,
-                    valkey, searxng, nginx-proxy-manager
+  Daemons and web:  bitcoind, monerod, fulcrum, monero-wallet-rpc, lightningd,
+                    tor, valkey, searxng, nginx-proxy-manager
   MCP servers:      searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
                     monero-wallet-mcp, lightning-mcp
   BoltMesh app:     postgres, boltmesh-backend, boltmesh-worker,
                     boltmesh-frontend
-  Exposure:         nothing but nginx-proxy-manager (80/443/81) is reachable
-                    from the LAN; it runs on the host network, so it keeps
-                    clients' real addresses. Every service it fronts is on the
-                    host's loopback (see NPM_HOSTS in stack.conf)
+  Exposure:         nginx-proxy-manager (80/443/81) plus Fulcrum's Electrum
+                    ports 50001 (TCP) / 50002 (SSL). NPM runs on the host
+                    network, so it keeps clients' real addresses; everything it
+                    fronts is on the host's loopback (see NPM_HOSTS in
+                    stack.conf). Fulcrum is the one non-HTTP LAN surface
+  Electrum:         point a Bitcoin wallet at this host on 50001 (TCP) or
+                    50002 (SSL, self-signed). Fulcrum indexes alongside
+                    bitcoind and accepts wallets once its index has caught up
+                    (podman logs fulcrum)
   MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
   Onion (no DNS):   the same surface as http://<onion>.onion/ (ONION_SERVICES in
@@ -732,9 +743,10 @@ Stack deployed.
   Monitoring:       every 5 min (monitor.timer) + spend tripwire; both alert
                     only once $DATA_DIR/config/monitoring/monitor.env is filled in
 
-Chain sync continues in the background (bitcoind is pruned; monerod is
-pruned). Re-run ./deploy.sh once the chains are current to finish anything
-that was waiting on them.
+Chain sync continues in the background (both daemons are full nodes, so the
+first sync downloads and validates the whole Bitcoin and Monero chains). Re-run
+./deploy.sh once the chains are current to finish anything that was waiting on
+them.
 EOF
 fi
 

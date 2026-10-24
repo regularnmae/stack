@@ -1,6 +1,6 @@
-# Quadlet unit for the Monero node. No secrets: the restricted RPC runs
-# without a login, and standard RPC (18081) is bound to loopback inside the
-# container and never reachable from the network.
+# Quadlet unit for the Monero full (archival) node. No secrets: the restricted
+# RPC runs without a login, and standard RPC (18081) is bound to loopback inside
+# the container and never reachable from the network.
 [Unit]
 Description=Monero Node
 After=network-online.target npm-network-network.service
@@ -28,12 +28,13 @@ Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
 # NOTE: Exec= replaces the image CMD, so the image's default flags
 # must be restated verbatim, with our additions appended.
 # (--non-interactive is prepended by the entrypoint itself.)
-#   --prune-blockchain: rolling prune keeps the chain ~70-80 GB.
+# No --prune-blockchain: this is a full (archival) node, so it keeps and
+# serves the whole chain. Pruning is one-way -- an existing pruned data dir
+# must be re-synced from scratch (see "Full nodes and disk" in README.md).
 Exec=--rpc-restricted-bind-ip=0.0.0.0 \
      --rpc-restricted-bind-port=18089 \
      --no-igd --no-zmq --enable-dns-blocklist \
-     --ban-list=/home/monero/ban_list.txt \
-     --prune-blockchain
+     --ban-list=/home/monero/ban_list.txt
 
 # The image build drops the Dockerfile HEALTHCHECK (the OCI image
 # config has no healthcheck field), so define it here instead. This

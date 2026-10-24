@@ -7,8 +7,9 @@
 server=1
 daemon=0
 
-# Rolling prune: keeps the node small. Incompatible with -txindex.
-prune=20000
+# Full (archival) node: keep and validate the whole chain. Do not set prune:
+# reverting it requires re-downloading the blockchain.
+prune=0
 txindex=0
 
 # RPC. rpcallowip is the podman subnet only, so a re-added PublishPort would

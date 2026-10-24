@@ -27,6 +27,14 @@
       "matchStrings": ["Image=docker\\.io/louislam/uptime-kuma:(?<currentValue>[^@\\s]+)"],
       "datasourceTemplate": "docker",
       "depNameTemplate": "louislam/uptime-kuma"
+    },
+    {
+      "customType": "regex",
+      "description": "the Fulcrum image tag in its rendered Quadlet unit (same Quadlet gap as uptime-kuma)",
+      "fileMatch": ["^deploy/fulcrum\\.container\\.in$"],
+      "matchStrings": ["Image=docker\\.io/cculianu/fulcrum:(?<currentValue>[^@\\s]+)"],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "cculianu/fulcrum"
     }
   ],
   "lockFileMaintenance": {

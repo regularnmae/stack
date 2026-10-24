@@ -17,6 +17,7 @@ stack runs and one script that fixes a deployment problem.
 | --- | --- | --- | --- |
 | `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — | `$DATA_DIR/bitcoin` |
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
+| `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
 | `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
 | `lightningd` | `docker.io/elementsproject/lightningd:latest` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
@@ -34,11 +35,17 @@ stack runs and one script that fixes a deployment problem.
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` | — |
 
-**Only `nginx-proxy-manager` is reachable from the LAN.** It runs on the **host
-network** (`Network=host`), so its own nginx binds `80`/`443`/`81` in the host's
-namespace — nothing is port-forwarded for it, and a request therefore arrives
-with the client's real address. That is what its access log, its fail2ban surface
-and the `X-Forwarded-For` it sets on the way to an app need. A *published* port
+`bitcoind` and `monerod` are **full (archival) nodes**, storing and validating
+the whole chain; `fulcrum` indexes that chain for Bitcoin wallets over the
+Electrum protocol. See [Full nodes and disk](#full-nodes-and-disk) before sizing
+the data disk.
+
+**Only `nginx-proxy-manager` is reachable from the LAN over HTTP.** It runs on
+the **host network** (`Network=host`), so its own nginx binds `80`/`443`/`81` in
+the host's namespace — nothing is port-forwarded for it, and a request therefore
+arrives with the client's real address. That is what its access log, its fail2ban
+surface and the `X-Forwarded-For` it sets on the way to an app need. A
+*published* port
 cannot do that on a rootless build: podman's `rootlessport` forwards from inside
 the rootless namespace, so NPM logged its own container IP (`10.89.0.5`) for
 every client. Podman ≥ 6.0 can forward with `pasta` instead
@@ -64,8 +71,11 @@ NPM's own admin API on `127.0.0.1:81`. The proxy hosts are declared in `NPM_HOST
 themselves live in NPM's database, not in this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in
-`stack.conf`); the loopback publishes are not, and another machine cannot reach
-them.
+`stack.conf`), plus Fulcrum's Electrum ports `50001` (TCP) and `50002` (SSL) —
+the one deliberate exception, because the Electrum protocol is raw TCP and NPM
+cannot proxy it. The loopback publishes are not opened, and another machine
+cannot reach them. Point a Bitcoin wallet at this host on `50001`/`50002`; the
+SSL certificate is self-signed and generated in `$DATA_DIR/fulcrum`.
 
 The same three public hostnames are also published as **Tor onion services** from
 the same `tor` unit that lightningd already uses as its SOCKS proxy — no extra
@@ -156,10 +166,15 @@ stale image). Common flags:
 ./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
 ```
 
-Chain sync takes hours to days on a truly bare host (`bitcoind` is pruned, so
-it re-downloads the chain; `monerod` is pruned too). `deploy.sh` starts the
-containers and does **not** wait for sync — re-run it once the chains are
-current and anything that was waiting (notably the CLN runes) completes.
+Chain sync takes hours to days on a truly bare host: both daemons are **full
+(archival) nodes**, so the first start downloads and validates the whole Bitcoin
+and Monero chains. `fulcrum` starts indexing from `bitcoind`'s RPC as soon as it
+answers and follows the node through initial block download; it only accepts
+wallet connections once its own index has caught up (watch `podman logs fulcrum`).
+See [Full nodes and disk](#full-nodes-and-disk) for the disk budget.
+`deploy.sh` starts the containers and does **not** wait for sync — re-run it once
+the chains are current and anything that was waiting (notably the CLN runes)
+completes.
 
 ### Wallets
 
@@ -172,14 +187,26 @@ A bare host has no wallets. `deploy.sh` prompts:
 
 Both are skipped when there is no TTY. See `scripts/wallets.sh`.
 
+### Electrum (Bitcoin wallet)
+
+`fulcrum` serves the Bitcoin wallet interface at this host's **`50001`** (plain
+TCP) or **`50002`** (SSL, self-signed) — not through nginx-proxy-manager, because
+the Electrum protocol is not HTTP. Point Sparrow/Electrum at it once
+`podman logs fulcrum` shows the index caught up; the node and the indexer can
+sync at the same time, but a wallet must not rely on a partial index. On an
+existing host, re-run `./bootstrap.sh` (or open `50001`/`50002` in firewalld
+yourself) so the new ports reach the LAN.
+
 ## Where the data lives
 
 Everything the stack must not lose sits under **one directory**, `$DATA_DIR`
 (`STACK_DATA_DIR`, default `$HOME/data`). `deploy.sh` asks for it once and
 remembers the answer in `~/.config/stack/data-dir.env`:
 
-  - `bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
-    (`tor/onion/` holds the onion services' keys, `tor/torrc` the config)
+  - `bitcoin/ monero/ fulcrum/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
+    (`tor/onion/` holds the onion services' keys, `tor/torrc` the config; `fulcrum/`
+    is the Electrum index and its self-signed certificate, regenerable and excluded
+    from backups)
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
   - `uptime-kuma/` — the status page's state (sqlite, history; configured in its UI)
   - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
@@ -212,10 +239,59 @@ sudo semanage fcontext -a -t container_file_t "/data/stack(/.*)?"
 sudo restorecon -RF /data/stack
 ```
 
+### Full nodes and disk
+
+`bitcoind` and `monerod` are **full (archival) nodes**: `bitcoin.conf` is seeded
+with `prune=0` and `monerod` runs without `--prune-blockchain`. Both store and
+validate the entire chain, which dominates the data dir — roughly 800 GB for
+Bitcoin and 250 GB for Monero as of late 2026, both growing. Fulcrum's Electrum
+index adds roughly 100–135 GB and ~1–2 GB of RAM (`--db_mem 1024` caps its
+RocksDB cache). Budget a 2 TB data disk. The chains and the index are excluded
+from the backup set for exactly this reason: they are large and re-downloadable,
+not irreplaceable state.
+
+#### Converting a pruned host
+
+Changing the config does not restore history. An existing pruned data directory
+stays pruned (pruning is one-way), so both chains must be re-synced from
+genesis. The wallets live outside the chain data — `monero-wallet-rpc/` and
+`bitcoin/wallets/` — so they are untouched:
+
+```sh
+# The data dir you answered at install time (default: $HOME/data).
+DATA_DIR="${STACK_DATA_DIR:-$HOME/data}"
+
+# Bitcoin: edit its config as the container user, then drop only the pruned
+# chain. The image uid owns bitcoin/, so the delete goes through podman unshare.
+podman exec bitcoind sed -i -e 's|^[[:space:]]*prune[[:space:]]*=.*|prune=0|' /data/.bitcoin/bitcoin.conf
+systemctl --user stop bitcoind.service
+podman unshare rm -rf "$DATA_DIR/bitcoin/blocks" "$DATA_DIR/bitcoin/chainstate"
+./deploy.sh --only bitcoind
+
+# Monero: the node data dir is chain-only; the wallet is elsewhere.
+systemctl --user stop monerod.service
+podman unshare rm -rf "$DATA_DIR/monero"
+./deploy.sh --only monerod
+```
+
+`./deploy.sh` cannot do this for you: `install.sh` seeds `bitcoin.conf` only
+when it is missing, so an existing host keeps its old `prune=` line until it is
+edited. Check the result with `podman exec bitcoind bitcoin-cli
+getblockchaininfo` (`"pruned": false`); Monero does not report its prune state
+through the restricted RPC, so a fresh `$DATA_DIR/monero` is the proof.
+
+If `bitcoind` is restarted before its chain is dropped, it crash-loops with
+`You need to rebuild the database using -reindex to go back to unpruned mode`.
+Stop it and run the Bitcoin delete step above: removing `blocks/` and
+`chainstate/` clears the `prunedblockfiles` flag in `blocks/index` and forces
+the same full re-download a one-off `-reindex` would, without leaving a flag in
+the unit.
+
 ## Reinstalling the host without re-syncing
 
 With the data dir on a separate disk (e.g. `/data/stack`), a Rocky reinstall on
-the system disk keeps the chains, wallets, CLN identity and every token:
+the system disk keeps the chains, the Electrum index, wallets, CLN identity and
+every token:
 
 1. Reinstall the OS. Do **not** touch the data disk.
 2. Make sure it is mounted at the same path again (`/etc/fstab` — a reinstall
@@ -230,9 +306,10 @@ the system disk keeps the chains, wallets, CLN identity and every token:
    ```
 
 `deploy.sh` finds the existing
-`bitcoin/ monero/ monero-wallet-rpc/ cln/ tor/ npm/ config/` there (labelling
-the path for containers if it has to) — so nothing re-syncs, the wallet still
-opens (its password is in `config/stack/secrets.env`), and the client tokens are
+`bitcoin/ monero/ fulcrum/ monero-wallet-rpc/ cln/ tor/ npm/ config/` there
+(labelling the path for containers if it has to) — so nothing re-syncs, the
+wallet still opens (its password is in `config/stack/secrets.env`), and the
+client tokens are
 unchanged.
 
 ## Backup & restore
@@ -255,9 +332,9 @@ the things in `$DATA_DIR` that cannot be re-downloaded:
   `postgres/` cluster is not copied: a file-by-file copy of a live `PGDATA` is
   only crash-recoverable)
 
-The chains (`bitcoin/`, `monero/`), `searxng/` and the raw `postgres/` cluster
-are deliberately **excluded**: they are large and regenerable, so restic never
-walks them.
+The chains (`bitcoin/`, `monero/`), the Electrum index (`fulcrum/`), `searxng/`
+and the raw `postgres/` cluster are deliberately **excluded**: they are large and
+regenerable, so restic never walks them.
 
 - `deploy/backup.container` — the one-shot job (a Quadlet unit, rendered like
   the rest).
@@ -408,8 +485,10 @@ Notes:
 
 ## Proxy hosts (nginx-proxy-manager)
 
-nginx-proxy-manager is the stack's only LAN-facing unit, so every public
-hostname is a proxy host in NPM. They are declared in `NPM_HOSTS` in
+nginx-proxy-manager is the stack's only LAN-facing HTTP unit, so every public
+hostname is a proxy host in NPM. (Fulcrum's raw Electrum ports `50001`/`50002`
+are the deliberate non-HTTP exception; see [What runs](#what-runs).) They are
+declared in `NPM_HOSTS` in
 `stack.conf` — `domain | forward_host:port | flags` — and reconciled from this
 repo by `scripts/npm-hosts.sh` through the NPM admin API on `127.0.0.1:81` (NPM
 binds it on the host network): a host already serving the domain is updated in
@@ -623,12 +702,13 @@ under `$DATA_DIR/config/`, mode 600.
   password in a curl config on stdin, so it never reaches the host's argv.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
-`lightningd` and `monero-wallet-rpc` are *rendered* from `deploy/*.container.in`
-by `install.sh` (substituting `@PLACEHOLDERS@`). Every unit is rendered the same
-way — the secret-free ones only substitute `@DATA_DIR@`/`@CONFIG_DIR@` — so no
-unit is a symlink. The rendered units are mode 600 and never enter git. Do not
-"simplify" `monero-wallet-rpc` to a config file: its entrypoint binds `0.0.0.0`
-only when `--rpc-login` is on the command line.
+`lightningd`, `monero-wallet-rpc` and `fulcrum` are *rendered* from
+`deploy/*.container.in` by `install.sh` (substituting `@PLACEHOLDERS@`). Every
+unit is rendered the same way — the secret-free ones only substitute
+`@DATA_DIR@`/`@CONFIG_DIR@` — so no unit is a symlink. The rendered units are
+mode 600 and never enter git. Do not "simplify" `monero-wallet-rpc` to a config
+file: its entrypoint binds `0.0.0.0` only when `--rpc-login` is on the command
+line.
 
 `bitcoind` keeps its RPC credentials in its own `bitcoin.conf`, which
 `install.sh` seeds on a fresh host and hands to the image uid. It is edited
@@ -642,7 +722,7 @@ stack/
   deploy.sh               # the one-click orchestrator (asks for the data dir)
   verify.sh               # health + endpoint checks
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
-  renovate.json           # Renovate policy (tor image base/image bumps)
+  renovate.json           # Renovate policy (tor image base + Quadlet image tags)
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
   scripts/lib.sh          # data-dir resolution + SELinux labelling + the
                           #   net_curl / mcp_* helpers every check goes through
@@ -655,7 +735,7 @@ stack/
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
-    *.container.in        # lightningd and monero-wallet-rpc, rendered (secrets)
+    *.container.in        # lightningd, monero-wallet-rpc, fulcrum, rendered (secrets)
     *.timer               # backup.timer, monitor.timer (plain user units;
                           #   Quadlet has no .timer type)
     monitor.service       # the monitor script as a plain user unit

@@ -60,7 +60,7 @@ if [ "$NO_NODES" = 1 ]; then
     )
 else
     containers=(
-        bitcoind monerod monero-wallet-rpc lightningd
+        bitcoind monerod fulcrum monero-wallet-rpc lightningd
         tor valkey searxng uptime-kuma nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend

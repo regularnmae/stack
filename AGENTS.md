@@ -15,14 +15,14 @@ in `README.md`; this file is the agent-facing complement and does not repeat it.
 /`Environment=` reach the container's environment, not the daemon's argv, so a
 secret cannot reach `--bitcoin-rpcpassword` etc. from an env file. So **every
 unit is rendered** by `install.sh` from `deploy/*.container[.in]`, substituting
-`@DATA_DIR@`/`@CONFIG_DIR@` (the plain user units also use `@REPO_DIR@`); the two
-secret-bearing units, `lightningd` and `monero-wallet-rpc`, additionally
-substitute `@PLACEHOLDERS@` from `config/stack/secrets.env`. Rendered units are
-mode 600 and never committed; none is a symlink. Never move a secret onto a
-committed `.container`, and never "simplify" `monero-wallet-rpc` to a config
-file: its entrypoint binds `0.0.0.0` only when `--rpc-login` is on the command
-line, otherwise it forces `127.0.0.1` and the wallet is unreachable from the MCP
-server.
+`@DATA_DIR@`/`@CONFIG_DIR@` (the plain user units also use `@REPO_DIR@`); the
+three secret-bearing units, `lightningd`, `monero-wallet-rpc` and `fulcrum`,
+additionally substitute `@PLACEHOLDERS@` from `config/stack/secrets.env`. Rendered
+units are mode 600 and never committed; none is a symlink. Never move a secret
+onto a committed `.container`, and never "simplify" `monero-wallet-rpc` to a
+config file: its entrypoint binds `0.0.0.0` only when `--rpc-login` is on the
+command line, otherwise it forces `127.0.0.1` and the wallet is unreachable from
+the MCP server.
 
 ## Commands
 
@@ -76,8 +76,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **Data-dir ownership:** `bitcoind`/`monero-wallet-rpc` run as the image uid
   (host 525287 = in-container 1000) and do **not** re-own their bind mounts, so
   `install.sh` `podman unshare chown -R 1000:1000`s them; `monerod` re-owns its
-  own directory. `cln/`, `tor/` and `uptime-kuma/` are written by container root
-  (= the host user under rootless podman).
+  own directory. `cln/`, `tor/`, `uptime-kuma/` and `fulcrum/` are written by
+  container root (= the host user under rootless podman).
 - **`uptime-kuma` is UI-configured for its own account, declared for
   everything else:** there is no env file in the unit and nothing is seeded
   into its sqlite — but its monitors are `KUMA_MONITORS` in `stack.conf`,
@@ -126,9 +126,30 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
   type), so `install.sh` renders it into `~/.config/systemd/user/` and enables it.
+- **Both daemons are full (archival) nodes:** `install.sh` seeds `bitcoin.conf`
+  with `prune=0` and `monerod.container` has no `--prune-blockchain`, so the
+  chains are large (roughly 800 GB Bitcoin / 250 GB Monero in late 2026) and the
+  data disk must be sized for that. Never "save space" by reintroducing prune:
+  pruning is one-way, and an existing pruned host must re-sync (Bitcoin: set
+  `prune=0`, stop, drop `blocks/`+`chainstate/`, keep `wallets/`; Monero: stop,
+  drop `monero/`, restart). `install.sh` seeds `bitcoin.conf` only when it is
+  missing, so an existing host keeps its old `prune=` until edited; the README's
+  "Full nodes and disk" section is the operator path.
+- **`fulcrum` is the Electrum server, and the one non-NPM LAN surface:**
+  `deploy/fulcrum.container.in` runs the official `cculianu/fulcrum` image on
+  `npm-network`, publishes raw Electrum `50001` (TCP) and `50002` (self-signed
+  SSL) straight on the LAN because NPM only proxies HTTP, and uses the bitcoind
+  RPC credentials from `secrets.env` (rendered into `Exec=`). It indexes from
+  bitcoind's RPC and follows it through IBD, so `deploy.sh` starts it once
+  bitcoind RPC answers; it only accepts wallets after its own index catches up.
+  Its `$DATA_DIR/fulcrum` database (~100–135 GB) and cert are regenerable and
+  excluded from the backup set; `--db_mem 1024` caps RocksDB. Do not add its
+  ports to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
+  and keep `50001/50002` in `FIREWALL_PORTS` if they move.
 - **The backup set is `cln/ monero-wallet-rpc/ tor/ config/ npm/ audit/
-  uptime-kuma/ postgres-dump/` only** — chains, `searxng/` and the raw
-  `postgres/` cluster stay out so restic never walks them. `tor/` is in it for
+  uptime-kuma/ postgres-dump/` only** — chains, the Fulcrum index (`fulcrum/`),
+  `searxng/` and the raw `postgres/` cluster stay out so restic never walks
+  them. `tor/` is in it for
   `tor/onion/` (the hidden services' keys: a lost key is a new `.onion` address).
   `postgres-dump.container` (a oneshot) `pg_dumpall`s into
   `$DATA_DIR/postgres-dump`; its libpq settings belong in
@@ -209,7 +230,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `Network=host` is that NPM can no longer resolve a container name: every unit it
   fronts publishes its port on the host's **loopback**
   (`PublishPort=127.0.0.1:<port>:…`), those are the `127.0.0.1:` targets in
-  `NPM_HOSTS`/`MCP_HOSTS`, and only 80/443/81 stay LAN-reachable. The host-side
+  `NPM_HOSTS`/`MCP_HOSTS`, and only 80/443/81 plus Fulcrum's raw Electrum
+  50001/50002 stay LAN-reachable. The host-side
   checks still read the services by container name on `npm-network` through
   `net_curl` — a throwaway `localhost/netcheck:local` container
   (`netcheck/Containerfile`, built by `install.sh`) — with `net_curl_host` the

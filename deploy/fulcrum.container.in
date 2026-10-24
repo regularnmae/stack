@@ -1,0 +1,52 @@
+# Quadlet unit for Fulcrum, the Electrum server the Bitcoin wallet connects to.
+# It indexes the chain from bitcoind and speaks the Electrum protocol over raw
+# TCP/TLS -- not HTTP, so nginx-proxy-manager cannot front it. These are the
+# only non-NPM ports opened on the LAN (FIREWALL_PORTS). Its database is
+# @DATA_DIR@/fulcrum: large and regenerable, so it is outside the backup set.
+# install.sh renders this into ~/.config/containers/systemd/ (mode 600) because
+# Exec= carries the bitcoind RPC password, like lightningd.
+[Unit]
+Description=Fulcrum Electrum server
+After=network-online.target npm-network-network.service bitcoind.service
+Wants=bitcoind.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=fulcrum
+Image=docker.io/cculianu/fulcrum:v2.1.4
+Network=npm-network.network
+
+# Raw Electrum TCP and SSL, straight on the LAN. NPM only proxies HTTP, so this
+# is the one service that is not behind it; the ports are opened by
+# bootstrap.sh from FIREWALL_PORTS in stack.conf. Do not add them to NPM_HOSTS.
+PublishPort=50001:50001
+PublishPort=50002:50002
+
+# fulcrum writes as container root, which is the host user under rootless
+# podman (like cln/ and tor/), so install.sh only mkdirs this directory. The
+# image entrypoint generates a self-signed fulcrum.crt/.key here on first start
+# and appends -D /data -c ... -k ... to the command.
+Volume=@DATA_DIR@/fulcrum:/data:z
+
+# -t/-s: plaintext and self-signed TLS for wallets. -a: admin RPC on loopback
+# only (FulcrumAdmin; never published). --db_mem caps RocksDB's cache so the
+# indexer cannot crowd out bitcoind/monerod on a 16 GB host. Fulcrum starts
+# indexing as soon as bitcoind's RPC answers and follows it through IBD; it
+# serves wallets only once its own index has caught up.
+Exec=Fulcrum -b bitcoind:8332 -u @BITCOIN_RPC_USER@ -p @BITCOIN_RPC_PASSWORD@ \
+     -t 0.0.0.0:50001 -s 0.0.0.0:50002 -a 127.0.0.1:8000 \
+     --polltime 5 --bd-timeout 120 --db_mem 1024 --ts-format utc
+
+# The admin RPC does not listen until the initial index is caught up, so
+# liveness is the process itself: the entrypoint execs Fulcrum as PID 1.
+HealthCmd=sh -c 'grep -qx Fulcrum /proc/1/comm'
+HealthInterval=60s
+HealthStartPeriod=10s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
