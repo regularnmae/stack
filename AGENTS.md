@@ -129,7 +129,11 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **Both daemons are full (archival) nodes:** `install.sh` seeds `bitcoin.conf`
   with `prune=0` and `monerod.container` has no `--prune-blockchain`, so the
   chains are large (roughly 800 GB Bitcoin / 250 GB Monero in late 2026) and the
-  data disk must be sized for that. Never "save space" by reintroducing prune:
+  data disk must be sized for that. The seed also sets `dbcache=3072` (Core's
+  default is 450) — the one knob that materially shortens IBD by cutting
+  chainstate writes; it is a cache ceiling, not an allocation, and the README's
+  "Speeding up the initial sync" tells the operator to drop it back to 450 once
+  synced. Never "save space" by reintroducing prune:
   pruning is one-way, and an existing pruned host must re-sync (Bitcoin: set
   `prune=0`, stop, drop `blocks/`+`chainstate/`, keep `wallets/`; Monero: stop,
   drop `monero/`, restart). `install.sh` seeds `bitcoin.conf` only when it is

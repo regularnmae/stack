@@ -284,6 +284,14 @@ daemon=0
 prune=0
 txindex=0
 
+# Validation cache, in MiB (range 4-16384; Core's default is 450). A bigger
+# cache is the one knob that materially speeds up the initial block download,
+# because it cuts chainstate writes to disk -- it does not change the download
+# itself. 3072 fits a 16 GB host next to monerod and Fulcrum; drop it back to
+# 450 once the chain is synced and the cache buys nothing (README: "Speeding up
+# the initial sync").
+dbcache=3072
+
 # RPC. rpcallowip is the podman subnet only, so a re-added PublishPort would
 # still be refused: a request via a host port arrives from the LAN address.
 rpcuser=$BITCOIN_RPC_USER
