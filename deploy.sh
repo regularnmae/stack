@@ -5,7 +5,10 @@
 #                                  # start everything, verify
 #   ./deploy.sh --bootstrap        # also provision a bare Rocky 10 host first
 #   ./deploy.sh --only <name>      # redeploy a single service (app or unit);
-#                                  # --only boltmesh rebuilds the whole app tier
+#                                  # --only boltmesh rebuilds the whole app tier;
+#                                  # --only explorers rebuilds both explorer
+#                                  # images, --only btc-explorer /
+#                                  # --only xmr-explorer just one (and restarts it)
 #   ./deploy.sh --skip-apps        # infrastructure only (daemons, searxng, NPM)
 #   ./deploy.sh --skip-daemons     # everything except the chain nodes: no
 #                                  # bitcoind/monerod/lightningd/monero-wallet-rpc,
@@ -59,6 +62,12 @@ LIGHTNINGD_WAIT="${LIGHTNINGD_WAIT:-900}"
 POSTGRES_WAIT="${POSTGRES_WAIT:-180}"
 APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"
 BITCOIND_READY=0
+
+# The two blockchain explorers. Their images are built from this repo (not
+# pulled), so they are deployed like the app tier -- after the daemons they
+# read -- and only when their image is missing, unless --only forces a rebuild.
+EXPLORER_UNITS=(btc-explorer xmr-explorer)
+EXPLORER_WAIT="${EXPLORER_WAIT:-180}"
 
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
@@ -538,13 +547,58 @@ deploy_boltmesh() {
 }
 
 # ---------------------------------------------------------------------------
+# 6b-bis. the blockchain explorers
+# ---------------------------------------------------------------------------
+# BTC RPC Explorer and MoneroBlock are local images (btc-explorer/ and
+# xmr-explorer/ Containerfiles), not pulled ones, so they are built here like
+# the app tier rather than by install.sh. They read the daemons over RPC, so
+# they come after start_daemons; they are built only when the image is missing
+# (a rebuild is --only). Nothing here is secret: the BTC unit reads its RPC
+# credentials from an EnvironmentFile install.sh seeded.
+build_explorer() { # name [force]
+    local name="$1" force="${2:-0}" dir="$REPO_DIR/$1" image
+    case "$name" in
+        btc-explorer) image="$BTC_EXPLORER_IMAGE" ;;
+        xmr-explorer) image="$XMR_EXPLORER_IMAGE" ;;
+        *) warn "unknown explorer: $name"; return 1 ;;
+    esac
+    [ -f "$dir/Containerfile" ] || { warn "$name has no Containerfile"; return 1; }
+    if [ "$force" = 0 ] && podman image exists "$image" 2>/dev/null; then
+        log "$image is present"
+        return 0
+    fi
+    log "building $image"
+    if [ "$name" = xmr-explorer ]; then
+        log "MoneroBlock is a small Go build; no Monero compile"
+    fi
+    run podman build -t "$image" "$dir"
+}
+
+deploy_explorers() {
+    if [ "$SKIP_DAEMONS" = 1 ]; then
+        log "skipping the blockchain explorers (--skip-daemons)"
+        return 0
+    fi
+    local name
+    for name in "${EXPLORER_UNITS[@]}"; do
+        build_explorer "$name" \
+            || { warn "$name did not build; the other explorer continues"; continue; }
+        restart_unit "$name"
+        wait_healthy "$name" "$EXPLORER_WAIT" \
+            || { warn "$name did not report healthy"; dump_tail "$name" 30; }
+    done
+}
+
+# ---------------------------------------------------------------------------
 # 6c. the nginx-proxy-manager proxy hosts
 # ---------------------------------------------------------------------------
-# Not a unit: nginx-proxy-manager already serves, and every backend it fronts is
-# already up -- each publishing its port on the host's loopback, where NPM (on
-# the host network) forwards. This only configures NPM, through its admin API,
-# to serve the hosts declared in NPM_HOSTS. It self-skips with a one-line note
-# when $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
+# Not a unit: nginx-proxy-manager already serves. Every backend it fronts
+# publishes its port on the host's loopback, where NPM (on the host network)
+# forwards -- so this only configures NPM, through its admin API, to serve the
+# hosts declared in NPM_HOSTS. It runs before the explorers so their proxy hosts
+# exist even while their images build: NPM does not connect to a loopback
+# upstream until a request arrives. It self-skips with a one-line note when
+# $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
 # before the admin login exists.
 configure_npm_hosts() {
     if [ "$DRY_RUN" = 1 ]; then
@@ -639,6 +693,22 @@ if [ -n "$ONLY" ]; then
         # generic branch below, which restarts the one unit and waits.
         install_units
         deploy_boltmesh
+    elif [ "$ONLY" = explorers ]; then
+        # Both explorer images, rebuilt even if they exist (their Containerfiles
+        # are the only place their versions live).
+        install_units
+        for name in "${EXPLORER_UNITS[@]}"; do
+            build_explorer "$name" 1 || continue
+            restart_unit "$name"
+            wait_healthy "$name" "$EXPLORER_WAIT" || true
+        done
+    elif [ "$ONLY" = btc-explorer ] || [ "$ONLY" = xmr-explorer ]; then
+        # One explorer: rebuild its image and restart only that unit. The
+        # generic branch below would skip the build and keep the old image.
+        install_units
+        build_explorer "$ONLY" 1
+        restart_unit "$ONLY"
+        wait_healthy "$ONLY" "$EXPLORER_WAIT" || true
     elif [ "$ONLY" = npm-hosts ]; then
         # Re-apply the proxy hosts after a stack.conf change, or after filling
         # in $DATA_DIR/config/npm/api.env. Touches no container.
@@ -668,8 +738,13 @@ setup_wallets
 start_daemons
 [ "$SKIP_APPS" = 1 ] || deploy_apps
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
+# Configure the proxy hosts before the explorers: their images are local builds,
+# and the rest of the public surface must not wait for them. The explorer hosts
+# point at loopback ports, so NPM starts fine before the containers do; kuma's
+# monitors run after deploy_explorers so they see them up.
 configure_npm_hosts
 sync_npm_network
+deploy_explorers
 kuma_monitors
 note_firewall
 
@@ -693,6 +768,7 @@ Stack deployed (chain daemons skipped).
                 monero-wallet-mcp, lightning-mcp
   BoltMesh app: postgres, boltmesh-backend, boltmesh-worker,
                 boltmesh-frontend
+  Explorers:    skipped with the chain daemons (--skip-daemons)
 
 nginx-proxy-manager is the only HTTP service a client reaches: it runs on the
 host network, so it binds 80/443/81 itself and every request keeps the client's
@@ -721,6 +797,10 @@ Stack deployed.
                     monero-wallet-mcp, lightning-mcp
   BoltMesh app:     postgres, boltmesh-backend, boltmesh-worker,
                     boltmesh-frontend
+  Explorers:        https://$BTC_EXPLORER_HOST (BTC RPC Explorer: bitcoind RPC
+                    + Fulcrum for address history) and
+                    https://$XMR_EXPLORER_HOST (MoneroBlock: monerod's
+                    restricted RPC)
   Exposure:         nginx-proxy-manager (80/443/81) plus Fulcrum's Electrum
                     ports 50001 (TCP) / 50002 (SSL). NPM runs on the host
                     network, so it keeps clients' real addresses; everything it

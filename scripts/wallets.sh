@@ -155,19 +155,58 @@ setup_monero() {
 # ---------------------------------------------------------------------------
 bitcoin_cli() { podman exec bitcoind bitcoin-cli -datadir=/data/.bitcoin "$@"; }
 
+btc_wallet_loaded() {
+    bitcoin_cli listwallets 2>/dev/null | grep -q "\"$BITCOIN_WALLET\""
+}
+
+# The wallet may live in the default wallets/ directory or, on a host that
+# created it before that layout, at the datadir root (e.g. /data/.bitcoin/mainnet
+# -- which is where this stack's older runs put it). listwalletdir does not
+# always report the latter, so check the filesystem too.
+btc_wallet_on_disk() {
+    bitcoin_cli listwalletdir 2>/dev/null | grep -q "\"name\": \"$BITCOIN_WALLET\"" \
+        || podman exec bitcoind test -f "/data/.bitcoin/$BITCOIN_WALLET/wallet.dat" 2>/dev/null \
+        || podman exec bitcoind test -f "/data/.bitcoin/wallets/$BITCOIN_WALLET/wallet.dat" 2>/dev/null
+}
+
+# loadwallet <name> resolves against the wallet dir; an older datadir-root wallet
+# needs its path. Try both, then prove it with listwallets.
+load_bitcoin_wallet() {
+    bitcoin_cli loadwallet "$BITCOIN_WALLET" >/dev/null 2>&1 || true
+    btc_wallet_loaded && return 0
+    bitcoin_cli loadwallet "/data/.bitcoin/$BITCOIN_WALLET" >/dev/null 2>&1 || true
+    btc_wallet_loaded
+}
+
 setup_bitcoin() {
     command -v podman >/dev/null 2>&1 || die "podman is required"
     if ! podman ps --filter 'name=^bitcoind$' --format '{{.Status}}' 2>/dev/null | grep -q '^Up'; then
         warn "bitcoind is not running; start it first (./deploy.sh) and re-run --bitcoin"
         return 1
     fi
-    if bitcoin_cli listwallets 2>/dev/null | grep -q "\"$BITCOIN_WALLET\""; then
+
+    # bitcoind serves chain RPC (getblockchaininfo) while it is still loading its
+    # wallets, and deploy.sh's wallet step runs in exactly that window. Without
+    # this wait, listwallets is empty and the script prompts to create a wallet
+    # that already exists -- then createwallet fails with "Database already
+    # exists".
+    local deadline
+    deadline=$(( $(date +%s) + ${BITCOIND_WALLET_WAIT:-120} ))
+    until bitcoin_cli listwallets >/dev/null 2>&1; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            warn "bitcoind wallet RPC did not answer; start it first (./deploy.sh) and re-run --bitcoin"
+            return 1
+        fi
+        sleep 2
+    done
+
+    if btc_wallet_loaded; then
         log "Bitcoin wallet '$BITCOIN_WALLET' already loaded (leaving it alone)"
         return 0
     fi
-    if bitcoin_cli listwalletdir 2>/dev/null | grep -q "\"name\": \"$BITCOIN_WALLET\""; then
+    if btc_wallet_on_disk; then
         log "Bitcoin wallet '$BITCOIN_WALLET' exists on disk; loading it"
-        bitcoin_cli loadwallet "$BITCOIN_WALLET" >/dev/null 2>&1 || true
+        load_bitcoin_wallet || { warn "could not load the existing wallet '$BITCOIN_WALLET'"; return 1; }
         return 0
     fi
 
@@ -180,7 +219,17 @@ setup_bitcoin() {
     case "$choice" in
         c|C)
             log "creating wallet '$BITCOIN_WALLET'"
-            bitcoin_cli -named createwallet wallet_name="$BITCOIN_WALLET" descriptors=true load_on_startup=true
+            if ! bitcoin_cli -named createwallet wallet_name="$BITCOIN_WALLET" descriptors=true load_on_startup=true; then
+                # A directory can exist without listwalletdir reporting it (the
+                # older datadir-root layout). Load it rather than failing the
+                # whole wallet step for a wallet that is already there.
+                if load_bitcoin_wallet; then
+                    log "loaded the existing wallet '$BITCOIN_WALLET'"
+                else
+                    warn "could not create or load wallet '$BITCOIN_WALLET'"
+                    return 1
+                fi
+            fi
             ;;
         r|R)
             local path; path=$(ask "  path to the wallet backup .dat: ")
@@ -197,6 +246,10 @@ setup_bitcoin() {
             return 0
             ;;
     esac
+    if ! btc_wallet_loaded; then
+        warn "Bitcoin wallet '$BITCOIN_WALLET' was not loaded; check: podman logs bitcoind"
+        return 1
+    fi
     log "Bitcoin wallet '$BITCOIN_WALLET' ready"
 }
 

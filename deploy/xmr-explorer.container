@@ -1,0 +1,49 @@
+# Quadlet unit for MoneroBlock, the Monero explorer served at
+# $XMR_EXPLORER_HOST (NPM_HOSTS in stack.conf). It is read-only and stateless:
+# blocks, transactions and network info come from monerod's restricted RPC
+# (18089) -- there is no chain mount, no LMDB reader, and no local index. It has
+# no env file and no directory in the backup set.
+#
+# The container IP is pinned because tor's onion target is this address, and tor
+# validates a HiddenServicePort target when it starts -- before this container
+# may exist on a fresh host. Keep it unique (tor .240, boltmesh .241/.242,
+# btc-explorer .243).
+[Unit]
+Description=MoneroBlock (trustless Monero block explorer)
+After=network-online.target npm-network-network.service monerod.service
+Wants=monerod.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=xmr-explorer
+Image=localhost/xmr-explorer:local
+Network=npm-network.network
+IP=10.89.0.244
+
+# Loopback only: nginx-proxy-manager runs on the host network and reaches this
+# on host 8109 (NPM_HOSTS in stack.conf). NPM terminates TLS and is the only
+# way in for a client.
+PublishPort=127.0.0.1:8109:31312
+
+# The image's ENTRYPOINT is `moneroblock`, so Exec= supplies only its flags.
+# --daemon points at the restricted RPC port monerod publishes on npm-network
+# (the unrestricted one is never exposed). MoneroBlock prepends http:// when the
+# daemon URL has no scheme.
+Exec=--bind=0.0.0.0:31312 --daemon=monerod:18089
+
+# /style.css is the static stylesheet: a 200 proves the listener without
+# touching monerod. The home page calls get_info/get_block_headers_range, and
+# while monerod is in initial sync its restricted RPC can be slow enough that
+# the page times out; verify.sh checks the home page separately and warns rather
+# than fails in that window.
+HealthCmd=curl -fsS -o /dev/null http://127.0.0.1:31312/style.css
+HealthInterval=60s
+HealthStartPeriod=30s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -18,6 +18,8 @@ stack runs and one script that fixes a deployment problem.
 | `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — | `$DATA_DIR/bitcoin` |
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
 | `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
+| `btc-explorer` | `localhost/btc-explorer:local` (built from `btc-explorer/Containerfile`) | `127.0.0.1:8108` | — |
+| `xmr-explorer` | `localhost/xmr-explorer:local` (MoneroBlock, built from `xmr-explorer/Containerfile`) | `127.0.0.1:8109` | — |
 | `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
 | `lightningd` | `docker.io/elementsproject/lightningd:latest` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
@@ -38,7 +40,8 @@ stack runs and one script that fixes a deployment problem.
 `bitcoind` and `monerod` are **full (archival) nodes**, storing and validating
 the whole chain; `fulcrum` indexes that chain for Bitcoin wallets over the
 Electrum protocol. See [Full nodes and disk](#full-nodes-and-disk) before sizing
-the data disk.
+the data disk. The two explorers read those services rather than keeping a
+chain of their own — see [Block explorers](#block-explorers).
 
 **Only `nginx-proxy-manager` is reachable from the LAN over HTTP.** It runs on
 the **host network** (`Network=host`), so its own nginx binds `80`/`443`/`81` in
@@ -56,7 +59,10 @@ but Rocky 10's podman 5.8 has no such key.
 Because NPM is no longer a peer on `npm-network` (`10.89.0.0/24`, pinned in
 `deploy/npm-network.network` because `tor.container` pins `--ip=10.89.0.240` and
 both `bitcoin.conf` and `torrc` allow that subnet), it cannot resolve a container
-name. Every unit it proxies to therefore publishes its port on the **host's
+name. The four containers behind onion services also pin their IPs
+(`10.89.0.241`–`.244`) for a related reason: tor validates a
+`HiddenServicePort` target at startup, so a container *name* that does not exist
+yet would keep tor from starting at all. Every unit it proxies to therefore publishes its port on the **host's
 loopback** only — the `127.0.0.1:…` entries above, i.e.
 `PublishPort=127.0.0.1:…` in that unit — and `NPM_HOSTS`/`MCP_HOSTS` in
 `stack.conf` name `127.0.0.1`, not a container. A loopback bind is invisible to
@@ -77,7 +83,7 @@ cannot proxy it. The loopback publishes are not opened, and another machine
 cannot reach them. Point a Bitcoin wallet at this host on `50001`/`50002`; the
 SSL certificate is self-signed and generated in `$DATA_DIR/fulcrum`.
 
-The same three public hostnames are also published as **Tor onion services** from
+The same public hostnames are also published as **Tor onion services** from
 the same `tor` unit that lightningd already uses as its SOCKS proxy — no extra
 container, no DNS and no certificate needed. See
 [Tor onion services](#tor-onion-services).
@@ -150,11 +156,13 @@ an OS reinstall. See [Where the data lives](#where-the-data-lives).
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds + restarts the
 five MCP servers and the BoltMesh app tier (a plain start would keep running a
-stale image). Common flags:
+stale image). The two explorer images are built only when missing — `--only`
+forces a rebuild. Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
 ./deploy.sh --only boltmesh           # rebuild + migrate the whole BoltMesh tier
+./deploy.sh --only explorers          # rebuild both explorer images
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only monitor            # run the health + spend checks now
 ./deploy.sh --only npm-hosts           # re-apply every proxy host in NPM
@@ -165,6 +173,10 @@ stale image). Common flags:
 ./verify.sh                           # container health, MCP handshakes, onion fetches
 ./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
 ```
+
+The first run also builds the two explorers. Both are small local builds
+(MoneroBlock is Go, BTC RPC Explorer is Node), so the stack is already up while
+they build (see [Block explorers](#block-explorers)).
 
 Chain sync takes hours to days on a truly bare host: both daemons are **full
 (archival) nodes**, so the first start downloads and validates the whole Bitcoin
@@ -197,6 +209,49 @@ sync at the same time, but a wallet must not rely on a partial index. On an
 existing host, re-run `./bootstrap.sh` (or open `50001`/`50002` in firewalld
 yourself) so the new ports reach the LAN.
 
+### Block explorers
+
+Two read-only web explorers are served behind nginx-proxy-manager:
+
+- **BTC RPC Explorer** at `https://$BTC_EXPLORER_HOST` (`BTC_EXPLORER_HOST`,
+  default `btc.boltmesh.net`). It reads `bitcoind` over RPC and uses the
+  existing `fulcrum` for address history, so it adds no index and no second
+  chain scan. Because `bitcoin.conf` keeps `txindex=0`, an **address** lookup
+  works through Fulcrum and a transaction in the last few blocks is found by
+  txid, but an older txid needs its block height. Enabling `txindex=1` would
+  remove that limit at the cost of another full-chain index; the stack
+  deliberately does not. Until Fulcrum's index has caught up, the explorer logs
+  `ECONNREFUSED fulcrum:50001` and its address pages fail; block/transaction
+  pages (bitcoind RPC) already work.
+- **MoneroBlock** at `https://$XMR_EXPLORER_HOST` (`XMR_EXPLORER_HOST`,
+  default `xmr.boltmesh.net`). It is a trustless, **RPC-only** explorer: blocks,
+  transactions and network info come from monerod's restricted RPC (18089), so
+  it needs no chain mount, no LMDB reader and no local index, and keeps no
+  state of its own. Its UI is narrower than the Onion Monero explorer's
+  (no ring/mixin or address-proof pages), but it is stateless and its image is
+  a small Go build. Its healthcheck and status monitor use the static
+  `/style.css`; the home page calls monerod's RPC, which can be slow enough to
+  time out while the node is in initial sync (`verify.sh` warns instead of
+  failing in that window).
+
+Both images are built locally from `btc-explorer/Containerfile` and
+`xmr-explorer/Containerfile`; they are not pulled. `./deploy.sh` builds each
+only when the image is missing. Neither needs a Monero compile:
+MoneroBlock is Go and BTC RPC Explorer is Node, so both builds are quick.
+`./deploy.sh --only xmr-explorer` (or `--only explorers`) forces a rebuild,
+and `--only btc-explorer` does the same for the Bitcoin one. The explorer
+commits are pinned in their Containerfiles; Renovate's dockerfile manager
+tracks the base images, and custom git-refs managers track both pinned commits.
+
+Both hosts redirect HTTP to HTTPS and carry a Let's Encrypt certificate like the
+rest of the public surface, and both are mirrored as onion services. The BTC
+explorer is public; set `BTCEXP_BASIC_AUTH_PASSWORD` in
+`$DATA_DIR/config/btc-explorer/btc-explorer.env` and re-run
+`./deploy.sh --only btc-explorer` to put it behind basic auth (any username,
+that password). `verify.sh` asks each explorer for its chain height, which
+proves the path through to its daemon (the BTC check degrades to a warning when
+basic auth is on).
+
 ## Where the data lives
 
 Everything the stack must not lose sits under **one directory**, `$DATA_DIR`
@@ -214,6 +269,11 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `config/` — every bearer token and secret
   - `audit/` — the monitor's log and the spend tripwire baselines
   - `backup-cache/` — restic's cache (regenerable)
+
+The explorers keep no data directory: both are stateless and read their daemon
+over RPC. Their only persistent input is
+`config/btc-explorer/btc-explorer.env` (the Bitcoin node/Fulcrum wiring);
+MoneroBlock needs no env file.
 
 The backup *repository* lives outside `$DATA_DIR`, in `$STACK_BACKUP_DIR`
 (default `$HOME/data-backup`), so wiping the data dir does not delete it — see
@@ -358,9 +418,10 @@ the things in `$DATA_DIR` that cannot be re-downloaded:
   `postgres/` cluster is not copied: a file-by-file copy of a live `PGDATA` is
   only crash-recoverable)
 
-The chains (`bitcoin/`, `monero/`), the Electrum index (`fulcrum/`), `searxng/`
-and the raw `postgres/` cluster are deliberately **excluded**: they are large and
-regenerable, so restic never walks them.
+The chains (`bitcoin/`, `monero/`), the Electrum index (`fulcrum/`), `searxng/`,
+the two explorers (stateless, RPC-only) and the raw `postgres/` cluster are
+deliberately **excluded**: they are large and regenerable, so restic never walks
+them.
 
 - `deploy/backup.container` — the one-shot job (a Quadlet unit, rendered like
   the rest).
@@ -530,6 +591,8 @@ NPM_HOSTS=(
     "${SEARXNG_HOST}|127.0.0.1:8080|ws,block"
     "${CLNREST_HOST}|https://127.0.0.1:3010|ws,block"
     "${XMR_RPC_HOST}|127.0.0.1:18083|ws,block"
+    "${BTC_EXPLORER_HOST}|127.0.0.1:8108|force-ssl,block"
+    "${XMR_EXPLORER_HOST}|127.0.0.1:8109|force-ssl,block"
     "${UPTIME_KUMA_HOST}|127.0.0.1:8107|ws,block"
     "${MCP_HOST}|127.0.0.1:8100|mcp,force-ssl,http2"
 )
@@ -585,7 +648,7 @@ it works before public DNS exists.
 
 ## Tor onion services
 
-The three public hostnames are also published as Tor v3 onion services, from the
+The public hostnames are also published as Tor v3 onion services, from the
 `tor` unit that already exists (lightningd's SOCKS proxy and CLN's own onion
 client). There is no extra container and nothing to open in the firewall: a
 hidden service is made of a few lines in `torrc` and outbound connections, which
@@ -595,8 +658,10 @@ The declaration is `ONION_SERVICES` in `stack.conf`:
 
 ```sh
 ONION_SERVICES=(
-    "boltmesh|boltmesh-frontend:80|${BOLTMESH_FRONTEND_HOST}|/|200"
-    "api|boltmesh-backend:8000|${BOLTMESH_API_HOST}|/health|200"
+    "boltmesh|10.89.0.241:80|${BOLTMESH_FRONTEND_HOST}|/|200"
+    "api|10.89.0.242:8000|${BOLTMESH_API_HOST}|/health|200"
+    "btc-explorer|10.89.0.243:3002|${BTC_EXPLORER_HOST}|/|200,401"
+    "xmr-explorer|10.89.0.244:31312|${XMR_EXPLORER_HOST}|/|200"
     "mcp|${ONION_NPM_TARGET}|${MCP_HOST}|/searxng|401"
 )
 ```
@@ -612,6 +677,11 @@ The address itself is key material, not configuration: tor writes it to
 is part of the [backup set](#backup--restore). Restore those keys and the
 addresses come back; lose them and every address changes.
 
+tor logs a `ControlPort ... non-local address` warning at startup. That is
+expected: lightningd drives the statictor service through
+`10.89.0.240:9051`, which is not loopback. The port is protected by
+`HashedControlPassword` and is reachable only from `npm-network`.
+
 ```sh
 cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
 ./verify.sh                            # fetches each of them through tor
@@ -620,14 +690,17 @@ cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
 
 | `ONION_SERVICES` name | Serves | Forwarded to |
 | --- | --- | --- |
-| `boltmesh` | the BoltMesh SPA | `http://<addr>.onion/` → `boltmesh-frontend:80` |
-| `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `boltmesh-backend:8000` |
+| `boltmesh` | the BoltMesh SPA | `http://<addr>.onion/` → `10.89.0.241:80` |
+| `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `10.89.0.242:8000` |
+| `btc-explorer` | BTC RPC Explorer | `http://<addr>.onion/` → `10.89.0.243:3002` |
+| `xmr-explorer` | MoneroBlock | `http://<addr>.onion/style.css` → `10.89.0.244:31312` |
 | `mcp` | the five MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning>` → NPM's `*.onion` host |
 
-Two of the three forward to their container by name: they are plain HTTP origins
-and tor is a peer on `npm-network`. The MCP host cannot — it is five servers
-split by *path*, which only nginx-proxy-manager does, and NPM is on the host
-network, where a container has no route (`10.89.0.1:80` is refused from
+All but the MCP host forward to a container's pinned IP (the units set `IP=`):
+tor validates the target when it starts, so a name for a container that has not
+started yet would keep tor down. The MCP host cannot use an IP target — it is
+five servers split by *path*, which only nginx-proxy-manager does, and NPM is on
+the host network, where a container has no route (`10.89.0.1:80` is refused from
 `npm-network`). The one reachable name is `host.containers.internal` (pasta's
 host gateway, added by podman), so the mcp onion forwards there and NPM matches
 the wildcard `*.onion` proxy host. A wildcard is required because **tor cannot
@@ -722,6 +795,9 @@ under `$DATA_DIR/config/`, mode 600.
   tokens, upstream credentials, spend policy and CLN runes. The unit reads them
   with `EnvironmentFile=`; the shapes are documented in
   `deploy/examples/<name>/`.
+- **`$DATA_DIR/config/btc-explorer/btc-explorer.env`** holds the BTC
+  explorer's bitcoind RPC credentials and its Fulcrum endpoint. The unit reads
+  it with `EnvironmentFile=` (the explorer has no other configuration).
 - **`$DATA_DIR/config/npm/api.env`** holds the nginx-proxy-manager admin login
   that `scripts/npm-hosts.sh` uses to reconcile every proxy host (`NPM_HOSTS`)
   through the API on `81` (or an API token instead). The script sends the
@@ -748,7 +824,7 @@ stack/
   deploy.sh               # the one-click orchestrator (asks for the data dir)
   verify.sh               # health + endpoint checks
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
-  renovate.json           # Renovate policy (tor image base + Quadlet image tags)
+  renovate.json           # Renovate policy (pinned images and git refs)
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
   scripts/lib.sh          # data-dir resolution + SELinux labelling + the
                           #   net_curl / mcp_* helpers every check goes through
@@ -773,8 +849,11 @@ stack/
     examples/monitoring/*.example # monitor.env shape (Apprise targets + heartbeat)
     examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
     examples/boltmesh/*.example   # db/secrets/app/gateway env shapes
+    examples/btc-explorer/*.example # btc-explorer.env shape (RPC + Fulcrum wiring)
   tor/Containerfile       # built by install.sh: the Tor proxy + onion services
   netcheck/Containerfile  # built by install.sh: the curl client the host checks run
+  btc-explorer/Containerfile # built by deploy.sh: BTC RPC Explorer (stateless)
+  xmr-explorer/Containerfile # built by deploy.sh: MoneroBlock (Go, RPC-only)
 ```
 
 ## Rollback

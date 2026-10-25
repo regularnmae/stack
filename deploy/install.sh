@@ -46,6 +46,8 @@ UNITS=(
     "bitcoind.container:bitcoind.container"
     "monerod.container:monerod.container"
     "fulcrum.container.in:fulcrum.container"
+    "btc-explorer.container:btc-explorer.container"
+    "xmr-explorer.container:xmr-explorer.container"
     "tor.container:tor.container"
     "lightningd.container.in:lightningd.container"
     "monero-wallet-rpc.container.in:monero-wallet-rpc.container"
@@ -535,6 +537,41 @@ EOF
     log "wrote $BTC_ENV/upstream.env (mode 600)"
 fi
 
+# BTC RPC Explorer's configuration. The app is configured entirely through the
+# environment (so the unit uses EnvironmentFile=, not a rendered Exec=), and it
+# needs the same bitcoind RPC credentials plus Fulcrum's Electrum endpoint. It
+# keeps no data of its own. txindex stays 0: address history comes from Fulcrum;
+# an old txid needs its block height (README: "Block explorers").
+BTCEXP_ENV="$CONFIG_DIR/btc-explorer"
+if ensure_secret "$BTCEXP_ENV/btc-explorer.env" "btc explorer env"; then
+    write_secret "$BTCEXP_ENV/btc-explorer.env" <<EOF
+# BTC RPC Explorer (deploy/btc-explorer.container). Read via EnvironmentFile=.
+# The RPC password is a secret; the rest is wiring. Empty
+# BTCEXP_BASIC_AUTH_PASSWORD means the explorer is public (as served by NPM).
+BTCEXP_HOST=0.0.0.0
+BTCEXP_PORT=3002
+BTCEXP_BITCOIND_HOST=bitcoind
+BTCEXP_BITCOIND_PORT=8332
+BTCEXP_BITCOIND_USER=$BITCOIN_RPC_USER
+BTCEXP_BITCOIND_PASS=$BITCOIN_RPC_PASSWORD
+# Address history and balances come from the stack's own Fulcrum; no second
+# index and no external API. BTCEXP_ELECTRUM_TXINDEX is electrs-only, so it is
+# deliberately absent (Fulcrum is not electrs).
+BTCEXP_ADDRESS_API=electrum
+BTCEXP_ELECTRUM_SERVERS=tcp://fulcrum:50001
+# Served behind nginx-proxy-manager, which terminates TLS. Privacy mode keeps
+# the explorer from calling out for exchange rates or IP geolocation.
+BTCEXP_SECURE_SITE=true
+BTCEXP_PRIVACY_MODE=true
+BTCEXP_NO_RATES=true
+BTCEXP_SLOW_DEVICE_MODE=true
+BTCEXP_RPC_ALLOWALL=false
+# Optional HTTP basic auth (any username, this password). Empty = public.
+BTCEXP_BASIC_AUTH_PASSWORD=
+EOF
+    log "wrote $BTCEXP_ENV/btc-explorer.env (mode 600)"
+fi
+
 XMR_ENV="$CONFIG_DIR/monero-node-mcp"
 if ensure_secret "$XMR_ENV/token.env" "monero-node-mcp token env"; then
     token=$(new_or_reused_token monero-node-mcp MONERO_MCP_TOKEN)
@@ -749,10 +786,10 @@ EOF
 fi
 
 # nginx-proxy-manager's admin API, for scripts/npm-hosts.sh: it reconciles every
-# proxy host the stack serves (NPM_HOSTS in stack.conf) -- the BoltMesh and
-# SearXNG web hosts and the MCP path-prefix host. The admin login (or a
-# pre-created API token) is a secret, so the file is mode 600; empty means the
-# script logs a one-line skip rather than failing a deploy.
+# proxy host the stack serves (NPM_HOSTS in stack.conf) -- the BoltMesh,
+# SearXNG and explorer web hosts and the MCP path-prefix host. The admin login
+# (or a pre-created API token) is a secret, so the file is mode 600; empty means
+# the script logs a one-line skip rather than failing a deploy.
 NPM_ENV="$CONFIG_DIR/npm/api.env"
 if ensure_secret "$NPM_ENV" "nginx-proxy-manager api env"; then
     write_secret "$NPM_ENV" <<'EOF'
@@ -985,6 +1022,10 @@ Done. Everything the stack owns lives under:
     the restic repository the nightly backup writes (backup.timer)
 
 Next:  ./deploy.sh         # build images, start everything, verify
+The two explorers are built by ./deploy.sh from btc-explorer/ and xmr-explorer/
+  (not pulled): BTC RPC Explorer (Node) and MoneroBlock (Go, RPC-only). Both are
+  small local builds. They are served at https://$BTC_EXPLORER_HOST and
+  https://$XMR_EXPLORER_HOST once the NPM admin login is in place.
 Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
   $CONFIG_DIR/monero-wallet-mcp/spend.env  and  $CONFIG_DIR/lightning-mcp/spend.env
 BoltMesh is wired to the stack's lightningd and monero-wallet-rpc; fill in the

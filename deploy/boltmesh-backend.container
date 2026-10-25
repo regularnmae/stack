@@ -11,6 +11,9 @@ Requires=npm-network-network.service postgres.service
 ContainerName=boltmesh-backend
 Image=localhost/boltmesh-backend:latest
 Network=npm-network.network
+# Pin the IP: tor's onion target is this address (see the frontend unit; keep
+# the range unique, tor is .240).
+IP=10.89.0.242
 
 # Four env files, all OUTSIDE this repo under $DATA_DIR/config/boltmesh/
 # (mode 600), written by deploy/install.sh so no secret is committed:

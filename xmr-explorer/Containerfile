@@ -1,0 +1,51 @@
+# MoneroBlock: the trustless, RPC-only Monero block explorer the stack serves
+# at $XMR_EXPLORER_HOST. It talks to monerod's restricted RPC (18089) for
+# blocks/transactions/network info and keeps no chain copy or local index -- so
+# the unit needs no $DATA_DIR/monero mount, no LMDB reader workaround, and no
+# Monero compile. That also makes the image a small, quick Go build.
+#
+# (The previous Onion Monero Blockchain Explorer reads monerod's LMDB directly;
+# that read-only startup path hung in this environment, which is why this is a
+# different explorer. If you ever switch back, keep the unit's IP= and note that
+# LMDB readers key on the process pid.)
+#
+# Pin a commit, not a branch: Dockerfile-style reproducibility, and the project
+# has only v0.1.2 (2022) as a usable tag. The base images and the commit are
+# tracked by Renovate (dockerfile manager + the custom git-refs manager).
+#
+# Build:  podman build -t localhost/xmr-explorer:local xmr-explorer/
+FROM docker.io/library/golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS builder
+
+ARG MONEROBLOCK_COMMIT=7c8172d725390d96b71dddd8f4316a3f275c32d5
+
+RUN apk add --no-cache git
+
+WORKDIR /src
+RUN git init -q /src \
+    && git remote add origin https://github.com/duggavo/MoneroBlock.git \
+    && git fetch --depth 1 origin "${MONEROBLOCK_COMMIT}" \
+    && git checkout -q FETCH_HEAD
+
+# go.sum is not committed upstream, so tidy it in the image (never in the
+# checkout above) before the static build. CGO off keeps the final stage simple.
+RUN go mod tidy \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/moneroblock .
+
+FROM docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+
+# curl is the unit's healthcheck client; ca-certificates is harmless and keeps
+# an https daemon URL usable if one is ever configured.
+RUN apk add --no-cache ca-certificates curl \
+    && adduser -D -u 1000 moneroblock
+
+COPY --from=builder /out/moneroblock /usr/local/bin/moneroblock
+
+USER moneroblock
+WORKDIR /home/moneroblock
+
+EXPOSE 31312
+
+# Flags come from the Quadlet Exec= (the bind address and the daemon URL); this
+# is the safe default for a hand run.
+ENTRYPOINT ["moneroblock"]
+CMD ["--bind", "0.0.0.0:31312", "--daemon", "monerod:18089"]

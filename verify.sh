@@ -60,7 +60,7 @@ if [ "$NO_NODES" = 1 ]; then
     )
 else
     containers=(
-        bitcoind monerod fulcrum monero-wallet-rpc lightningd
+        bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-rpc lightningd
         tor valkey searxng uptime-kuma nginx-proxy-manager
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
@@ -237,13 +237,15 @@ else
         code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 30 \
             --socks5-hostname "$TOR_SOCKS" "http://$addr$path" 2>/dev/null || true)
         [ -n "$code" ] || code=000
-        case "$code" in
-            "$expect")
+        case ",$expect," in
+            *",$code,"*)
                 pass "$mirrors served at http://$addr$path ($code)" ;;
-            000)
-                warn "no answer for $mirrors at $addr (tor still publishing? give it a minute)" ;;
             *)
-                bad "$mirrors at $addr$path -> $code (expected $expect)" ;;
+                if [ "$code" = 000 ]; then
+                    warn "no answer for $mirrors at $addr (tor still publishing? give it a minute)"
+                else
+                    bad "$mirrors at $addr$path -> $code (expected $expect)"
+                fi ;;
         esac
     done
 fi
@@ -261,6 +263,53 @@ else
 fi
 fe_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 "http://boltmesh-frontend:80/" 2>/dev/null || echo 000)
 if [ "$fe_code" = "200" ]; then pass "boltmesh-frontend / 200"; else bad "boltmesh-frontend / -> $fe_code"; fi
+
+# ---------------------------------------------------------------------------
+head2 "Block explorers"
+# Both explorers are read as peers on npm-network; NPM reaches the same servers
+# through their loopback publishes (127.0.0.1:8108/8109 in NPM_HOSTS). Asking
+# each for something RPC-backed proves more than a bare 200 on a static page:
+# BTC's /api/blocks/tip reads bitcoind, and MoneroBlock's / calls get_info and
+# get_block_headers_range against monerod.
+if [ "$NO_NODES" = 1 ]; then
+    warn "chain daemons skipped by request; not checking the explorers"
+else
+    # -w puts the status after the body, so a basic-auth-protected explorer
+    # (BTCEXP_BASIC_AUTH_PASSWORD) reads as a warning rather than a failure.
+    btc_resp=$(net_curl -s -m 15 -w '\n%{http_code}' "http://btc-explorer:3002/api/blocks/tip" 2>/dev/null || true)
+    btc_code="${btc_resp##*$'\n'}"
+    btc_tip="${btc_resp%$'\n'*}"
+    btc_h=$(printf '%s' "$btc_tip" | grep -oE '"height":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
+    case "$btc_code" in
+        401)
+            warn "btc-explorer is behind basic auth; chain-height check skipped" ;;
+        *)
+            if [ -n "$btc_h" ]; then
+                pass "btc-explorer sees bitcoind at height $btc_h"
+            else
+                bad "btc-explorer did not report a chain tip (bitcoind RPC unreachable?)"
+            fi ;;
+    esac
+
+    xmr_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 15 "http://xmr-explorer:31312/style.css" 2>/dev/null || true)
+    [ -n "$xmr_code" ] || xmr_code=000
+    if [ "$xmr_code" = "200" ]; then
+        pass "xmr-explorer /style.css 200"
+    else
+        bad "xmr-explorer /style.css -> $xmr_code (listener down?)"
+    fi
+
+    # The home page exercises monerod's restricted RPC. During initial sync that
+    # RPC is slow enough to time out, so this is a warning, not a failure --
+    # monerod's own freshness is checked separately by the monitor.
+    xmr_home=$(net_curl -s -o /dev/null -w '%{http_code}' -m 30 "http://xmr-explorer:31312/" 2>/dev/null || true)
+    [ -n "$xmr_home" ] || xmr_home=000
+    if [ "$xmr_home" = "200" ]; then
+        pass "xmr-explorer / 200 (MoneroBlock read monerod over RPC)"
+    else
+        warn "xmr-explorer home page -> $xmr_home (monerod RPC busy during sync?)"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 head2 "Status page"

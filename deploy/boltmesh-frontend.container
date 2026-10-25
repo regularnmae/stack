@@ -13,6 +13,10 @@ Requires=npm-network-network.service
 ContainerName=boltmesh-frontend
 Image=localhost/boltmesh-frontend:latest
 Network=npm-network.network
+# Pin the IP: tor's onion target is this address, and tor validates a
+# HiddenServicePort target when it starts -- before this container may exist on
+# a fresh host. Keep it unique (tor itself is .240).
+IP=10.89.0.241
 
 # No env files: the app reads no runtime config, the VITE_* values are inlined
 # into the bundle at build time. The image runs nginx on :80 with the SPA

@@ -1,0 +1,70 @@
+# BTC RPC Explorer: the self-hosted Bitcoin explorer the stack serves at
+# $BTC_EXPLORER_HOST. It reads the stack's own bitcoind over RPC and, for
+# address history, the existing Fulcrum over the Electrum protocol -- so it
+# adds no index of its own and no second chain scan. That is also why it fits a
+# node with txindex=0 (bitcoin.conf): a transaction can still be found by
+# address (Fulcrum) or by txid within the last few blocks, but an old txid needs
+# its block height. Turning on txindex would make it a full replacement, at the
+# cost of another index over the whole chain -- a deliberate no here.
+#
+# Built from a pinned git commit, not the npm package: the published 3.4.0 is
+# from 2023 and pins zeromq 5.x, whose nan bindings do not compile on Node 22.
+# Upstream's master moved to zeromq 6 (node-addon-api) and is what its own
+# Dockerfile builds.
+#
+# Built by deploy.sh (not install.sh) because it is an application image, the
+# same as the MCP servers and the BoltMesh tier. Both stages are Debian slim:
+# the app has native dependencies (zeromq, tiny-secp256k1), and a glibc build
+# must not be copied into a musl final stage.
+#
+# Build:  podman build -t localhost/btc-explorer:local btc-explorer/
+FROM docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS builder
+
+ARG BTC_RPC_EXPLORER_COMMIT=26e282a06e87b645c6e0687e2503d26d1e623dea
+
+# git for the source clone and for the two GitHub-ref dependencies; the rest
+# builds the native modules for this base.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git python3 make g++ cmake pkg-config ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN git init -q /app \
+    && git remote add origin https://github.com/janoside/btc-rpc-explorer.git \
+    && git fetch --depth 1 origin "${BTC_RPC_EXPLORER_COMMIT}" \
+    && git checkout -q FETCH_HEAD
+
+# --omit=dev: the app runs from source and the CSS is committed under
+# public/style, so eslint/sass are not needed.
+RUN npm install --omit=dev && npm cache clean --force
+
+FROM docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
+
+# git is the app's optional version banner (it degrades without it, but this
+# keeps the image honest); curl is the healthcheck's client.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app /app
+
+# The app writes its optional filesystem caches (UTXO/difficulty/mempool
+# summaries) under process.cwd()/cache. They are regenerable, so they stay in
+# the container's writable layer and are never mounted or backed up.
+WORKDIR /app
+
+# Configuration arrives entirely through EnvironmentFile= (the unit points at
+# $DATA_DIR/config/btc-explorer/btc-explorer.env); these are just safe defaults
+# for a hand run of the image. BTCEXP_HOST must be 0.0.0.0 because the unit
+# publishes the port on the host's loopback, not in the container.
+ENV NODE_ENV=production \
+    BTCEXP_HOST=0.0.0.0 \
+    BTCEXP_PORT=3002
+
+EXPOSE 3002
+
+# Health is declared by the Quadlet unit (HealthCmd=), not here: podman builds
+# OCI images by default and ignores Docker's HEALTHCHECK directive.
+
+CMD ["node", "bin/www"]

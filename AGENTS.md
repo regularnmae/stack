@@ -150,6 +150,27 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   excluded from the backup set; `--db_mem 1024` caps RocksDB. Do not add its
   ports to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
   and keep `50001/50002` in `FIREWALL_PORTS` if they move.
+- **The two explorers read the daemons; neither adds an index.** `btc-explorer`
+  (BTC RPC Explorer, `localhost/btc-explorer:local` from
+  `btc-explorer/Containerfile`) reads bitcoind RPC plus Fulcrum's Electrum
+  endpoint for address history; `bitcoin.conf` stays `txindex=0`, so an address
+  lookup works but an old txid needs its block height. `xmr-explorer`
+  (MoneroBlock, `localhost/xmr-explorer:local` from
+  `xmr-explorer/Containerfile`) is **RPC-only**: it reads blocks, transactions
+  and network info from monerod's restricted RPC (18089), keeps no chain copy
+  and no LMDB reader, and has no env file. Its healthcheck and status monitor
+  use the static `/style.css`, not `/`: the home page calls monerod's RPC, which
+  can time out during initial sync (verify.sh warns on that). Both are
+  loopback-published (`8108`/`8109`), fronted by NPM with `force-ssl`, mirrored
+  as onions, and declared in `KUMA_MONITORS`. Their images are built by `deploy.sh`, not
+  `install.sh`, and only when missing (`--only
+  btc-explorer|xmr-explorer|explorers` forces a rebuild); both are small local
+  builds (MoneroBlock is Go, BTC RPC Explorer is Node), not a Monero compile.
+  Neither has state in the backup set; `config/btc-explorer/btc-explorer.env` is
+  the BTC RPC/Fulcrum wiring. Both Containerfiles' base images are covered by
+  Renovate's dockerfile manager, and both pinned commits by custom git-refs
+  managers. (The earlier Onion Monero explorer, which read LMDB directly, is
+  gone: its read-only startup path hung in this environment.)
 - **The backup set is `cln/ monero-wallet-rpc/ tor/ config/ npm/ audit/
   uptime-kuma/ postgres-dump/` only** — chains, the Fulcrum index (`fulcrum/`),
   `searxng/` and the raw `postgres/` cluster stay out so restic never walks
@@ -179,11 +200,18 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **The subnet is pinned** (`10.89.0.0/24`) because `tor.container` pins
   `--ip=10.89.0.240` and both `bitcoin.conf` (`rpcallowip`) and `torrc`
   (`SocksPolicy`) allow it. `tor` is addressed by that IP, not by name
-  (`lightningd` runs `--always-use-proxy=true`, which suppresses DNS). Don't drop
-  it.
+  (`lightningd` runs `--always-use-proxy=true`, which suppresses DNS). The four
+  containers that back onion services also pin their IPs — `boltmesh-frontend`
+  `.241`, `boltmesh-backend` `.242`, `btc-explorer` `.243`, `xmr-explorer` `.244`
+  — because tor validates a `HiddenServicePort` target at startup: a container
+  *name* that does not exist yet (fresh host, or before `deploy_apps`) is an
+  unparseable address and stops tor from starting. Keep the range unique; don't
+  drop the subnet.
 - **`torrc`'s `HashedControlPassword` must hash to `TOR_SERVICE_PASSWORD`**;
   `install.sh` derives it with `tor --hash-password` on a fresh host and
-  otherwise leaves `torrc` alone.
+  otherwise leaves `torrc` alone. tor logs a `ControlPort ... non-local address`
+  warning because lightningd drives the statictor service over `10.89.0.240:9051`;
+  that is deliberate, the port is password-protected and only on `npm-network`.
 - **`tor` is also the onion publisher, and the onion side does not go through NPM
   the way the clearweb side does.** `ONION_SERVICES` in `stack.conf` is the
   declaration; `install.sh` rewrites only the marked region at the end of

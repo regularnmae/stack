@@ -27,12 +27,12 @@
 # and NPM is still the only way in for a client.
 #
 # NPM IS the request path for every service: it terminates TLS, and the MCP
-# bearer tokens gate the services behind it. The proxy hosts -- the BoltMesh and
-# SearXNG web hosts and the one path-prefix host serving the five MCP servers --
-# are declared in NPM_HOSTS (stack.conf) and reconciled by scripts/npm-hosts.sh,
-# which reads the admin API on 127.0.0.1:81; its credentials come from
-# $DATA_DIR/config/npm/api.env. Those hosts live in the SQLite database below,
-# not in this repo.
+# bearer tokens gate the services behind it. The proxy hosts -- the BoltMesh,
+# SearXNG and explorer web hosts and the one path-prefix host serving the five
+# MCP servers -- are declared in NPM_HOSTS (stack.conf) and reconciled by
+# scripts/npm-hosts.sh, which reads the admin API on 127.0.0.1:81; its
+# credentials come from $DATA_DIR/config/npm/api.env. Those hosts live in the
+# SQLite database below, not in this repo.
 [Unit]
 Description=Nginx Proxy Manager
 After=network-online.target
