@@ -34,6 +34,9 @@ USER_UNIT_DIR="$CONFIG_HOME/systemd/user"
 # Where the backup job keeps its restic repository (mounted at /repo). Defined
 # in stack.conf; default here so install.sh works standalone too.
 STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
+# Not optional: render_unit substitutes it into the victoriametrics unit, and
+# this default covers a checkout whose stack.conf predates the monitoring block.
+METRICS_RETENTION="${METRICS_RETENTION:-30d}"
 export STACK_BACKUP_DIR
 
 # Every unit is rendered: all of them reference either the data dir or the
@@ -63,6 +66,8 @@ UNITS=(
     "boltmesh-frontend.container:boltmesh-frontend.container"
     "postgres-dump.container:postgres-dump.container"
     "backup.container:backup.container"
+    "victoriametrics.container:victoriametrics.container"
+    "node-exporter.container:node-exporter.container"
 )
 
 # Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir).
@@ -70,12 +75,16 @@ USER_UNITS=(
     "backup.timer"
     "monitor.service"
     "monitor.timer"
+    "metrics.service"
+    "metrics.timer"
 )
-# The subset that is enabled --now. monitor.service has no [Install] -- only the
-# timer activates it -- so it must not be enabled on its own.
+# The subset that is enabled --now. monitor.service and metrics.service have no
+# [Install] -- only their timers activate them -- so they must not be enabled on
+# their own.
 USER_TIMERS=(
     "backup.timer"
     "monitor.timer"
+    "metrics.timer"
 )
 
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
@@ -343,6 +352,29 @@ mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/postgres-dump"
 # account is created in its web UI on first use, and the monitors are
 # reconciled by scripts/kuma-monitors.sh once the api.env has the login.
 mkdir -p "$DATA_DIR/uptime-kuma"
+
+# Monitoring: the metrics store, and the textfile node-exporter serves.
+# victoriametrics and node-exporter both run as container root == the login user
+# under rootless podman, so a plain mkdir is enough. The textfile dir is 0755
+# because the exporter runs as uid 65534 (a subuid) and has to read what
+# scripts/metrics.sh writes; the writers chmod the files 0644 for the same
+# reason. $DATA_DIR/monitoring is regenerable and stays out of the backup set.
+mkdir -p "$DATA_DIR/monitoring/vm" "$DATA_DIR/monitoring/textfile"
+chmod 0755 "$DATA_DIR/monitoring/textfile" 2>/dev/null || true
+
+# The scrape config is structural (which exporters exist), not operator tuning,
+# so it is copied on every run from deploy/monitoring/scrape.yml -- unlike
+# monitor.env below, which is seeded once and belongs to the operator. Two things
+# matter here and both are easy to get wrong:
+#   * it lives in its own directory because the VM unit mounts that directory (a
+#     single-file bind mount keeps the inode it opened);
+#   * it is written IN PLACE (cat >), not installed/moved into place, because VM
+#     watches the inode: a replaced file is invisible to it even though the
+#     directory mount shows the new one, so the config would silently stay stale
+#     until a restart.
+mkdir -p "$CONFIG_DIR/monitoring/vm"
+( umask 077; cat "$DEPLOY_DIR/monitoring/scrape.yml" > "$CONFIG_DIR/monitoring/vm/scrape.yml" )
+log "wrote $CONFIG_DIR/monitoring/vm/scrape.yml"
 
 # The backup job's restic cache (regenerable) and its repository. The repo is
 # outside $DATA_DIR on purpose, so wiping the data dir does not delete it.
@@ -768,9 +800,10 @@ EOF
     log "wrote $BACKUP_ENV (mode 600)"
 fi
 
-# Monitoring: the alert targets and the dead-man's-switch heartbeat for
-# deploy/monitor.service (scripts/monitor.sh). Empty values mean journal-only,
-# so a fresh host is safe before this file is filled in.
+# Monitoring: the alert targets, the dead-man's-switch heartbeat and the
+# thresholds for deploy/monitor.service (scripts/monitor.sh). Empty values mean
+# journal-only / the built-in default, so a fresh host is safe before this file
+# is filled in.
 MON_ENV="$CONFIG_DIR/monitoring/monitor.env"
 if ensure_secret "$MON_ENV" "monitoring env"; then
     write_secret "$MON_ENV" <<'EOF'
@@ -781,8 +814,30 @@ MONITOR_APPRISE_URLS=
 MONITOR_PING_URL=
 MONITOR_GRACE_SYNC=1
 MONITOR_VERIFY_ARGS=--deep
+
+# Thresholds for the host checks. Each is a number the script compares against;
+# leaving it empty keeps the default shown here, and they are read at run time,
+# so editing this file needs no reload.
+#   disk/inodes: per cent still free. This is the number node_exporter graphs,
+#                read here directly with df so alerting needs no query engine.
+#   io:          % of wall time the data dir's disk is busy, sampled over 3s;
+#                sustained contention is what makes every chain crawl.
+#   backup:      hours since the last successful restic snapshot (a timer that
+#                fires is not the same as a repository that has a snapshot).
+#   cert:        days of remaining validity on the shortest-lived certificate
+#                nginx-proxy-manager holds (a failed renewal is otherwise silent).
+#   restarts:    systemd restarts of any stack unit between two sweeps.
+#   metrics:     seconds before stack.prom counts as stale (the collector is a
+#                60s timer; five missed ticks is a real failure).
+MONITOR_DISK_FREE_PCT=10
+MONITOR_INODES_FREE_PCT=5
+MONITOR_IO_UTIL_PCT=90
+MONITOR_BACKUP_MAX_AGE_H=36
+MONITOR_CERT_MIN_DAYS=14
+MONITOR_RESTART_MAX=3
+MONITOR_METRICS_MAX_AGE_S=300
 EOF
-    log "wrote $MON_ENV (mode 600) -- empty: journal-only until filled in"
+    log "wrote $MON_ENV (mode 600) -- empty targets: journal-only until filled in"
 fi
 
 # nginx-proxy-manager's admin API, for scripts/npm-hosts.sh: it reconciles every
@@ -965,6 +1020,7 @@ render_unit() {
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
         -e "s|@MONERO_WALLET_PASSWORD@|$(esc "$MONERO_WALLET_PASSWORD")|g" \
         -e "s|@MONERO_RPC_LOGIN@|$(esc "$MONERO_RPC_LOGIN")|g" \
+        -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
         "$src" > "$tmp"
     [ -L "$target" ] && rm -f "$target"
     install -m 600 "$tmp" "$target"
@@ -1018,6 +1074,7 @@ Done. Everything the stack owns lives under:
     postgres-dump/  <- the pre-backup pg_dumpall
     config/         <- all bearer tokens and secrets (mode 600)
     audit/          <- the monitor's log and the spend tripwire baselines
+    monitoring/     <- the metrics store and node-exporter's textfile (regenerable)
   $STACK_BACKUP_DIR
     the restic repository the nightly backup writes (backup.timer)
 
@@ -1032,6 +1089,9 @@ BoltMesh is wired to the stack's lightningd and monero-wallet-rpc; fill in the
   OAuth / SMTP / GitHub values in $CONFIG_DIR/boltmesh/app.env before first use.
 The monitor runs every 5 minutes (monitor.timer) and alerts only once
   $CONFIG_DIR/monitoring/monitor.env has an Apprise target and/or a heartbeat.
+Metrics are collected every minute (metrics.timer) and stored for
+  ${METRICS_RETENTION} in $DATA_DIR/monitoring/vm; read them at
+  http://127.0.0.1:8428/vmui over an SSH tunnel (no public host, on purpose).
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $CONFIG_DIR/npm/api.env has the nginx-proxy-manager admin login
   (scripts/npm-hosts.sh, which ./deploy.sh runs).

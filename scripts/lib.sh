@@ -59,6 +59,29 @@ net_curl_host() {
     podman run --rm -i --network host "$NETCHECK_IMAGE" curl "$@"
 }
 
+# Write a Prometheus textfile for node-exporter's textfile collector: stdin -> a
+# .prom file, atomically, with the permissions the exporter needs. node-exporter
+# runs as uid 65534 -- a *subuid* under rootless podman -- so it owns neither the
+# directory nor the file and must still be able to read them; getting that wrong
+# is the quietest way to lose every custom metric, which is why the mode lives
+# here and not in each writer:
+#   printf 'stack_x 1\n' | prom_write "$DATA_DIR/monitoring/textfile/stack.prom"
+prom_write() {
+    local target="$1" dir tmp
+    dir=$(dirname "$target")
+    mkdir -p "$dir" || return 1
+    # 0755 the directory, 0644 the file: the exporter has only "other" access.
+    chmod 0755 "$dir" 2>/dev/null || true
+    tmp=$(mktemp "$dir/.$(basename "$target").XXXXXX") || return 1
+    if ! cat > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    chmod 0644 "$tmp"
+    # Atomic within the directory, so the collector never serves half a file.
+    mv -f "$tmp" "$target"
+}
+
 # The session id the last mcp_initialize was given, and the marker that -w uses
 # to put it after the response body rather than mixed into it.
 MCP_SESSION_ID=""

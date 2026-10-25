@@ -1,0 +1,64 @@
+# Quadlet unit for VictoriaMetrics, the stack's metrics store.
+#
+# What it is: the history behind vmui and the /api/v1 query API -- how fast a
+# chain synced, when a service went unhealthy, what the disk did at 03:00. It
+# feeds nothing in the alerting path: scripts/monitor.sh reads the daemons
+# directly, so a VM that is down cannot silence an alert, and a broken scrape
+# cannot page anyone at 4am.
+#
+# Single node, one process, Prometheus-compatible. It scrapes node-exporter and
+# itself (deploy/monitoring/scrape.yml); everything else arrives through the
+# textfile collector, written by scripts/metrics.sh on deploy/metrics.timer.
+#
+# install.sh renders this into ~/.config/containers/systemd/, where quadlet
+# turns it into victoriametrics.service.
+[Unit]
+Description=VictoriaMetrics (metrics store for the stack)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=victoriametrics
+Image=docker.io/victoriametrics/victoria-metrics:v1.154.1
+Network=npm-network.network
+
+# Loopback only, and deliberately NOT behind nginx-proxy-manager: vmui has no
+# authentication of its own, and the rule in this stack is that every public
+# host is declared in NPM_HOSTS and TLS-terminated. Reach it over an SSH tunnel
+# instead -- ssh -L 8428:127.0.0.1:8428 thishost, then open
+# http://127.0.0.1:8428/vmui. Nothing is opened in the firewall.
+PublishPort=127.0.0.1:8428:8428
+
+# The scrape config, written from deploy/monitoring/scrape.yml by install.sh on
+# every run (structural config, not operator-tuned: the alerting thresholds live
+# in monitor.env). The *directory* is mounted, not the file: a single-file bind
+# mount keeps the inode it opened, so a re-rendered scrape.yml would never reach
+# the running VM. Its own directory (not monitoring/) keeps monitor.env's SMTP
+# credentials out of this container. VM re-reads the config on change.
+Volume=@CONFIG_DIR@/monitoring/vm:/etc/vm:ro,z
+
+# The series themselves. Regenerable and therefore outside the backup set; the
+# container runs as root == the login user under rootless podman (like cln/ and
+# tor/), so install.sh only has to create the directory.
+Volume=@DATA_DIR@/monitoring/vm:/victoria-metrics-data:z
+
+# One Exec= line (a Quadlet Exec= is a single command): the data path, the
+# listener, @METRICS_RETENTION@ from stack.conf (default 30d -- retention is
+# bounded by time, so a busy scrape cannot fill the data disk by surprise) and
+# the scrape config. configCheckInterval is required for the reload loop to
+# exist at all: VictoriaMetrics does not watch -promscrape.config unless it is
+# set, so without it a re-rendered scrape.yml would wait for a unit restart.
+Exec=-storageDataPath=/victoria-metrics-data -httpListenAddr=:8428 -retentionPeriod=@METRICS_RETENTION@ -promscrape.config=/etc/vm/scrape.yml -promscrape.configCheckInterval=30s
+
+# The image ships wget (verified), and /-/healthy is VM's own liveness endpoint.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:8428/-/healthy
+HealthInterval=60s
+HealthStartPeriod=30s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

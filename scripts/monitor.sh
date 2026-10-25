@@ -56,9 +56,23 @@ MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-$(env_value "$MONITOR_ENV" MONITOR_GRA
 MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-1}"
 MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:-$(env_value "$MONITOR_ENV" MONITOR_VERIFY_ARGS)}"
 MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:---deep}"
+# The host-check thresholds follow the same order as the four above -- the unit's
+# EnvironmentFile when systemd runs it, then this file, then the default inside
+# num_or below -- so `scripts/monitor.sh` by hand alerts on exactly what the
+# timer would.
+MONITOR_DISK_FREE_PCT="${MONITOR_DISK_FREE_PCT:-$(env_value "$MONITOR_ENV" MONITOR_DISK_FREE_PCT)}"
+MONITOR_INODES_FREE_PCT="${MONITOR_INODES_FREE_PCT:-$(env_value "$MONITOR_ENV" MONITOR_INODES_FREE_PCT)}"
+MONITOR_IO_UTIL_PCT="${MONITOR_IO_UTIL_PCT:-$(env_value "$MONITOR_ENV" MONITOR_IO_UTIL_PCT)}"
+MONITOR_BACKUP_MAX_AGE_H="${MONITOR_BACKUP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_MAX_AGE_H)}"
+MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONITOR_CERT_MIN_DAYS)}"
+MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
+MONITOR_METRICS_MAX_AGE_S="${MONITOR_METRICS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_METRICS_MAX_AGE_S)}"
 
 PROBLEMS=()
 WARNS=()
+verify_failures=0
+backup_age_s=""
+backup_count=""
 say()  { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
 head3() { say ""; say "$*"; }
 ok()   { say "  ok    $*"; }
@@ -77,15 +91,18 @@ if [ "$DO_VERIFY" = 1 ]; then
     else
         # Carry the verifier's own FAIL lines into the alert body.
         carried=0
+        vcount=0
         while IFS= read -r line; do
             case "$line" in
                 *FAIL*)
                     fail "verify: ${line#*FAIL }"
                     carried=1
+                    vcount=$((vcount + 1))
                     ;;
             esac
         done <<< "$(printf '%s' "$verify_out" | sed 's/\x1b\[[0-9;]*m//g')"
         [ "$carried" = 1 ] || fail "verify.sh reported problems"
+        verify_failures="$vcount"
     fi
 fi
 
@@ -164,7 +181,189 @@ if [ -n "$xmrwallet_token" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. the spend tripwire
+# 3. host health -- the failures invisible from inside the containers: a full
+# disk, an exhausted inode table, a saturated disk, a backup that stopped
+# running, a certificate that stopped renewing, a unit crash-looping behind a
+# "healthy" label, and the metrics collector going quiet.
+#
+# These read the host directly (df, /proc, /sys, restic, systemd, openssl) and
+# never query the metrics store: alerting must not depend on the pipeline that
+# exists to draw graphs of it.
+# ---------------------------------------------------------------------------
+head3 "host"
+
+# Defaults live here, not only in monitor.env, so an older env file (one written
+# before these checks existed) still monitors.
+num_or() { # value default
+    case "${1:-}" in
+        ''|*[!0-9]*) printf '%s' "$2" ;;
+        *)           printf '%s' "$1" ;;
+    esac
+}
+THRESH_DISK=$(num_or "${MONITOR_DISK_FREE_PCT:-}" 10)
+THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
+THRESH_IO=$(num_or "${MONITOR_IO_UTIL_PCT:-}" 90)
+THRESH_BACKUP_H=$(num_or "${MONITOR_BACKUP_MAX_AGE_H:-}" 36)
+THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
+THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
+THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
+
+# df -P's Use% is rounded *up*, so 100-Use% is a floor: erring towards alarming.
+#   free_pct PATH            # per cent of the filesystem still free
+#   free_pct --inodes PATH   # per cent of its inodes still free
+free_pct() {
+    if [ "$1" = --inodes ]; then
+        df -Pi "$2" 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print 100 - $5}'
+    else
+        df -P "$1" 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print 100 - $5}'
+    fi
+}
+
+for target in "$DATA_DIR" /; do
+    dfree=$(free_pct "$target" 2>/dev/null || true)
+    ifree=$(free_pct --inodes "$target" 2>/dev/null || true)
+    if [ -n "$dfree" ] && [ "$dfree" -lt "$THRESH_DISK" ]; then
+        fail "disk almost full: $target has ${dfree}% free (threshold ${THRESH_DISK}%)"
+    else
+        ok "$target has ${dfree:-?}% disk free"
+    fi
+    if [ -n "$ifree" ] && [ "$ifree" -lt "$THRESH_INODES" ]; then
+        fail "inodes almost exhausted on $target: ${ifree}% free (threshold ${THRESH_INODES}%)"
+    fi
+done
+
+# Saturation, not space: a disk that is 100% busy at a few MB/s is why every
+# chain crawls, and it is invisible in df. io_ticks (wall-clock milliseconds
+# during which the device had I/O in flight) is field 10 of
+# /sys/block/<dev>/stat -- note *10*, not the 13 of /proc/diskstats: the sysfs
+# file omits major/minor/name, so it is three columns shorter. Sampling it twice
+# gives percent-busy directly.
+block_device() { # path -> the whole-disk name behind it (sda for sda1)
+    local src name=""
+    src=$(findmnt -no SOURCE --target "$1" 2>/dev/null) || return 1
+    name=$(basename "$src")
+    case "$name" in
+        *p[0-9]*) name="${name%p[0-9]*}" ;;   # nvme0n1p1, mmcblk0p1
+        *[0-9])   name="${name%[0-9]*}" ;;    # sda1, vda2
+    esac
+    [ -n "$name" ] && printf '%s' "$name"
+}
+dev=$(block_device "$DATA_DIR" || true)
+if [ -n "${dev:-}" ] && [ -r "/sys/block/$dev/stat" ]; then
+    io_a=$(awk '{print $10}' "/sys/block/$dev/stat")
+    sleep 3
+    io_b=$(awk '{print $10}' "/sys/block/$dev/stat")
+    util=$(( (io_b - io_a) * 100 / 3000 ))
+    [ "$util" -gt 100 ] && util=100
+    if [ "$util" -ge "$THRESH_IO" ]; then
+        soft "$dev (holding $DATA_DIR) was ${util}% busy over 3s; everything on it is queueing"
+    else
+        ok "$dev (holding $DATA_DIR) ${util}% busy"
+    fi
+else
+    soft "could not identify the block device holding $DATA_DIR"
+fi
+
+# backup age: a timer that fires is not a repository that has a snapshot, and a
+# fire-and-forget backup is the failure you find out about on restore day.
+if command -v jq >/dev/null 2>&1; then
+    if bjson=$("$REPO_DIR/scripts/backup.sh" list --json 2>/dev/null) \
+        && printf '%s' "$bjson" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        backup_count=$(printf '%s' "$bjson" | jq 'length')
+        latest=$(printf '%s' "$bjson" | jq -r 'map(.time) | max // empty' 2>/dev/null)
+        if [ -n "$latest" ]; then
+            latest_s=$(date -d "$latest" +%s 2>/dev/null || echo "")
+            if [ -n "$latest_s" ]; then
+                backup_age_s=$(( $(date +%s) - latest_s ))
+                backup_age_h=$(( backup_age_s / 3600 ))
+                if [ "$backup_age_h" -gt "$THRESH_BACKUP_H" ]; then
+                    fail "no restic snapshot for ${backup_age_h}h (threshold ${THRESH_BACKUP_H}h)"
+                else
+                    ok "last backup ${backup_age_h}h ago ($backup_count snapshot(s))"
+                fi
+            fi
+        fi
+        [ -n "$backup_age_s" ] || soft "no restic snapshot yet (expected until the first backup runs)"
+    else
+        soft "could not list the restic repository (scripts/backup.sh list)"
+    fi
+else
+    soft "jq missing; skipped the backup age check"
+fi
+
+# Certificate expiry: NPM renews by itself, and fails silently. One cert per
+# hosted name lives under letsencrypt/live/<id>/cert.pem.
+CERT_MIN=""
+CERT_WHICH=""
+now_s=$(date +%s)
+for cert in "$NPM_DIR"/letsencrypt/live/*/cert.pem; do
+    [ -s "$cert" ] || continue
+    end=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2) || continue
+    end_s=$(date -d "$end" +%s 2>/dev/null) || continue
+    days=$(( (end_s - now_s) / 86400 ))
+    if [ -z "$CERT_MIN" ] || [ "$days" -lt "$CERT_MIN" ]; then
+        CERT_MIN="$days"; CERT_WHICH="$(basename "$(dirname "$cert")")"
+    fi
+done
+if [ -n "$CERT_MIN" ]; then
+    if [ "$CERT_MIN" -lt "$THRESH_CERT_D" ]; then
+        fail "certificate $CERT_WHICH expires in ${CERT_MIN}d (threshold ${THRESH_CERT_D}d)"
+    else
+        ok "soonest certificate expiry ${CERT_MIN}d ($CERT_WHICH)"
+    fi
+else
+    soft "no nginx-proxy-manager certificate yet (fill in $CONFIG_DIR/npm/api.env)"
+fi
+
+# Restart deltas between sweeps: systemd restarts a crashed unit and podman
+# briefly reports it healthy again, so a crash loop can hide inside a green
+# health check. Counted per sweep against the last one.
+RESTART_STATE="$AUDIT_DIR/restarts"
+declare -A prev_restarts=()
+if [ -f "$RESTART_STATE" ]; then
+    while read -r rname rcount; do
+        [ -n "${rname:-}" ] && prev_restarts[$rname]="${rcount:-0}"
+    done < "$RESTART_STATE"
+fi
+restart_state=""
+restarted=0
+if command -v systemctl >/dev/null 2>&1; then
+    for c in $(podman ps --format '{{.Names}}' 2>/dev/null); do
+        nr=$(systemctl --user show "$c.service" -p NRestarts --value 2>/dev/null || true)
+        [ -n "$nr" ] || continue
+        case "$nr" in (*[!0-9]*) continue ;; esac
+        was="${prev_restarts[$c]:-0}"
+        if [ "$nr" -gt "$((was + THRESH_RESTART))" ]; then
+            fail "$c restarted $((nr - was)) time(s) since the last sweep"
+            restarted=$((restarted + 1))
+        fi
+        restart_state+="$c $nr"$'\n'
+    done
+    printf '%s' "$restart_state" > "$RESTART_STATE" 2>/dev/null || true
+    [ "$restarted" = 0 ] && ok "no unit restarted more than $THRESH_RESTART time(s) since the last sweep"
+fi
+
+# The collector that produces every graph. If it stops, the history stops and
+# nothing else notices -- so the thing that is meant to give visibility is
+# itself checked, from the outside.
+STACK_PROM="$DATA_DIR/monitoring/textfile/stack.prom"
+if systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
+    if [ -f "$STACK_PROM" ]; then
+        prom_age=$(( $(date +%s) - $(stat -c %Y "$STACK_PROM" 2>/dev/null || echo 0) ))
+        if [ "$prom_age" -gt "$THRESH_METRICS_S" ]; then
+            fail "metrics collector is stale: stack.prom is ${prom_age}s old (threshold ${THRESH_METRICS_S}s)"
+        else
+            ok "metrics collector wrote ${prom_age}s ago"
+        fi
+    else
+        fail "metrics collector has never written $STACK_PROM"
+    fi
+else
+    soft "metrics.timer is not active; the metrics pipeline is not checked"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. the spend tripwire
 # ---------------------------------------------------------------------------
 head3 "spend tripwire"
 audit_out=$("$REPO_DIR/scripts/spend-audit.sh" 2>&1) || audit_rc=$?
@@ -186,10 +385,26 @@ if [ "$audit_trips" = 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. the record, the heartbeat, the alert
+# 5. the record, the heartbeat, the alert
 # ---------------------------------------------------------------------------
 status=ok
 [ "${#PROBLEMS[@]}" -gt 0 ] && status=fail
+
+# The other half of node-exporter's textfile: the numbers this sweep has to
+# compute anyway (backup age, the verifier's failures, spend trips), so they get
+# history without scripts/metrics.sh paying for them again. prom_write owns the
+# 0755/0644 permissions the exporter's uid needs.
+{
+    printf '# written by scripts/monitor.sh (deploy/monitor.timer)\n'
+    printf 'stack_sweep_timestamp %s\n' "$(date +%s)"
+    printf 'stack_verify_failures %s\n' "${verify_failures:-0}"
+    printf 'stack_spend_trips %s\n' "${audit_trips:-0}"
+    printf 'stack_monitor_problems %s\n' "${#PROBLEMS[@]}"
+    printf 'stack_monitor_warnings %s\n' "${#WARNS[@]}"
+    [ -n "$backup_age_s" ] && printf 'stack_backup_age_seconds %s\n' "$backup_age_s"
+    [ -n "$backup_count" ] && printf 'stack_backup_snapshots %s\n' "$backup_count"
+} | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" || soft "could not write monitor.prom"
+
 {
     printf '%s status=%s problems=%d warnings=%d\n' \
         "$(date -Is)" "$status" "${#PROBLEMS[@]}" "${#WARNS[@]}"

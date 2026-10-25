@@ -321,6 +321,11 @@ ensure_network() {
 # ---------------------------------------------------------------------------
 start_infra() {
     ensure_network
+    # Monitoring first: it depends on nothing, it is cheap, and starting it
+    # before the daemons is what puts a whole initial sync in the history
+    # instead of beginning mid-way through it.
+    start_unit node-exporter
+    start_unit victoriametrics
     # tor first: lightningd requires it and addresses it by its pinned IP.
     start_unit tor
     if [ "$SKIP_DAEMONS" = 0 ]; then
@@ -822,6 +827,10 @@ Stack deployed.
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR
   Monitoring:       every 5 min (monitor.timer) + spend tripwire; both alert
                     only once $DATA_DIR/config/monitoring/monitor.env is filled in
+  Metrics:          every minute (metrics.timer) into victoriametrics, which is
+                    loopback-only by design -- read it over an SSH tunnel:
+                    ssh -L 8428:127.0.0.1:8428 <host>, then
+                    http://127.0.0.1:8428/vmui (30d of history)
 
 Chain sync continues in the background (both daemons are full nodes, so the
 first sync downloads and validates the whole Bitcoin and Monero chains). Re-run

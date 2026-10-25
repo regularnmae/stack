@@ -38,6 +38,22 @@
     },
     {
       "customType": "regex",
+      "description": "the VictoriaMetrics image tag in its Quadlet unit (same Quadlet gap as uptime-kuma/fulcrum)",
+      "fileMatch": ["^deploy/victoriametrics\\.container$"],
+      "matchStrings": ["Image=docker\\.io/victoriametrics/victoria-metrics:(?<currentValue>[^@\\s]+)"],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "victoriametrics/victoria-metrics"
+    },
+    {
+      "customType": "regex",
+      "description": "the node_exporter image tag in its Quadlet unit (same Quadlet gap)",
+      "fileMatch": ["^deploy/node-exporter\\.container$"],
+      "matchStrings": ["Image=docker\\.io/prom/node-exporter:(?<currentValue>[^@\\s]+)"],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "prom/node-exporter"
+    },
+    {
+      "customType": "regex",
       "description": "the btc-rpc-explorer master commit pinned in btc-explorer/Containerfile (the published npm 3.4.0 is stale and does not build on Node 22)",
       "fileMatch": ["^btc-explorer/Containerfile$"],
       "matchStrings": ["ARG BTC_RPC_EXPLORER_COMMIT=(?<currentDigest>[0-9a-f]{40})"],

@@ -4,6 +4,7 @@
 #   scripts/backup.sh [backup]        # run the job now: init if needed, back up, prune
 #   scripts/backup.sh init            # initialise the repository only
 #   scripts/backup.sh list            # list snapshots
+#   scripts/backup.sh list --json     # the same, for scripts (restic's JSON)
 #   scripts/backup.sh check           # verify repository integrity
 #   scripts/backup.sh forget          # apply the retention policy (and prune)
 #   scripts/backup.sh restore <snap>  # restore into the data dir, in place
@@ -126,7 +127,10 @@ case "$cmd" in
         log "initialised $RESTIC_REPOSITORY"
         ;;
     list|snapshots)
-        restic snapshots --tag stack
+        # Any extra argument goes to restic, which is how scripts/monitor.sh
+        # gets `list --json` for the backup-age check (one source of truth for
+        # the repository, the password and the mounts).
+        restic snapshots --tag stack "$@"
         ;;
     check)
         restic check

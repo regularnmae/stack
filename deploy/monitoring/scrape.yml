@@ -1,0 +1,26 @@
+# What VictoriaMetrics scrapes (deploy/victoriametrics.container runs it with
+# -promscrape.config=/etc/vm/scrape.yml).
+#
+# install.sh copies this file to $DATA_DIR/config/monitoring/vm/scrape.yml on
+# every run (the VM unit mounts that directory, and the copy is written in place
+# so the running VM's watcher sees it). It is structural config (which exporters
+# exist), not operator tuning: thresholds and their grace periods live in
+# monitor.env, and the numbers no exporter produces are written as a Prometheus
+# textfile by scripts/metrics.sh -- node_exporter serves them from the same
+# endpoint, so they arrive under the `node` job below.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # The host: disk space, inodes, I/O saturation, memory, load -- plus every
+  # stack_* series from the textfile collector.
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # The store's own counters, so a failing scrape or a filling data dir shows up
+  # next to the data instead of only in vmui's status block.
+  - job_name: victoriametrics
+    static_configs:
+      - targets: ["victoriametrics:8428"]

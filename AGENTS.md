@@ -42,7 +42,7 @@ the MCP server.
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
 ./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/spend-audit.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong
@@ -241,7 +241,29 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   the `caronc/apprise` image has no ENTRYPOINT, so the CLI must be named
   (`podman run --rm caronc/apprise apprise -t TITLE -b BODY URL...`), and a
   `mailto://` URL on 587 needs `?mode=starttls` (`465` → `?mode=ssl`) or it
-  fails with a bare "Connection error".
+  fails with a bare "Connection error". It also carries the host checks (disk,
+  inodes, disk saturation from `/sys/block/<dev>/stat` io_ticks, backup age via
+  `scripts/backup.sh list --json`, certificate expiry off NPM's
+  `letsencrypt/live/*/cert.pem`, systemd `NRestarts` deltas between sweeps, and
+  the metrics textfile going stale) — thresholds are `MONITOR_*` keys in
+  `monitor.env` **with defaults in the script**, so an env file written before a
+  check existed still monitors.
+- **Metrics are history, not alerting, and the two must not be coupled:**
+  `victoriametrics` (loopback `8428`, 30d via `METRICS_RETENTION`) +
+  `node-exporter` (host `/proc`, `/sys`, `/` read-only; `SecurityLabelDisable=true`
+  because a container domain may not read the host's labels and relabelling `/`
+  is not an option) + `scripts/metrics.sh` on `metrics.timer` every minute.
+  `monitor.sh` never queries the store — that is what keeps a wedged or deleted
+  VM from silencing an alert — and `vmui` gets **no** NPM host: it has no auth
+  of its own, so the store stays loopback-only (SSH tunnel) and nothing is added
+  to `FIREWALL_PORTS`. The numbers are published through node-exporter's
+  **textfile collector**, which is the permissions trap: the exporter is uid
+  65534 (a subuid under rootless podman), so both writers chmod the directory
+  `0755` and the files `0644`; a silent "graphs stopped while everything is
+  healthy" is almost always that. `$DATA_DIR/monitoring` is regenerable and
+  stays out of the backup set, and `monitor.prom` (backup age, verify failures,
+  spend trips) is written by `monitor.sh` so the sweep's numbers get history
+  without paying for them twice.
 - **nginx-proxy-manager runs on the host network, and health comes from podman** —
   `deploy/nginx-proxy-manager.container` sets `Network=host` and has no
   `PublishPort=`, so NPM's own nginx binds :80/:443/:81 in the host's namespace

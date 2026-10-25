@@ -1,0 +1,65 @@
+# Quadlet unit for node_exporter, the stack's window on the host itself.
+#
+# This is the piece the stack was missing: nothing watched disk space, inodes,
+# I/O saturation, memory or load, which is exactly how a re-sync on one shared
+# disk becomes "everything is slow and nobody knows why" (85% busy, ~47%
+# iowait, found by hand). It also serves the textfile collector --
+# $DATA_DIR/monitoring/textfile/*.prom -- which is how scripts/metrics.sh and
+# scripts/monitor.sh publish the numbers no daemon exports.
+#
+# install.sh renders this into ~/.config/containers/systemd/, where quadlet
+# turns it into node-exporter.service.
+[Unit]
+Description=node_exporter (host metrics and the stack's textfile metrics)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=node-exporter
+Image=docker.io/prom/node-exporter:v1.12.1
+Network=npm-network.network
+
+# Loopback only, scraped by victoriametrics over npm-network. Same reasoning as
+# the metrics store: no public host, nothing added to the firewall.
+PublishPort=127.0.0.1:9100:9100
+
+# Read-only host mounts. /proc and /sys carry the kernel counters;
+# --path.rootfs makes the filesystem collectors stat the real mountpoints, which
+# is what produces node_filesystem_avail_bytes{mountpoint="/data"}.
+#
+# Mounting / looks alarming, but it is read-only and the container runs as
+# uid 65534, which under rootless podman is a *subuid*: it cannot read the
+# stack's 0600 secrets or the chain data no matter that the path is visible.
+Volume=/proc:/host/proc:ro
+Volume=/sys:/host/sys:ro
+Volume=/:/host:ro
+
+# SELinux is enforcing on this host and the host mounts above carry the host's
+# own labels, which a container domain may not read -- and relabelling / is not
+# an option. This is the one unit with SELinux separation off, which is why its
+# mounts are all :ro and it is reachable only on a loopback port. The textfile
+# dir below keeps its :z label so it still works if the label is ever re-enabled.
+SecurityLabelDisable=true
+
+# Where scripts/metrics.sh (every minute) and scripts/monitor.sh (every five)
+# write their .prom files. Must be world-readable: the exporter runs as
+# uid 65534, i.e. a subuid that owns nothing here. Both writers chmod 0755 the
+# directory and 0644 the files -- a silent "no metrics" is otherwise the first
+# failure mode (README: "Monitoring and metrics").
+Volume=@DATA_DIR@/monitoring/textfile:/textfile:z
+
+Exec=--path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host --collector.textfile.directory=/textfile
+
+# The image ships busybox wget (verified) and runs as nobody: scraping its own
+# /metrics proves the listener, and a truncated body would fail the fetch.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:9100/metrics
+HealthInterval=60s
+HealthStartPeriod=15s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

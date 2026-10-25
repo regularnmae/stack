@@ -55,6 +55,7 @@ if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
+        victoriametrics node-exporter
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -62,6 +63,7 @@ else
     containers=(
         bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-rpc lightningd
         tor valkey searxng uptime-kuma nginx-proxy-manager
+        victoriametrics node-exporter
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -378,7 +380,7 @@ if [ "$DEEP" = 1 ]; then
     # Freshness is best-effort and a fresh host legitimately has no snapshot, so
     # this only warns. A failure means the repository or password is wrong.
     if out=$("$REPO_DIR/scripts/backup.sh" snapshots 2>/dev/null) \
-        && printf '%s' "$out" | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+        && grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}' <<< "$out"; then
         pass "backup repository has snapshots"
     else
         warn "no backup snapshots yet (expected until the first backup runs)"
@@ -403,6 +405,87 @@ if [ -d "$AUDIT_DIR" ]; then
     pass "audit dir present ($AUDIT_DIR)"
 else
     warn "no audit dir yet ($AUDIT_DIR); the first monitor run creates it"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "Metrics"
+# The pipeline is history, not alerting (scripts/monitor.sh never queries it), so
+# a problem here is reported but cannot hide an alert. It is checked because a
+# silently dead collector is invisible otherwise: the graph just stops.
+METRICS_TIMER="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/metrics.timer"
+if [ -f "$METRICS_TIMER" ]; then
+    pass "metrics.timer installed"
+else
+    bad "metrics.timer is not installed (run deploy/install.sh)"
+fi
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
+    pass "metrics.timer is active"
+else
+    warn "metrics.timer is not active (systemctl --user status metrics.timer)"
+fi
+
+vm_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://victoriametrics:8428/-/healthy 2>/dev/null) || vm_code=""
+[ -n "$vm_code" ] || vm_code=000
+if [ "$vm_code" = 200 ]; then
+    pass "victoriametrics /-/healthy 200"
+else
+    bad "victoriametrics /-/healthy -> $vm_code"
+fi
+
+# /metrics is what the scrape reads, and it carries the textfile collector --
+# asking for the stack's own series proves the whole path (writer, permissions,
+# exporter), not just that the exporter is listening.
+ne_metrics=$(net_curl -s -m 10 http://node-exporter:9100/metrics 2>/dev/null) || ne_metrics=""
+if [ -n "$ne_metrics" ]; then
+    pass "node-exporter /metrics answers"
+    # Here-strings, not `printf | grep -q`: this body is >64KB, so a match early
+    # in it makes grep exit and printf take SIGPIPE -- which `pipefail` turns
+    # into a failed check. It reads as a false alarm ("no filesystem metrics")
+    # exactly when the metric is present.
+    if grep -q '^stack_metrics_timestamp' <<< "$ne_metrics"; then
+        pass "textfile collector serves the stack's series"
+    else
+        warn "no stack_* series in node-exporter (scripts/metrics.sh has not run, or the textfile is unreadable)"
+    fi
+    if grep -q '^node_filesystem_avail_bytes' <<< "$ne_metrics"; then
+        pass "node-exporter reads the host filesystems"
+    elif grep -q '^node_scrape_collector_success{collector="filesystem"} 0' <<< "$ne_metrics"; then
+        # Seen under heavy I/O: the collector hits statfs on a mount that is
+        # being torn down (a container's overlay, a churny tmpfs) and gives up
+        # for that scrape only. The next one recovers.
+        warn "the filesystem collector failed on this scrape (a mount disappeared mid-scan? re-run)"
+    else
+        warn "node-exporter reports no filesystem metrics (the / host mount is missing?)"
+    fi
+else
+    bad "node-exporter /metrics -> no answer"
+fi
+
+# The ages, read off the host: the file the collector writes and the scrape
+# that turns it into history. A collector that runs but is not scraped is just
+# as blind as one that does not run.
+STACK_PROM="$DATA_DIR/monitoring/textfile/stack.prom"
+if [ -f "$STACK_PROM" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$STACK_PROM" 2>/dev/null || echo 0) ))
+    if [ "$age" -le 300 ]; then
+        pass "stack.prom written ${age}s ago"
+    else
+        warn "stack.prom is ${age}s old (metrics.timer / scripts/metrics.sh)"
+    fi
+else
+    warn "no stack.prom yet ($STACK_PROM); the first metrics run creates it"
+fi
+
+if [ "$DEEP" = 1 ]; then
+    # A real query, not a health endpoint: this is the path vmui and any future
+    # dashboard uses.
+    q=$(net_curl -s -m 10 --get --data-urlencode 'query=stack_metrics_timestamp' \
+        http://victoriametrics:8428/api/v1/query 2>/dev/null) || q=""
+    if printf '%s' "$q" | grep -q '"value"'; then
+        pass "victoriametrics answers a PromQL query"
+    else
+        warn "victoriametrics has no stack_metrics_timestamp series yet (first scrape?)"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

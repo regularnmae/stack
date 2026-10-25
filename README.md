@@ -27,6 +27,8 @@ stack runs and one script that fixes a deployment problem.
 | `searxng` | `docker.io/searxng/searxng:latest` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
+| `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.154.1` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
+| `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | `127.0.0.1:9100` | — (serves `$DATA_DIR/monitoring/textfile`) |
 | `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` | — |
 | `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` | — |
 | `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` | — |
@@ -172,6 +174,7 @@ forces a rebuild. Common flags:
 ./deploy.sh --dry-run                 # print the plan, change nothing
 ./verify.sh                           # container health, MCP handshakes, onion fetches
 ./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
+./scripts/metrics.sh                  # one metrics collection (metrics.timer runs it)
 ```
 
 The first run also builds the two explorers. Both are small local builds
@@ -268,6 +271,8 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `postgres-dump/` — the pre-backup `pg_dumpall`
   - `config/` — every bearer token and secret
   - `audit/` — the monitor's log and the spend tripwire baselines
+  - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
+    (both regenerable, both excluded from backups)
   - `backup-cache/` — restic's cache (regenerable)
 
 The explorers keep no data directory: both are stateless and read their daemon
@@ -484,11 +489,19 @@ that closes that gap.
   `deploy/monitor.timer`. Read-only: it starts nothing and rewrites no config.
   It runs `verify.sh` for the container/MCP base checks and adds the ones
   nothing else does — bitcoind freshness, CLN peers and **offline channels**,
-  the Monero wallet's lag behind `monerod` — then the spend tripwire.
+  the Monero wallet's lag behind `monerod`, the host itself (disk and inode
+  space, disk saturation, backup age, certificate expiry, units that
+  crash-looped since the last sweep, and the metrics collector going quiet) —
+  then the spend tripwire.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
   `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
 - `scripts/spend-audit.sh` — the spend tripwire (below); also runnable alone.
+
+The monitor reads the daemons and the host **directly**; it never queries the
+metrics store. That is deliberate: alerting must not depend on the pipeline that
+exists to draw graphs of itself, so VictoriaMetrics can be down, wedged or
+deleted without silencing an alert.
 
 **Alerting is off until you fill in
 `$DATA_DIR/config/monitoring/monitor.env`** (mode 600, seeded empty):
@@ -505,7 +518,51 @@ that closes that gap.
 
 With both empty the monitor still runs and records to
 `$DATA_DIR/audit/audit.log`, and `verify.sh` reports whether the timer is
-installed and active.
+installed and active. The host checks' thresholds are the same file
+(`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
+`MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`, `MONITOR_METRICS_MAX_AGE_S`, …);
+each falls back to its default in the script, so a monitor.env written before a
+check existed still monitors.
+
+### Metrics and history
+
+Alerting tells you *that* something is wrong. These two units answer *when it
+started, how bad it got and whether it is improving* — the questions a chain
+sync on one shared disk actually raises ("how fast was the IBD at 03:00?", "when
+did the Monero RPC wedge?").
+
+| | |
+| --- | --- |
+| `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION` in `stack.conf`), `127.0.0.1:8428` |
+| `node-exporter` | the host: disk space, inodes, I/O saturation, memory, load — plus the **textfile collector**, which is how the stack's own numbers get in |
+| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, Fulcrum's index height, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability**, the wallet's lag |
+| `scripts/monitor.sh` (every five minutes) | writes `monitor.prom` beside it: backup age and snapshot count, verify failures, spend trips, sweep timestamp |
+
+**Read it over an SSH tunnel, by design:**
+
+```sh
+ssh -L 8428:127.0.0.1:8428 you@host      # then http://127.0.0.1:8428/vmui
+```
+
+`vmui` has no authentication of its own, and every public host in this stack is
+declared in `NPM_HOSTS` and TLS-terminated — so the metrics store publishes on
+the host's **loopback only** and adds nothing to the firewall. If you want it on
+the LAN, put it behind `nginx-proxy-manager` with basic auth *and* declare it in
+`NPM_HOSTS`; don't publish it directly.
+
+Two consequences worth knowing:
+
+- **`$DATA_DIR/monitoring` is not in the backup set.** It is history, not state:
+  losing it costs you the graphs, and nothing else. Same reasoning as
+  `fulcrum/` and `searxng/`.
+- **The textfile is a permissions trap.** `node-exporter` runs as uid 65534 (a
+  subuid under rootless podman), so it owns neither the directory nor the files.
+  Both writers chmod the directory `0755` and the files `0644`; if you ever see
+  graphs stop while the containers are healthy, check that first — `verify.sh`
+  has a check for it (`node-exporter /metrics` must carry `stack_*` series).
+
+No Grafana: `vmui` is a PromQL frontend with charts, and one less container on a
+disk that is the stack's bottleneck is worth more than dashboards.
 
 ### The spend tripwire
 

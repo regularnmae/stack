@@ -1,0 +1,19 @@
+# The schedule for the metrics collector in deploy/metrics.service.
+#
+# Quadlet has no .timer type, so this is a plain systemd USER unit (like
+# backup.timer and monitor.timer). deploy/install.sh installs it to
+# ~/.config/systemd/user/ and runs `systemctl --user enable --now metrics.timer`.
+#
+# Every minute, because this is the resolution the history is read at (a chain's
+# sync rate, a disk's saturation) -- not a jittered calendar event: a minute is
+# short enough that the jitter would only add noise.
+[Unit]
+Description=Collect the stack's metrics every minute
+
+[Timer]
+OnCalendar=*:0/1
+Persistent=true
+Unit=metrics.service
+
+[Install]
+WantedBy=timers.target
