@@ -38,7 +38,13 @@ Exec=Fulcrum -b bitcoind:8332 -u @BITCOIN_RPC_USER@ -p @BITCOIN_RPC_PASSWORD@ \
      --polltime 5 --bd-timeout 120 --db_mem 1024 --ts-format utc
 
 # The admin RPC does not listen until the initial index is caught up, so
-# liveness is the process itself: the entrypoint execs Fulcrum as PID 1.
+# liveness is the process itself: the entrypoint execs Fulcrum as PID 1. That is
+# deliberately all this checks -- podman's health is the liveness signal
+# deploy.sh waits on, and an index probe here would report "unhealthy" through
+# the multi-hour first sync (and flip the unit red for a state that is normal).
+# The functional check lives outside the unit: verify.sh --deep asks the server
+# for its tip over Electrum and compares it with bitcoind, and scripts/monitor.sh
+# alerts when the gap grows (scripts/lib.sh's electrum_tip).
 HealthCmd=sh -c 'grep -qx Fulcrum /proc/1/comm'
 HealthInterval=60s
 HealthStartPeriod=10s

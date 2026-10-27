@@ -7,14 +7,21 @@
 //
 //   KUMA_URL            base URL of the server (http://uptime-kuma:3001)
 //   KUMA_USERNAME / KUMA_PASSWORD   the admin login (api.env)
-//   KUMA_MONITORS_JSON  [{"name","url","codes":[...],"interval","retryInterval","maxretries"}]
+//   KUMA_MONITORS_JSON  [{"name","type","url"|"hostname"+"port","codes":[...],
+//                        "interval","retryInterval","maxretries"}]
 //   KUMA_STATUS_JSON    {"slug","title","group"} or empty: create + publish the page
 //   KUMA_DRY_RUN / KUMA_PRUNE    the script's flags, as KUMA_DRY_RUN=1 / KUMA_PRUNE=1
 //
+// `type` is "http" (url + codes) or "port" (hostname + port, kuma's TCP check).
+// A port monitor has no status codes -- kuma's own form still submits the http
+// default for the column, and the add handler .every()s it before it looks at
+// the type at all, so the array is sent either way.
+//
 // Three rules keep a reconcile from fighting the UI:
-//   * a monitor is only touched when a *declared* field changed (url, accepted
-//     status codes) -- the UI-tuned ones (interval, retries with their drift,
-//     notifications it got attached to) are never rewritten;
+//   * a monitor is only touched when a *declared* field changed (url + accepted
+//     status codes, or hostname + port for a port monitor) -- the UI-tuned ones
+//     (interval, retries with their drift, notifications it got attached to) are
+//     never rewritten;
 //   * the status page is created and filled with the declared monitors only
 //     while it is empty; a page that already carries monitors belongs to the
 //     UI, layout and all;
@@ -35,10 +42,58 @@ const log = (msg) => { console.log(msg); };
 
 if (!PASSWORD || !USERNAME) fail("KUMA_USERNAME/KUMA_PASSWORD missing");
 if (!Array.isArray(MONITORS) || MONITORS.length === 0) fail("KUMA_MONITORS_JSON empty");
+// A declaration is http (a url) or port (a hostname + a port). Validated here so
+// a typo is an error before anything touches the server.
+const monitorType = (d) => d.type || "http";
 for (const d of MONITORS) {
-    if (!d?.name || !d?.url) fail(`bad monitor declaration: ${JSON.stringify(d)}`);
+    if (!d?.name) fail(`bad monitor declaration: ${JSON.stringify(d)}`);
+    if (monitorType(d) === "port") {
+        if (!d.hostname) fail(`a port monitor needs a hostname: ${JSON.stringify(d)}`);
+        if (!Number.isInteger(d.port) || d.port < 1 || d.port > 65535) {
+            fail(`a port monitor needs a port in 1-65535: ${JSON.stringify(d)}`);
+        }
+    } else if (monitorType(d) === "http") {
+        if (!d.url) fail(`an http monitor needs a url: ${JSON.stringify(d)}`);
+        if (!Array.isArray(d.codes) || d.codes.length === 0) fail(`an http monitor needs codes: ${JSON.stringify(d)}`);
+    } else {
+        fail(`unknown monitor type "${d.type}" for "${d.name}"`);
+    }
     if (typeof d.interval !== "number" || d.interval <= 0) fail(`bad interval for ${d.name}`);
     if (typeof d.maxretries !== "number" || d.maxretries < 0) fail(`bad retries for ${d.name}`);
+}
+
+// The fields a declaration owns, in the shape the add/edit handlers read. url on
+// a port monitor is inert (kuma's form keeps "https://" in it); it is written as
+// the tcp:// target so an operator reading the database sees what it checks.
+function declaredFields(d) {
+    if (monitorType(d) === "port") {
+        return {
+            type: "port",
+            hostname: d.hostname,
+            port: d.port,
+            url: `tcp://${d.hostname}:${d.port}`,
+        };
+    }
+    return { type: "http", method: "GET", url: d.url, accepted_statuscodes: d.codes };
+}
+
+// How a declaration reads in a log line.
+function describe(d) {
+    return monitorType(d) === "port"
+        ? `${d.hostname}:${d.port} (tcp)`
+        : `${d.url} (codes ${d.codes.join(",")})`;
+}
+
+// The same fields for an edit, where a UI-tuned monitor is carried over: only
+// what the declaration owns is overridden, so an http monitor's method, body and
+// headers stay whatever the UI set. A port monitor carries no codes, so
+// accepted_statuscodes is left exactly as the list push had it -- re-sending an
+// empty list would trip the handler's .every() on the way back in.
+function editFields(d) {
+    if (monitorType(d) === "port") {
+        return { type: "port", hostname: d.hostname, port: d.port, url: `tcp://${d.hostname}:${d.port}` };
+    }
+    return { url: d.url, accepted_statuscodes: d.codes };
 }
 
 const sock = io(BASE_URL, { transports: ["websocket"], reconnection: false, timeout: 20000, forceNew: true });
@@ -129,9 +184,14 @@ function rawArray(val) {
     return [];
 }
 
-// Declared fields only: url + accepted status codes. Interval and retries are
+// Declared fields only: url + accepted status codes for an http monitor,
+// hostname + port (and the type itself) for a port one. Interval and retries are
 // deliberately ignored -- those belong to the UI once the monitor exists.
 function differs(existing, d) {
+    if ((existing.type ?? "http") !== monitorType(d)) return true;
+    if (monitorType(d) === "port") {
+        return existing.hostname !== d.hostname || Number(existing.port) !== d.port;
+    }
     return (existing.url ?? "") !== d.url
         || normalizedCodes(existing) !== JSON.stringify([...d.codes].sort());
 }
@@ -139,24 +199,23 @@ function differs(existing, d) {
 for (const d of MONITORS) {
     const existing = byName.get(d.name);
     if (!existing) {
-        if (DRY_RUN) { log(`[dry-run] would create monitor "${d.name}" (${d.url}, codes ${d.codes.join(",")})`); continue; }
+        if (DRY_RUN) { log(`[dry-run] would create monitor "${d.name}" (${describe(d)})`); continue; }
         const res = await call("add", [{
             name: d.name,
-            type: "http",
-            method: "GET",
-            url: d.url,
+            ...declaredFields(d),
             interval: d.interval,
             retryInterval: d.retryInterval,
             maxretries: d.maxretries,
             resendInterval: 0,
             // The add handler consumes accepted_statuscodes as the *array*
-            // (it builds and stores the _json string itself), and it
+            // (it builds and stores the _json string itself) for every type --
+            // it .every()s it before it looks at the monitor's type, so a port
+            // monitor missing it crashes the handler server-side. It also
             // JSON.stringifies conditions, kafkaProducerBrokers,
-            // kafkaProducerSaslOptions and rabbitmqNodes directly -- so those
-            // must arrive as raw arrays/objects. Sending the _json string for
-            // the codes (or omitting these) crashes the handler server-side
-            // ("Cannot read properties of undefined (reading 'every')").
-            accepted_statuscodes: d.codes,
+            // kafkaProducerSaslOptions and rabbitmqNodes directly, so those must
+            // arrive as raw arrays. A port monitor has no codes to accept by
+            // definition; ["200-299"] is what kuma's own form submits for it.
+            accepted_statuscodes: d.codes?.length ? d.codes : ["200-299"],
             notificationIDList: {},
             conditions: [],
             kafkaProducerBrokers: [],
@@ -165,7 +224,7 @@ for (const d of MONITORS) {
             active: true,
         }]);
         if (!res?.monitorID) fail(`could not create monitor "${d.name}": ${res?.msg || "no monitorID"}`);
-        log(`created monitor "${d.name}" (id ${res.monitorID}, ${d.url}, codes ${d.codes.join(",")})`);
+        log(`created monitor "${d.name}" (id ${res.monitorID}, ${describe(d)})`);
         resolvedIds.push(res.monitorID);
         continue;
     }
@@ -182,8 +241,7 @@ for (const d of MONITORS) {
         const { accepted_statuscodes_json: _json, ...carry } = existing;
         const res = await call("editMonitor", [{
             ...carry,
-            url: d.url,
-            accepted_statuscodes: d.codes,
+            ...editFields(d),
             conditions: rawArray(carry.conditions),
             kafkaProducerBrokers: rawArray(carry.kafkaProducerBrokers),
             kafkaProducerSaslOptions: rawArray(carry.kafkaProducerSaslOptions),

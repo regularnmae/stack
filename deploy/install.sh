@@ -848,6 +848,8 @@ MONITOR_VERIFY_ARGS=--deep
 #   restarts:    systemd restarts of any stack unit between two sweeps.
 #   metrics:     seconds before stack.prom counts as stale (the collector is a
 #                60s timer; five missed ticks is a real failure).
+#   fulcrum:     blocks Fulcrum's Electrum index may lag bitcoind (it polls every
+#                5s when healthy, so the default 12 means "stopped following").
 MONITOR_DISK_FREE_PCT=10
 MONITOR_INODES_FREE_PCT=5
 MONITOR_IO_UTIL_PCT=90
@@ -855,6 +857,7 @@ MONITOR_BACKUP_MAX_AGE_H=36
 MONITOR_CERT_MIN_DAYS=14
 MONITOR_RESTART_MAX=3
 MONITOR_METRICS_MAX_AGE_S=300
+MONITOR_FULCRUM_LAG_BLOCKS=12
 EOF
     log "wrote $MON_ENV (mode 600) -- empty targets: journal-only until filled in"
 fi

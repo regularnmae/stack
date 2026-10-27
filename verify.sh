@@ -7,7 +7,9 @@
 #                               # onion service in ONION_SERVICES answers through
 #                               # tor too
 #   ./verify.sh --deep          # additionally call one read tool per endpoint,
-#                               # proving the path through to the daemon
+#                               # proving the path through to the daemon, and
+#                               # compare Fulcrum's Electrum index height with
+#                               # bitcoind's
 #   ./verify.sh --no-nodes      # the chain daemons were skipped (deploy.sh
 #                               # --skip-daemons); don't call them missing
 #
@@ -310,6 +312,74 @@ else
         pass "xmr-explorer / 200 (MoneroBlock read monerod over RPC)"
     else
         warn "xmr-explorer home page -> $xmr_home (monerod RPC busy during sync?)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+head2 "Fulcrum (Electrum)"
+# Fulcrum is the one service that is not HTTP: the Electrum protocol is
+# newline-delimited JSON-RPC over raw TCP (50001) and TLS (50002), so neither
+# net_curl nor nginx-proxy-manager can read it. Its healthcheck is the process
+# table (`grep -qx Fulcrum /proc/1/comm`), which a wedged index passes forever --
+# before this probe existed, an index that had stopped following bitcoind read
+# healthy from every direction. The probes dial the published ports on the host's
+# loopback, i.e. exactly what a wallet on the LAN reaches (see scripts/lib.sh).
+if [ "$NO_NODES" = 1 ]; then
+    warn "chain daemons skipped by request; not checking Fulcrum"
+else
+    # One getblockchaininfo for the whole section: it is what decides whether a
+    # silent 50001 is broken or just a first-run index that has not caught up.
+    btc_chain=$(podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null || true)
+    btc_ibd=$(printf '%s' "$btc_chain" \
+        | grep -oE '"initialblockdownload":[[:space:]]*(true|false)' | grep -oE '(true|false)' | head -n1)
+    btc_blocks=$(printf '%s' "$btc_chain" \
+        | grep -oE '"blocks":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
+
+    # server.version is the banner: it names the server and the protocol revision,
+    # which is the cheapest proof that something is speaking Electrum rather than
+    # merely listening (a listening socket with a stuck app passes a TCP connect).
+    ver_req='{"id":0,"method":"server.version","params":["stack-verify","1.4"]}'
+    for spec in "50001|plain|$ver_req" "50002|tls|$ver_req"; do
+        IFS='|' read -r port kind req <<<"$spec"
+        if [ "$kind" = tls ]; then
+            reply=$(electrum_call_tls 127.0.0.1 "$port" "$req")
+            label="50002 (TLS)"
+        else
+            reply=$(electrum_call 127.0.0.1 "$port" "$req")
+            label="50001 (TCP)"
+        fi
+        if printf '%s' "$reply" | grep -q '"result"'; then
+            pass "fulcrum answers Electrum on $label: $(printf '%s' "$reply" | grep -oE 'Fulcrum[^"]*' | head -n1)"
+        elif [ "$btc_ibd" = true ]; then
+            warn "fulcrum does not answer on $label yet (bitcoind is in initial block download)"
+        else
+            bad "fulcrum is not answering Electrum on $label: ${reply:-no reply}"
+        fi
+    done
+
+    if [ "$DEEP" = 1 ]; then
+        # The index-backed question. server.version comes from memory and stays
+        # green on a wedged index, so the height is what separates "serving" from
+        # "serving stale". Fulcrum polls bitcoind every 5s (--polltime), so a
+        # healthy one sits 0-1 block behind; a big gap in the other direction is
+        # either a first index or a stall -- monitor.sh decides which, and pages.
+        tip=$(electrum_tip 50001)
+        if [ -z "$tip" ]; then
+            if [ "$btc_ibd" = true ]; then
+                warn "fulcrum reports no tip yet (indexing from scratch)"
+            else
+                bad "fulcrum reports no tip on 50001"
+            fi
+        elif [ -n "$btc_blocks" ]; then
+            lag=$((btc_blocks - tip))
+            if [ "$lag" -gt 12 ]; then
+                warn "fulcrum index is $lag block(s) behind bitcoind (tip $tip, bitcoind $btc_blocks)"
+            else
+                pass "fulcrum index at $tip (bitcoind $btc_blocks)"
+            fi
+        else
+            warn "fulcrum reports tip $tip but bitcoind's height is unreadable; lag not compared"
+        fi
     fi
 fi
 

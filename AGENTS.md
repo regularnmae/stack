@@ -86,9 +86,17 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `kuma-ctl/`). The admin login the setup wizard creates lives in
   `$DATA_DIR/config/uptime-kuma/api.env` (UI-first like `npm/api.env`); the
   reconciler, `deploy.sh` and `verify.sh` self-skip/warn until it is filled in.
-  The reconciler carries UI-tuned monitor settings over untouched (compare
-  declared fields only: url + accepted status codes) and only creates/fills
-  the status page while it has no monitors of its own. Two more socket.io
+  A declaration is `name | url | codes | interval | retries`, and a
+  `tcp://host:port` url means kuma's **TCP-port** monitor instead of HTTP (no
+  status code applies, so that field stays empty; only Fulcrum's `50001` uses
+  it, declared against `host.containers.internal` so the *published* port is
+  watched). A port monitor only proves the socket accepts a connection — kuma
+  2.5's `server/monitor-types/tcp.js` is `tcping()` and nothing more — so the
+  index behind 50001 is checked by `verify.sh`/`monitor.sh`, not by kuma. The
+  reconciler carries UI-tuned monitor settings over untouched (compare
+  declared fields only: url + accepted status codes, or hostname + port) and
+  only creates/fills the status page while it has no monitors of its own. Two
+  more socket.io
   shape traps it lives with: multi-arg management events
   (`addStatusPage(title, slug)`, `saveStatusPage(slug, config, imgDataUrl,
   publicGroupList)`) are positional — send one object and the *ack callback*
@@ -150,6 +158,18 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   excluded from the backup set; `--db_mem 1024` caps RocksDB. Do not add its
   ports to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
   and keep `50001/50002` in `FIREWALL_PORTS` if they move.
+  Its `HealthCmd` is `grep -qx Fulcrum /proc/1/comm` on purpose — podman's
+  health is the liveness signal `deploy.sh` waits on, and a first index refuses
+  wallets for hours, so an index probe there would paint a normal state red. The
+  functional check is outside the unit: `scripts/lib.sh`'s `electrum_call` /
+  `electrum_call_tls` / `electrum_tip` (bash `/dev/tcp` for `50001`, `openssl
+  s_client` for `50002` — the host has no `nc`, and the published loopback port
+  is what a wallet dials), used by `verify.sh --deep` (banner on both ports, then
+  the served tip against bitcoind's `blocks`) and by `scripts/monitor.sh` (pages
+  past `MONITOR_FULCRUM_LAG_BLOCKS`, default 12, softened by
+  `MONITOR_GRACE_SYNC` during IBD). Ask it for `blockchain.headers.subscribe`,
+  never just `server.version`: Fulcrum answers the latter from memory with no
+  sync gate, so a wedged index passes it.
 - **The two explorers read the daemons; neither adds an index.** `btc-explorer`
   (BTC RPC Explorer, `localhost/btc-explorer:local` from
   `btc-explorer/Containerfile`) reads bitcoind RPC plus Fulcrum's Electrum
@@ -257,9 +277,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   inodes, disk saturation from `/sys/block/<dev>/stat` io_ticks, backup age via
   `scripts/backup.sh list --json`, certificate expiry off NPM's
   `letsencrypt/live/*/cert.pem`, systemd `NRestarts` deltas between sweeps, and
-  the metrics textfile going stale) — thresholds are `MONITOR_*` keys in
-  `monitor.env` **with defaults in the script**, so an env file written before a
-  check existed still monitors.
+  the metrics textfile going stale) and the chain/daemon checks (`verify.sh` for
+  the base sweep, then bitcoind freshness, Fulcrum's Electrum tip against
+  bitcoind's `blocks`, CLN peers/channels, the wallet's lag) — thresholds are
+  `MONITOR_*` keys in `monitor.env` **with defaults in the script**, so an env
+  file written before a check existed still monitors. `num_or` and
+  `THRESH_FULCRUM_LAG` are defined with the config (not with the host checks)
+  because the chain section reads a threshold before that section runs.
 - **Metrics are history, not alerting, and the two must not be coupled:**
   `victoriametrics` (loopback `8428`, 30d via `METRICS_RETENTION`) +
   `node-exporter` (host `/proc`, `/sys`, `/` read-only; `SecurityLabelDisable=true`
@@ -275,7 +299,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   healthy" is almost always that. `$DATA_DIR/monitoring` is regenerable and
   stays out of the backup set, and `monitor.prom` (backup age, verify failures,
   spend trips) is written by `monitor.sh` so the sweep's numbers get history
-  without paying for them twice.
+  without paying for them twice. Fulcrum's height is the Electrum tip over 50001
+  (`electrum_tip`), **not** a `podman logs` scrape: the image prints "Processed
+  height" only at 1% steps, so `--tail 200` holds no line once it has caught up
+  and the old `stack_fulcrum_indexed_height` reported a stale value forever. The
+  series are `stack_fulcrum_up` (the container's own health), `_electrum_up`,
+  `_electrum_tip` and `_lag_blocks`; a first-run index legitimately answers
+  nothing for days, which is why that is a 0 rather than a `collector_error`.
 - **nginx-proxy-manager runs on the host network, and health comes from podman** —
   `deploy/nginx-proxy-manager.container` sets `Network=host` and has no
   `PublishPort=`, so NPM's own nginx binds :80/:443/:81 in the host's namespace

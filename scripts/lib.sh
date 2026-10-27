@@ -59,6 +59,65 @@ net_curl_host() {
     podman run --rm -i --network host "$NETCHECK_IMAGE" curl "$@"
 }
 
+# --- the Electrum protocol (Fulcrum) ----------------------------------------
+# Electrum is newline-delimited JSON-RPC over raw TCP, not HTTP: 50001 plaintext
+# and 50002 TLS with a certificate the image self-signs. net_curl cannot read it
+# and nginx-proxy-manager cannot front it, so this is the stack's one protocol
+# that needs a TCP client of its own.
+#
+# The client is bash's /dev/tcp. The host has no nc -- bootstrap.sh installs
+# podman, firewalld, git, openssl and jq and nothing else -- and `read -t` is the
+# whole timeout, so a probe costs no container start and no package. It runs in
+# a subshell because a failed `exec` redirection can end a non-interactive shell:
+# a refused port has to cost the caller an empty string, never the sweep. TLS
+# goes through openssl, which is already a bootstrap dependency (scripts/monitor.sh
+# reads certificate expiry with it).
+#
+# Callers dial 127.0.0.1 -- deploy/fulcrum.container.in publishes 50001/50002 on
+# every interface, so the published port on the host's loopback is exactly what a
+# wallet on the LAN reaches. Reading the container by name would prove less (it
+# stays up if the publish is lost) and is not what the protocol surface is.
+electrum_call() { # host port request-line -> the server's reply, empty on failure
+    bash -c '
+        exec 3<>"/dev/tcp/$1/$2" || exit 0
+        printf "%s\n" "$3" >&3
+        IFS= read -r -t 5 reply <&3
+        printf "%s" "$reply"
+    ' _ "$1" "$2" "$3" 2>/dev/null
+}
+
+# The same over TLS. -quiet drops the handshake chatter; stdin has to stay open a
+# moment after the request or s_client closes the connection before the answer
+# arrives, hence the sleep -- two seconds, not a timeout loop (five runs of a
+# local TLS server answered inside it every time).
+electrum_call_tls() { # host port request-line -> the server's reply, empty on failure
+    { printf '%s\n' "$3"; sleep 2; } \
+        | timeout 10 openssl s_client -quiet -connect "$1:$2" 2>/dev/null \
+        | head -n1
+}
+
+# The tip height Fulcrum reports, or empty when it does not answer. This is the
+# index-backed question on purpose: `server.version` is answered from memory and
+# stays green on exactly the failure this exists to catch -- an index that has
+# wedged while the process, the port and the healthcheck all still look fine.
+# Callers compare it with bitcoind's `blocks`; a healthy Fulcrum polls every 5s
+# (--polltime), so the gap is 0-1 block once it has caught up.
+#
+# Fulcrum answers nothing useful while it is still catching up on a fresh host,
+# so an empty result is expected during initial block download: verify.sh warns
+# and scripts/monitor.sh softens it under MONITOR_GRACE_SYNC.
+electrum_tip() { # port [tls] -> height, empty on failure
+    local port="$1" tls="${2:-}" reply
+    local req='{"id":1,"method":"blockchain.headers.subscribe","params":[]}'
+    if [ "$tls" = tls ]; then
+        reply=$(electrum_call_tls 127.0.0.1 "$port" "$req")
+    else
+        reply=$(electrum_call 127.0.0.1 "$port" "$req")
+    fi
+    printf '%s' "$reply" | grep -oE '"height"[[:space:]]*:[[:space:]]*[0-9]+' \
+        | grep -oE '[0-9]+$' | head -n1
+}
+
 # Write a Prometheus textfile for node-exporter's textfile collector: stdin -> a
 # .prom file, atomically, with the permissions the exporter needs. node-exporter
 # runs as uid 65534 -- a *subuid* under rootless podman -- so it owns neither the

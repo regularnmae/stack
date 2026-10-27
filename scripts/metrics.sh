@@ -80,22 +80,35 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# fulcrum -- up, and how far its index has got. It logs "Processed height: N,
-# X%" every 1%, which is the only progress it exposes (no admin RPC).
+# fulcrum -- the process (the container's own healthcheck), the Electrum surface,
+# and how far its index has actually got. The tip is asked of the server over
+# 50001 rather than scraped from `podman logs`: Fulcrum prints "Processed height:
+# N, X%" only at 1% steps, so once it has caught up `--tail 200` legitimately
+# holds no line and the scrape reported a stale height indefinitely.
+#
+# stack_fulcrum_up and stack_fulcrum_electrum_up disagree in the case that
+# matters: a healthy process with a wedged index answers server.version all day.
+# No collector_error here -- a first-run index answers nothing on 50001 for days,
+# and that is a state to graph (up=0, lag growing), not a broken collector.
 # ---------------------------------------------------------------------------
 if podman inspect -f '{{.State.Health.Status}}' fulcrum 2>/dev/null | grep -qx healthy; then
     emit stack_fulcrum_up 1
 else
     emit stack_fulcrum_up 0
 fi
-fheight=$(podman logs --tail 200 fulcrum 2>/dev/null \
-    | sed 's/\x1b\[[0-9;]*m//g' \
-    | grep -oE 'Processed height: [0-9]+' | tail -n1 | grep -oE '[0-9]+$' || true)
-if [ -n "$fheight" ]; then
-    emit stack_fulcrum_indexed_height "$fheight"
+if ftip=$(electrum_tip 50001) && [ -n "$ftip" ]; then
+    emit stack_fulcrum_electrum_up 1
+    emit stack_fulcrum_electrum_tip "$ftip"
+    # btc_blocks is only present when bitcoind answered above; without it there is
+    # nothing to compare the tip with, so the lag series is omitted, not zeroed.
+    if [ -n "${btc:-}" ]; then
+        bblocks=$(jq -r '.blocks // empty' <<<"$btc" 2>/dev/null || true)
+        [ -n "$bblocks" ] && emit stack_fulcrum_lag_blocks "$((bblocks - ftip))"
+    fi
+    say "fulcrum tip $ftip"
 else
-    # Not an error: before the first 1% mark there is simply no line yet.
-    say "fulcrum has no progress line yet"
+    emit stack_fulcrum_electrum_up 0
+    say "fulcrum is not answering Electrum on 50001"
 fi
 
 # ---------------------------------------------------------------------------

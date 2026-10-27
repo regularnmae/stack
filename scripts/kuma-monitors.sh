@@ -15,7 +15,13 @@
 # where codes is a comma-separated list of Uptime-Kuma ranges ("200-299,400-
 # 499" -- a token-gated endpoint answers 401 without a token, which is *up*),
 # interval the seconds between beats (default 60) and retries the attempts
-# before down (default 2). The page every declared monitor is published on is
+# before down (default 2). A url of the form `tcp://host:port` declares kuma's
+# "port" monitor instead of an HTTP one: no status code applies, so that field
+# stays empty and the interval/retries keep their positions:
+#
+#   "Fulcrum (Electrum TCP)|tcp://host.containers.internal:50001||60|2"
+#
+# The page every declared monitor is published on is
 # KUMA_STATUS_SLUG/KUMA_STATUS_TITLE/KUMA_STATUS_GROUP.
 #
 # Uptime-Kuma has no REST write API, so the work runs as a socket.io client in
@@ -79,28 +85,52 @@ fi
 # --- declaration -> payload -------------------------------------------------
 # Every entry becomes a normalized monitor object. Numbers must be verifiably
 # numbers before they reach --argjson; codes are trimmed and split on commas.
+# Two shapes exist because kuma has two check types behind one monitor table:
+# http(s) is a URL with accepted status codes, tcp:// is hostname+port and no
+# codes at all.
 monitors_json="[]"
 for entry in "${KUMA_MONITORS[@]}"; do
     IFS='|' read -r mname murl mcodes minterval mretries <<<"$entry"
     [ -n "$mname" ] && [ -n "$murl" ] \
         || die "bad KUMA_MONITORS entry: $entry (want \"name|url[|codes[|interval[|retries]]]\")"
     case "$murl" in
-        http://*|https://*) ;;
-        *) die "bad monitor URL in KUMA_MONITORS entry: $entry (want scheme://...)" ;;
+        http://*|https://*)
+            mcodes="${mcodes:-200-299}"
+            printf '%s' "$mcodes" | grep -qE '^[0-9]{3}-[0-9]{3}(,[0-9]{3}-[0-9]{3})*$' \
+                || die "bad accepted status codes in KUMA_MONITORS entry: $entry (want ranges like 200-299,400-499)"
+            ;;
+        tcp://*)
+            [ -z "$mcodes" ] \
+                || die "a tcp:// monitor accepts no status codes: $entry (leave that field empty)"
+            ;;
+        *) die "bad monitor URL in KUMA_MONITORS entry: $entry (want scheme://..., or tcp://host:port)" ;;
     esac
-    mcodes="${mcodes:-200-299}"
     minterval="${minterval:-60}"
     mretries="${mretries:-2}"
     case "$minterval" in ''|*[!0-9]*) die "bad interval in KUMA_MONITORS entry: $entry (seconds)" ;; esac
     case "$mretries"  in ''|*[!0-9]*) die "bad retries in KUMA_MONITORS entry: $entry (attempts)" ;; esac
-    printf '%s' "$mcodes" | grep -qE '^[0-9]{3}-[0-9]{3}(,[0-9]{3}-[0-9]{3})*$' \
-        || die "bad accepted status codes in KUMA_MONITORS entry: $entry (want ranges like 200-299,400-499)"
-    monitors_json=$(printf '%s' "$monitors_json" | jq -c \
-        --arg name "$mname" --arg url "$murl" --arg codes "$mcodes" \
-        --argjson interval "$minterval" --argjson retries "$mretries" \
-        '. + [{name: $name, url: $url,
-               codes: ($codes | gsub(" "; "") | split(",")),
-               interval: $interval, retryInterval: $interval, maxretries: $retries}]')
+    if [ "${murl#tcp://}" != "$murl" ]; then
+        mtarget="${murl#tcp://}"
+        mhost="${mtarget%:*}"
+        mport="${mtarget##*:}"
+        [ -n "$mhost" ] && [ "$mport" != "$mtarget" ] \
+            || die "bad tcp:// target in KUMA_MONITORS entry: $entry (want tcp://host:port)"
+        case "$mport" in ''|*[!0-9]*) die "bad port in KUMA_MONITORS entry: $entry (1-65535)" ;; esac
+        { [ "$mport" -ge 1 ] && [ "$mport" -le 65535 ]; } \
+            || die "bad port in KUMA_MONITORS entry: $entry (1-65535)"
+        monitors_json=$(printf '%s' "$monitors_json" | jq -c \
+            --arg name "$mname" --arg host "$mhost" --argjson port "$mport" \
+            --argjson interval "$minterval" --argjson retries "$mretries" \
+            '. + [{name: $name, type: "port", hostname: $host, port: $port,
+                   interval: $interval, retryInterval: $interval, maxretries: $retries}]')
+    else
+        monitors_json=$(printf '%s' "$monitors_json" | jq -c \
+            --arg name "$mname" --arg url "$murl" --arg codes "$mcodes" \
+            --argjson interval "$minterval" --argjson retries "$mretries" \
+            '. + [{name: $name, type: "http", url: $url,
+                   codes: ($codes | gsub(" "; "") | split(",")),
+                   interval: $interval, retryInterval: $interval, maxretries: $retries}]')
+    fi
 done
 
 status_json=""
@@ -121,7 +151,7 @@ fi
 runtime_args=(
     --rm
     --network npm-network
-    -e "KUMA_URL=http://uptime-kuma:3001"
+    -e "KUMA_URL=${KUMA_URL:-http://uptime-kuma:3001}"
     -e "KUMA_USERNAME=$KUMA_USERNAME"
     -e "KUMA_PASSWORD=$KUMA_PASSWORD"
     -e "KUMA_MONITORS_JSON=$monitors_json"

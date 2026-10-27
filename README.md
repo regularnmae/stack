@@ -212,6 +212,20 @@ sync at the same time, but a wallet must not rely on a partial index. On an
 existing host, re-run `./bootstrap.sh` (or open `50001`/`50002` in firewalld
 yourself) so the new ports reach the LAN.
 
+Its container healthcheck is the process table and nothing else, on purpose: a
+first index legitimately refuses wallets for hours, so the unit must not go red
+for it. The index is checked from outside instead —
+
+```sh
+./verify.sh --deep        # asks 50001/50002 for the Electrum banner, then compares
+                          # the tip Fulcrum reports with bitcoind's height
+./scripts/monitor.sh      # pages when the gap passes MONITOR_FULCRUM_LAG_BLOCKS
+```
+
+— because a wedged index keeps the process alive, the port open and
+`server.version` answering, so the height is the only thing that says whether
+wallets are being served *current* data.
+
 ### Block explorers
 
 Two read-only web explorers are served behind nginx-proxy-manager:
@@ -519,11 +533,12 @@ that closes that gap.
 - `scripts/monitor.sh` — runs every five minutes from
   `deploy/monitor.timer`. Read-only: it starts nothing and rewrites no config.
   It runs `verify.sh` for the container/MCP base checks and adds the ones
-  nothing else does — bitcoind freshness, CLN peers and **offline channels**,
-  the Monero wallet's lag behind `monerod`, the host itself (disk and inode
-  space, disk saturation, backup age, certificate expiry, units that
-  crash-looped since the last sweep, and the metrics collector going quiet) —
-  then the spend tripwire.
+  nothing else does — bitcoind freshness, **Fulcrum's Electrum index** (the tip
+  it serves against bitcoind's height), CLN peers and **offline channels**, the
+  Monero wallet's lag behind `monerod`, the host itself (disk and inode space,
+  disk saturation, backup age, certificate expiry, units that crash-looped
+  since the last sweep, and the metrics collector going quiet) — then the spend
+  tripwire.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
   `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
@@ -551,7 +566,8 @@ With both empty the monitor still runs and records to
 `$DATA_DIR/audit/audit.log`, and `verify.sh` reports whether the timer is
 installed and active. The host checks' thresholds are the same file
 (`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
-`MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`, `MONITOR_METRICS_MAX_AGE_S`, …);
+`MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`, `MONITOR_METRICS_MAX_AGE_S`,
+`MONITOR_FULCRUM_LAG_BLOCKS`, …);
 each falls back to its default in the script, so a monitor.env written before a
 check existed still monitors.
 
@@ -566,7 +582,7 @@ did the Monero RPC wedge?").
 | --- | --- |
 | `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION` in `stack.conf`), `127.0.0.1:8428` |
 | `node-exporter` | the host: disk space, inodes, I/O saturation, memory, load — plus the **textfile collector**, which is how the stack's own numbers get in |
-| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, Fulcrum's index height, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability**, the wallet's lag |
+| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, Fulcrum's Electrum reachability, the tip it serves and its lag behind bitcoind, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability**, the wallet's lag |
 | `scripts/monitor.sh` (every five minutes) | writes `monitor.prom` beside it: backup age and snapshot count, verify failures, spend trips, sweep timestamp |
 
 **Read it over an SSH tunnel, by design:**
@@ -635,6 +651,16 @@ untouched, and `--prune` is the only destructive mode. The script creates the
 status page (`KUMA_STATUS_SLUG`) with one group holding every declared
 monitor — and only while the page has nothing on it yet: an existing page's
 layout is never rewritten, so rearranging it in the UI is safe.
+
+A url of the form `tcp://host:port` declares Uptime-Kuma's **TCP-port** monitor
+instead of an HTTP one — there is no status code to accept, so that field stays
+empty while interval and retries keep their positions. `fulcrum`'s `50001` is
+the only entry that needs it (Electrum is raw TCP, so it cannot be probed as a
+URL), and it is declared against `host.containers.internal:50001` — pasta's
+gateway to this host — so it watches the **published** port wallets use, not the
+container. A port monitor proves the socket accepts a connection and nothing
+more; whether the index behind it is current is what `verify.sh --deep` and
+`scripts/monitor.sh` read (above).
 
 Uptime-Kuma has no REST write API, so the reconciler speaks its socket.io
 API from the `kuma-ctl` image (built by `deploy/install.sh` from `kuma-ctl/`,

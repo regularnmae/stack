@@ -67,6 +67,22 @@ MONITOR_BACKUP_MAX_AGE_H="${MONITOR_BACKUP_MAX_AGE_H:-$(env_value "$MONITOR_ENV"
 MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONITOR_CERT_MIN_DAYS)}"
 MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
 MONITOR_METRICS_MAX_AGE_S="${MONITOR_METRICS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_METRICS_MAX_AGE_S)}"
+MONITOR_FULCRUM_LAG_BLOCKS="${MONITOR_FULCRUM_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MONITOR_FULCRUM_LAG_BLOCKS)}"
+
+# Defaults live here, not only in monitor.env, so an older env file (one written
+# before these checks existed) still monitors. The helper and the one threshold
+# the chain section reads live up here rather than with the host checks below.
+num_or() { # value default
+    case "${1:-}" in
+        ''|*[!0-9]*) printf '%s' "$2" ;;
+        *)           printf '%s' "$1" ;;
+    esac
+}
+# How far Fulcrum's index may sit behind bitcoind before it is a failure. A
+# healthy one polls every 5s (--polltime) and is 0-1 block behind, so this is a
+# "stopped following" threshold, not a "slightly late" one: 12 blocks is about
+# two hours at 10 minutes a block.
+THRESH_FULCRUM_LAG=$(num_or "${MONITOR_FULCRUM_LAG_BLOCKS:-}" 12)
 
 PROBLEMS=()
 WARNS=()
@@ -124,6 +140,31 @@ else
         fail "bitcoind is behind: blocks=$blocks headers=$headers"
     else
         ok "bitcoind at height $blocks"
+    fi
+fi
+
+# Fulcrum, the Electrum server: the one daemon whose own port says the least. Its
+# healthcheck is the process table (`grep -qx Fulcrum /proc/1/comm`), it keeps
+# accepting connections and answering server.version while the index is wedged,
+# and the wallet/explorer surface then silently serves stale heights. So ask it
+# the index-backed question -- the tip it reports -- and compare with bitcoind.
+ftip=$(electrum_tip 50001)
+if [ -z "$ftip" ]; then
+    if [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
+        ok "fulcrum is not serving Electrum yet (bitcoind is in initial block download)"
+    else
+        fail "fulcrum does not answer Electrum on 50001"
+    fi
+elif [ -z "${blocks:-}" ]; then
+    soft "fulcrum reports tip $ftip; bitcoind height unreadable, so lag is not compared"
+elif [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
+    ok "fulcrum index at $ftip (bitcoind is in initial block download; lag $((blocks - ftip)) not paged)"
+else
+    behind=$((blocks - ftip))
+    if [ "$behind" -gt "$THRESH_FULCRUM_LAG" ]; then
+        fail "fulcrum index is $behind block(s) behind bitcoind (tip $ftip, bitcoind $blocks)"
+    else
+        ok "fulcrum index at $ftip (bitcoind $blocks)"
     fi
 fi
 
@@ -193,13 +234,8 @@ fi
 head3 "host"
 
 # Defaults live here, not only in monitor.env, so an older env file (one written
-# before these checks existed) still monitors.
-num_or() { # value default
-    case "${1:-}" in
-        ''|*[!0-9]*) printf '%s' "$2" ;;
-        *)           printf '%s' "$1" ;;
-    esac
-}
+# before these checks existed) still monitors. num_or is defined with the config
+# above, because the chain section reads a threshold through it first.
 THRESH_DISK=$(num_or "${MONITOR_DISK_FREE_PCT:-}" 10)
 THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
 THRESH_IO=$(num_or "${MONITOR_IO_UTIL_PCT:-}" 90)
