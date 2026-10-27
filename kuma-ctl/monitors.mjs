@@ -81,10 +81,6 @@ await infoReceived;
 // persistent listener kicks in even if it arrives between the login ack and
 // this wait; an *empty* list still counts as arrived -- a fresh instance has
 // no monitors, and the server will never push another one.
-// The `monitorList` push lands once after login; wait up to 15s for it. The
-// persistent listener kicks in even if it arrives between the login ack and
-// this wait; an *empty* list still counts as arrived -- a fresh instance has
-// no monitors, and the server will never push another one.
 let monitorList = null;
 sock.on("monitorList", (list) => { monitorList = list ?? {}; });
 

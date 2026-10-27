@@ -134,7 +134,12 @@ runtime_args=(
 # --- reconcile inside the kuma-ctl container --------------------------------
 # The script is bind-mounted so the repo owns the runtime code; the login is
 # delivered through the environment -- podman run -e is not a command line ps
-# can read, holding the same rule scripts/npm-hosts.sh's curl config holds.</think><tool_call>edit<arg_key>newString</arg_key><arg_value>log "reconciling ${#KUMA_MONITORS[@]} monitor(s)"$([ -n "$status_json" ] && printf " + status page '%s'" "$KUMA_STATUS_SLUG")
+# can read, holding the same rule scripts/npm-hosts.sh's curl config holds.
+if [ -n "$status_json" ]; then
+    log "reconciling ${#KUMA_MONITORS[@]} monitor(s) + status page '$KUMA_STATUS_SLUG'"
+else
+    log "reconciling ${#KUMA_MONITORS[@]} monitor(s)"
+fi
 podman run "${runtime_args[@]}" "$KUMA_CTL_IMAGE" node /kuma-ctl/monitors.mjs
 
 log "done"
