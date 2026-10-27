@@ -171,18 +171,30 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   Renovate's dockerfile manager, and both pinned commits by custom git-refs
   managers. (The earlier Onion Monero explorer, which read LMDB directly, is
   gone: its read-only startup path hung in this environment.)
-- **The backup set is `cln/ monero-wallet-rpc/ tor/ config/ npm/ audit/
-  uptime-kuma/ postgres-dump/` only** — chains, the Fulcrum index (`fulcrum/`),
-  `searxng/` and the raw `postgres/` cluster stay out so restic never walks
-  them. `tor/` is in it for
-  `tor/onion/` (the hidden services' keys: a lost key is a new `.onion` address).
-  `postgres-dump.container` (a oneshot) `pg_dumpall`s into
-  `$DATA_DIR/postgres-dump`; its libpq settings belong in
+- **The backup set is declared once, as `BACKUP_PATHS` in `stack.conf`**
+  (`cln monero-wallet-rpc tor config npm audit uptime-kuma postgres-dump`).
+  `install.sh` renders that array into `backup.container` — one read-only
+  `Volume=` per entry plus the path list in `Exec=` (`@BACKUP_VOLUMES@`/
+  `@BACKUP_PATHS@`) — and `scripts/backup.sh` derives its own mounts, restic
+  arguments, the directories a restore creates and its confirmation prompt from
+  the same array, so a hand run and the nightly job copy the same thing and a
+  new directory is one line. Chains, the Fulcrum index (`fulcrum/`), `searxng/`,
+  `monitoring/` and the raw `postgres/` cluster stay out so restic never walks
+  them. `tor/` is in it for `tor/onion/` (the hidden services' keys: a lost key
+  is a new `.onion` address). `postgres-dump.container` (a oneshot) `pg_dumpall`s
+  into `$DATA_DIR/postgres-dump`; its libpq settings belong in
   `config/boltmesh/dump.env`, **not** `db.env` (`PGHOST`/`PGUSER` in the server's
-  own env break its socket-based entrypoint bootstrap). The repo is
-  `$STACK_BACKUP_DIR`, reached through `backup.env`; `scripts/backup.sh` reads
-  `RESTIC_*` from **the environment first, then the file** — the only order that
-  can recover a fresh host, since the file lives inside the repository.
+  own env break its socket-based entrypoint bootstrap). The unit reaches it
+  through `Wants=/After=postgres-dump.service`, which `systemctl` honours on any
+  start — but a bare `scripts/backup.sh backup` has no such ordering, so the
+  script starts the same unit itself (best-effort: a Postgres outage must not
+  stop the run that protects the wallet) and says so when the unit is missing.
+  The repo is `$STACK_BACKUP_DIR`, reached through `backup.env`;
+  `scripts/backup.sh` reads `RESTIC_*` from **the environment first, then the
+  file** — the only order that can recover a fresh host, since the file lives
+  inside the repository. Restoring `postgres-dump/` only puts `all.sql` back on
+  disk: the database itself is replayed into the running `postgres` (README,
+  "Restoring onto a fresh host").
 - **BoltMesh is a tier of four units, not an MCP server**, built by
   `deploy_boltmesh` (not `deploy_app`). The private `boltmesh-labs` repos clone
   over SSH (`GITHUB_SSH_HOST`), and `deploy.sh` sets `GIT_TERMINAL_PROMPT=0`/

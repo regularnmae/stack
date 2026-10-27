@@ -428,13 +428,24 @@ the two explorers (stateless, RPC-only) and the raw `postgres/` cluster are
 deliberately **excluded**: they are large and regenerable, so restic never walks
 them.
 
+That set is declared **once**, as `BACKUP_PATHS` in `stack.conf`. `install.sh`
+renders it into the job's mounts and its `Exec=`, and `scripts/backup.sh` derives
+its own mounts, restic arguments and restore prompt from the same array — so a
+hand run copies exactly what the nightly run copies, and adding a directory is a
+one-line edit in `stack.conf` rather than four edits in two files.
+
 - `deploy/backup.container` — the one-shot job (a Quadlet unit, rendered like
   the rest).
 - `deploy/backup.timer` — the schedule (`*-*-* 03:30:00`, plus 30 min of
   jitter). Quadlet has no `.timer` type, so this is an ordinary systemd **user**
   unit at `~/.config/systemd/user/backup.timer`, enabled by `install.sh`.
 - `scripts/backup.sh` — run it by hand and inspect what you have:
-  `backup | init | list | check | forget | restore <snap> | unlock`.
+  `backup | init | list | ls | check | forget | restore <snap> | unlock`.
+  `ls [<snap>]` lists the paths inside a snapshot, which is how you prove a
+  given run really holds the database dump and not just the wallet. `backup`
+  also takes the same pre-backup `pg_dumpall` as the unit (it starts
+  `postgres-dump.service` when that unit is installed), because a hand run has
+  none of the unit's `Wants=` ordering.
 - `./deploy.sh --only backup` runs the job once, now.
 
 The repository defaults to the host directory `$STACK_BACKUP_DIR` (default
@@ -462,7 +473,7 @@ export RESTIC_PASSWORD=…           # from your password manager
 git clone https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
 ./bootstrap.sh
-./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, tor/, config/, npm/, audit/, uptime-kuma/
+./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, tor/, config/, npm/, audit/, uptime-kuma/, postgres-dump/
 ./deploy.sh                        # adopts the restored secrets and wallet
 ```
 
@@ -471,6 +482,26 @@ secrets in the order `secrets.env → the installed unit → the daemon's config
 generate`: a restored `config/` and wallet are adopted as-is instead of being
 regenerated. The Monero wallet directory comes back owned by the image uid
 (`scripts/backup.sh` fixes that up), so `monero-wallet-rpc` opens it directly.
+
+**The database is not restored by that step.** `postgres-dump/` comes back as a
+file (`all.sql`), and `./deploy.sh` starts an empty `postgres` next to it. Replay
+it once the stack is up, with the API and the worker stopped so nothing writes
+underneath the load:
+
+```sh
+systemctl --user stop boltmesh-backend.service boltmesh-worker.service
+podman exec -i postgres psql -U vpnuser -d postgres < "$DATA_DIR/postgres-dump/all.sql"
+systemctl --user start boltmesh-backend.service boltmesh-worker.service
+```
+
+The dump was taken with `pg_dumpall --clean --if-exists`, so it recreates the
+`vpndb` database itself. It also carries the role, which already exists on a host
+whose `postgres/` was just initialised with the same credentials: `psql` reports
+those role errors (`already exists`, or a role it will not drop while you are
+connected as it), carries on because it is not run with `ON_ERROR_STOP`, and the
+database load is what matters. Confirm the schema landed with
+`podman exec postgres psql -U vpnuser -d vpndb -c '\dt'` before letting the API
+back in.
 
 > **Consistency:** the job snapshots `cln/` and the wallet while their daemons
 > are running. CLN's `hsm_secret` and `emergency.recover` are static and restore

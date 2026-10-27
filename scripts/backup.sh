@@ -5,15 +5,18 @@
 #   scripts/backup.sh init            # initialise the repository only
 #   scripts/backup.sh list            # list snapshots
 #   scripts/backup.sh list --json     # the same, for scripts (restic's JSON)
+#   scripts/backup.sh ls [<snap>]     # list the paths inside a snapshot
 #   scripts/backup.sh check           # verify repository integrity
 #   scripts/backup.sh forget          # apply the retention policy (and prune)
 #   scripts/backup.sh restore <snap>  # restore into the data dir, in place
 #   scripts/backup.sh unlock          # clear stale locks
 #
 # The scheduled run lives in deploy/backup.container + deploy/backup.timer;
-# this helper runs the same job by hand and adds the read/restore commands. It
-# uses the same read-only mounts as the unit, so what it copies is exactly what
-# the nightly job copies.
+# this helper runs the same job by hand and adds the read/restore commands. Both
+# read the backup set from one declaration -- BACKUP_PATHS in stack.conf -- which
+# deploy/install.sh also renders into the unit, so what a hand run copies is
+# exactly what the nightly job copies, and the database dump is refreshed here
+# the same way the unit's Wants=postgres-dump.service refreshes it.
 #
 # The repository and password are read from the ENVIRONMENT FIRST, then from
 # $DATA_DIR/config/backup/backup.env. That order is what makes recovery on a
@@ -27,6 +30,12 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
+# The backup set. Not defaulted: an empty set would produce a snapshot that
+# silently holds nothing, which is worse than a clear error.
+if [ "${BACKUP_PATHS+x}" != x ] || [ "${#BACKUP_PATHS[@]}" -eq 0 ]; then
+    die "stack.conf must define BACKUP_PATHS (the backup set)"
+fi
+
 RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:latest}"
 STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
 RETENTION=(--keep-daily 7 --keep-weekly 4 --keep-monthly 6)
@@ -38,17 +47,17 @@ cmd="${1:-backup}"
 
 case "$cmd" in
     -h|--help) usage_header "$0"; exit 0 ;;
-    backup|init|list|snapshots|check|forget|restore|unlock|version) ;;
+    backup|init|list|snapshots|ls|check|forget|restore|unlock|version) ;;
     *) die "unknown command: $cmd (try --help)" ;;
 esac
 
-# restore takes a snapshot argument; everything else takes none.
+# restore and ls take a snapshot argument; everything else takes none.
 snapshot=""
-if [ "$cmd" = restore ]; then
+if [ "$cmd" = restore ] || [ "$cmd" = ls ]; then
     for a in "$@"; do
         case "$a" in
             -y|--yes) ASSUME_YES=1 ;;
-            *) [ -n "$snapshot" ] && die "restore takes one snapshot id"; snapshot="$a" ;;
+            *) [ -n "$snapshot" ] && die "$cmd takes one snapshot id"; snapshot="$a" ;;
         esac
     done
     snapshot="${snapshot:-latest}"
@@ -77,24 +86,23 @@ common=(
     -v "$DATA_DIR/backup-cache:/cache:z"
     --env RESTIC_REPOSITORY --env RESTIC_PASSWORD --env RESTIC_CACHE_DIR
 )
-data_ro=(
-    -v "$DATA_DIR/cln:/data/cln:ro,z"
-    -v "$DATA_DIR/monero-wallet-rpc:/data/monero-wallet-rpc:ro,z"
-    -v "$DATA_DIR/tor:/data/tor:ro,z"
-    -v "$DATA_DIR/config:/data/config:ro,z"
-    -v "$DATA_DIR/npm:/data/npm:ro,z"
-    -v "$DATA_DIR/audit:/data/audit:ro,z"
-    -v "$DATA_DIR/uptime-kuma:/data/uptime-kuma:ro,z"
-)
-data_rw=(
-    -v "$DATA_DIR/cln:/data/cln:z"
-    -v "$DATA_DIR/monero-wallet-rpc:/data/monero-wallet-rpc:z"
-    -v "$DATA_DIR/tor:/data/tor:z"
-    -v "$DATA_DIR/config:/data/config:z"
-    -v "$DATA_DIR/npm:/data/npm:z"
-    -v "$DATA_DIR/audit:/data/audit:z"
-    -v "$DATA_DIR/uptime-kuma:/data/uptime-kuma:z"
-)
+# The backup set, derived from BACKUP_PATHS in stack.conf -- the same
+# declaration deploy/install.sh renders into deploy/backup.container's Volume=
+# lines and Exec=. Nothing below repeats the list: a directory added there is
+# mounted, backed up, created before a restore and named in the prompt
+# automatically.
+#
+# The mount paths mirror $DATA_DIR (/data/<name>), which is what lets `restore
+# --target /` land the contents back in the data dir. `:z` (shared) because
+# lightningd, nginx-proxy-manager and tor mount some of these directories too.
+data_ro=()
+data_rw=()
+backup_paths=()
+for p in "${BACKUP_PATHS[@]}"; do
+    data_ro+=(-v "$DATA_DIR/$p:/data/$p:ro,z")
+    data_rw+=(-v "$DATA_DIR/$p:/data/$p:z")
+    backup_paths+=("/data/$p")
+done
 
 restic() { podman run "${common[@]}" "$RESTIC_IMAGE" "$@"; }
 
@@ -102,24 +110,47 @@ restic() { podman run "${common[@]}" "$RESTIC_IMAGE" "$@"; }
 # (:z) podman statfs's the source and fails rather than creating it. A restore
 # is exactly the case where they are missing, so create them.
 ensure_mount_dirs() {
-    mkdir -p "$STACK_BACKUP_DIR" "$DATA_DIR/backup-cache" \
-        "$DATA_DIR/cln" "$DATA_DIR/monero-wallet-rpc" "$DATA_DIR/tor" "$DATA_DIR/config" \
-        "$DATA_DIR/npm" "$DATA_DIR/audit" "$DATA_DIR/uptime-kuma"
+    mkdir -p "$STACK_BACKUP_DIR" "$DATA_DIR/backup-cache"
+    local p
+    for p in "${BACKUP_PATHS[@]}"; do
+        mkdir -p "$DATA_DIR/$p"
+    done
 }
 ensure_mount_dirs
 
-# The exact set the nightly unit copies: identity, wallet, secrets, the Tor onion
-# keys, NPM, the monitor's audit log + spend baselines, and the status page
-# state. The chains and searxng are regenerable and stay out.
-backup_paths=(/data/cln /data/monero-wallet-rpc /data/tor /data/config /data/npm /data/audit /data/uptime-kuma)
+# The same job the nightly unit runs (deploy/backup.container's Exec=), built
+# from the same declaration: the path list and the retention policy are
+# generated, so the two cannot drift.
+job_script=$(
+    printf 'set -e\n'
+    printf 'restic snapshots >/dev/null 2>&1 || restic init\n'
+    printf 'restic backup %s --host stack --tag stack\n' "${backup_paths[*]}"
+    printf 'restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune\n'
+)
 
-# Mirrors the Exec= in deploy/backup.container; keep the two in step.
-read -r -d '' job_script <<'SH' || true
-set -e
-restic snapshots >/dev/null 2>&1 || restic init
-restic backup /data/cln /data/monero-wallet-rpc /data/tor /data/config /data/npm /data/audit /data/uptime-kuma --host stack --tag stack
-restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
-SH
+# The nightly unit gets a fresh pg_dumpall from postgres-dump.service, pulled in
+# by Wants=/After= in deploy/backup.container. A hand run has no such ordering,
+# so it takes the same dump here. Best-effort, exactly like the unit: a Postgres
+# outage must never stop the run that protects the wallet and the CLN identity,
+# and the previous dump is still worth copying.
+refresh_postgres_dump() {
+    local p in_set=0
+    for p in "${BACKUP_PATHS[@]}"; do
+        [ "$p" = postgres-dump ] && in_set=1
+    done
+    [ "$in_set" = 1 ] || return 0
+
+    if ! command -v systemctl >/dev/null 2>&1 \
+        || ! systemctl --user cat postgres-dump.service >/dev/null 2>&1; then
+        warn "postgres-dump.service is not installed (or not reachable); copying $DATA_DIR/postgres-dump as it stands"
+        return 0
+    fi
+    if systemctl --user start postgres-dump.service; then
+        log "took a fresh BoltMesh database dump"
+    else
+        warn "postgres-dump.service failed; copying the previous dump (if any)"
+    fi
+}
 
 case "$cmd" in
     init)
@@ -131,6 +162,11 @@ case "$cmd" in
         # gets `list --json` for the backup-age check (one source of truth for
         # the repository, the password and the mounts).
         restic snapshots --tag stack "$@"
+        ;;
+    ls)
+        # What is actually inside a snapshot: the check that a run really did
+        # hold the database dump and not just the wallet.
+        restic ls "$snapshot"
         ;;
     check)
         restic check
@@ -145,6 +181,7 @@ case "$cmd" in
         restic version
         ;;
     backup)
+        refresh_postgres_dump
         log "backing up ${backup_paths[*]} to $RESTIC_REPOSITORY"
         podman run "${common[@]}" "${data_ro[@]}" \
             --entrypoint /bin/sh "$RESTIC_IMAGE" -c "$job_script"
@@ -153,8 +190,9 @@ case "$cmd" in
     restore)
         if [ "${ASSUME_YES:-0}" != 1 ]; then
             if [ -t 0 ]; then
-                printf 'Restore snapshot "%s" over %s/{cln,monero-wallet-rpc,tor,config,npm,audit,uptime-kuma}?\n' \
-                    "$snapshot" "$DATA_DIR"
+                set_list=$(IFS=,; printf '%s' "${BACKUP_PATHS[*]}")
+                printf 'Restore snapshot "%s" over %s/{%s}?\n' \
+                    "$snapshot" "$DATA_DIR" "$set_list"
                 read -r -p "Type 'yes' to continue: " answer || answer=""
                 [ "$answer" = yes ] || die "aborted"
             else

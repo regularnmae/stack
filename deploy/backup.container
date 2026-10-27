@@ -1,21 +1,24 @@
 # Quadlet unit for the nightly backup: an encrypted, deduplicating restic
 # repository holding everything in $DATA_DIR that cannot be re-downloaded --
 # the CLN identity and channel state, the Monero wallet, every token/secret,
-# the nginx-proxy-manager config and TLS material, and the BoltMesh database.
+# the nginx-proxy-manager config and TLS material, the BoltMesh database, and
+# the status page's own state.
 #
-# The backup set is the irreplaceable state, nothing else: the CLN identity
-# and channel state, the Monero wallet, every token/secret, the Tor onion
-# services' keys (a lost key is a new .onion address), the nginx-proxy-manager
-# config and TLS material, the monitor's audit log and spend tripwire baselines,
-# the BoltMesh database dump, and the status page's own state (uptime-kuma/).
+# The backup set is declared ONCE, as BACKUP_PATHS in stack.conf. deploy/install.sh
+# renders it into the two places below (one Volume= per entry, and the restic path
+# list in Exec=), and scripts/backup.sh derives its own mounts and arguments from
+# the same array -- so adding a directory is a one-line edit in stack.conf, never
+# an edit here. The rationale for each entry (and for what is deliberately absent)
+# lives in that declaration.
 #
 # The BoltMesh database is backed up as a pg_dumpall, not as its raw cluster
 # ($DATA_DIR/postgres): postgres-dump.service runs first (Wants=/After=
 # below) and writes $DATA_DIR/postgres-dump/all.sql, which is what is mounted.
 #
-# The chain data (bitcoin/, monero/) and searxng/ are deliberately NOT backed
-# up: they are huge and regenerable. Only the directories below are mounted, so
-# restic never walks a 600 GB chain.
+# The chain data (bitcoin/, monero/), the Electrum index (fulcrum/), searxng/
+# and the metrics store are deliberately NOT backed up: they are huge and
+# regenerable. Only the directories below are mounted, so restic never walks a
+# 600 GB chain.
 #
 # This file is secret-free on purpose: the repository location and the restic
 # password arrive through backup.env (EnvironmentFile), not as @PLACEHOLDERS@,
@@ -41,20 +44,10 @@ Image=docker.io/restic/restic:latest
 # $DATA_DIR/config/backup/backup.env (mode 600); it is never committed.
 EnvironmentFile=@CONFIG_DIR@/backup/backup.env
 
-# Read-only state, mounted at paths that mirror $DATA_DIR so a restore can
-# target the data dir directly. `:z` (shared) because lightningd and
-# nginx-proxy-manager mount these same directories.
-Volume=@DATA_DIR@/cln:/data/cln:ro,z
-Volume=@DATA_DIR@/monero-wallet-rpc:/data/monero-wallet-rpc:ro,z
-# tor/ is here for the onion services' keys: without them every .onion address
-# the stack publishes changes. (`:z` shared -- tor.container mounts the same
-# directory.)
-Volume=@DATA_DIR@/tor:/data/tor:ro,z
-Volume=@DATA_DIR@/config:/data/config:ro,z
-Volume=@DATA_DIR@/npm:/data/npm:ro,z
-Volume=@DATA_DIR@/audit:/data/audit:ro,z
-Volume=@DATA_DIR@/uptime-kuma:/data/uptime-kuma:ro,z
-Volume=@DATA_DIR@/postgres-dump:/data/postgres-dump:ro,z
+# The backup set (BACKUP_PATHS in stack.conf), read-only, at paths that mirror
+# $DATA_DIR so a restore can target the data dir directly. `:z` (shared) because
+# lightningd, nginx-proxy-manager and tor mount these same directories.
+@BACKUP_VOLUMES@
 
 # The repository (writable) and restic's cache. The image's ENTRYPOINT is
 # /usr/bin/restic, so it is replaced with a shell to allow init-if-missing and
@@ -62,7 +55,7 @@ Volume=@DATA_DIR@/postgres-dump:/data/postgres-dump:ro,z
 Volume=@BACKUP_DIR@:/repo:z
 Volume=@DATA_DIR@/backup-cache:/cache:z
 Entrypoint=/bin/sh
-Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup /data/cln /data/monero-wallet-rpc /data/tor /data/config /data/npm /data/audit /data/uptime-kuma /data/postgres-dump --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
+Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup @BACKUP_PATHS@ --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
 
 [Service]
 Type=oneshot

@@ -38,6 +38,12 @@ STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
 # this default covers a checkout whose stack.conf predates the monitoring block.
 METRICS_RETENTION="${METRICS_RETENTION:-30d}"
 export STACK_BACKUP_DIR
+# The backup set. Not defaulted here: an empty set would render a backup unit
+# that copies nothing, so a stack.conf that lost the declaration is a hard error
+# rather than a silent empty snapshot.
+if [ "${BACKUP_PATHS+x}" != x ] || [ "${#BACKUP_PATHS[@]}" -eq 0 ]; then
+    die "stack.conf must define BACKUP_PATHS (the backup set)"
+fi
 
 # Every unit is rendered: all of them reference either the data dir or the
 # config dir, so none is a plain symlink any more. Pairs are "source:target".
@@ -172,6 +178,30 @@ chown_image_uid() {
 }
 
 esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
+
+# The backup set (BACKUP_PATHS in stack.conf) rendered the two ways
+# deploy/backup.container needs it: one read-only Volume= per entry, and the
+# space-separated path list restic backs up in its Exec=. scripts/backup.sh
+# derives its mounts and arguments from the same array, so the declaration is
+# the only place a directory is added or removed.
+#
+# `:z` (shared), not `:Z`: lightningd, nginx-proxy-manager and tor mount some of
+# these same directories, and two containers cannot share a path one labels
+# private. No escaping here: these go into the unit verbatim, not through sed.
+backup_mounts() {
+    local p
+    for p in "${BACKUP_PATHS[@]}"; do
+        printf 'Volume=%s/%s:/data/%s:ro,z\n' "$DATA_DIR" "$p" "$p"
+    done
+}
+
+backup_restic_paths() {
+    local p out=""
+    for p in "${BACKUP_PATHS[@]}"; do
+        out+="${out:+ }/data/$p"
+    done
+    printf '%s' "$out"
+}
 
 first_nonempty() {
     local v
@@ -1009,12 +1039,13 @@ log "wrote $BOLT_GATEWAY (mode 600)"
 # 7. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
 render_unit() {
-    local src="$1" target="$2" tmp
+    local src="$1" target="$2" tmp vol
     tmp="$(mktemp)"
     sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
         -e "s|@CONFIG_DIR@|$(esc "$CONFIG_DIR")|g" \
         -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
         -e "s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g" \
+        -e "s|@BACKUP_PATHS@|$(esc "$(backup_restic_paths)")|g" \
         -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
         -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
@@ -1022,6 +1053,20 @@ render_unit() {
         -e "s|@MONERO_RPC_LOGIN@|$(esc "$MONERO_RPC_LOGIN")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
         "$src" > "$tmp"
+    # @BACKUP_VOLUMES@ becomes one Volume= line per BACKUP_PATHS entry, which a
+    # sed replacement cannot carry (its value is multi-line and would need the
+    # newlines escaped); substitute the whole line here instead. Only
+    # backup.container carries the token.
+    if grep -qF '@BACKUP_VOLUMES@' "$tmp"; then
+        vol="$(mktemp)"
+        backup_mounts > "$vol"
+        awk -v f="$vol" '
+            index($0, "@BACKUP_VOLUMES@") { while ((getline l < f) > 0) print l; close(f); next }
+            { print }
+        ' "$tmp" > "$tmp.vol"
+        mv -f "$tmp.vol" "$tmp"
+        rm -f "$vol"
+    fi
     [ -L "$target" ] && rm -f "$target"
     install -m 600 "$tmp" "$target"
     rm -f "$tmp"

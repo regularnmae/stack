@@ -5,7 +5,8 @@
 # file is only crash-recoverable, so the backup set holds this SQL instead of
 # $DATA_DIR/postgres. Like the backup job it has no [Install]: backup.service
 # activates it (backup.container Wants=/After= this service, so a failed dump
-# never blocks the restic run).
+# never blocks the restic run). scripts/backup.sh starts the same unit for a
+# hand run, which has no Wants= ordering of its own.
 [Unit]
 Description=BoltMesh database dump (pg_dumpall) for the nightly backup
 After=network-online.target npm-network-network.service postgres.service
