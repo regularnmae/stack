@@ -436,17 +436,6 @@ if command -v podman >/dev/null 2>&1 && ! podman image exists "$KUMA_CTL_IMAGE" 
     fi
 fi
 
-# The socket.io client scripts/kuma-monitors.sh runs (kuma has no REST write
-# API); built the same way, left alone once it exists. The reconcile script is
-# bind-mounted on every run, so a change to kuma-ctl/monitors.mjs does not need
-# a rebuild -- only the pinned node/socket.io-client base does.
-if command -v podman >/dev/null 2>&1 && ! podman image exists "$KUMA_CTL_IMAGE" 2>/dev/null; then
-    if [ -f "$REPO_DIR/kuma-ctl/Containerfile" ]; then
-        log "building $KUMA_CTL_IMAGE"
-        podman build -t "$KUMA_CTL_IMAGE" "$REPO_DIR/kuma-ctl/" >/dev/null
-    fi
-fi
-
 # ---------------------------------------------------------------------------
 # 4. tor image + torrc (+ the onion services)
 # ---------------------------------------------------------------------------
