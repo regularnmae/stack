@@ -15,7 +15,7 @@ jobs:
       # AGENTS.md); bump both together.
       SHELLCHECK_VERSION: v0.11.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # -P SCRIPTDIR makes the `# shellcheck source=…` directives resolve
       # relative to each script, and -S info gates on every finding.
       - name: shellcheck
