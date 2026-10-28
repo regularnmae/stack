@@ -119,7 +119,12 @@ fi
 ln=""
 if ln=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) && [ -n "$ln" ]; then
     emit stack_cln_rpc_up 1
-    emit stack_cln_peers "$(jq -r '.num_peers // 0' <<<"$ln")"
+    # Connected peers, not getinfo's num_peers: that one is documented as "the
+    # total count of peers, connected or with channels", so it stays >= 1 for a
+    # node whose only peer is offline and the series would read as healthy.
+    lpeers=$(podman exec lightningd lightning-cli listpeers 2>/dev/null || echo '{"peers":[]}')
+    emit stack_cln_peers \
+        "$(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null || echo 0)"
     # Present only while the condition holds, so test for the key rather than
     # its value.
     emit stack_cln_bitcoind_sync_warning \
@@ -130,7 +135,7 @@ if ln=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) && [ -n "$ln" 
     pchans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null || echo '{"channels":[]}')
     emit stack_cln_channels_offline \
         "$(jq -r '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' <<<"$pchans" 2>/dev/null || echo 0)"
-    say "lightningd $(jq -r '.num_peers // 0' <<<"$ln") peer(s)"
+    say "lightningd $(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null || echo 0) connected peer(s)"
 else
     emit stack_cln_rpc_up 0
     collector_error lightningd

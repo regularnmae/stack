@@ -172,25 +172,32 @@ lninfo=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) || lninfo=""
 if [ -z "$lninfo" ]; then
     fail "lightningd RPC unreachable"
 else
-    peers=$(printf '%s' "$lninfo" | grep -oE '"num_peers":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
-    if [ "${peers:-0}" = 0 ]; then
-        soft "lightningd has no peers"
-    else
-        ok "lightningd has $peers peer(s)"
-    fi
     if printf '%s' "$lninfo" | grep -qE '"warning_bitcoind_sync"'; then
         fail "lightningd reports warning_bitcoind_sync (its view of bitcoind is stale)"
     fi
-    # CLN's own channels are in listpeerchannels, not listchannels: listchannels
-    # is the gossip table (one entry per direction, for every channel the node
-    # knows) and it carries `active`, the channel_update's enabled bit -- an
-    # operator setting that stays true while the peer is offline. It has no
-    # connectivity field at all, so the old `grep '"connected": false'` here
-    # matched nothing on a node whose peer was down and this check passed every
-    # sweep. listpeerchannels is the node's own view, with peer_connected and a
-    # state; only an operational channel counts (an ONCHAIN one is meant to be
-    # alone).
+    # Peers and channels both come from the node's own view, not from getinfo:
+    # getinfo's num_peers is "the total count of peers, connected or with
+    # channels" (CLN's wording), so it stays >= 1 for a node whose only peer is
+    # offline -- measured live: the peer container was stopped and this still
+    # printed "1 peer(s)". listpeers carries `connected` per peer.
+    #
+    # Channels: listchannels is the gossip table (one entry per direction, for
+    # every channel the node knows) and its `active` is the channel_update's
+    # enabled bit -- an operator setting that stays true while the peer is
+    # offline. It has no connectivity field, so a `grep '"connected": false'`
+    # there matched nothing and the check passed every sweep. listpeerchannels
+    # is the node's own view, with peer_connected and a state; only operational
+    # channels count (an ONCHAIN one is meant to be alone).
     if command -v jq >/dev/null 2>&1; then
+        lpeers=$(podman exec lightningd lightning-cli listpeers 2>/dev/null) || lpeers=""
+        npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
+        if [ -z "$npeers" ]; then
+            soft "could not read lightningd listpeers; skipped the peer check"
+        elif [ "$npeers" = 0 ]; then
+            soft "lightningd has no connected peers"
+        else
+            ok "lightningd has $npeers connected peer(s)"
+        fi
         chans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null) || chans=""
         offline=$(printf '%s' "$chans" | jq -r \
             '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
@@ -203,7 +210,7 @@ else
             ok "no lightning channel with an offline peer"
         fi
     else
-        soft "jq missing; skipped the offline-channel check"
+        soft "jq missing; skipped the lightning peer and channel checks"
     fi
 fi
 

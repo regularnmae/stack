@@ -73,19 +73,23 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   the unit reads "active" and `Restart=always` never fires. So `deploy.sh`
   restarts a still-active but `unhealthy` lightningd, waits for `getwalletinfo`
   before waiting on lightningd, and dumps the log on any timeout.
-- **CLN connection state lives in `listpeerchannels`, not `listchannels`:**
+- **CLN connection state lives in `listpeerchannels` / `listpeers`, not
+  `listchannels` or `getinfo`:**
   `listchannels` is the gossmap (one entry per direction, for every channel the
   node knows) and its only liveness field is `active` — the `channel_update`'s
   enabled bit, an operator setting that stays `true` while the peer is offline.
   It has no `connected` field at all, which is how `scripts/monitor.sh` came to
   `grep '"connected": false'` out of it and report "no offline channels" on a
-  node whose only peer was down. The node's own view (per channel: `state`,
-  `peer_connected`) is `listpeerchannels`; count only `state ==
-  "CHANNELD_NORMAL"`, since an onchain/closing channel is meant to have no peer.
-  `scripts/metrics.sh` emits the same count as `stack_cln_channels_offline`, and
+  node whose only peer was down. `getinfo`'s `num_peers` is no better: CLN
+  documents it as "the total count of peers, connected or with channels", so a
+  node with one offline channel peer still reports 1. The node's own view is
+  `listpeerchannels` (per channel: `state`, `peer_connected` — count only
+  `state == "CHANNELD_NORMAL"`, since an onchain/closing channel is meant to
+  have no peer) and `listpeers` (per peer: `connected`). `scripts/metrics.sh`
+  emits the same numbers as `stack_cln_channels_offline` and `stack_cln_peers`;
   `lightning-cli` run through `podman exec` is not gated by the clnrest rune —
-  if the MCP ever needs this, `listpeerchannels` has to be added to
-  `READ_METHODS` in `deploy/install.sh` too.
+  if the MCP ever needs these, they have to be added to `READ_METHODS` in
+  `deploy/install.sh` too.
 - **Data-dir ownership:** `bitcoind`/`monero-wallet-rpc` run as the image uid
   (host 525287 = in-container 1000) and do **not** re-own their bind mounts, so
   `install.sh` `podman unshare chown -R 1000:1000`s them; `monerod` re-owns its
