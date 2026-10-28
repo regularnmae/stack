@@ -15,7 +15,7 @@ stack runs and one script that fixes a deployment problem.
 
 | Unit | Image | Published on the host | Data |
 | --- | --- | --- | --- |
-| `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — | `$DATA_DIR/bitcoin` |
+| `bitcoind` | `docker.io/lncm/bitcoind:v28.0` | — | `$DATA_DIR/bitcoin` |
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.4` | — | `$DATA_DIR/monero` |
 | `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
 | `btc-explorer` | `localhost/btc-explorer:local` (built from `btc-explorer/Containerfile`) | `127.0.0.1:8108` | — |
