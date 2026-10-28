@@ -124,9 +124,12 @@ if ln=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) && [ -n "$ln" 
     # its value.
     emit stack_cln_bitcoind_sync_warning \
         "$(jq -r 'if has("warning_bitcoind_sync") then 1 else 0 end' <<<"$ln")"
-    chans=$(podman exec lightningd lightning-cli listchannels 2>/dev/null || echo '{"channels":[]}')
+    # The node's own channels, with each peer's connection state: listchannels is
+    # the gossip table and has no connectivity field (see scripts/monitor.sh), so
+    # this reads listpeerchannels and counts only operational ones.
+    pchans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null || echo '{"channels":[]}')
     emit stack_cln_channels_offline \
-        "$(jq -r '[.channels[] | select(.connected == false)] | length' <<<"$chans" 2>/dev/null || echo 0)"
+        "$(jq -r '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' <<<"$pchans" 2>/dev/null || echo 0)"
     say "lightningd $(jq -r '.num_peers // 0' <<<"$ln") peer(s)"
 else
     emit stack_cln_rpc_up 0

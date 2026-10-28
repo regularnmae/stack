@@ -181,12 +181,29 @@ else
     if printf '%s' "$lninfo" | grep -qE '"warning_bitcoind_sync"'; then
         fail "lightningd reports warning_bitcoind_sync (its view of bitcoind is stale)"
     fi
-    chans=$(podman exec lightningd lightning-cli listchannels 2>/dev/null) || chans=""
-    offline=$(printf '%s' "$chans" | grep -oE '"connected":[[:space:]]*false' | grep -c . )
-    if [ "${offline:-0}" -gt 0 ]; then
-        fail "$offline lightning channel(s) are offline"
+    # CLN's own channels are in listpeerchannels, not listchannels: listchannels
+    # is the gossip table (one entry per direction, for every channel the node
+    # knows) and it carries `active`, the channel_update's enabled bit -- an
+    # operator setting that stays true while the peer is offline. It has no
+    # connectivity field at all, so the old `grep '"connected": false'` here
+    # matched nothing on a node whose peer was down and this check passed every
+    # sweep. listpeerchannels is the node's own view, with peer_connected and a
+    # state; only an operational channel counts (an ONCHAIN one is meant to be
+    # alone).
+    if command -v jq >/dev/null 2>&1; then
+        chans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null) || chans=""
+        offline=$(printf '%s' "$chans" | jq -r \
+            '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
+            2>/dev/null) || offline=""
+        if [ -z "$offline" ]; then
+            soft "could not read lightningd listpeerchannels; skipped the offline-channel check"
+        elif [ "$offline" -gt 0 ]; then
+            fail "$offline lightning channel(s) have their peer offline"
+        else
+            ok "no lightning channel with an offline peer"
+        fi
     else
-        ok "no offline lightning channels"
+        soft "jq missing; skipped the offline-channel check"
     fi
 fi
 
