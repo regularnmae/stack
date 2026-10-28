@@ -9,7 +9,7 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=bitcoind
-Image=docker.io/lncm/bitcoind:v27.2
+Image=docker.io/lncm/bitcoind:v28.0
 Network=npm-network.network
 
 # P2P & RPC ports are deliberately NOT published to the host.
