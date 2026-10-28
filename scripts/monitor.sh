@@ -46,7 +46,7 @@ mkdir -p "$AUDIT_DIR"
 MONITOR_ENV="$CONFIG_DIR/monitoring/monitor.env"
 STATE_FILE="$AUDIT_DIR/state"
 AUDIT_LOG="$AUDIT_DIR/audit.log"
-APPRISE_IMAGE="${APPRISE_IMAGE:-docker.io/caronc/apprise:2.0.1}"
+APPRISE_IMAGE="${APPRISE_IMAGE:-docker.io/caronc/apprise:2.0.2}"
 
 # The unit passes these through EnvironmentFile; reading the file here too makes
 # a hand run behave the same. env_value never sources the file.
