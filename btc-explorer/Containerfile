@@ -18,7 +18,7 @@
 # must not be copied into a musl final stage.
 #
 # Build:  podman build -t localhost/btc-explorer:local btc-explorer/
-FROM docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS builder
+FROM docker.io/library/node:26-bookworm-slim@sha256:88e480776c6149ff1d098cd304f44bf18057fb5d284a3329b78162d29821e28c AS builder
 
 ARG BTC_RPC_EXPLORER_COMMIT=26e282a06e87b645c6e0687e2503d26d1e623dea
 
@@ -39,7 +39,7 @@ RUN git init -q /app \
 # public/style, so eslint/sass are not needed.
 RUN npm install --omit=dev && npm cache clean --force
 
-FROM docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
+FROM docker.io/library/node:26-bookworm-slim@sha256:88e480776c6149ff1d098cd304f44bf18057fb5d284a3329b78162d29821e28c
 
 # git is the app's optional version banner (it degrades without it, but this
 # keeps the image honest); curl is the healthcheck's client.

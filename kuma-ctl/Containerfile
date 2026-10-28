@@ -20,7 +20,7 @@
 # No ENTRYPOINT/CMD: scripts/kuma-monitors.sh names its command.
 #
 # Build:  podman build -t localhost/kuma-ctl:local kuma-ctl/
-FROM docker.io/library/node:22-alpine@sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284
+FROM docker.io/library/node:26-alpine@sha256:65fb44a19eb983bc475aebef8ca3416da172e5b7b0e52418cca100997959ca6e
 # A workdir of one's own: npm refuses `npm install <pkg>` without a
 # package.json and misbehaves at / ("Tracker idealTree already exists"), so the
 # dependency lives under its own directory -- inside the image only, the build
