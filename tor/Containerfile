@@ -11,5 +11,5 @@
 # 3.20 reached EOL 2026-04-01; this rides 3.24, supported to 2028-06.
 #
 # Build:  podman build -t localhost/tor:local tor/
-FROM docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN apk add --no-cache tor=0.4.9.14-r0

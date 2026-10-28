@@ -14,7 +14,7 @@
 # tracked by Renovate (dockerfile manager + the custom git-refs manager).
 #
 # Build:  podman build -t localhost/xmr-explorer:local xmr-explorer/
-FROM docker.io/library/golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS builder
+FROM docker.io/library/golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
 
 ARG MONEROBLOCK_COMMIT=7c8172d725390d96b71dddd8f4316a3f275c32d5
 
@@ -31,7 +31,7 @@ RUN git init -q /src \
 RUN go mod tidy \
     && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/moneroblock .
 
-FROM docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 # curl is the unit's healthcheck client; ca-certificates is harmless and keeps
 # an https daemon URL usable if one is ever configured.
