@@ -16,16 +16,16 @@ stack runs and one script that fixes a deployment problem.
 | Unit | Image | Published on the host | Data |
 | --- | --- | --- | --- |
 | `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — | `$DATA_DIR/bitcoin` |
-| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:latest` | — | `$DATA_DIR/monero` |
+| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.3` | — | `$DATA_DIR/monero` |
 | `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
 | `btc-explorer` | `localhost/btc-explorer:local` (built from `btc-explorer/Containerfile`) | `127.0.0.1:8108` | — |
 | `xmr-explorer` | `localhost/xmr-explorer:local` (MoneroBlock, built from `xmr-explorer/Containerfile`) | `127.0.0.1:8109` | — |
-| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
-| `lightningd` | `docker.io/elementsproject/lightningd:latest` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
+| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.1` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
+| `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
-| `valkey` | `docker.io/valkey/valkey:9-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:latest` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
-| `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:latest` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
+| `valkey` | `docker.io/valkey/valkey:9.1.2-alpine` | — | — |
+| `searxng` | `docker.io/searxng/searxng:2026.10.15-b00212a83` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
+| `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
 | `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.154.1` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | `127.0.0.1:9100` | — (serves `$DATA_DIR/monitoring/textfile`) |
@@ -44,6 +44,17 @@ the whole chain; `fulcrum` indexes that chain for Bitcoin wallets over the
 Electrum protocol. See [Full nodes and disk](#full-nodes-and-disk) before sizing
 the data disk. The two explorers read those services rather than keeping a
 chain of their own — see [Block explorers](#block-explorers).
+
+**Every pulled image is pinned to a tag, and Renovate watches the tags** —
+`postgres` and `restic` are the two deliberate exceptions, hand-pinned and
+untracked. Merging one of those PRs changes nothing on the host: a unit keeps
+running its old image until it is restarted, and
+`./deploy.sh --only <service>` is what pulls the new tag (podman only pulls a
+*missing* image, so nothing upgrades on its own — which is also why `:latest`
+used to mean "whatever a fresh host got that day"). Back up before `lightningd`
+(CLN's wallet migrations are forward-only), move `monerod` and
+`monero-wallet-rpc` together (an upgrade is driven by a hardfork height, and a
+wallet older than its daemon is unsupported), then run `./verify.sh`.
 
 **Only `nginx-proxy-manager` is reachable from the LAN over HTTP.** It runs on
 the **host network** (`Network=host`), so its own nginx binds `80`/`443`/`81` in

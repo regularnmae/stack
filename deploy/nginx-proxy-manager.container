@@ -39,7 +39,7 @@ After=network-online.target
 
 [Container]
 ContainerName=nginx-proxy-manager
-Image=docker.io/jc21/nginx-proxy-manager:latest
+Image=docker.io/jc21/nginx-proxy-manager:2.16.0
 Network=host
 
 # Volume mounts with :z (shared) for SELinux labelling. Shared, not private

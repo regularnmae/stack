@@ -15,7 +15,7 @@ Requires=monerod.service
 
 [Container]
 ContainerName=monero-wallet-rpc
-Image=ghcr.io/sethforprivacy/simple-monero-wallet-rpc:latest
+Image=ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.1
 Network=npm-network.network
 
 # The wallet RPC can open wallets and move funds, so it is

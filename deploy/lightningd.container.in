@@ -13,7 +13,7 @@ Requires=bitcoind.service tor.service
 
 [Container]
 ContainerName=lightningd
-Image=docker.io/elementsproject/lightningd:latest
+Image=docker.io/elementsproject/lightningd:v26.06.9
 Network=npm-network.network
 
 # CLNRest and Lightning P2P ports.

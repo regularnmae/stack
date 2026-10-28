@@ -7,7 +7,7 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=valkey
-Image=docker.io/valkey/valkey:9-alpine
+Image=docker.io/valkey/valkey:9.1.2-alpine
 Network=npm-network.network
 
 # No PublishPort: only SearXNG reaches it, as valkey:6379 on

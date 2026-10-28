@@ -9,9 +9,63 @@
     {
       "matchManagers": ["pep621"],
       "groupName": "python dependencies"
+    },
+    {
+      "description": "hand-pinned on purpose: the Postgres cluster and the backup tool are upgraded by the operator, not by a PR (renovate.json's own rule, documented in AGENTS.md)",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "docker.io/library/postgres",
+        "docker.io/restic/restic"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "monerod and its wallet-rpc must land together: a wallet older than the daemon it talks to is unsupported, and a Monero upgrade is a hardfork deadline, not a convenience",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "ghcr.io/sethforprivacy/simple-monerod",
+        "ghcr.io/sethforprivacy/simple-monero-wallet-rpc"
+      ],
+      "groupName": "monero daemons"
+    },
+    {
+      "description": "SearXNG tags are <date>-<commit>, so every build has a different suffix and docker versioning calls them incompatible; loose compares the date part, which keeps it at one rolling PR a week instead of never",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["docker.io/searxng/searxng"],
+      "versioning": "loose",
+      "schedule": ["on monday"]
+    },
+    {
+      "description": "the daemons that hold consensus state or terminate TLS are never automerged, and the PR body says what applying it actually costs",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "docker.io/lncm/bitcoind",
+        "ghcr.io/sethforprivacy/simple-monerod",
+        "ghcr.io/sethforprivacy/simple-monero-wallet-rpc",
+        "docker.io/elementsproject/lightningd",
+        "docker.io/jc21/nginx-proxy-manager"
+      ],
+      "automerge": false,
+      "prBodyNotes": [
+        "Merging this changes the tag only: the host keeps running the old image until `./deploy.sh --only <service>` pulls the new one, followed by `./verify.sh`.",
+        "Consensus daemons: read the upstream release notes first. `lightningd` wallet migrations are forward-only, so run `./scripts/backup.sh backup` before deploying it; Monero upgrades are driven by a hardfork height and the daemon and wallet move as a pair."
+      ]
     }
   ],
   "customManagers": [
+    {
+      "customType": "regex",
+      "description": "every third-party Image= line in a Quadlet unit, plus the two image defaults that live in scripts (wallets.sh's MONERO_IMAGE, monitor.sh's APPRISE_IMAGE). Renovate has no Quadlet manager and cannot read a shell default, so both are matched here. One generic matcher rather than one per unit: a new unit cannot then quietly go unwatched, which is exactly how the daemons drifted. Only the docker.io/ghcr.io registries are matched, so the locally built localhost/* and tor:local tags stay invisible, and the two deliberate exceptions (postgres, restic) are switched off in packageRules. The tag must carry a version: the docker versioning cannot bump `latest` (it cannot parse it at all), which is why every unit carries a real tag.",
+      "fileMatch": [
+        "^deploy/[^/]+\\.container(\\.in)?$",
+        "^scripts/(wallets|monitor)\\.sh$"
+      ],
+      "matchStrings": [
+        "(?:^|\\n)Image=(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s]+):(?<currentValue>[^@\\s]+)",
+        "(?:^|\\n)(?:MONERO_IMAGE|APPRISE_IMAGE)=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
+      ],
+      "datasourceTemplate": "docker"
+    },
     {
       "customType": "regex",
       "description": "the shellcheck release CI pins and downloads (SHELLCHECK_VERSION in .github/workflows/ci.yml)",
@@ -19,38 +73,6 @@
       "matchStrings": ["SHELLCHECK_VERSION: (?<currentValue>v[0-9.]+)"],
       "depNameTemplate": "koalaman/shellcheck",
       "datasourceTemplate": "github-releases"
-    },
-    {
-      "customType": "regex",
-      "description": "the Uptime-Kuma image tag in its Quadlet unit (Renovate's managers cover Dockerfile FROM and compose files, not Image= lines; pinned to the v2 major, so only patches/minors within it are bumped)",
-      "fileMatch": ["^deploy/uptime-kuma\\.container$"],
-      "matchStrings": ["Image=docker\\.io/louislam/uptime-kuma:(?<currentValue>[^@\\s]+)"],
-      "datasourceTemplate": "docker",
-      "depNameTemplate": "louislam/uptime-kuma"
-    },
-    {
-      "customType": "regex",
-      "description": "the Fulcrum image tag in its rendered Quadlet unit (same Quadlet gap as uptime-kuma)",
-      "fileMatch": ["^deploy/fulcrum\\.container\\.in$"],
-      "matchStrings": ["Image=docker\\.io/cculianu/fulcrum:(?<currentValue>[^@\\s]+)"],
-      "datasourceTemplate": "docker",
-      "depNameTemplate": "cculianu/fulcrum"
-    },
-    {
-      "customType": "regex",
-      "description": "the VictoriaMetrics image tag in its Quadlet unit (same Quadlet gap as uptime-kuma/fulcrum)",
-      "fileMatch": ["^deploy/victoriametrics\\.container$"],
-      "matchStrings": ["Image=docker\\.io/victoriametrics/victoria-metrics:(?<currentValue>[^@\\s]+)"],
-      "datasourceTemplate": "docker",
-      "depNameTemplate": "victoriametrics/victoria-metrics"
-    },
-    {
-      "customType": "regex",
-      "description": "the node_exporter image tag in its Quadlet unit (same Quadlet gap)",
-      "fileMatch": ["^deploy/node-exporter\\.container$"],
-      "matchStrings": ["Image=docker\\.io/prom/node-exporter:(?<currentValue>[^@\\s]+)"],
-      "datasourceTemplate": "docker",
-      "depNameTemplate": "prom/node-exporter"
     },
     {
       "customType": "regex",

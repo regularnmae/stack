@@ -140,13 +140,33 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   the handler `JSON.stringify`es them itself (`monitors.mjs` carries a
   `rawArray()` helper). The `monitorList` push object is already in the shape
   `editMonitor` reads — spread it and override only declared fields.
-  Renovate is
-  taught about the `louislam/
-  uptime-kuma` image tag by a custom `regex` manager in `renovate.json`
-  (Renovate has no Quadlet manager, and its other `Image=` lines —
-  `postgres:18-alpine`, `restic:latest` — are pinned deliberately, so the
-  manager is scoped to that one file); the `kuma-ctl` Containerfile's node
-  digest comes from the ordinary dockerfile manager.
+  The `kuma-ctl` Containerfile's node digest comes from the ordinary dockerfile
+  manager.
+- **Every pulled image carries a real tag, and one generic Renovate manager
+  covers all of them.** Renovate has no Quadlet manager and cannot read a shell
+  default, so `renovate.json`'s regex manager matches `^Image=` across
+  `deploy/*.container[.in]` **plus** the two image defaults in scripts
+  (`MONERO_IMAGE` in `scripts/wallets.sh`, `APPRISE_IMAGE` in
+  `scripts/monitor.sh`) — one matcher, not one per unit, so a new unit cannot go
+  unwatched. `postgres` and `restic` are the hand-pinned exceptions, disabled by
+  package name. Only `docker.io`/`ghcr.io` are matched, so the `localhost/*`
+  local builds and `tor:local` stay invisible to it. The tag must carry a
+  version: docker versioning returns null for `latest` (so a manager on it would
+  watch nothing) and its `isCompatible()` requires the *same suffix and the same
+  number of version components*, which is why `9-alpine` never became
+  `9.1-alpine` and why searxng's `<date>-<commit>` tags are matched with
+  `versioning: loose` on a weekly schedule. (Same rule, deliberately: the bare
+  `louislam/uptime-kuma:2` never moves either, so that major pin is a choice,
+  not something the manager will fix.) Pinning is not cosmetic: podman only
+  pulls a missing image, so a `:latest` unit silently becomes "whatever a fresh
+  host pulled that day". The Monero pair is grouped (a wallet older than its
+  daemon is unsupported, and an upgrade is a hardfork deadline) and the
+  consensus/TLS daemons carry `prBodyNotes` saying that merging a PR changes
+  nothing until `./deploy.sh --only <svc>`, and that CLN's migrations are
+  forward-only. `scripts/wallets.sh` and `monero-wallet-rpc.container.in` must
+  hold the *same* wallet tag or the wallet this script creates is not the one
+  the unit serves; the same tag also appears in the README's "What runs" table,
+  which is hand-maintained.
 - **Backup is a oneshot Quadlet job plus a plain user timer.** `backup.container`
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
