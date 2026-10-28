@@ -142,15 +142,28 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `editMonitor` reads — spread it and override only declared fields.
   The `kuma-ctl` Containerfile's node digest comes from the ordinary dockerfile
   manager.
-- **Every pulled image carries a real tag, and one generic Renovate manager
-  covers all of them.** Renovate has no Quadlet manager and cannot read a shell
-  default, so `renovate.json`'s regex manager matches `^Image=` across
-  `deploy/*.container[.in]` **plus** the two image defaults in scripts
+- **Every pulled image carries a real tag, and two managers cover them.**
+  Renovate *does* have a Quadlet manager (it did not when this file was first
+  written), and its `managerFilePatterns` are `*.container` / `*.image` /
+  `*.volume` — so it reads the 22 plain units and **cannot see
+  `deploy/*.container.in`**, the three templates `install.sh` renders because
+  they carry secrets. Those three, and the two image defaults that live in shell
   (`MONERO_IMAGE` in `scripts/wallets.sh`, `APPRISE_IMAGE` in
-  `scripts/monitor.sh`) — one matcher, not one per unit, so a new unit cannot go
-  unwatched. `postgres` and `restic` are the hand-pinned exceptions, disabled by
-  package name. Only `docker.io`/`ghcr.io` are matched, so the `localhost/*`
-  local builds and `tor:local` stay invisible to it. The tag must carry a
+  `scripts/monitor.sh` — no manager reads a shell default), are matched by
+  `renovate.json`'s regex manager. Note the two-file overlap: the wallet tag is
+  in both `wallets.sh` and `monero-wallet-rpc.container.in`, and one PR moves
+  both. `postgres` and `restic` are the hand-pinned exceptions, disabled by
+  package name; `localhost/*` (everything built here by `deploy.sh`/`install.sh`)
+  is disabled too, since looking it up only earns a 401. Units stay
+  **tag**-pinned: `pinDigests` is off for the quadlet manager and for the regex
+  manager's docker deps, because kuma's `2` and searxng's date tags move on their
+  own and a digest pin would turn a reviewable version bump into a PR per
+  upstream rebuild. Digests belong in the Containerfiles, where the base image is
+  built once. That `pinDigests: false` for the regex manager is not cosmetic: a
+  regex manager can only *update* a digest, never **add** one, so inheriting
+  `docker:pinDigests` made Renovate try to pin and fail with "Digest is not
+  updated" → "Error updating branch: update failure", which aborted the whole
+  branch — real upgrades included. The tag must carry a
   version: docker versioning returns null for `latest` (so a manager on it would
   watch nothing) and its `isCompatible()` requires the *same suffix and the same
   number of version components*, which is why `9-alpine` never became

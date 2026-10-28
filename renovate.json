@@ -1,18 +1,54 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "docker:pinDigests"],
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests"
+  ],
   "packageRules": [
     {
-      "matchManagers": ["dockerfile"],
+      "matchManagers": [
+        "dockerfile"
+      ],
       "groupName": "container base images"
     },
     {
-      "matchManagers": ["pep621"],
+      "matchManagers": [
+        "pep621"
+      ],
       "groupName": "python dependencies"
     },
     {
+      "description": "the plain Quadlet units are read by Renovate's own quadlet manager. They stay tag-pinned rather than digest-pinned: kuma's `2` and searxng's date tags move on their own, so a digest pin would open a PR on every upstream rebuild and turn the reviewable version bump into noise (docker:pinDigests still applies to the Containerfiles, where the base image is built once)",
+      "matchManagers": [
+        "quadlet"
+      ],
+      "pinDigests": false
+    },
+    {
+      "description": "same for the three rendered templates and the two script defaults: their deps come from the regex manager, which can only rewrite an existing digest, so inheriting docker:pinDigests made Renovate try to *add* one and fail the branch with 'Digest is not updated' / 'update failure' -- aborting that branch's real upgrades with it",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "pinDigests": false
+    },
+    {
+      "description": "localhost/* images are built on this host (deploy.sh or install.sh), not pulled: there is no registry to look them up in, and the attempt only earns 401s in the log",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "localhost/*"
+      ],
+      "enabled": false
+    },
+    {
       "description": "hand-pinned on purpose: the Postgres cluster and the backup tool are upgraded by the operator, not by a PR (renovate.json's own rule, documented in AGENTS.md)",
-      "matchDatasources": ["docker"],
+      "matchDatasources": [
+        "docker"
+      ],
       "matchPackageNames": [
         "docker.io/library/postgres",
         "docker.io/restic/restic"
@@ -21,7 +57,9 @@
     },
     {
       "description": "monerod and its wallet-rpc must land together: a wallet older than the daemon it talks to is unsupported, and a Monero upgrade is a hardfork deadline, not a convenience",
-      "matchDatasources": ["docker"],
+      "matchDatasources": [
+        "docker"
+      ],
       "matchPackageNames": [
         "ghcr.io/sethforprivacy/simple-monerod",
         "ghcr.io/sethforprivacy/simple-monero-wallet-rpc"
@@ -30,14 +68,22 @@
     },
     {
       "description": "SearXNG tags are <date>-<commit>, so every build has a different suffix and docker versioning calls them incompatible; loose compares the date part, which keeps it at one rolling PR a week instead of never",
-      "matchDatasources": ["docker"],
-      "matchPackageNames": ["docker.io/searxng/searxng"],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/searxng/searxng"
+      ],
       "versioning": "loose",
-      "schedule": ["on monday"]
+      "schedule": [
+        "on monday"
+      ]
     },
     {
       "description": "the daemons that hold consensus state or terminate TLS are never automerged, and the PR body says what applying it actually costs",
-      "matchDatasources": ["docker"],
+      "matchDatasources": [
+        "docker"
+      ],
       "matchPackageNames": [
         "docker.io/lncm/bitcoind",
         "ghcr.io/sethforprivacy/simple-monerod",
@@ -55,44 +101,56 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "every third-party Image= line in a Quadlet unit, plus the two image defaults that live in scripts (wallets.sh's MONERO_IMAGE, monitor.sh's APPRISE_IMAGE). Renovate has no Quadlet manager and cannot read a shell default, so both are matched here. One generic matcher rather than one per unit: a new unit cannot then quietly go unwatched, which is exactly how the daemons drifted. Only the docker.io/ghcr.io registries are matched, so the locally built localhost/* and tor:local tags stay invisible, and the two deliberate exceptions (postgres, restic) are switched off in packageRules. The tag must carry a version: the docker versioning cannot bump `latest` (it cannot parse it at all), which is why every unit carries a real tag.",
-      "fileMatch": [
-        "^deploy/[^/]+\\.container(\\.in)?$",
-        "^scripts/(wallets|monitor)\\.sh$"
-      ],
+      "description": "the three rendered unit *templates* and the two image defaults that live in shell. Renovate's quadlet manager matches only *.container, so deploy/*.container.in (fulcrum, lightningd, monero-wallet-rpc -- the units install.sh renders, because they carry secrets) is invisible to it, and no manager reads a shell default (wallets.sh's MONERO_IMAGE, monitor.sh's APPRISE_IMAGE). These stay tag-pinned too; the packageRules entry below turns digest pinning off for them, because a regex manager can only *update* a digest, never add one.",
       "matchStrings": [
         "(?:^|\\n)Image=(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s]+):(?<currentValue>[^@\\s]+)",
         "(?:^|\\n)(?:MONERO_IMAGE|APPRISE_IMAGE)=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
       ],
-      "datasourceTemplate": "docker"
+      "datasourceTemplate": "docker",
+      "managerFilePatterns": [
+        "/^deploy/[^/]+\\.container\\.in$/",
+        "/^scripts/(wallets|monitor)\\.sh$/"
+      ]
     },
     {
       "customType": "regex",
       "description": "the shellcheck release CI pins and downloads (SHELLCHECK_VERSION in .github/workflows/ci.yml)",
-      "fileMatch": ["^\\.github/workflows/ci\\.yml$"],
-      "matchStrings": ["SHELLCHECK_VERSION: (?<currentValue>v[0-9.]+)"],
+      "matchStrings": [
+        "SHELLCHECK_VERSION: (?<currentValue>v[0-9.]+)"
+      ],
       "depNameTemplate": "koalaman/shellcheck",
-      "datasourceTemplate": "github-releases"
+      "datasourceTemplate": "github-releases",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/ci\\.yml$/"
+      ]
     },
     {
       "customType": "regex",
       "description": "the btc-rpc-explorer master commit pinned in btc-explorer/Containerfile (the published npm 3.4.0 is stale and does not build on Node 22)",
-      "fileMatch": ["^btc-explorer/Containerfile$"],
-      "matchStrings": ["ARG BTC_RPC_EXPLORER_COMMIT=(?<currentDigest>[0-9a-f]{40})"],
+      "matchStrings": [
+        "ARG BTC_RPC_EXPLORER_COMMIT=(?<currentDigest>[0-9a-f]{40})"
+      ],
       "currentValueTemplate": "master",
       "datasourceTemplate": "git-refs",
       "depNameTemplate": "btc-rpc-explorer",
-      "packageNameTemplate": "https://github.com/janoside/btc-rpc-explorer"
+      "packageNameTemplate": "https://github.com/janoside/btc-rpc-explorer",
+      "managerFilePatterns": [
+        "/^btc-explorer/Containerfile$/"
+      ]
     },
     {
       "customType": "regex",
       "description": "the MoneroBlock release commit pinned in xmr-explorer/Containerfile (the project's last tag is v0.1.2; current main is the same commit)",
-      "fileMatch": ["^xmr-explorer/Containerfile$"],
-      "matchStrings": ["ARG MONEROBLOCK_COMMIT=(?<currentDigest>[0-9a-f]{40})"],
+      "matchStrings": [
+        "ARG MONEROBLOCK_COMMIT=(?<currentDigest>[0-9a-f]{40})"
+      ],
       "currentValueTemplate": "main",
       "datasourceTemplate": "git-refs",
       "depNameTemplate": "MoneroBlock",
-      "packageNameTemplate": "https://github.com/duggavo/MoneroBlock"
+      "packageNameTemplate": "https://github.com/duggavo/MoneroBlock",
+      "managerFilePatterns": [
+        "/^xmr-explorer/Containerfile$/"
+      ]
     }
   ],
   "lockFileMaintenance": {
