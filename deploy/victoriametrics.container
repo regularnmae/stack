@@ -19,7 +19,7 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=victoriametrics
-Image=docker.io/victoriametrics/victoria-metrics:v1.154.1
+Image=docker.io/victoriametrics/victoria-metrics:v1.155.0
 Network=npm-network.network
 
 # Loopback only, and deliberately NOT behind nginx-proxy-manager: vmui has no
