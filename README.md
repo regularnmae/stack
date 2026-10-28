@@ -16,11 +16,11 @@ stack runs and one script that fixes a deployment problem.
 | Unit | Image | Published on the host | Data |
 | --- | --- | --- | --- |
 | `bitcoind` | `docker.io/lncm/bitcoind:v27.2` | — | `$DATA_DIR/bitcoin` |
-| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.3` | — | `$DATA_DIR/monero` |
+| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.4` | — | `$DATA_DIR/monero` |
 | `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
 | `btc-explorer` | `localhost/btc-explorer:local` (built from `btc-explorer/Containerfile`) | `127.0.0.1:8108` | — |
 | `xmr-explorer` | `localhost/xmr-explorer:local` (MoneroBlock, built from `xmr-explorer/Containerfile`) | `127.0.0.1:8109` | — |
-| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.1` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
+| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.4` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
 | `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9.1.2-alpine` | — | — |

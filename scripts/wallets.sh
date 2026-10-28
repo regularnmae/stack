@@ -29,7 +29,7 @@ CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
 # Must stay the same tag as monero-wallet-rpc.container.in: the wallet this
 # script creates is served by that unit. Renovate updates both in one PR.
-MONERO_IMAGE="ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.1"
+MONERO_IMAGE="ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.4"
 MONERO_WALLET="mainnet"
 SETUP_NAME="monero-wallet-setup"
 SETUP_PORT=18099
