@@ -337,9 +337,17 @@ with `prune=0` and `monerod` runs without `--prune-blockchain`. Both store and
 validate the entire chain, which dominates the data dir — roughly 800 GB for
 Bitcoin and 250 GB for Monero as of late 2026, both growing. Fulcrum's Electrum
 index adds roughly 100–135 GB and ~3–4 GB of RAM (`--db_mem 3072` caps its
-RocksDB cache; a rebuild is compaction-bound below that). Budget a 2 TB data disk. The chains and the index are excluded
-from the backup set for exactly this reason: they are large and re-downloadable,
-not irreplaceable state.
+RocksDB cache; a rebuild is compaction-bound below that). Budget a 2 TB data
+disk. The chains and the index are excluded from the backup set for exactly this
+reason: they are large and re-downloadable, not irreplaceable state.
+
+The data dir sits on a rotational disk in this layout, which is fine for
+serving but not for building: a Fulcrum index that has to be rebuilt from
+block 0 runs at roughly 40 blocks/min there (~10 days for the chain as of late
+2026, and slower at higher heights), and it serves no wallets until it
+finishes. If that is too slow for you, give `$DATA_DIR/fulcrum` a separate
+SSD before starting the rebuild — the HDD is a deliberate choice, not an
+oversight, so don't wait for a resync to finish and then move it.
 
 #### Converting a pruned host
 

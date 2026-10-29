@@ -224,7 +224,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   middle; check `free -h` during a resync before going to RocksDB's default
   4096. A resync also loses the DB's undo info, which Fulcrum warns about at
   startup ("presume the DB is consistent") — harmless, but it means the next
-  restart cannot undo a block. Do not add its
+  restart cannot undo a block. `$DATA_DIR` is a **rotational** disk in this
+  layout (`/dev/sda1`, `ROTA=1`, ~93 MB/s sequential), which is what makes a
+  rebuild weeks rather than hours: ~40 blocks/min at height 379k, measured
+  2026-10-29. That is accepted — the index stays on the HDD, there is no second
+  SSD — so a slow resync is not a fault to chase; `--db_mem` is the only knob
+  that moved it (+30%) and 2.1.4 exposes no fast-sync or history cap to shrink
+  the work. Do not add its
   ports to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
   and keep `50001/50002` in `FIREWALL_PORTS` if they move.
   Its `HealthCmd` is `grep -qx Fulcrum /proc/1/comm` on purpose — podman's
