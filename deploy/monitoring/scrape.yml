@@ -15,9 +15,20 @@ global:
 scrape_configs:
   # The host: disk space, inodes, I/O saturation, memory, load -- plus every
   # stack_* series from the textfile collector.
+  #
+  # node-exporter runs on the host network (deploy/node-exporter.container for
+  # why the wildcard bind is required, not a loopback or PublishPort); the
+  # store reaches it here. The relabel pins `instance` back to the old dial
+  # address "node-exporter:9100" so the host-filesystem/CPU/memory history does
+  # not split into a new instance when this deployed; the netdev and netstat
+  # series change meaning anyway -- until then they reported the exporter's
+  # own container netns (its veth eth0 + lo), never the host's NIC.
   - job_name: node
     static_configs:
-      - targets: ["node-exporter:9100"]
+      - targets: ["host.containers.internal:9100"]
+    relabel_configs:
+      - target_label: instance
+        replacement: "node-exporter:9100"
 
   # The store's own counters, so a failing scrape or a filling data dir shows up
   # next to the data instead of only in vmui's status block.

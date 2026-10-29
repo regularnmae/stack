@@ -345,6 +345,20 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `node-exporter` (host `/proc`, `/sys`, `/` read-only; `SecurityLabelDisable=true`
   because a container domain may not read the host's labels and relabelling `/`
   is not an option) + `scripts/metrics.sh` on `metrics.timer` every minute.
+  node-exporter runs on the **host network**, bound to the wildcard
+  (`--web.listen-address=:9100`, not a PublishPort): `/proc/net/*` is
+  scoped to the netns present at read time, so a containered exporter's netdev
+  and netstat collectors only ever reported its own `eth0`/`lo` — the host's NIC
+  (`enp8s0`) never reached the store. The wildcard bind is measured fact, not
+  taste: rootless podman keeps the npm-network bridge and its `10.89.0.1`
+  gateway inside the userns, so that address does not exist in the host netns
+  to bind, and pasta delivers a container's `host.containers.internal` dial
+  into the host netns but **not** onto host loopback — only a wildcard bind
+  catches it. The LAN exposure is closed by the firewall (9100 is not in
+  `FIREWALL_PORTS`); VM scrapes it as `host.containers.internal:9100`, and its
+  `instance` label is pinned to `node-exporter:9100` in `scrape.yml` so
+  host-filesystem/CPU history doesn't split at that deploy. The npm-network
+  `After=/Requires=` stays: it keeps the network up ahead of the scrape path.
   `monitor.sh` never queries the store — that is what keeps a wedged or deleted
   VM from silencing an alert — and `vmui` gets **no** NPM host: it has no auth
   of its own, so the store stays loopback-only (SSH tunnel) and nothing is added

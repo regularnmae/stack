@@ -504,8 +504,10 @@ fi
 
 # /metrics is what the scrape reads, and it carries the textfile collector --
 # asking for the stack's own series proves the whole path (writer, permissions,
-# exporter), not just that the exporter is listening.
-ne_metrics=$(net_curl -s -m 10 http://node-exporter:9100/metrics 2>/dev/null) || ne_metrics=""
+# exporter), not just that the exporter is listening. node-exporter runs on the
+# host network and is bound to npm-network's gateway IP, so this side reaches it
+# as host.containers.internal -- never by the (no longer a peer) container name.
+ne_metrics=$(net_curl -s -m 10 http://host.containers.internal:9100/metrics 2>/dev/null) || ne_metrics=""
 if [ -n "$ne_metrics" ]; then
     pass "node-exporter /metrics answers"
     # Here-strings, not `printf | grep -q`: this body is >64KB, so a match early

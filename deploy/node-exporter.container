@@ -17,11 +17,26 @@ Requires=npm-network-network.service
 [Container]
 ContainerName=node-exporter
 Image=docker.io/prom/node-exporter:v1.12.1
-Network=npm-network.network
+Network=host
 
-# Loopback only, scraped by victoriametrics over npm-network. Same reasoning as
-# the metrics store: no public host, nothing added to the firewall.
-PublishPort=127.0.0.1:9100:9100
+# On the host network, and NOT a container on npm-network with a PublishPort.
+# The netdev and netstat collectors read /proc/net, whose entries are scoped to
+# the network namespace present at read time: through this container's own
+# /proc mount they only ever exposed the container's veth (eth0) and lo -- the
+# host's NIC (enp8s0) was invisible, so the store had no history of its
+# bandwidth at all. Host network is the standard topology for that (NPM's unit
+# is the repo precedent), and keeps this the one place the TCP-retrans and
+# listen-drop counters are host-real.
+#
+# The listener binds the wildcard, and 127.0.0.1 will NOT do: rootless podman
+# keeps the npm-network bridge and its 10.89.0.1 gateway inside the userns, so
+# no gateway address exists in the host namespace to bind (measured, not
+# guessed), and pasta delivers a container's `host.containers.internal` dial
+# into the host namespace but not onto host loopback -- only a wildcard bind
+# catches it. The LAN exposure that wildcard implies is closed by the firewall:
+# 9100 is not in FIREWALL_PORTS, and a container dialing the host's LAN address
+# is refused too (verified through netcheck). victoriametrics (on npm-network)
+# scrapes it as host.containers.internal:9100.
 
 # Read-only host mounts. /proc and /sys carry the kernel counters;
 # --path.rootfs makes the filesystem collectors stat the real mountpoints, which
@@ -48,11 +63,11 @@ SecurityLabelDisable=true
 # failure mode (README: "Monitoring and metrics").
 Volume=@DATA_DIR@/monitoring/textfile:/textfile:z
 
-Exec=--path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host --collector.textfile.directory=/textfile
+Exec=--web.listen-address=:9100 --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host --collector.textfile.directory=/textfile
 
 # The image ships busybox wget (verified) and runs as nobody: scraping its own
 # /metrics proves the listener, and a truncated body would fail the fetch.
-HealthCmd=wget -q -O /dev/null http://127.0.0.1:9100/metrics
+HealthCmd=wget -q -O /dev/null http://0.0.0.0:9100/metrics
 HealthInterval=60s
 HealthStartPeriod=15s
 HealthRetries=3
