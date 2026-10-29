@@ -9,7 +9,7 @@ Requires=npm-network-network.service valkey.service
 
 [Container]
 ContainerName=searxng
-Image=docker.io/searxng/searxng:2026.10.28-c360868e5
+Image=docker.io/searxng/searxng:2026.10.29-cff884f98
 Network=npm-network.network
 
 # Loopback only: nginx-proxy-manager runs on the host network, so host 8080 is
