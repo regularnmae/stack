@@ -197,9 +197,12 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   Containerfile's and not the directory's. `verify.sh`'s "Local images" section
   runs the same comparison, so a bump merged and never deployed shows up without
   a deploy. Three consequences: tor is the only long-lived container among the
-  five, so `unit_digest` hashes its image label as `tor.image` to restart it
-  (netcheck and kuma-ctl are throwaway runs and pick the new image up by
-  themselves); a failed rebuild is fatal only when the image is *missing* —
+  five, and a rebuilt image changes no rendered unit, so `start_infra` calls
+  `refresh_image_unit tor "$TOR_IMAGE"` — it compares the container's `.Image`
+  id with the image on disk and restarts when they differ, which also covers a
+  bare `./deploy/install.sh` run (netcheck and kuma-ctl are throwaway runs and
+  pick the new image up by themselves); a failed rebuild is fatal only when the
+  image is *missing* —
   for a stale one it warns and keeps the bits that work, because a helper image
   must not take down an install; and the apk pins these images used to carry
   (`curl=8.22.0-r0`, `tor=0.4.9.14-r0`) had rotted, since Alpine keeps only the

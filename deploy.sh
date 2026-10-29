@@ -188,17 +188,6 @@ unit_digest() {
     if [ -s "$DATA_DIR/tor/torrc" ]; then
         sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 " tor.unit" }'
     fi
-    # tor is also the one long-running container whose image install.sh rebuilds
-    # (a base-image bump, netcheck and kuma-ctl are throwaway runs and pick the
-    # new image up by themselves). A rebuilt image changes no rendered unit, so
-    # without this the container would keep the old bits while verify.sh's label
-    # check reports the image as current -- a false green. Same pseudo-name
-    # trick as torrc, so a rebuilt image restarts exactly tor.
-    if podman image exists "$TOR_IMAGE" 2>/dev/null; then
-        printf '%s tor.image\n' \
-            "$(podman image inspect --format '{{index .Labels "org.stack.inputs"}}' \
-                "$TOR_IMAGE" 2>/dev/null || true)"
-    fi
 }
 
 # .container only, never *.network: a network cannot be restarted under the
@@ -239,6 +228,27 @@ start_unit() { log "starting $1.service"; run systemctl --user start "$1.service
 # `start` is a no-op on an already-active unit, so a redeploy that rebuilt the
 # image would keep running the old container. Redeploys restart instead.
 restart_unit() { log "restarting $1.service"; run systemctl --user restart "$1.service"; }
+
+# A locally-built image can be rebuilt while its unit stays identical: that is
+# the whole point of install.sh's Containerfile label, and a bare
+# ./deploy/install.sh leaves the old container behind with no unit digest to
+# notice. So compare what the container is actually running with the image on
+# disk and restart when they differ -- `start` alone is a no-op on an active
+# unit, which is what would otherwise keep the old bits forever.
+refresh_image_unit() { # container image -> restart when the container is older
+    local name="$1" image="$2" running current
+    [ "$DRY_RUN" = 0 ] || return 0
+    podman container exists "$name" 2>/dev/null || return 0
+    systemctl --user is-active --quiet "$name.service" 2>/dev/null || return 0
+    running=$(podman inspect "$name" --format '{{.Image}}' 2>/dev/null || true)
+    current=$(podman image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)
+    if [ -z "$running" ] || [ -z "$current" ] || [ "$running" = "$current" ]; then
+        return 0
+    fi
+    log "$name is running an older $image; restarting it"
+    restart_unit "$name"
+    wait_healthy "$name" "$APP_HEALTH_WAIT" || true
+}
 
 wait_healthy() { # container timeout
     local c="$1" t="${2:-180}" deadline st=""
@@ -337,7 +347,10 @@ start_infra() {
     # instead of beginning mid-way through it.
     start_unit node-exporter
     start_unit victoriametrics
-    # tor first: lightningd requires it and addresses it by its pinned IP.
+    # tor first: lightningd requires it and addresses it by its pinned IP. Its
+    # image is the one install.sh rebuilds in place, so bounce it first when the
+    # container predates the image (see refresh_image_unit).
+    refresh_image_unit tor "$TOR_IMAGE"
     start_unit tor
     if [ "$SKIP_DAEMONS" = 0 ]; then
         start_unit bitcoind
