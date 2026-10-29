@@ -147,12 +147,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   written), and its `managerFilePatterns` are `*.container` / `*.image` /
   `*.volume` — so it reads the 22 plain units and **cannot see
   `deploy/*.container.in`**, the three templates `install.sh` renders because
-  they carry secrets. Those three, and the two image defaults that live in shell
+  they carry secrets. Those three, and the three image defaults that live in shell
   (`MONERO_IMAGE` in `scripts/wallets.sh`, `APPRISE_IMAGE` in
-  `scripts/monitor.sh` — no manager reads a shell default), are matched by
+  `scripts/monitor.sh`, `RESTIC_IMAGE` in `scripts/backup.sh` — no manager reads
+  a shell default), are matched by
   `renovate.json`'s regex manager. Note the two-file overlap: the wallet tag is
   in both `wallets.sh` and `monero-wallet-rpc.container.in`, and one PR moves
-  both. `postgres` and `restic` are the hand-pinned exceptions, disabled by
+  both. `postgres` is the hand-pinned exception, disabled by
   package name; `localhost/*` (everything built here by `deploy.sh`/`install.sh`)
   is disabled too, since looking it up only earns a 401. Units stay
   **tag**-pinned: `pinDigests` is off for the quadlet manager and for the regex

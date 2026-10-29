@@ -46,12 +46,13 @@ the data disk. The two explorers read those services rather than keeping a
 chain of their own — see [Block explorers](#block-explorers).
 
 **Every pulled image is pinned to a tag, and Renovate watches the tags** —
-`postgres` and `restic` are the two deliberate exceptions, hand-pinned and
-untracked. Merging one of those PRs changes nothing on the host: a unit keeps
+`postgres` is the one deliberate exception, hand-pinned and untracked. Merging
+one of those PRs changes nothing on the host: a unit keeps
 running its old image until it is restarted, and
 `./deploy.sh --only <service>` is what pulls the new tag (podman only pulls a
 *missing* image, so nothing upgrades on its own — which is also why `:latest`
-used to mean "whatever a fresh host got that day"). Back up before `lightningd`
+used to mean "whatever a fresh host got that day", and why the backup job, which
+runs on a timer rather than a restart, picks up a merged restic bump by itself). Back up before `lightningd`
 (CLN's wallet migrations are forward-only), move `monerod` and
 `monero-wallet-rpc` together (an upgrade is driven by a hardfork height, and a
 wallet older than its daemon is unsupported), then run `./verify.sh`.

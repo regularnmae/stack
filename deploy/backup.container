@@ -38,7 +38,7 @@ After=postgres-dump.service
 
 [Container]
 ContainerName=stack-backup
-Image=docker.io/restic/restic:latest
+Image=docker.io/restic/restic:0.19.1
 
 # The repo location + password. deploy/install.sh writes this to
 # $DATA_DIR/config/backup/backup.env (mode 600); it is never committed.

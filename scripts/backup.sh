@@ -36,7 +36,7 @@ if [ "${BACKUP_PATHS+x}" != x ] || [ "${#BACKUP_PATHS[@]}" -eq 0 ]; then
     die "stack.conf must define BACKUP_PATHS (the backup set)"
 fi
 
-RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:latest}"
+RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
 STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
 RETENTION=(--keep-daily 7 --keep-weekly 4 --keep-monthly 6)
 

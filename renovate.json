@@ -45,15 +45,27 @@
       "enabled": false
     },
     {
-      "description": "hand-pinned on purpose: the Postgres cluster and the backup tool are upgraded by the operator, not by a PR (renovate.json's own rule, documented in AGENTS.md)",
+      "description": "hand-pinned on purpose: the Postgres cluster is upgraded by the operator, not by a PR (renovate.json's own rule, documented in AGENTS.md)",
       "matchDatasources": [
         "docker"
       ],
       "matchPackageNames": [
-        "docker.io/library/postgres",
-        "docker.io/restic/restic"
+        "docker.io/library/postgres"
       ],
       "enabled": false
+    },
+    {
+      "description": "the backup tool updates like no other unit: backup.container is a oneshot on a nightly timer, so a changed tag IS a missing image and podman pulls it on the next run -- no ./deploy.sh --only backup, unlike every other pinned unit",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/restic/restic"
+      ],
+      "automerge": false,
+      "prBodyNotes": [
+        "Merging this needs no deploy step: the next `backup.timer` run sees a missing image and pulls it. Afterwards run `./scripts/backup.sh list` and `./scripts/backup.sh check` to confirm the new binary reads the existing repository (it is format v2, so the tag must never go below 0.17)."
+      ]
     },
     {
       "description": "monerod and its wallet-rpc must land together: a wallet older than the daemon it talks to is unsupported, and a Monero upgrade is a hardfork deadline, not a convenience",
@@ -101,15 +113,15 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "the three rendered unit *templates* and the two image defaults that live in shell. Renovate's quadlet manager matches only *.container, so deploy/*.container.in (fulcrum, lightningd, monero-wallet-rpc -- the units install.sh renders, because they carry secrets) is invisible to it, and no manager reads a shell default (wallets.sh's MONERO_IMAGE, monitor.sh's APPRISE_IMAGE). These stay tag-pinned too; the packageRules entry below turns digest pinning off for them, because a regex manager can only *update* a digest, never add one.",
+      "description": "the three rendered unit *templates* and the three image defaults that live in shell. Renovate's quadlet manager matches only *.container, so deploy/*.container.in (fulcrum, lightningd, monero-wallet-rpc -- the units install.sh renders, because they carry secrets) is invisible to it, and no manager reads a shell default (wallets.sh's MONERO_IMAGE, monitor.sh's APPRISE_IMAGE, backup.sh's RESTIC_IMAGE). These stay tag-pinned too; the packageRules entry below turns digest pinning off for them, because a regex manager can only *update* a digest, never add one.",
       "matchStrings": [
         "(?:^|\\n)Image=(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s]+):(?<currentValue>[^@\\s]+)",
-        "(?:^|\\n)(?:MONERO_IMAGE|APPRISE_IMAGE)=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
+        "(?:^|\\n)(?:MONERO_IMAGE|APPRISE_IMAGE|RESTIC_IMAGE)=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
       ],
       "datasourceTemplate": "docker",
       "managerFilePatterns": [
         "/^deploy/[^/]+\\.container\\.in$/",
-        "/^scripts/(wallets|monitor)\\.sh$/"
+        "/^scripts/(wallets|monitor|backup)\\.sh$/"
       ]
     },
     {
