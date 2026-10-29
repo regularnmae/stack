@@ -317,9 +317,14 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   hash-baselines both `spend.env`, both token files and `node.env` (the spend
   rune), and diffs outgoing `listpays`/`get_transfers` against a baseline.
 - **The monitor is a read-only host script, not a container:** `monitor.timer` (a
-  plain user unit) runs `scripts/monitor.sh` with
-  `EnvironmentFile=@CONFIG_DIR@/monitoring/monitor.env`; it is alert-only (never
-  restarts a unit) and silent until `monitor.env` is filled in. Apprise traps:
+  plain user unit) only schedules `monitor.service` (`Unit=monitor.service`); the
+  environment lives on the *service*, which runs `scripts/monitor.sh --quiet`
+  with `EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env` — the leading `-`
+  makes it optional, so an unfilled `monitor.env` still runs the sweep,
+  journal-only. `scripts/monitor.sh` reads the same file through `env_value`
+  (environment first, then the file, never sourcing it), so a hand run alerts on
+  exactly what the timer would. It is alert-only (never restarts a unit) and
+  silent until `monitor.env` is filled in. Apprise traps:
   the `caronc/apprise` image has no ENTRYPOINT, so the CLI must be named
   (`podman run --rm caronc/apprise apprise -t TITLE -b BODY URL...`), and a
   `mailto://` URL on 587 needs `?mode=starttls` (`465` → `?mode=ssl`) or it
