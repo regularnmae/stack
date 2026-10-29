@@ -68,6 +68,12 @@ MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONIT
 MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
 MONITOR_METRICS_MAX_AGE_S="${MONITOR_METRICS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_METRICS_MAX_AGE_S)}"
 MONITOR_FULCRUM_LAG_BLOCKS="${MONITOR_FULCRUM_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MONITOR_FULCRUM_LAG_BLOCKS)}"
+# The chain section (below) reads these before the host checks define theirs, so
+# they resolve here too, next to THRESH_FULCRUM_LAG which unblocks that order:
+# bitcoind's peer floor and mempool cap, and monerod's lag behind its target.
+MONITOR_BTC_MIN_PEERS="${MONITOR_BTC_MIN_PEERS:-$(env_value "$MONITOR_ENV" MONITOR_BTC_MIN_PEERS)}"
+MONITOR_MEMPOOL_MB="${MONITOR_MEMPOOL_MB:-$(env_value "$MONITOR_ENV" MONITOR_MEMPOOL_MB)}"
+MONITOR_XMR_LAG_BLOCKS="${MONITOR_XMR_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MONITOR_XMR_LAG_BLOCKS)}"
 
 # Defaults live here, not only in monitor.env, so an older env file (one written
 # before these checks existed) still monitors. The helper and the one threshold
@@ -83,6 +89,18 @@ num_or() { # value default
 # "stopped following" threshold, not a "slightly late" one: 12 blocks is about
 # two hours at 10 minutes a block.
 THRESH_FULCRUM_LAG=$(num_or "${MONITOR_FULCRUM_LAG_BLOCKS:-}" 12)
+# The peer floor is deliberately 1: any peer count below it (i.e. zero) fails,
+# and during IBD zero peers means the download is stalled, not protected --
+# there is no grace here, unlike the height checks.
+THRESH_BTC_PEERS=$(num_or "${MONITOR_BTC_MIN_PEERS:-}" 1)
+# A warn, not a failure: bitcoind's default maxmempool is 300 MB and Core
+# grows the mempool well into a fee storm before it rejects; this is the
+# "look at the fees" signal long before anything else notices.
+THRESH_MEMPOOL_MB=$(num_or "${MONITOR_MEMPOOL_MB:-}" 250)
+# While synchronized, monerod is normally 0-1 blocks from target_height; more
+# means a wedged-but-alive RPC surface serving a stale chain. While not
+# synchronized the grace covers it, like the other chain checks.
+THRESH_XMR_LAG=$(num_or "${MONITOR_XMR_LAG_BLOCKS:-}" 3)
 
 PROBLEMS=()
 WARNS=()
@@ -140,6 +158,31 @@ else
         fail "bitcoind is behind: blocks=$blocks headers=$headers"
     else
         ok "bitcoind at height $blocks"
+    fi
+    # Peers: the freshness check above has a blind spot -- a connected node
+    # whose only peers vanished keeps its height while its sync stalls. The
+    # floor defaults to 1, so any 0-peer read fails ("$THRESH" wording below);
+    # this deliberately looks past IBD, where a stalled download is the same
+    # fault as a stalled tip.
+    json_peers=$(podman exec bitcoind bitcoin-cli getpeerinfo 2>/dev/null) || json_peers=""
+    n_peers=$(printf '%s' "$json_peers" | jq -r 'if type == "array" then length else empty end' 2>/dev/null) || n_peers=""
+    if [ -z "$n_peers" ]; then
+        soft "could not read bitcoind getpeerinfo; skipped the peer check"
+    elif [ "$n_peers" -lt "$THRESH_BTC_PEERS" ]; then
+        fail "bitcoind has $n_peers peer(s) (floor $THRESH_BTC_PEERS): its sync cannot advance without one"
+    else
+        ok "bitcoind has $n_peers peer(s)"
+    fi
+    # The mempool cap: a warn only, since Core fills it well into a fee storm
+    # before rejecting and the right response is "look at the fees", not a page.
+    mp=$(podman exec bitcoind bitcoin-cli getmempoolinfo 2>/dev/null) || mp=""
+    mp_mb=$(printf '%s' "$mp" | jq -r 'if type == "object" then ((.bytes // 0) / 1048576 | floor) else empty end' 2>/dev/null) || mp_mb=""
+    if [ -n "$mp_mb" ]; then
+        if [ "$mp_mb" -ge "$THRESH_MEMPOOL_MB" ]; then
+            soft "bitcoind's mempool holds ${mp_mb} MB (warn threshold ${THRESH_MEMPOOL_MB} MB) -- fee storm or a packed signal"
+        else
+            ok "bitcoind's mempool at ${mp_mb} MB"
+        fi
     fi
 fi
 
@@ -229,6 +272,19 @@ if [ -n "$xmrnode_token" ]; then
         fail "monerod is not synchronized (height ${node_h:-?})"
     else
         ok "monerod height ${node_h:-?} (synchronized=${sync:-?})"
+        # Lag behind the network tip (get_info's target_height minus height).
+        # A synchronized node sitting above the threshold is a fault: the RPC
+        # surface (explorer, wallet-RPC) then answers, but serves a stale
+        # chain. While not synchronized, the grace covers it as usual.
+        target_h=$(printf '%s' "$node_body" | grep -oE '\\?"target_height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
+        if [ -n "$node_h" ] && [ -n "$target_h" ] && [ "$target_h" -ge "$node_h" ]; then
+            xlag=$(( target_h - node_h ))
+            if [ "$sync" = true ] && [ "$xlag" -gt "$THRESH_XMR_LAG" ]; then
+                fail "monerod reports synchronized but is $xlag block(s) behind its target (height $node_h, target $target_h)"
+            else
+                ok "monerod is $xlag block(s) from its target"
+            fi
+        fi
     fi
 else
     soft "no MONERO_MCP_TOKEN; skipped the monerod height check"
@@ -267,6 +323,16 @@ THRESH_BACKUP_H=$(num_or "${MONITOR_BACKUP_MAX_AGE_H:-}" 36)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
 THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
 THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
+# The NIC's errs+drop columns, delta'd between sweeps like the restart counters:
+# a carrier dropping packets is invisible to every chain check (all of them
+# see is a slow sync) and to node-exporter's *counters* until someone looks.
+MONITOR_NET_DROP="${MONITOR_NET_DROP:-$(env_value "$MONITOR_ENV" MONITOR_NET_DROP)}"
+THRESH_NET_DROP=$(num_or "${MONITOR_NET_DROP:-}" 100)
+# The hottest hwmon reading at sweep time; a warn, since this box is headless
+# and a one-off spike (a compile, a busy sweep) is noise, while a climbing
+# trend shows in the graphs node-exporter already exports from the same sysfs.
+MONITOR_TEMP_MAX="${MONITOR_TEMP_MAX:-$(env_value "$MONITOR_ENV" MONITOR_TEMP_MAX)}"
+THRESH_TEMP_C=$(num_or "${MONITOR_TEMP_MAX:-}" 85)
 
 # df -P's Use% is rounded *up*, so 100-Use% is a floor: erring towards alarming.
 #   free_pct PATH            # per cent of the filesystem still free
@@ -420,6 +486,71 @@ if systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
     fi
 else
     soft "metrics.timer is not active; the metrics pipeline is not checked"
+fi
+
+# The carrier, read the way the restart counters above are: delta'd between
+# sweeps, against a state file. The chain checks have a blind spot here -- a
+# NIC shedding packets still shows as "syncing, just slowly", which is what
+# every IBD looks like anyway.
+NET_STATE="$AUDIT_DIR/net"
+nic=""
+if command -v ip >/dev/null 2>&1; then
+    nic=$(ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')
+fi
+if [ -z "$nic" ]; then
+    soft "no default route; skipped the NIC drop check"
+elif [ ! -r /proc/net/dev ]; then
+    soft "/proc/net/dev unreadable; skipped the NIC drop check"
+else
+    # errs+drop, both directions: field 1 is the interface name, so the receive
+    # columns run 2..9 (errs 4, drop 5) and the transmit columns 10..17
+    # (errs 12, drop 13).
+    net_total=$(awk -v n="$nic:" '$1==n {print $4+$5+$12+$13; exit}' /proc/net/dev 2>/dev/null)
+    case "$net_total" in ''|*[!0-9]*) net_total="" ;; esac
+    if [ -z "$net_total" ]; then
+        soft "could not read $nic's counters; skipped the NIC drop check"
+    else
+        prev_net=""
+        if [ -f "$NET_STATE" ]; then
+            while read -r pnic ptotal; do
+                [ "$pnic" = "$nic" ] && prev_net="$ptotal"
+            done < "$NET_STATE"
+        fi
+        printf '%s %s\n' "$nic" "$net_total" > "$NET_STATE" 2>/dev/null || true
+        net_drop=""
+        [ -n "$prev_net" ] && [ "$prev_net" -le "$net_total" ] && net_drop=$(( net_total - prev_net ))
+        if [ -n "$net_drop" ] && [ "$net_drop" -ge "$THRESH_NET_DROP" ]; then
+            soft "$nic dropped/errored $net_drop packet(s) since the last sweep (threshold $THRESH_NET_DROP)"
+        else
+            ok "no NIC drop growth on $nic since the last sweep"
+        fi
+    fi
+fi
+
+# The hottest sensor, read off the same sysfs node-exporter graphs -- but the
+# alert reads it here so the graphs being down does not cost the check.
+if command -v find >/dev/null 2>&1; then
+    temp_max=-999
+    temp_chip=""
+    for t in /sys/class/hwmon/hwmon*/temp*_input; do
+        [ -r "$t" ] || continue
+        val=$(cat "$t" 2>/dev/null) || continue
+        case "$val" in ''|*[!0-9-]*) continue ;; esac
+        val_c=$(( val / 1000 ))
+        if [ "$val_c" -gt "$temp_max" ]; then
+            temp_max="$val_c"
+            temp_chip=$(basename "$(dirname "$t")")
+        fi
+    done
+    if [ "$temp_max" -eq -999 ]; then
+        soft "no readable hwmon temperature; skipped the temperature check"
+    else
+        if [ "$temp_max" -ge "$THRESH_TEMP_C" ]; then
+            soft "hottest sensor ($temp_chip) reads ${temp_max}°C (threshold ${THRESH_TEMP_C}°C)"
+        else
+            ok "hottest sensor ($temp_chip) at ${temp_max}°C"
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------------------

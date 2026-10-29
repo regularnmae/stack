@@ -332,12 +332,15 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   fails with a bare "Connection error". It also carries the host checks (disk,
   inodes, disk saturation from `/sys/block/<dev>/stat` io_ticks, backup age via
   `scripts/backup.sh list --json`, certificate expiry off NPM's
-  `letsencrypt/live/*/cert.pem`, systemd `NRestarts` deltas between sweeps, and
+  `letsencrypt/live/*/cert.pem`, systemd `NRestarts` deltas between sweeps, the
+  NIC's errs+drop delta off `/proc/net/dev` (fields 4+5 rx, 12+13 tx — field 1
+  is the interface name), the hottest hwmon sensor, and
   the metrics textfile going stale) and the chain/daemon checks (`verify.sh` for
-  the base sweep, then bitcoind freshness, Fulcrum's Electrum tip against
-  bitcoind's `blocks`, CLN peers/channels, the wallet's lag) — thresholds are
-  `MONITOR_*` keys in `monitor.env` **with defaults in the script**, so an env
-  file written before a check existed still monitors. `num_or` and
+  the base sweep, then bitcoind freshness + a peer floor + the mempool cap,
+  Fulcrum's Electrum tip against bitcoind's `blocks`, CLN peers/channels,
+  monerod's target_height lag while synchronized, the wallet's lag) — thresholds
+  are `MONITOR_*` keys in `monitor.env` **with defaults in the script**, so an
+  env file written before a check existed still monitors. `num_or` and
   `THRESH_FULCRUM_LAG` are defined with the config (not with the host checks)
   because the chain section reads a threshold before that section runs.
 - **Metrics are history, not alerting, and the two must not be coupled:**

@@ -80,6 +80,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# bitcoind -- the mempool and the peers, the two reads that a *synced* node
+# makes interesting: how close the mempool sits to its cap (bitcoin.conf's
+# maxmempool; a fee storm fills it long before anything else in the stack
+# degrades) and whether the node is actually peered (a node answering RPC on
+# zero peers is exactly the silent-stalling failure class CLN's check below
+# is about; during IBD zero peers means stalled, so the grace is not applied).
+# ---------------------------------------------------------------------------
+if mp=$(podman exec bitcoind bitcoin-cli getmempoolinfo 2>/dev/null) && [ -n "$mp" ]; then
+    emit stack_btc_mempool_bytes "$(jq -r '.bytes' <<<"$mp")"
+    emit stack_btc_mempool_txs "$(jq -r '.size' <<<"$mp")"
+else
+    collector_error bitcoind-mempool
+fi
+if peers=$(podman exec bitcoind bitcoin-cli getpeerinfo 2>/dev/null) && [ -n "$peers" ]; then
+    emit stack_btc_peers "$(jq -r 'length' <<<"$peers")"
+else
+    collector_error bitcoind-peers
+fi
+
+# ---------------------------------------------------------------------------
 # fulcrum -- the process (the container's own healthcheck), the Electrum surface,
 # and how far its index has actually got. The tip is asked of the server over
 # 50001 rather than scraped from `podman logs`: Fulcrum prints "Processed height:
@@ -157,6 +177,16 @@ if xnode=$(podman exec monerod curl -s -m 5 http://127.0.0.1:18089/get_height 2>
     && [ -n "$xnode" ] && jq -e '.height' <<<"$xnode" >/dev/null 2>&1; then
     emit stack_xmr_rpc_up 1
     emit stack_xmr_height "$(jq -r '.height' <<<"$xnode")"
+    # The lag behind the network tip: target_height only reaches the RPC through
+    # get_info (get_height above does not carry it), which is why this is a
+    # second read rather than more of the first. Omitted, not zeroed, when
+    # get_info does not answer within the same budget -- a hole keeps a wedge
+    # visible, a zero would erase it. This is the daemon-side lag; the wallet's
+    # lag below subtracts from `height`, the local tip.
+    if xinfo=$(podman exec monerod curl -s -m 5 http://127.0.0.1:18089/get_info 2>/dev/null) \
+        && jq -e '.height and .target_height and (.target_height >= .height)' <<<"$xinfo" >/dev/null 2>&1; then
+        emit stack_xmr_lag "$(( $(jq -r '.target_height' <<<"$xinfo") - $(jq -r '.height' <<<"$xinfo") ))"
+    fi
     say "monerod $(jq -r '.height' <<<"$xnode")"
 else
     emit stack_xmr_rpc_up 0
@@ -186,6 +216,23 @@ if [ -n "$wtoken" ]; then
     fi
 else
     say "no MONERO_MCP_TOKEN; skipped the wallet height"
+fi
+
+# ---------------------------------------------------------------------------
+# systemd -- the restart counter of every unit that is managing a running
+# container, read straight off the user manager. monitor.sh pages on the
+# *delta* between its sweeps; this is the monotonic counter for the graph, so
+# "when did it start crash-looping and did it stop" is a query, not a scroll
+# through the journal. Units that are not running (deleted, failed and never
+# restarted) are simply absent, as podman ps does not know them.
+# ---------------------------------------------------------------------------
+if command -v systemctl >/dev/null 2>&1; then
+    while read -r cname; do
+        [ -n "$cname" ] || continue
+        nr=$(systemctl --user show "$cname.service" -p NRestarts --value 2>/dev/null) || continue
+        case "$nr" in (*[!0-9]*) continue ;; esac
+        emit "stack_systemd_restarts{unit=\"$cname\"}" "$nr"
+    done < <(podman ps --format '{{.Names}}' 2>/dev/null)
 fi
 
 # ---------------------------------------------------------------------------

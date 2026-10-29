@@ -579,7 +579,8 @@ With both empty the monitor still runs and records to
 installed and active. The host checks' thresholds are the same file
 (`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
 `MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`, `MONITOR_METRICS_MAX_AGE_S`,
-`MONITOR_FULCRUM_LAG_BLOCKS`, …);
+`MONITOR_FULCRUM_LAG_BLOCKS`, `MONITOR_BTC_MIN_PEERS`, `MONITOR_MEMPOOL_MB`,
+`MONITOR_XMR_LAG_BLOCKS`, `MONITOR_NET_DROP`, `MONITOR_TEMP_MAX`, …);
 each falls back to its default in the script, so a monitor.env written before a
 check existed still monitors.
 
@@ -592,9 +593,9 @@ did the Monero RPC wedge?").
 
 | | |
 | --- | --- |
-| `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION` in `stack.conf`), `127.0.0.1:8428` |
-| `node-exporter` | the host: disk space, inodes, I/O saturation, memory, load — plus the **textfile collector**, which is how the stack's own numbers get in |
-| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, Fulcrum's Electrum reachability, the tip it serves and its lag behind bitcoind, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability**, the wallet's lag |
+  | `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION` in `stack.conf`), `127.0.0.1:8428` |
+| `node-exporter` | the host: disk space, inodes, I/O saturation, memory, load, NIC bandwidth/errors, temperatures — plus the **textfile collector**, which is how the stack's own numbers get in |
+| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, bitcoind's peer count and mempool, Fulcrum's Electrum reachability, the tip it serves and its lag behind bitcoind, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability** and its lag behind `target_height`, the wallet's lag, and each managed unit's systemd restart counter |
 | `scripts/monitor.sh` (every five minutes) | writes `monitor.prom` beside it: backup age and snapshot count, verify failures, spend trips, sweep timestamp |
 
 **Read it over an SSH tunnel, by design:**
