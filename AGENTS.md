@@ -78,9 +78,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `listchannels` is the gossmap (one entry per direction, for every channel the
   node knows) and its only liveness field is `active` — the `channel_update`'s
   enabled bit, an operator setting that stays `true` while the peer is offline.
-  It has no `connected` field at all, which is how `scripts/monitor.sh` came to
-  `grep '"connected": false'` out of it and report "no offline channels" on a
-  node whose only peer was down. `getinfo`'s `num_peers` is no better: CLN
+  It has no `connected` field at all. `getinfo`'s `num_peers` is no better: CLN
   documents it as "the total count of peers, connected or with channels", so a
   node with one offline channel peer still reports 1. The node's own view is
   `listpeerchannels` (per channel: `state`, `peer_connected` — count only
@@ -143,9 +141,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   The `kuma-ctl` Containerfile's node digest comes from the ordinary dockerfile
   manager.
 - **Every pulled image carries a real tag, and two managers cover them.**
-  Renovate *does* have a Quadlet manager (it did not when this file was first
-  written), and its `managerFilePatterns` are `*.container` / `*.image` /
-  `*.volume` — so it reads the 22 plain units and **cannot see
+  Renovate's Quadlet manager has `managerFilePatterns` of `*.container` /
+  `*.image` / `*.volume` — so it reads the 22 plain units and **cannot see
   `deploy/*.container.in`**, the three templates `install.sh` renders because
   they carry secrets. Those three, and the three image defaults that live in shell
   (`MONERO_IMAGE` in `scripts/wallets.sh`, `APPRISE_IMAGE` in
@@ -186,8 +183,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   the Containerfile that built it. The dockerfile manager rewrites only
   `FROM …@sha256:` lines (btc-explorer/ and kuma-ctl/ today, the alpine/golang
   bases in the other three whenever they move), which changes no unit and no
-  tag — so `podman image exists` alone kept the old bits forever, and did until
-  2026-10-29. `deploy_explorers`' `build_explorer` and `install.sh`'s
+  tag — so `podman image exists` alone would keep the old bits forever.
+  `deploy_explorers`' `build_explorer` and `install.sh`'s
   `ensure_local_image` therefore build with
   `--label org.stack.inputs=<sha256 of the Containerfile>` and rebuild when the
   label differs (`scripts/lib.sh`'s `image_is_current`); no label at all counts
@@ -204,28 +201,20 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   pick the new image up by themselves); a failed rebuild is fatal only when the
   image is *missing* —
   for a stale one it warns and keeps the bits that work, because a helper image
-  must not take down an install; and the apk pins these images used to carry
-  (`curl=8.22.0-r0`, `tor=0.4.9.14-r0`) had rotted, since Alpine keeps only the
-  current revision per branch, so the first automatic rebuild failed outright.
-  Both are now unpinned to the branch, with the base digest as the only pin —
-  nothing here watches apk versions, so an exact pin rots silently until exactly
-  the rebuild that automation triggers. Tag bumps are the other half: a changed
-  `Image=` reaches a running container only because `restart_changed_units` sees
-  the rendered unit change, which is how searxng sat on `2026.10.27` while
-  `main` pinned `2026.10.28`.
+  must not take down an install; and the apk packages in both helper images are
+  unpinned to the branch, with the base digest as the only pin — nothing here
+  watches apk versions, so an exact pin rots silently until exactly the rebuild
+  that automation triggers. Tag bumps are the other half: a changed `Image=`
+  reaches a running container only because `restart_changed_units` sees the
+  rendered unit change.
 - **Backup is a oneshot Quadlet job plus a plain user timer.** `backup.container`
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
   type), so `install.sh` renders it into `~/.config/systemd/user/` and enables it.
-- **Both daemons are full (archival) nodes:** `install.sh` seeds `bitcoin.conf`
-  with `prune=0` and `monerod.container` has no `--prune-blockchain`, so the
-  chains are large (roughly 800 GB Bitcoin / 250 GB Monero in late 2026) and the
-  data disk must be sized for that. Never "save space" by reintroducing prune:
-  pruning is one-way, and an existing pruned host must re-sync (Bitcoin: set
-  `prune=0`, stop, drop `blocks/`+`chainstate/`, keep `wallets/`; Monero: stop,
-  drop `monero/`, restart). `install.sh` seeds `bitcoin.conf` only when it is
-  missing, so an existing host keeps its old `prune=` until edited; the README's
-  "Full nodes and disk" section is the operator path.
+- **Both daemons are full (archival) nodes:** the chains are large (roughly
+  800 GB Bitcoin / 250 GB Monero in late 2026) and the data disk must be sized
+  for that. `install.sh` seeds `bitcoin.conf` only when it is missing, so an
+  existing host keeps its own values until edited.
 - **`fulcrum` is the Electrum server, and the one non-NPM LAN surface:**
   `deploy/fulcrum.container.in` runs the official `cculianu/fulcrum` image on
   `npm-network`, publishes raw Electrum `50001` (TCP) and `50002` (self-signed
@@ -235,22 +224,16 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   bitcoind RPC answers; it only accepts wallets after its own index catches up.
   Its `$DATA_DIR/fulcrum` database (~100–135 GB) and cert are regenerable and
   excluded from the backup set. `--db_mem 3072` bounds RocksDB (block cache plus
-  write buffers); it was `1024` until 2026-10-29, when a lost index had to be
-  rebuilt and that size made the resync compaction-bound — ~10 MB/s of writes
-  (~100x amplification) for ~31 blocks/min, i.e. weeks instead of hours, with the
-  host at 40–60% iowait. 3072 still leaves ~6 GB for the daemons on a 16 GB host
-  (bitcoind 1.2, monerod 0.6, everything else under 0.3), so it is the measured
-  middle; check `free -h` during a resync before going to RocksDB's default
-  4096. A resync also loses the DB's undo info, which Fulcrum warns about at
-  startup ("presume the DB is consistent") — harmless, but it means the next
-  restart cannot undo a block. `$DATA_DIR` is a **rotational** disk in this
-  layout (`/dev/sda1`, `ROTA=1`, ~93 MB/s sequential), which is what makes a
-  rebuild weeks rather than hours: ~40 blocks/min at height 379k, measured
-  2026-10-29. That is accepted — the index stays on the HDD, there is no second
-  SSD — so a slow resync is not a fault to chase; `--db_mem` is the only knob
-  that moved it (+30%) and 2.1.4 exposes no fast-sync or history cap to shrink
-  the work. Do not add its
-  ports to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
+  write buffers) and still leaves ~6 GB for the daemons on a 16 GB host
+  (bitcoind 1.2, monerod 0.6, everything else under 0.3); check `free -h` before
+  going to RocksDB's default 4096. A resync loses the DB's undo info, which
+  Fulcrum warns about at startup ("presume the DB is consistent") — harmless,
+  but it means the next restart cannot undo a block. `$DATA_DIR` is a
+  **rotational** disk in this layout (`/dev/sda1`, `ROTA=1`), so building an
+  index there is slow (~40 blocks/min at height 379k) and a slow resync is not a
+  fault to chase; `--db_mem` is the only knob that moves that rate, and 2.1.4
+  exposes no fast-sync or history cap to shrink the work. Do not add its ports
+  to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
   and keep `50001/50002` in `FIREWALL_PORTS` if they move.
   Its `HealthCmd` is `grep -qx Fulcrum /proc/1/comm` on purpose — podman's
   health is the liveness signal `deploy.sh` waits on, and a first index refuses
@@ -283,8 +266,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   Neither has state in the backup set; `config/btc-explorer/btc-explorer.env` is
   the BTC RPC/Fulcrum wiring. Both Containerfiles' base images are covered by
   Renovate's dockerfile manager, and both pinned commits by custom git-refs
-  managers. (The earlier Onion Monero explorer, which read LMDB directly, is
-  gone: its read-only startup path hung in this environment.)
+  managers.
 - **The backup set is declared once, as `BACKUP_PATHS` in `stack.conf`**
   (`cln monero-wallet-rpc tor config npm audit uptime-kuma postgres-dump`).
   `install.sh` renders that array into `backup.container` — one read-only
@@ -418,8 +400,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   without paying for them twice. Fulcrum's height is the Electrum tip over 50001
   (`electrum_tip`), **not** a `podman logs` scrape: the image prints "Processed
   height" only at 1% steps, so `--tail 200` holds no line once it has caught up
-  and the old `stack_fulcrum_indexed_height` reported a stale value forever. The
-  series are `stack_fulcrum_up` (the container's own health), `_electrum_up`,
+  and a scraped height goes stale. The series are `stack_fulcrum_up` (the
+  container's own health), `_electrum_up`,
   `_electrum_tip` and `_lag_blocks`; a first-run index legitimately answers
   nothing for days, which is why that is a 0 rather than a `collector_error`.
 - **nginx-proxy-manager runs on the host network, and health comes from podman** —

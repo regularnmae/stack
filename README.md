@@ -50,11 +50,10 @@ chain of their own — see [Block explorers](#block-explorers).
 one of those PRs changes nothing on the host: a unit keeps
 running its old image until it is restarted, and
 `./deploy.sh --only <service>` is what pulls the new tag (podman only pulls a
-*missing* image, so nothing upgrades on its own — which is also why `:latest`
-used to mean "whatever a fresh host got that day", and why the backup job, which
-runs on a timer rather than a restart, picks up a merged restic bump by itself). Back up before `lightningd`
-(CLN's wallet migrations are forward-only), move `monerod` and
-`monero-wallet-rpc` together (an upgrade is driven by a hardfork height, and a
+*missing* image, so nothing upgrades on its own; the backup job, which runs on a
+timer rather than a restart, picks up a merged restic bump by itself). Back up
+before `lightningd` (CLN's wallet migrations are forward-only), move `monerod`
+and `monero-wallet-rpc` together (an upgrade is driven by a hardfork height, and a
 wallet older than its daemon is unsupported), then run `./verify.sh`.
 
 **Only `nginx-proxy-manager` is reachable from the LAN over HTTP.** It runs on
@@ -335,59 +334,19 @@ sudo restorecon -RF /data/stack
 
 ### Full nodes and disk
 
-`bitcoind` and `monerod` are **full (archival) nodes**: `bitcoin.conf` is seeded
-with `prune=0` and `monerod` runs without `--prune-blockchain`. Both store and
-validate the entire chain, which dominates the data dir — roughly 800 GB for
-Bitcoin and 250 GB for Monero as of late 2026, both growing. Fulcrum's Electrum
-index adds roughly 100–135 GB and ~3–4 GB of RAM (`--db_mem 3072` caps its
-RocksDB cache; a rebuild is compaction-bound below that). Budget a 2 TB data
-disk. The chains and the index are excluded from the backup set for exactly this
-reason: they are large and re-downloadable, not irreplaceable state.
+`bitcoind` and `monerod` are **full (archival) nodes**: both store and validate
+the entire chain, which dominates the data dir — roughly 800 GB for Bitcoin and
+250 GB for Monero as of late 2026, both growing. Fulcrum's Electrum index adds
+roughly 100–135 GB and ~3–4 GB of RAM (`--db_mem 3072` caps its RocksDB cache;
+a rebuild is compaction-bound below that). Budget a 2 TB data disk. The chains
+and the index are excluded from the backup set for exactly this reason: they are
+large and re-downloadable, not irreplaceable state.
 
-The data dir sits on a rotational disk in this layout, which is fine for
-serving but not for building: a Fulcrum index that has to be rebuilt from
-block 0 runs at roughly 40 blocks/min there (~10 days for the chain as of late
-2026, and slower at higher heights), and it serves no wallets until it
-finishes. If that is too slow for you, give `$DATA_DIR/fulcrum` a separate
-SSD before starting the rebuild — the HDD is a deliberate choice, not an
-oversight, so don't wait for a resync to finish and then move it.
-
-#### Converting a pruned host
-
-Changing the config does not restore history. An existing pruned data directory
-stays pruned (pruning is one-way), so both chains must be re-synced from
-genesis. The wallets live outside the chain data — `monero-wallet-rpc/` and
-`bitcoin/wallets/` — so they are untouched:
-
-```sh
-# The data dir you answered at install time (default: $HOME/data).
-DATA_DIR="${STACK_DATA_DIR:-$HOME/data}"
-
-# Bitcoin: edit its config as the container user, then drop only the pruned
-# chain. The image uid owns bitcoin/, so the delete goes through podman unshare.
-podman exec bitcoind sed -i -e 's|^[[:space:]]*prune[[:space:]]*=.*|prune=0|' /data/.bitcoin/bitcoin.conf
-systemctl --user stop bitcoind.service
-podman unshare rm -rf "$DATA_DIR/bitcoin/blocks" "$DATA_DIR/bitcoin/chainstate"
-./deploy.sh --only bitcoind
-
-# Monero: the node data dir is chain-only; the wallet is elsewhere.
-systemctl --user stop monerod.service
-podman unshare rm -rf "$DATA_DIR/monero"
-./deploy.sh --only monerod
-```
-
-`./deploy.sh` cannot do this for you: `install.sh` seeds `bitcoin.conf` only
-when it is missing, so an existing host keeps its old `prune=` line until it is
-edited. Check the result with `podman exec bitcoind bitcoin-cli
-getblockchaininfo` (`"pruned": false`); Monero does not report its prune state
-through the restricted RPC, so a fresh `$DATA_DIR/monero` is the proof.
-
-If `bitcoind` is restarted before its chain is dropped, it crash-loops with
-`You need to rebuild the database using -reindex to go back to unpruned mode`.
-Stop it and run the Bitcoin delete step above: removing `blocks/` and
-`chainstate/` clears the `prunedblockfiles` flag in `blocks/index` and forces
-the same full re-download a one-off `-reindex` would, without leaving a flag in
-the unit.
+The data dir sits on a rotational disk in this layout, which is fine for serving
+but not for building: a Fulcrum index that has to be rebuilt from block 0 runs
+at roughly 40 blocks/min there, and it serves no wallets until it finishes. If
+that is too slow for you, give `$DATA_DIR/fulcrum` a separate SSD before
+starting the rebuild — don't wait for a resync to finish and then move it.
 
 ## Reinstalling the host without re-syncing
 

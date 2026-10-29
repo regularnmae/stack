@@ -318,10 +318,8 @@ if [ ! -s "$DATA_DIR/bitcoin/bitcoin.conf" ]; then
 server=1
 daemon=0
 
-# Full (archival) node: keep and validate the whole chain. Leave prune at 0:
-# reverting it requires re-downloading the blockchain (README: "Full nodes and
-# disk"). txindex stays off; the MCP server and lightningd do not need it, and
-# it costs another index.
+# Full (archival) node: keep and validate the whole chain. txindex stays off;
+# the MCP server and lightningd do not need it, and it costs another index.
 prune=0
 txindex=0
 

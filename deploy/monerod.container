@@ -28,9 +28,6 @@ Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
 # NOTE: Exec= replaces the image CMD, so the image's default flags
 # must be restated verbatim, with our additions appended.
 # (--non-interactive is prepended by the entrypoint itself.)
-# No --prune-blockchain: this is a full (archival) node, so it keeps and
-# serves the whole chain. Pruning is one-way -- an existing pruned data dir
-# must be re-synced from scratch (see "Full nodes and disk" in README.md).
 Exec=--rpc-restricted-bind-ip=0.0.0.0 \
      --rpc-restricted-bind-port=18089 \
      --no-igd --no-zmq --enable-dns-blocklist \
