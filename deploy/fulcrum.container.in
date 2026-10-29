@@ -31,11 +31,8 @@ Volume=@DATA_DIR@/fulcrum:/data:z
 # -t/-s: plaintext and self-signed TLS for wallets. -a: admin RPC on loopback
 # only (FulcrumAdmin; never published). --db_mem bounds RocksDB (block cache
 # plus write buffers) so the indexer cannot crowd out bitcoind/monerod on a
-# 16 GB host. It was 1024, and a fresh index at that size is compaction-bound:
-# measured on 2026-10-29, a resync from block 0 wrote ~10 MB/s for ~31
-# blocks/min (100x write amplification) with the host at 40-60% iowait. 3072
-# leaves ~6 GB for the daemons -- bitcoind 1.2, monerod 0.6, the rest under
-# 0.3 each -- while giving the LSM room to batch. Do not raise this to
+# 16 GB host: 3072 leaves ~6 GB for them -- bitcoind 1.2, monerod 0.6, the rest
+# under 0.3 each -- while giving the LSM room to batch. Do not raise this to
 # RocksDB's default 4096 without checking `free -h` during a full resync.
 # Fulcrum starts indexing as soon as bitcoind's RPC answers and follows it
 # through IBD; it serves wallets only once its own index has caught up.

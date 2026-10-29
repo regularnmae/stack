@@ -7,7 +7,10 @@ BoltMesh's `backend`/`frontend` under `boltmesh-labs`) ship only code, tests, CI
 and a `Containerfile` — if a unit or an env file changes, it changes here.
 
 Operator-facing narrative (install, data dir, restore, rollback, layout) lives
-in `README.md`; this file is the agent-facing complement and does not repeat it.
+in `README.md`. This file is the agent-facing complement and does not repeat it:
+decisions, traps, and where the detail actually lives. When a script or unit
+already documents a mechanism in its own header, this file points at it instead
+of restating it — read that file before changing the behaviour.
 
 ## The one rule that shapes everything
 
@@ -62,7 +65,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `restart_changed_units`) and restarts exactly the units whose definition
   changed — never ones that are inactive, since those are started later in
   order. `nginx-proxy-manager` is only flagged there: its restart is deferred to
-  `sync_npm_network`, after the proxy hosts are rewritten.
+  `sync_npm_network`, after the proxy hosts are rewritten (`deploy.sh` says why
+  the order is load-bearing).
 - **CLN runes are verified, not trusted:** `createrune` can return a rune whose
   `unique_id` the node blacklisted, so `install.sh` proves each with `checkrune`
   and retries on a fresh id.
@@ -73,140 +77,65 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   the unit reads "active" and `Restart=always` never fires. So `deploy.sh`
   restarts a still-active but `unhealthy` lightningd, waits for `getwalletinfo`
   before waiting on lightningd, and dumps the log on any timeout.
-- **CLN connection state lives in `listpeerchannels` / `listpeers`, not
-  `listchannels` or `getinfo`:**
-  `listchannels` is the gossmap (one entry per direction, for every channel the
-  node knows) and its only liveness field is `active` — the `channel_update`'s
-  enabled bit, an operator setting that stays `true` while the peer is offline.
-  It has no `connected` field at all. `getinfo`'s `num_peers` is no better: CLN
-  documents it as "the total count of peers, connected or with channels", so a
-  node with one offline channel peer still reports 1. The node's own view is
-  `listpeerchannels` (per channel: `state`, `peer_connected` — count only
-  `state == "CHANNELD_NORMAL"`, since an onchain/closing channel is meant to
-  have no peer) and `listpeers` (per peer: `connected`). `scripts/metrics.sh`
-  emits the same numbers as `stack_cln_channels_offline` and `stack_cln_peers`;
-  `lightning-cli` run through `podman exec` is not gated by the clnrest rune —
-  if the MCP ever needs these, they have to be added to `READ_METHODS` in
-  `deploy/install.sh` too.
+- **CLN peers and channels come from `listpeerchannels`/`listpeers`, never
+  `listchannels` or `getinfo`'s `num_peers`:** the gossmap's `active` is an
+  operator setting that stays true while a peer is offline, and `num_peers`
+  counts peers with channels whether or not they are connected.
+  `scripts/monitor.sh` carries the shapes and the counting rule;
+  `scripts/metrics.sh` emits `stack_cln_peers`/`stack_cln_channels_offline`.
+  `lightning-cli` through `podman exec` is not gated by the clnrest rune — the
+  MCP needs the method added to `READ_METHODS` in `deploy/install.sh`.
 - **Data-dir ownership:** `bitcoind`/`monero-wallet-rpc` run as the image uid
   (host 525287 = in-container 1000) and do **not** re-own their bind mounts, so
   `install.sh` `podman unshare chown -R 1000:1000`s them; `monerod` re-owns its
   own directory. `cln/`, `tor/`, `uptime-kuma/` and `fulcrum/` are written by
   container root (= the host user under rootless podman).
-- **`uptime-kuma` is UI-configured for its own account, declared for
-  everything else:** there is no env file in the unit and nothing is seeded
-  into its sqlite — but its monitors are `KUMA_MONITORS` in `stack.conf`,
-  reconciled by `scripts/kuma-monitors.sh` into the socket.io server (no REST
-  write API) through the `kuma-ctl` image (built like `netcheck`, from
-  `kuma-ctl/`). The admin login the setup wizard creates lives in
-  `$DATA_DIR/config/uptime-kuma/api.env` (UI-first like `npm/api.env`); the
-  reconciler, `deploy.sh` and `verify.sh` self-skip/warn until it is filled in.
-  A declaration is `name | url | codes | interval | retries`, and a
-  `tcp://host:port` url means kuma's **TCP-port** monitor instead of HTTP (no
-  status code applies, so that field stays empty; only Fulcrum's `50001` uses
-  it, declared against `host.containers.internal` so the *published* port is
-  watched). A port monitor only proves the socket accepts a connection — kuma
-  2.5's `server/monitor-types/tcp.js` is `tcping()` and nothing more — so the
-  index behind 50001 is checked by `verify.sh`/`monitor.sh`, not by kuma. The
-  reconciler carries UI-tuned monitor settings over untouched (compare
-  declared fields only: url + accepted status codes, or hostname + port) and
-  only creates/fills the status page while it has no monitors of its own. Two
-  more socket.io
-  shape traps it lives with: multi-arg management events
-  (`addStatusPage(title, slug)`, `saveStatusPage(slug, config, imgDataUrl,
-  publicGroupList)`) are positional — send one object and the *ack callback*
-  takes the next data slot, the handler never answers, and the client burns
-  its whole ack timeout; and `imgDataUrl` must be a string (`null` throws in
-  `saveStatusPage`). Notifications stay UI-configured. Note v2
-  answers `/` with a **302 to `/dashboard`** — any probe must follow redirects
-  (`verify.sh` does); a bare 200 on `/` is not what kuma returns. All this repo
-  knows about it is the unit, the `8107` loopback publish, the
-  `status.boltmesh.net` proxy host (`ws` for the dashboard's socket.io) and the
-  backup dir. Don't "seed" its login into `config/` beyond `api.env`. Don't
-  "simplify" the reconcile into curl calls: `add`/`editMonitor` are socket.io
-  events, not REST endpoints. And anything sent over that socket.io — login
-  first of all — must wait for the server's `info` event first: v2.5 registers
-  its handlers only *after* `await sendInfo()`, so an event emitted straight
-  after `connect` is dropped, not queued, and the client sees only its own ack
-  timeout (`kuma-ctl/monitors.mjs` waits for `info` and retries). And the
-  `add`/`editMonitor` payloads are shape-sensitive: `accepted_statuscodes`
-  must be the **array** (the handler builds `accepted_statuscodes_json`
-  itself and `.every()`-checks the array — sending the `_json` string or
-  omitting it crashes server-side with "Cannot read properties of undefined
-  (reading 'every')"), and `conditions`/`kafkaProducerBrokers`/
-  `kafkaProducerSaslOptions`/`rabbitmqNodes` must arrive as raw arrays because
-  the handler `JSON.stringify`es them itself (`monitors.mjs` carries a
-  `rawArray()` helper). The `monitorList` push object is already in the shape
-  `editMonitor` reads — spread it and override only declared fields.
-  The `kuma-ctl` Containerfile's node digest comes from the ordinary dockerfile
-  manager.
+- **`uptime-kuma` is UI-configured for its own account, declared for everything
+  else:** no env file, nothing seeded into its sqlite, and its monitors are
+  `KUMA_MONITORS` in `stack.conf`, reconciled by `scripts/kuma-monitors.sh`
+  through the `kuma-ctl` image because kuma has no REST write API. The admin
+  login the setup wizard creates lives in `config/uptime-kuma/api.env` (UI-first
+  like `npm/api.env`), and the reconciler, `deploy.sh` and `verify.sh` self-skip
+  until it is filled in. The declaration format and every socket.io payload
+  trap (positional events, the `info` handshake, the status-code array) are in
+  `scripts/kuma-monitors.sh` and `kuma-ctl/monitors.mjs` — don't reimplement the
+  reconcile as curl. Note v2 answers `/` with a **302 to `/dashboard`**, so a
+  probe must follow redirects. Notifications stay UI-configured.
 - **Every pulled image carries a real tag, and two managers cover them.**
-  Renovate's Quadlet manager has `managerFilePatterns` of `*.container` /
-  `*.image` / `*.volume` — so it reads the 22 plain units and **cannot see
-  `deploy/*.container.in`**, the three templates `install.sh` renders because
-  they carry secrets. Those three, and the three image defaults that live in shell
-  (`MONERO_IMAGE` in `scripts/wallets.sh`, `APPRISE_IMAGE` in
-  `scripts/monitor.sh`, `RESTIC_IMAGE` in `scripts/backup.sh` — no manager reads
-  a shell default), are matched by
-  `renovate.json`'s regex manager. Note the two-file overlap: the wallet tag is
-  in both `wallets.sh` and `monero-wallet-rpc.container.in`, and one PR moves
-  both. `postgres` is the hand-pinned exception, disabled by
-  package name; `localhost/*` (everything built here by `deploy.sh`/`install.sh`)
-  is disabled too, since looking it up only earns a 401. Units stay
-  **tag**-pinned: `pinDigests` is off for the quadlet manager and for the regex
-  manager's docker deps, because kuma's `2` and searxng's date tags move on their
-  own and a digest pin would turn a reviewable version bump into a PR per
-  upstream rebuild. Digests belong in the Containerfiles, where the base image is
-  built once. That `pinDigests: false` for the regex manager is not cosmetic: a
-  regex manager can only *update* a digest, never **add** one, so inheriting
-  `docker:pinDigests` made Renovate try to pin and fail with "Digest is not
-  updated" → "Error updating branch: update failure", which aborted the whole
-  branch — real upgrades included. The tag must carry a
-  version: docker versioning returns null for `latest` (so a manager on it would
-  watch nothing) and its `isCompatible()` requires the *same suffix and the same
-  number of version components*, which is why `9-alpine` never became
-  `9.1-alpine` and why searxng's `<date>-<commit>` tags are matched with
-  `versioning: loose` on a weekly schedule. (Same rule, deliberately: the bare
-  `louislam/uptime-kuma:2` never moves either, so that major pin is a choice,
-  not something the manager will fix.) Pinning is not cosmetic: podman only
-  pulls a missing image, so a `:latest` unit silently becomes "whatever a fresh
-  host pulled that day". The Monero pair is grouped (a wallet older than its
-  daemon is unsupported, and an upgrade is a hardfork deadline) and the
-  consensus/TLS daemons carry `prBodyNotes` saying that merging a PR changes
-  nothing until `./deploy.sh --only <svc>`, and that CLN's migrations are
-  forward-only. `scripts/wallets.sh` and `monero-wallet-rpc.container.in` must
-  hold the *same* wallet tag or the wallet this script creates is not the one
-  the unit serves; the same tag also appears in the README's "What runs" table,
-  which is hand-maintained.
-  **Merging one of Renovate's Containerfile digest bumps now reaches the host on
-  the next `./deploy.sh`**, because each locally-built image carries the hash of
-  the Containerfile that built it. The dockerfile manager rewrites only
-  `FROM …@sha256:` lines (btc-explorer/ and kuma-ctl/ today, the alpine/golang
-  bases in the other three whenever they move), which changes no unit and no
-  tag — so `podman image exists` alone would keep the old bits forever.
-  `deploy_explorers`' `build_explorer` and `install.sh`'s
-  `ensure_local_image` therefore build with
-  `--label org.stack.inputs=<sha256 of the Containerfile>` and rebuild when the
-  label differs (`scripts/lib.sh`'s `image_is_current`); no label at all counts
-  as stale and is rebuilt once. That file *is* the recipe — base digest, upstream
-  `ARG` pins, and no `COPY` out of the build context (kuma-ctl/monitors.mjs is
-  bind-mounted at run time on purpose) — which is why the hash is the
-  Containerfile's and not the directory's. `verify.sh`'s "Local images" section
-  runs the same comparison, so a bump merged and never deployed shows up without
-  a deploy. Three consequences: tor is the only long-lived container among the
-  five, and a rebuilt image changes no rendered unit, so `start_infra` calls
-  `refresh_image_unit tor "$TOR_IMAGE"` — it compares the container's `.Image`
-  id with the image on disk and restarts when they differ, which also covers a
-  bare `./deploy/install.sh` run (netcheck and kuma-ctl are throwaway runs and
-  pick the new image up by themselves); a failed rebuild is fatal only when the
-  image is *missing* —
-  for a stale one it warns and keeps the bits that work, because a helper image
-  must not take down an install; and the apk packages in both helper images are
-  unpinned to the branch, with the base digest as the only pin — nothing here
-  watches apk versions, so an exact pin rots silently until exactly the rebuild
-  that automation triggers. Tag bumps are the other half: a changed `Image=`
-  reaches a running container only because `restart_changed_units` sees the
-  rendered unit change.
+  Renovate's Quadlet manager reads `*.container`/`*.image`/`*.volume` and
+  **cannot see `deploy/*.container.in`**; those three templates, and the three
+  image defaults that live in shell (`MONERO_IMAGE` in `scripts/wallets.sh`,
+  `APPRISE_IMAGE` in `scripts/monitor.sh`, `RESTIC_IMAGE` in `scripts/backup.sh`
+  — no manager reads a shell default), are matched by `renovate.json`'s regex
+  manager. The wallet tag appears in both `wallets.sh` and
+  `monero-wallet-rpc.container.in`, and one PR moves both; it also appears in
+  the README's "What runs" table, which is hand-maintained. `postgres` (hand
+  pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
+  (`pinDigests` off): kuma's `2` and searxng's date tags move on their own, a
+  digest pin would turn a reviewable version bump into a PR per upstream
+  rebuild, and a regex manager can only *update* a digest, never add one —
+  inheriting `docker:pinDigests` failed the whole branch. Every managed tag must
+  carry a version (`latest` buys nothing), and docker versioning wants the same
+  suffix and component count, so `9-alpine` never becomes `9.1-alpine` and
+  searxng's `<date>-<commit>` tags need `versioning: loose`. Digests belong in
+  the Containerfiles; the helper images' apk packages stay unpinned to the
+  branch for the same reason. The Monero pair is grouped (a wallet older than
+  its daemon is unsupported) and the daemons' PRs carry `prBodyNotes` that
+  merging changes nothing until `./deploy.sh --only <svc>`.
+- **A merged Containerfile digest bump reaches the host on the next
+  `./deploy.sh`:** each locally-built image is labelled with the sha256 of the
+  Containerfile that built it, and `deploy_explorers`/`ensure_local_image`
+  rebuild when the label differs (`scripts/lib.sh`'s `image_is_current`; no
+  label counts as stale). `podman image exists` alone would keep the old bits
+  forever, and `verify.sh`'s "Local images" section runs the same comparison. A
+  failed rebuild is fatal only when the image is *missing* — a stale one warns
+  and keeps the bits that work. `tor` is the only long-lived one, so
+  `start_infra` calls `refresh_image_unit` to restart it when the image id
+  changed; a changed `Image=` otherwise arrives only via
+  `restart_changed_units`. The Containerfile is the whole recipe — base digest,
+  upstream `ARG` pins, and deliberately no `COPY` out of the build context
+  (`kuma-ctl/monitors.mjs` is bind-mounted at run time), which is why the hash is
+  the Containerfile's and not the directory's.
 - **Backup is a oneshot Quadlet job plus a plain user timer.** `backup.container`
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
@@ -216,81 +145,52 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   for that. `install.sh` seeds `bitcoin.conf` only when it is missing, so an
   existing host keeps its own values until edited.
 - **`fulcrum` is the Electrum server, and the one non-NPM LAN surface:**
-  `deploy/fulcrum.container.in` runs the official `cculianu/fulcrum` image on
-  `npm-network`, publishes raw Electrum `50001` (TCP) and `50002` (self-signed
-  SSL) straight on the LAN because NPM only proxies HTTP, and uses the bitcoind
-  RPC credentials from `secrets.env` (rendered into `Exec=`). It indexes from
-  bitcoind's RPC and follows it through IBD, so `deploy.sh` starts it once
-  bitcoind RPC answers; it only accepts wallets after its own index catches up.
-  Its `$DATA_DIR/fulcrum` database (~100–135 GB) and cert are regenerable and
-  excluded from the backup set. `--db_mem 3072` bounds RocksDB (block cache plus
-  write buffers) and still leaves ~6 GB for the daemons on a 16 GB host
-  (bitcoind 1.2, monerod 0.6, everything else under 0.3); check `free -h` before
-  going to RocksDB's default 4096. A resync loses the DB's undo info, which
-  Fulcrum warns about at startup ("presume the DB is consistent") — harmless,
-  but it means the next restart cannot undo a block. `$DATA_DIR` is a
-  **rotational** disk in this layout (`/dev/sda1`, `ROTA=1`), so building an
-  index there is slow (~40 blocks/min at height 379k) and a slow resync is not a
-  fault to chase; `--db_mem` is the only knob that moves that rate, and 2.1.4
-  exposes no fast-sync or history cap to shrink the work. Do not add its ports
-  to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
-  and keep `50001/50002` in `FIREWALL_PORTS` if they move.
-  Its `HealthCmd` is `grep -qx Fulcrum /proc/1/comm` on purpose — podman's
-  health is the liveness signal `deploy.sh` waits on, and a first index refuses
-  wallets for hours, so an index probe there would paint a normal state red. The
-  functional check is outside the unit: `scripts/lib.sh`'s `electrum_call` /
-  `electrum_call_tls` / `electrum_tip` (bash `/dev/tcp` for `50001`, `openssl
-  s_client` for `50002` — the host has no `nc`, and the published loopback port
-  is what a wallet dials), used by `verify.sh --deep` (banner on both ports, then
-  the served tip against bitcoind's `blocks`) and by `scripts/monitor.sh` (pages
-  past `MONITOR_FULCRUM_LAG_BLOCKS`, default 12, softened by
-  `MONITOR_GRACE_SYNC` during IBD). Ask it for `blockchain.headers.subscribe`,
-  never just `server.version`: Fulcrum answers the latter from memory with no
-  sync gate, so a wedged index passes it.
+  `deploy/fulcrum.container.in` runs the official image on `npm-network` and
+  publishes raw Electrum `50001`/`50002` straight on the LAN, because NPM only
+  proxies HTTP — don't add it to `NPM_HOSTS`, and keep the ports in
+  `FIREWALL_PORTS`. It indexes from bitcoind's RPC and follows it through IBD,
+  accepting wallets only once its own index catches up. `--db_mem 3072` bounds
+  RocksDB and still leaves ~6 GB for the daemons on a 16 GB host; check
+  `free -h` before going to RocksDB's default 4096. A rebuild loses the DB's
+  undo info (Fulcrum's "presume the DB is consistent"), so the next restart
+  cannot undo a block. `$DATA_DIR` is a rotational disk, so a from-scratch index
+  runs ~40 blocks/min — slow is not a fault to chase, `--db_mem` is the only
+  knob, and 2.1.4 exposes no fast-sync or history cap to shrink the work. Its
+  `HealthCmd` is the process check on purpose: an index probe would paint a
+  normal first run red.
+  The functional check is outside the unit — `scripts/lib.sh`'s `electrum_call`/
+  `electrum_call_tls`/`electrum_tip` (bash `/dev/tcp` and `openssl s_client`;
+  the host has no `nc`), used by `verify.sh --deep` and `scripts/monitor.sh`.
+  Ask it for `blockchain.headers.subscribe`, never just `server.version`: that
+  one is answered from memory and passes a wedged index.
 - **The two explorers read the daemons; neither adds an index.** `btc-explorer`
-  (BTC RPC Explorer, `localhost/btc-explorer:local` from
-  `btc-explorer/Containerfile`) reads bitcoind RPC plus Fulcrum's Electrum
-  endpoint for address history; `bitcoin.conf` stays `txindex=0`, so an address
-  lookup works but an old txid needs its block height. `xmr-explorer`
-  (MoneroBlock, `localhost/xmr-explorer:local` from
-  `xmr-explorer/Containerfile`) is **RPC-only**: it reads blocks, transactions
-  and network info from monerod's restricted RPC (18089), keeps no chain copy
-  and no LMDB reader, and has no env file. Its healthcheck and status monitor
-  use the static `/style.css`, not `/`: the home page calls monerod's RPC, which
-  can time out during initial sync (verify.sh warns on that). Both are
-  loopback-published (`8108`/`8109`), fronted by NPM with `force-ssl`, mirrored
-  as onions, and declared in `KUMA_MONITORS`. Their images are built by `deploy.sh`, not
-  `install.sh`, and only when missing (`--only
-  btc-explorer|xmr-explorer|explorers` forces a rebuild); both are small local
-  builds (MoneroBlock is Go, BTC RPC Explorer is Node), not a Monero compile.
-  Neither has state in the backup set; `config/btc-explorer/btc-explorer.env` is
-  the BTC RPC/Fulcrum wiring. Both Containerfiles' base images are covered by
-  Renovate's dockerfile manager, and both pinned commits by custom git-refs
-  managers.
+  reads bitcoind RPC plus Fulcrum for address history (`txindex=0`, so an old
+  txid needs its block height); `xmr-explorer` (MoneroBlock) is **RPC-only**
+  against monerod's restricted RPC, with no chain copy and no LMDB reader. Both
+  are loopback-published, NPM-fronted with `force-ssl`, mirrored as onions,
+  declared in `KUMA_MONITORS`, and built by `deploy.sh` only when missing
+  (`--only btc-explorer|xmr-explorer|explorers` forces a rebuild). Neither has
+  state in the backup set; `config/btc-explorer/btc-explorer.env` is the BTC
+  RPC/Fulcrum wiring. `xmr-explorer` probes its static `/style.css`, not `/`,
+  which can time out during monerod's initial sync.
 - **The backup set is declared once, as `BACKUP_PATHS` in `stack.conf`**
   (`cln monero-wallet-rpc tor config npm audit uptime-kuma postgres-dump`).
-  `install.sh` renders that array into `backup.container` — one read-only
-  `Volume=` per entry plus the path list in `Exec=` (`@BACKUP_VOLUMES@`/
-  `@BACKUP_PATHS@`) — and `scripts/backup.sh` derives its own mounts, restic
-  arguments, the directories a restore creates and its confirmation prompt from
-  the same array, so a hand run and the nightly job copy the same thing and a
-  new directory is one line. Chains, the Fulcrum index (`fulcrum/`), `searxng/`,
-  `monitoring/` and the raw `postgres/` cluster stay out so restic never walks
-  them. `tor/` is in it for `tor/onion/` (the hidden services' keys: a lost key
-  is a new `.onion` address). `postgres-dump.container` (a oneshot) `pg_dumpall`s
-  into `$DATA_DIR/postgres-dump`; its libpq settings belong in
+  `install.sh` renders it into `backup.container` (one read-only `Volume=` per
+  entry plus the path list in `Exec=`), and `scripts/backup.sh` derives its own
+  mounts, restic arguments, restore directories and confirmation prompt from the
+  same array, so a hand run and the nightly job copy the same thing. Chains, the
+  Fulcrum index, `searxng/`, `monitoring/` and the raw `postgres/` cluster stay
+  out so restic never walks them. `tor/` is in it for `tor/onion/` — a lost key
+  is a new `.onion` address. `postgres-dump.container` `pg_dumpall`s into
+  `$DATA_DIR/postgres-dump`; its libpq settings belong in
   `config/boltmesh/dump.env`, **not** `db.env` (`PGHOST`/`PGUSER` in the server's
   own env break its socket-based entrypoint bootstrap). The unit reaches it
-  through `Wants=/After=postgres-dump.service`, which `systemctl` honours on any
-  start — but a bare `scripts/backup.sh backup` has no such ordering, so the
-  script starts the same unit itself (best-effort: a Postgres outage must not
-  stop the run that protects the wallet) and says so when the unit is missing.
-  The repo is `$STACK_BACKUP_DIR`, reached through `backup.env`;
-  `scripts/backup.sh` reads `RESTIC_*` from **the environment first, then the
-  file** — the only order that can recover a fresh host, since the file lives
-  inside the repository. Restoring `postgres-dump/` only puts `all.sql` back on
-  disk: the database itself is replayed into the running `postgres` (README,
-  "Restoring onto a fresh host").
+  through `Wants=/After=postgres-dump.service`, but a bare `scripts/backup.sh
+  backup` starts that unit itself (best-effort — a Postgres outage must not stop
+  the run that protects the wallet). The repo is `$STACK_BACKUP_DIR`, reached
+  through `backup.env`; `scripts/backup.sh` reads `RESTIC_*` from **the
+  environment first, then the file** — the only order that can recover a fresh
+  host.
 - **BoltMesh is a tier of four units, not an MCP server**, built by
   `deploy_boltmesh` (not `deploy_app`). The private `boltmesh-labs` repos clone
   over SSH (`GITHUB_SSH_HOST`), and `deploy.sh` sets `GIT_TERMINAL_PROMPT=0`/
@@ -307,14 +207,12 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   carrying the one-time commands, not a prompt.
 - **The subnet is pinned** (`10.89.0.0/24`) because `tor.container` pins
   `--ip=10.89.0.240` and both `bitcoin.conf` (`rpcallowip`) and `torrc`
-  (`SocksPolicy`) allow it. `tor` is addressed by that IP, not by name
+  (`SocksPolicy`) allow it; `tor` is addressed by that IP, not by name
   (`lightningd` runs `--always-use-proxy=true`, which suppresses DNS). The four
-  containers that back onion services also pin their IPs — `boltmesh-frontend`
-  `.241`, `boltmesh-backend` `.242`, `btc-explorer` `.243`, `xmr-explorer` `.244`
-  — because tor validates a `HiddenServicePort` target at startup: a container
-  *name* that does not exist yet (fresh host, or before `deploy_apps`) is an
-  unparseable address and stops tor from starting. Keep the range unique; don't
-  drop the subnet.
+  containers that back onion services pin `.241`–`.244` because tor validates a
+  `HiddenServicePort` target at startup: a container *name* that does not exist
+  yet is an unparseable address and stops tor from starting. Keep the range
+  unique; don't drop the subnet.
 - **`torrc`'s `HashedControlPassword` must hash to `TOR_SERVICE_PASSWORD`**;
   `install.sh` derives it with `tor --hash-password` on a fresh host and
   otherwise leaves `torrc` alone. tor logs a `ControlPort ... non-local address`
@@ -323,142 +221,87 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **`tor` is also the onion publisher, and the onion side does not go through NPM
   the way the clearweb side does.** `ONION_SERVICES` in `stack.conf` is the
   declaration; `install.sh` rewrites only the marked region at the end of
-  `torrc` (`# >>> onion services` … `# <<< onion services`) so the hash and the
-  `SocksPolicy` are never touched, and `deploy.sh`'s `unit_digest` hashes `torrc`
-  as `tor.unit` so a changed declaration restarts tor. The `.onion` address is
-  key material, not config: it comes from `$DATA_DIR/tor/onion/<name>/` (mounted
-  `/var/lib/tor/onion`, hence `tor/` in the backup set), so never "clean up"
-  that directory and never seed the address anywhere. The frontend and API onion
-  services forward to their **containers**; the mcp one cannot, because the
-  five-servers-by-path split is nginx-proxy-manager's job and NPM is on the host
-  network — a container has no route to it (`10.89.0.1:80` is refused from
-  `npm-network`; `host.containers.internal`, pasta's gateway, is the one reachable
-  name). Tor cannot rewrite `Host` and the address is unknown at install time,
-  so NPM gets a **wildcard `*.onion`** proxy host (the only host with no
-  certificate — `npm-hosts.sh` skips Let's Encrypt for `.onion`, and `force-ssl`
-  must never be added to it). Don't "fix" the mcp target to a container name or
-  give the wildcard a cert.
+  `torrc` so the hash and the `SocksPolicy` are never touched, and `deploy.sh`'s
+  `unit_digest` hashes `torrc` so a changed declaration restarts tor. The
+  `.onion` address is key material, not config: it comes from
+  `$DATA_DIR/tor/onion/<name>/` (mounted `/var/lib/tor/onion`, hence `tor/` in
+  the backup set), so never "clean up" that directory and never seed the address
+  anywhere. The frontend and API onions forward to their **containers**; the mcp
+  one cannot, because the path split is NPM's job and NPM is on the host
+  network, so it targets `host.containers.internal`. Tor cannot rewrite `Host`
+  and the address is unknown at install time, so NPM gets a **wildcard
+  `*.onion`** host (the only host with no certificate — `npm-hosts.sh` skips
+  Let's Encrypt for `.onion`, and `force-ssl` must never be added to it). Don't
+  "fix" the mcp target to a container name or give the wildcard a cert.
 - **Spending stays off:** `install.sh` writes `ENABLE_SPENDING=0` to both money
   servers' `spend.env` (never seed `1`); `scripts/spend-audit.sh` asserts it,
   hash-baselines both `spend.env`, both token files and `node.env` (the spend
   rune), and diffs outgoing `listpays`/`get_transfers` against a baseline.
 - **The monitor is a read-only host script, not a container:** `monitor.timer` (a
-  plain user unit) only schedules `monitor.service` (`Unit=monitor.service`); the
-  environment lives on the *service*, which runs `scripts/monitor.sh --quiet`
-  with `EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env` — the leading `-`
-  makes it optional, so an unfilled `monitor.env` still runs the sweep,
-  journal-only. `scripts/monitor.sh` reads the same file through `env_value`
-  (environment first, then the file, never sourcing it), so a hand run alerts on
+  plain user unit) schedules `monitor.service`, which runs
+  `scripts/monitor.sh --quiet` with an optional
+  `EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env` — the leading `-` keeps
+  an unfilled file from stopping the sweep. The script reads that file through
+  `env_value` (environment first, never sourcing it), so a hand run alerts on
   exactly what the timer would. It is alert-only (never restarts a unit) and
-  silent until `monitor.env` is filled in. Apprise traps:
-  the `caronc/apprise` image has no ENTRYPOINT, so the CLI must be named
-  (`podman run --rm caronc/apprise apprise -t TITLE -b BODY URL...`), and a
-  `mailto://` URL on 587 needs `?mode=starttls` (`465` → `?mode=ssl`) or it
-  fails with a bare "Connection error". It also carries the host checks (disk,
-  inodes, disk saturation from `/sys/block/<dev>/stat` io_ticks, backup age via
-  `scripts/backup.sh list --json`, certificate expiry off NPM's
-  `letsencrypt/live/*/cert.pem`, systemd `NRestarts` deltas between sweeps, the
-  NIC's errs+drop delta off `/proc/net/dev` (fields 4+5 rx, 12+13 tx — field 1
-  is the interface name), the hottest hwmon sensor, and
-  the metrics textfile going stale) and the chain/daemon checks (`verify.sh` for
-  the base sweep, then bitcoind freshness + a peer floor + the mempool cap,
-  Fulcrum's Electrum tip against bitcoind's `blocks`, CLN peers/channels,
-  monerod's target_height lag while synchronized, the wallet's lag) — thresholds
-  are `MONITOR_*` keys in `monitor.env` **with defaults in the script**, so an
-  env file written before a check existed still monitors. `num_or` and
-  `THRESH_FULCRUM_LAG` are defined with the config (not with the host checks)
-  because the chain section reads a threshold before that section runs.
+  silent until `monitor.env` is filled in; thresholds are `MONITOR_*` keys
+  **with defaults in the script**, so an env file written before a check existed
+  still monitors. It carries the host checks (disk, inodes, disk saturation,
+  backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
+  hottest sensor, a stale metrics textfile) and the chain/daemon checks (a
+  `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
+  peers/channels, monerod's lag, the wallet's lag). The Apprise traps
+  (`caronc/apprise` has no ENTRYPOINT, so name the CLI; a `mailto://` URL on 587
+  needs `?mode=starttls`) live in the script.
 - **Metrics are history, not alerting, and the two must not be coupled:**
   `victoriametrics` (loopback `8428`, 30d via `METRICS_RETENTION`) +
-  `node-exporter` (host `/proc`, `/sys`, `/` read-only; `SecurityLabelDisable=true`
-  because a container domain may not read the host's labels and relabelling `/`
-  is not an option) + `scripts/metrics.sh` on `metrics.timer` every minute.
-  node-exporter runs on the **host network**, bound to the wildcard
-  (`--web.listen-address=:9100`, not a PublishPort): `/proc/net/*` is
-  scoped to the netns present at read time, so a containered exporter's netdev
-  and netstat collectors only ever reported its own `eth0`/`lo` — the host's NIC
-  (`enp8s0`) never reached the store. The wildcard bind is measured fact, not
-  taste: rootless podman keeps the npm-network bridge and its `10.89.0.1`
-  gateway inside the userns, so that address does not exist in the host netns
-  to bind, and pasta delivers a container's `host.containers.internal` dial
-  into the host netns but **not** onto host loopback — only a wildcard bind
-  catches it. The LAN exposure is closed by the firewall (9100 is not in
-  `FIREWALL_PORTS`); VM scrapes it as `host.containers.internal:9100`, and its
-  `instance` label is pinned to `node-exporter:9100` in `scrape.yml` so
-  host-filesystem/CPU history doesn't split at that deploy. The npm-network
-  `After=/Requires=` stays: it keeps the network up ahead of the scrape path.
+  `node-exporter` + `scripts/metrics.sh` on `metrics.timer` every minute.
   `monitor.sh` never queries the store — that is what keeps a wedged or deleted
-  VM from silencing an alert — and `vmui` gets **no** NPM host: it has no auth
-  of its own, so the store stays loopback-only (SSH tunnel) and nothing is added
-  to `FIREWALL_PORTS`. The numbers are published through node-exporter's
-  **textfile collector**, which is the permissions trap: the exporter is uid
-  65534 (a subuid under rootless podman), so both writers chmod the directory
-  `0755` and the files `0644`; a silent "graphs stopped while everything is
-  healthy" is almost always that. `$DATA_DIR/monitoring` is regenerable and
-  stays out of the backup set, and `monitor.prom` (backup age, verify failures,
-  spend trips) is written by `monitor.sh` so the sweep's numbers get history
-  without paying for them twice. Fulcrum's height is the Electrum tip over 50001
-  (`electrum_tip`), **not** a `podman logs` scrape: the image prints "Processed
-  height" only at 1% steps, so `--tail 200` holds no line once it has caught up
-  and a scraped height goes stale. The series are `stack_fulcrum_up` (the
-  container's own health), `_electrum_up`,
-  `_electrum_tip` and `_lag_blocks`; a first-run index legitimately answers
-  nothing for days, which is why that is a 0 rather than a `collector_error`.
-- **nginx-proxy-manager runs on the host network, and health comes from podman** —
-  `deploy/nginx-proxy-manager.container` sets `Network=host` and has no
-  `PublishPort=`, so NPM's own nginx binds :80/:443/:81 in the host's namespace
-  and every request carries the client's real address. That is the *reason* it is
-  not published: rootless podman forwards a published port with `rootlessport`, a
-  userspace proxy that dials the container from inside the rootless namespace, so
-  NPM logged its own container IP (`10.89.0.5`) as the client for every request.
-  Podman ≥ 6.0 can forward with `pasta` instead (`rootless_port_forwarder="pasta"`
-  under `[network]` in `~/.config/containers/containers.conf`), which does
-  preserve the source address, but Rocky 10 ships podman 5.8 with no such key and
-  no `pesto` — so don't "simplify" NPM back to `PublishPort=80:80`. Restart
-  order is load-bearing too: `deploy.sh` rewrites the proxy hosts and only then
-  restarts NPM (`sync_npm_network`), because its nginx resolves every upstream at
-  start and refuses to come up while a saved host still names a container — which
-  also takes the admin API on `:81` down, so the reverse order cannot be
-  recovered through the API (park `$DATA_DIR/npm/data/nginx/proxy_host/*.conf`,
-  then re-run). The price of
-  `Network=host` is that NPM can no longer resolve a container name: every unit it
-  fronts publishes its port on the host's **loopback**
-  (`PublishPort=127.0.0.1:<port>:…`), those are the `127.0.0.1:` targets in
-  `NPM_HOSTS`/`MCP_HOSTS`, and only 80/443/81 plus Fulcrum's raw Electrum
-  50001/50002 stay LAN-reachable. The host-side
-  checks still read the services by container name on `npm-network` through
-  `net_curl` — a throwaway `localhost/netcheck:local` container
-  (`netcheck/Containerfile`, built by `install.sh`) — with `net_curl_host` the
-  same image on the host network, for NPM's own admin API on `127.0.0.1:81`. The
-  units *do* set `HealthCmd=`/`HealthInterval=`, so podman really does report
-  `(healthy)` for them and `deploy.sh` waits with `wait_healthy`; the MCP probe is
-  an authenticated `initialize`, i.e. strictly stronger than a `/health` GET.
+  VM from silencing an alert — and `vmui` gets **no** NPM host (it has no auth
+  of its own), so nothing is added to `FIREWALL_PORTS`. node-exporter runs on
+  the **host network** bound to the wildcard: a containered exporter's netdev
+  and netstat collectors only ever saw its own `eth0`/`lo`, and pasta delivers a
+  container's `host.containers.internal` dial into the host netns but not onto
+  host loopback. The numbers are published through its **textfile collector**,
+  whose permissions are the trap: the exporter is uid 65534 (a subuid), so both
+  writers chmod the directory `0755` and the files `0644` — a silent "graphs
+  stopped while everything is healthy" is almost always that.
+  `$DATA_DIR/monitoring` is regenerable and outside the backup set, and
+  `monitor.prom` carries the sweep's own numbers. The series and the
+  observe/decide split are documented in `scripts/metrics.sh`.
+- **nginx-proxy-manager runs on the host network, and health comes from podman.**
+  `Network=host` with no `PublishPort=`, so NPM's own nginx binds :80/:443/:81 in
+  the host's namespace and every request carries the client's real address; a
+  rootless published port went through `rootlessport` and showed NPM its own
+  container IP. `deploy/nginx-proxy-manager.container` carries the full
+  explanation, including why podman 6's `pasta` forwarder would be the other way
+  out. The price is that NPM cannot resolve a container name: every unit it
+  fronts publishes on the host's **loopback** (`PublishPort=127.0.0.1:<port>:…`),
+  which is what `NPM_HOSTS`/`MCP_HOSTS` point at, and only 80/443/81 plus
+  Fulcrum's raw ports stay LAN-reachable. Host-side checks still read
+  `container:8000` on `npm-network` through `net_curl` (the throwaway
+  `localhost/netcheck:local` image), with `net_curl_host` for NPM's own admin API
+  on `127.0.0.1:81`. The units set `HealthCmd=`/`HealthInterval=`, so podman
+  really does report `(healthy)` and `deploy.sh` waits with `wait_healthy`; the
+  MCP probe is an authenticated `initialize`, strictly stronger than a `/health`
+  GET.
 - **The bearer tokens never reach the host's argv** — `mcp_initialize` /
   `mcp_tool_call` pass them in a curl config on stdin (`-K -`), so `ps` cannot
   read a token out of a running verify/monitor/audit sweep. `npm-hosts.sh`
   does the same with the NPM admin password and the API token it mints.
-- **Every proxy host is declared, not hand-clicked:** `NPM_HOSTS` in
-  `stack.conf` (`domain | [scheme://]host:port | flags`, where host is always
-  `127.0.0.1` — the loopback publish of the unit being fronted) is the whole
-  public surface, and `scripts/npm-hosts.sh` (run by `deploy.sh`, or
-  `--only npm-hosts`) reconciles it through nginx-proxy-manager's admin API on
-  `127.0.0.1:81` — update in place by `domain_names`, else create, plus a Let's
-  Encrypt certificate per host. It needs the admin login in
-  `$DATA_DIR/config/npm/api.env` and `jq` on the host (bootstrap); it self-skips
-  when the login is absent. `--prune` (the only destructive mode) deletes hosts
-  and certificates `NPM_HOSTS` does not declare. The `mcp` flag is the exception
-  to "one forward": that host serves a location per `MCP_HOSTS` entry
-  (`/prefix:container:port` — the container names the `token.env` that is the
-  prefix's credential, the port is its loopback publish), each prefix rewritten
-  onto the container's `/mcp` (the MCP SDK's streamable-HTTP default; the apps
-  expose no path knob), and its nginx config must keep `proxy_buffering off` and
-  a long `proxy_read_timeout` — the transport is SSE, and a buffered body hangs
-  the client. `verify.sh` re-checks that path through NPM's `:80` (following the
-  force-SSL redirect to `:443`) by connecting the public host to NPM itself with
-  `--connect-to` — onto `127.0.0.1`, since NPM binds those ports in the host
-  namespace — so the certificate still validates. Proxying a daemon's own
-  API (`clnrest`, `xmr-rpc`) is gated only by that daemon's RPC credentials, not
-  by an MCP token.
+- **Every proxy host is declared, not hand-clicked:** `NPM_HOSTS` in `stack.conf`
+  is the whole public surface, and `scripts/npm-hosts.sh` reconciles it through
+  NPM's admin API on `127.0.0.1:81` (update in place by `domain_names`, else
+  create, plus a Let's Encrypt certificate per host). It needs the admin login in
+  `config/npm/api.env` and `jq` on the host (bootstrap), and self-skips when the
+  login is absent. `--prune` is the only destructive mode. The `mcp` flag is the
+  one exception to "one forward": one location per `MCP_HOSTS` entry
+  (`/prefix:container:port`), each rewritten onto the container's `/mcp`, with
+  the streaming settings an SSE transport needs — the script's header owns that
+  payload. `verify.sh` re-checks the path through NPM's `:80` (following the
+  force-SSL redirect) with `--connect-to` onto `127.0.0.1`, so the certificate
+  still validates. Proxying a daemon's own API (`clnrest`, `xmr-rpc`) is gated
+  only by that daemon's RPC credentials, not by an MCP token.
 
 ## Interface contract with the app repos
 
