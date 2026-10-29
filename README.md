@@ -24,7 +24,7 @@ stack runs and one script that fixes a deployment problem.
 | `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:2026.10.28-c360868e5` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
+| `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
 | `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
@@ -336,8 +336,8 @@ sudo restorecon -RF /data/stack
 with `prune=0` and `monerod` runs without `--prune-blockchain`. Both store and
 validate the entire chain, which dominates the data dir — roughly 800 GB for
 Bitcoin and 250 GB for Monero as of late 2026, both growing. Fulcrum's Electrum
-index adds roughly 100–135 GB and ~1–2 GB of RAM (`--db_mem 1024` caps its
-RocksDB cache). Budget a 2 TB data disk. The chains and the index are excluded
+index adds roughly 100–135 GB and ~3–4 GB of RAM (`--db_mem 3072` caps its
+RocksDB cache; a rebuild is compaction-bound below that). Budget a 2 TB data disk. The chains and the index are excluded
 from the backup set for exactly this reason: they are large and re-downloadable,
 not irreplaceable state.
 

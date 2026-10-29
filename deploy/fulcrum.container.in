@@ -29,13 +29,19 @@ PublishPort=50002:50002
 Volume=@DATA_DIR@/fulcrum:/data:z
 
 # -t/-s: plaintext and self-signed TLS for wallets. -a: admin RPC on loopback
-# only (FulcrumAdmin; never published). --db_mem caps RocksDB's cache so the
-# indexer cannot crowd out bitcoind/monerod on a 16 GB host. Fulcrum starts
-# indexing as soon as bitcoind's RPC answers and follows it through IBD; it
-# serves wallets only once its own index has caught up.
+# only (FulcrumAdmin; never published). --db_mem bounds RocksDB (block cache
+# plus write buffers) so the indexer cannot crowd out bitcoind/monerod on a
+# 16 GB host. It was 1024, and a fresh index at that size is compaction-bound:
+# measured on 2026-10-29, a resync from block 0 wrote ~10 MB/s for ~31
+# blocks/min (100x write amplification) with the host at 40-60% iowait. 3072
+# leaves ~6 GB for the daemons -- bitcoind 1.2, monerod 0.6, the rest under
+# 0.3 each -- while giving the LSM room to batch. Do not raise this to
+# RocksDB's default 4096 without checking `free -h` during a full resync.
+# Fulcrum starts indexing as soon as bitcoind's RPC answers and follows it
+# through IBD; it serves wallets only once its own index has caught up.
 Exec=Fulcrum -b bitcoind:8332 -u @BITCOIN_RPC_USER@ -p @BITCOIN_RPC_PASSWORD@ \
      -t 0.0.0.0:50001 -s 0.0.0.0:50002 -a 127.0.0.1:8000 \
-     --polltime 5 --bd-timeout 120 --db_mem 1024 --ts-format utc
+     --polltime 5 --bd-timeout 120 --db_mem 3072 --ts-format utc
 
 # The admin RPC does not listen until the initial index is caught up, so
 # liveness is the process itself: the entrypoint execs Fulcrum as PID 1. That is

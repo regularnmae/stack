@@ -181,6 +181,19 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   hold the *same* wallet tag or the wallet this script creates is not the one
   the unit serves; the same tag also appears in the README's "What runs" table,
   which is hand-maintained.
+  **Merging one of Renovate's Containerfile digest bumps changes nothing on a
+  running host**, and a plain `./deploy.sh` will not change that: the dockerfile
+  manager only rewrites `FROM …@sha256:` in `btc-explorer/` and `kuma-ctl/`, and
+  both build paths skip an image that already exists (`deploy_explorers`'
+  `build_explorer` and `install.sh`'s "left alone once it exists"). Consuming one
+  is `./deploy.sh --only btc-explorer` / `--only xmr-explorer`, which force the
+  build, and for the images `install.sh` builds — `kuma-ctl`, `netcheck`, `tor` —
+  a `podman rmi localhost/<name>:local` first, then `./deploy/install.sh`, then
+  `./deploy.sh --only kuma-monitors` for the socket.io client that base carries.
+  Tag bumps are the other half: a changed `Image=` restarts with the new tag only
+  because `restart_changed_units` sees the rendered unit change, so an unchanged
+  repo means a stale container (this is how searxng sat on `2026.10.27` while
+  `main` pinned `2026.10.28`).
 - **Backup is a oneshot Quadlet job plus a plain user timer.** `backup.container`
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
@@ -202,7 +215,16 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   bitcoind's RPC and follows it through IBD, so `deploy.sh` starts it once
   bitcoind RPC answers; it only accepts wallets after its own index catches up.
   Its `$DATA_DIR/fulcrum` database (~100–135 GB) and cert are regenerable and
-  excluded from the backup set; `--db_mem 1024` caps RocksDB. Do not add its
+  excluded from the backup set. `--db_mem 3072` bounds RocksDB (block cache plus
+  write buffers); it was `1024` until 2026-10-29, when a lost index had to be
+  rebuilt and that size made the resync compaction-bound — ~10 MB/s of writes
+  (~100x amplification) for ~31 blocks/min, i.e. weeks instead of hours, with the
+  host at 40–60% iowait. 3072 still leaves ~6 GB for the daemons on a 16 GB host
+  (bitcoind 1.2, monerod 0.6, everything else under 0.3), so it is the measured
+  middle; check `free -h` during a resync before going to RocksDB's default
+  4096. A resync also loses the DB's undo info, which Fulcrum warns about at
+  startup ("presume the DB is consistent") — harmless, but it means the next
+  restart cannot undo a block. Do not add its
   ports to `NPM_HOSTS` or try to front it with NPM (the protocol is raw TCP),
   and keep `50001/50002` in `FIREWALL_PORTS` if they move.
   Its `HealthCmd` is `grep -qx Fulcrum /proc/1/comm` on purpose — podman's
