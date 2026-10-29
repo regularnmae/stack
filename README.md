@@ -341,32 +341,6 @@ RocksDB cache). Budget a 2 TB data disk. The chains and the index are excluded
 from the backup set for exactly this reason: they are large and re-downloadable,
 not irreplaceable state.
 
-#### Speeding up the initial sync
-
-The first Bitcoin sync is validation-bound, not bandwidth-bound, and the cost is
-dominated by chainstate writes. `bitcoin.conf` is seeded with `dbcache=3072`
-(MiB) for that reason: Core's default is 450, and the extra cache is the single
-setting that materially shortens the initial block download. It does **not**
-speed up the download of blocks — only their validation and the UTXO writes
-behind it — so a node that is far behind still spends most of its time waiting
-on peers.
-
-On a small host, or while Fulcrum is indexing the same chain, lower it. The
-value is a cache ceiling, not an allocation, so a too-large number mostly means
-the kernel reclaims page cache instead:
-
-```sh
-podman exec bitcoind sh -c 'sed -i -e "s|^[[:space:]]*dbcache[[:space:]]*=.*|dbcache=1536|" /data/.bitcoin/bitcoin.conf'
-systemctl --user restart bitcoind.service   # resumes the sync, no re-download
-```
-
-Once `getblockchaininfo` reports `"initialblockdownload": false`, drop it back
-to `450`: the cache buys nothing in steady state and is RAM the rest of the
-stack can use. As with `prune=`, `install.sh` seeds the file only when it is
-missing, so an existing host keeps whatever it has until it is edited. Two
-smaller knobs: `par=<n>` caps script-verification threads (default 0 = one per
-core) and `maxmempool` shares unused memory with the same cache.
-
 #### Converting a pruned host
 
 Changing the config does not restore history. An existing pruned data directory
