@@ -98,6 +98,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+head2 "Local images"
+# These five are built here, not pulled, so a healthy container says nothing
+# about whether its image still matches its Containerfile -- a merged base-image
+# bump (Renovate's dockerfile manager) changes only that file. deploy.sh and
+# install.sh rebuild on the label mismatch (scripts/lib.sh's image_is_current);
+# this is how a bump that was merged but never deployed becomes visible. A stale
+# image is a warning, not a failure: the service is running the last good bits.
+local_images=(
+    "btc-explorer|$BTC_EXPLORER_IMAGE|btc-explorer"
+    "xmr-explorer|$XMR_EXPLORER_IMAGE|xmr-explorer"
+    "kuma-ctl|$KUMA_CTL_IMAGE|kuma-ctl"
+    "netcheck|$NETCHECK_IMAGE|netcheck"
+    "tor|$TOR_IMAGE|tor"
+)
+for entry in "${local_images[@]}"; do
+    IFS='|' read -r name image dir <<<"$entry"
+    if ! podman image exists "$image" 2>/dev/null; then
+        warn "$name image ($image) is missing; ./deploy.sh builds it"
+    elif image_is_current "$image" "$REPO_DIR/$dir/Containerfile"; then
+        pass "$name image matches its Containerfile"
+    else
+        warn "$name image is stale or unlabelled; ./deploy.sh rebuilds it from the current Containerfile"
+    fi
+done
+
+
+# ---------------------------------------------------------------------------
 head2 "MCP endpoints"
 # name|env-file|token-var|deep-tool|deep-args|needs-nodes
 # The name is the container name; it is read by name on npm-network, and it

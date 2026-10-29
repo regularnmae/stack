@@ -2,14 +2,17 @@
 # (alpine:latest + "apk add tor" at every boot) required working internet on
 # every start; baking the package in removes that dependency.
 #
-# Both the base and the package are pinned -- tag *and* digest for the base,
-# an exact apk version for tor -- so Renovate can bump them (and so a rebuild
-# ships the same bits). The local tag is deliberately versionless
-# (localhost/tor:local): the versions live only here, not duplicated across
-# stack.conf, the quadlet and the README.
+# The base is pinned -- tag *and* digest -- so a rebuild ships the same OS bits.
+# The apk package deliberately is *not* version-pinned: Alpine keeps only the
+# current revision of a package in a branch, so `tor=<exact>` builds today and
+# fails as soon as 0.4.9.x moves on -- which is exactly the rebuild a base-image
+# bump triggers. Nothing watches apk versions here, so the pin would rot
+# silently until that day; the branch (3.24) is the real constraint.
+# The local tag is deliberately versionless (localhost/tor:local): the versions
+# live only here, not duplicated across stack.conf, the quadlet and the README.
 #
 # 3.20 reached EOL 2026-04-01; this rides 3.24, supported to 2028-06.
 #
 # Build:  podman build -t localhost/tor:local tor/
 FROM docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
-RUN apk add --no-cache tor=0.4.9.14-r0
+RUN apk add --no-cache tor

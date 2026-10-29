@@ -411,39 +411,58 @@ log "wrote $CONFIG_DIR/monitoring/vm/scrape.yml"
 mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
 
 # ---------------------------------------------------------------------------
-# 3. netcheck image (the curl client the host-side checks run)
+# 3. the images built here: netcheck, kuma-ctl, tor
 # ---------------------------------------------------------------------------
-# Built here, not pulled, and left alone once it exists -- same reasoning as
-# the tor image below. scripts/lib.sh's net_curl runs it as a throwaway
-# container to read a service by name on npm-network, and net_curl_host the
-# same image on the host network for nginx-proxy-manager, which binds
-# 127.0.0.1:81 there.
-if command -v podman >/dev/null 2>&1 && ! podman image exists "$NETCHECK_IMAGE" 2>/dev/null; then
-    if [ -f "$REPO_DIR/netcheck/Containerfile" ]; then
-        log "building $NETCHECK_IMAGE"
-        podman build -t "$NETCHECK_IMAGE" "$REPO_DIR/netcheck/" >/dev/null
+# None of these is pulled, so "is it built?" is the wrong question: a base-image
+# bump rewrites only that image's Containerfile (Renovate's dockerfile manager),
+# so leaving an existing image alone forever is how such a bump never reaches
+# the host. The Containerfile's hash is baked in as a label and compared here
+# (scripts/lib.sh), so a stale image is rebuilt and a current one is left alone.
+ensure_local_image() { # image build-context
+    local image="$1" dir="$2"
+    [ -f "$dir/Containerfile" ] || return 0
+    if image_is_current "$image" "$dir/Containerfile"; then
+        log "$image is current"
+        return 0
     fi
+    if podman image exists "$image" 2>/dev/null; then
+        # A stale image is worth rebuilding, but failing the whole install over
+        # it would take the host down for a helper image: keep the bits that
+        # work and let verify.sh report the drift (a broken Containerfile -- an
+        # apk pin that moved, say -- is a fixable authoring bug, not an outage).
+        log "$image is stale: its Containerfile changed since it was built"
+        podman build --label "$(image_inputs_label "$dir/Containerfile")" \
+            -t "$image" "$dir" >/dev/null \
+            || warn "could not rebuild $image; keeping the current image (verify.sh reports it stale)"
+        return 0
+    fi
+    log "building $image"
+    podman build --label "$(image_inputs_label "$dir/Containerfile")" \
+        -t "$image" "$dir" >/dev/null \
+        || die "could not build $image"
+}
+
+# netcheck: the curl client the host-side checks run. scripts/lib.sh's net_curl
+# runs it as a throwaway container to read a service by name on npm-network, and
+# net_curl_host the same image on the host network for nginx-proxy-manager,
+# which binds 127.0.0.1:81 there.
+if command -v podman >/dev/null 2>&1; then
+    ensure_local_image "$NETCHECK_IMAGE" "$REPO_DIR/netcheck"
 fi
 
-# The socket.io client scripts/kuma-monitors.sh runs (kuma has no REST write
-# API); built the same way, left alone once it exists. The reconcile script is
-# bind-mounted on every run, so a change to kuma-ctl/monitors.mjs does not need
-# a rebuild -- only the pinned node/socket.io-client base does.
-if command -v podman >/dev/null 2>&1 && ! podman image exists "$KUMA_CTL_IMAGE" 2>/dev/null; then
-    if [ -f "$REPO_DIR/kuma-ctl/Containerfile" ]; then
-        log "building $KUMA_CTL_IMAGE"
-        podman build -t "$KUMA_CTL_IMAGE" "$REPO_DIR/kuma-ctl/" >/dev/null
-    fi
+# kuma-ctl: the socket.io client scripts/kuma-monitors.sh runs (kuma has no REST
+# write API). The reconcile script is bind-mounted on every run, so a change to
+# kuma-ctl/monitors.mjs does not need a rebuild -- only the pinned
+# node/socket.io-client base does.
+if command -v podman >/dev/null 2>&1; then
+    ensure_local_image "$KUMA_CTL_IMAGE" "$REPO_DIR/kuma-ctl"
 fi
 
 # ---------------------------------------------------------------------------
 # 4. tor image + torrc (+ the onion services)
 # ---------------------------------------------------------------------------
-if command -v podman >/dev/null 2>&1 && ! podman image exists "$TOR_IMAGE" 2>/dev/null; then
-    if [ -f "$REPO_DIR/tor/Containerfile" ]; then
-        log "building $TOR_IMAGE"
-        podman build -t "$TOR_IMAGE" "$REPO_DIR/tor/" >/dev/null
-    fi
+if command -v podman >/dev/null 2>&1; then
+    ensure_local_image "$TOR_IMAGE" "$REPO_DIR/tor"
 fi
 
 # The onion services, rendered from ONION_SERVICES in stack.conf. Tor's own

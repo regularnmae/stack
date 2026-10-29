@@ -118,6 +118,39 @@ electrum_tip() { # port [tls] -> height, empty on failure
         | grep -oE '[0-9]+$' | head -n1
 }
 
+# --- locally-built images --------------------------------------------------
+# The images this repo builds itself (btc-explorer, xmr-explorer, kuma-ctl,
+# netcheck, tor) are described completely by their Containerfile: the base image
+# is digest-pinned in `FROM`, every upstream pin is an `ARG` in the same file,
+# and none of them COPYs anything out of its build context (the one sibling
+# file, kuma-ctl/monitors.mjs, is bind-mounted at run time on purpose). So the
+# hash of that file *is* the image's build identity. Baking it in as a label
+# lets a later deploy answer "is this image the one this Containerfile
+# describes?" without rebuilding to find out -- which is what makes a merged
+# Renovate digest bump reach the host at all: it changes nothing else, no unit
+# file and no tag, so `podman image exists` alone would keep the old bits
+# forever. An image with no label (built before this existed) is stale by
+# definition and is rebuilt once.
+image_inputs_digest() { # containerfile -> sha256 of its bytes
+    sha256sum "$1" 2>/dev/null | awk '{ print $1 }'
+}
+
+image_is_current() { # image containerfile -> 0 when the label matches the file
+    local image="$1" cf="$2" want have
+    podman image exists "$image" 2>/dev/null || return 1
+    want=$(image_inputs_digest "$cf")
+    [ -n "$want" ] || return 1
+    have=$(podman image inspect \
+        --format '{{if .Labels}}{{index .Labels "org.stack.inputs"}}{{end}}' \
+        "$image" 2>/dev/null) || return 1
+    [ "$have" = "$want" ]
+}
+
+# The same value as it goes onto the image: one place for the label name.
+image_inputs_label() { # containerfile -> LABEL=VALUE for podman build --label
+    printf 'org.stack.inputs=%s' "$(image_inputs_digest "$1")"
+}
+
 # Write a Prometheus textfile for node-exporter's textfile collector: stdin -> a
 # .prom file, atomically, with the permissions the exporter needs. node-exporter
 # runs as uid 65534 -- a *subuid* under rootless podman -- so it owns neither the

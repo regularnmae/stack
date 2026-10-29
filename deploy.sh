@@ -188,6 +188,17 @@ unit_digest() {
     if [ -s "$DATA_DIR/tor/torrc" ]; then
         sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 " tor.unit" }'
     fi
+    # tor is also the one long-running container whose image install.sh rebuilds
+    # (a base-image bump, netcheck and kuma-ctl are throwaway runs and pick the
+    # new image up by themselves). A rebuilt image changes no rendered unit, so
+    # without this the container would keep the old bits while verify.sh's label
+    # check reports the image as current -- a false green. Same pseudo-name
+    # trick as torrc, so a rebuilt image restarts exactly tor.
+    if podman image exists "$TOR_IMAGE" 2>/dev/null; then
+        printf '%s tor.image\n' \
+            "$(podman image inspect --format '{{index .Labels "org.stack.inputs"}}' \
+                "$TOR_IMAGE" 2>/dev/null || true)"
+    fi
 }
 
 # .container only, never *.network: a network cannot be restarted under the
@@ -568,15 +579,22 @@ build_explorer() { # name [force]
         *) warn "unknown explorer: $name"; return 1 ;;
     esac
     [ -f "$dir/Containerfile" ] || { warn "$name has no Containerfile"; return 1; }
-    if [ "$force" = 0 ] && podman image exists "$image" 2>/dev/null; then
-        log "$image is present"
+    # "exists" is not enough: a digest bump changes only the Containerfile, so
+    # an unlabelled or label-mismatched image is the old bits under the same
+    # local tag. See scripts/lib.sh's image_is_current.
+    if [ "$force" = 0 ] && image_is_current "$image" "$dir/Containerfile"; then
+        log "$image is current"
         return 0
+    fi
+    if [ "$force" = 0 ]; then
+        log "$image is stale: its Containerfile changed since it was built"
     fi
     log "building $image"
     if [ "$name" = xmr-explorer ]; then
         log "MoneroBlock is a small Go build; no Monero compile"
     fi
-    run podman build -t "$image" "$dir"
+    run podman build --label "$(image_inputs_label "$dir/Containerfile")" \
+        -t "$image" "$dir"
 }
 
 deploy_explorers() {

@@ -170,8 +170,11 @@ an OS reinstall. See [Where the data lives](#where-the-data-lives).
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds + restarts the
 five MCP servers and the BoltMesh app tier (a plain start would keep running a
-stale image). The two explorer images are built only when missing — `--only`
-forces a rebuild. Common flags:
+stale image). The five images built here — the two explorers, `kuma-ctl`,
+`netcheck` and `tor` — are rebuilt when their Containerfile changed and left
+alone otherwise: the digest of that file is baked into the image as a label, so
+a merged base-image bump reaches the host on the next deploy instead of needing
+a hand rebuild (`--only` forces one anyway). Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service

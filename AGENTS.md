@@ -181,19 +181,35 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   hold the *same* wallet tag or the wallet this script creates is not the one
   the unit serves; the same tag also appears in the README's "What runs" table,
   which is hand-maintained.
-  **Merging one of Renovate's Containerfile digest bumps changes nothing on a
-  running host**, and a plain `./deploy.sh` will not change that: the dockerfile
-  manager only rewrites `FROM …@sha256:` in `btc-explorer/` and `kuma-ctl/`, and
-  both build paths skip an image that already exists (`deploy_explorers`'
-  `build_explorer` and `install.sh`'s "left alone once it exists"). Consuming one
-  is `./deploy.sh --only btc-explorer` / `--only xmr-explorer`, which force the
-  build, and for the images `install.sh` builds — `kuma-ctl`, `netcheck`, `tor` —
-  a `podman rmi localhost/<name>:local` first, then `./deploy/install.sh`, then
-  `./deploy.sh --only kuma-monitors` for the socket.io client that base carries.
-  Tag bumps are the other half: a changed `Image=` restarts with the new tag only
-  because `restart_changed_units` sees the rendered unit change, so an unchanged
-  repo means a stale container (this is how searxng sat on `2026.10.27` while
-  `main` pinned `2026.10.28`).
+  **Merging one of Renovate's Containerfile digest bumps now reaches the host on
+  the next `./deploy.sh`**, because each locally-built image carries the hash of
+  the Containerfile that built it. The dockerfile manager rewrites only
+  `FROM …@sha256:` lines (btc-explorer/ and kuma-ctl/ today, the alpine/golang
+  bases in the other three whenever they move), which changes no unit and no
+  tag — so `podman image exists` alone kept the old bits forever, and did until
+  2026-10-29. `deploy_explorers`' `build_explorer` and `install.sh`'s
+  `ensure_local_image` therefore build with
+  `--label org.stack.inputs=<sha256 of the Containerfile>` and rebuild when the
+  label differs (`scripts/lib.sh`'s `image_is_current`); no label at all counts
+  as stale and is rebuilt once. That file *is* the recipe — base digest, upstream
+  `ARG` pins, and no `COPY` out of the build context (kuma-ctl/monitors.mjs is
+  bind-mounted at run time on purpose) — which is why the hash is the
+  Containerfile's and not the directory's. `verify.sh`'s "Local images" section
+  runs the same comparison, so a bump merged and never deployed shows up without
+  a deploy. Three consequences: tor is the only long-lived container among the
+  five, so `unit_digest` hashes its image label as `tor.image` to restart it
+  (netcheck and kuma-ctl are throwaway runs and pick the new image up by
+  themselves); a failed rebuild is fatal only when the image is *missing* —
+  for a stale one it warns and keeps the bits that work, because a helper image
+  must not take down an install; and the apk pins these images used to carry
+  (`curl=8.22.0-r0`, `tor=0.4.9.14-r0`) had rotted, since Alpine keeps only the
+  current revision per branch, so the first automatic rebuild failed outright.
+  Both are now unpinned to the branch, with the base digest as the only pin —
+  nothing here watches apk versions, so an exact pin rots silently until exactly
+  the rebuild that automation triggers. Tag bumps are the other half: a changed
+  `Image=` reaches a running container only because `restart_changed_units` sees
+  the rendered unit change, which is how searxng sat on `2026.10.27` while
+  `main` pinned `2026.10.28`.
 - **Backup is a oneshot Quadlet job plus a plain user timer.** `backup.container`
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`

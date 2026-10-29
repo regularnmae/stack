@@ -10,15 +10,19 @@
 # runs on the host network (so clients' real addresses reach its logs) and binds
 # :80/:443/:81 itself, so it is read on 127.0.0.1.
 #
-# Both the base and the package are pinned -- tag *and* digest for the base, an
-# exact apk version for curl -- so Renovate can bump them (and so a rebuild
-# ships the same bits). The local tag is deliberately versionless
-# (localhost/netcheck:local): the versions live only here, not duplicated
-# across stack.conf, the scripts and the README.
+# The base is pinned -- tag *and* digest -- so a rebuild ships the same OS bits.
+# The apk package deliberately is *not* version-pinned: Alpine keeps only the
+# current revision of a package in a branch, so `curl=<exact>` builds today and
+# fails the moment 8.x moves to the next revision -- which is precisely the
+# rebuild a base-image bump triggers, turning a routine update into a failed
+# deploy. Nothing watches apk versions here (Renovate's dockerfile manager sees
+# FROM lines only), so an exact pin would rot silently until that day. The local
+# tag is deliberately versionless (localhost/netcheck:local): the versions live
+# only here, not duplicated across stack.conf, the scripts and the README.
 #
 # No ENTRYPOINT/CMD: every use names its own command (net_curl passes the curl
 # argv straight through), so there is nothing to override.
 #
 # Build:  podman build -t localhost/netcheck:local netcheck/
 FROM docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
-RUN apk add --no-cache curl=8.22.0-r0
+RUN apk add --no-cache curl
