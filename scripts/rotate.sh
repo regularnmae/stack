@@ -330,6 +330,16 @@ restart_unit_and_wait() { # container [timeout]
     fi
 }
 
+# True when the RUNNING container's PID 1 already carries the value the unit was
+# rendered with (checked on its own command line, not on the file). A resumed
+# rotation must not bounce a daemon that is already running the new secret: for
+# monero-wallet-rpc that restart costs another cache refresh, and for any daemon
+# it is a second outage for no reason.
+container_runs_secret() { # container value
+    podman exec "$1" sh -c 'tr "\0" "\n" < /proc/1/cmdline' 2>/dev/null \
+        | grep -qxF -- "$2"
+}
+
 restart_if_deployed() { # container...
     local c
     for c in "$@"; do
@@ -574,7 +584,11 @@ apply_monero_rpc() {
     install_rerender
 
     journal_put step "restart:monero-wallet-rpc"
-    restart_unit_and_wait monero-wallet-rpc "$MONERO_WALLET_WAIT"
+    if [ "$DRY_RUN" = 0 ] && container_runs_secret monero-wallet-rpc "--password=$new"; then
+        log "the running wallet already carries the journaled password; not restarting it"
+    else
+        restart_unit_and_wait monero-wallet-rpc "$MONERO_WALLET_WAIT"
+    fi
 
     journal_put step "restart:dependents"
     restart_if_deployed monero-wallet-mcp boltmesh-backend boltmesh-worker
@@ -1042,7 +1056,11 @@ apply_monero_wallet() {
     install_rerender
 
     journal_put step "restart:monero-wallet-rpc"
-    restart_unit_and_wait monero-wallet-rpc "$MONERO_WALLET_WAIT"
+    if [ "$DRY_RUN" = 0 ] && container_runs_secret monero-wallet-rpc "--password=$new"; then
+        log "the running wallet already carries the journaled password; not restarting it"
+    else
+        restart_unit_and_wait monero-wallet-rpc "$MONERO_WALLET_WAIT"
+    fi
 
     journal_put step "restart:dependents"
     restart_if_deployed monero-wallet-mcp boltmesh-backend boltmesh-worker
