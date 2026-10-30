@@ -891,6 +891,20 @@ five `podman logs -f` windows:
 ./scripts/logs.sh --health                           # is anything still arriving?
 ```
 
+Two sources beyond the journal are worth knowing about:
+
+- **Suricata's `eve.json`** is a root-owned file, not stdout, so `vector` reads it
+  as a file and labels it `unit=suricata.service`. Alerts, anomalies and their
+  surrounding DNS/TLS/HTTP events are therefore in the same timeline as the
+  proxy and the app tier — `./scripts/logs.sh --since 6h --grep '^ALERT'`
+  answers "what was happening when that signature fired".
+- **BoltMesh's backend and worker** log structured JSON to stdout. `vector`
+  parses it for those two containers: the human message becomes the log line,
+  and `level`/`logger` become searchable fields (`level:warning
+  logger:app.tasks.gateway_health_check`). The app's level also replaces
+  journald's, which is always `info` for stdout — without that,
+  `--priority warning` would silently miss every BoltMesh warning.
+
 …or open the LogsQL UI over an SSH tunnel, exactly like `vmui`:
 
 ```sh
@@ -1032,7 +1046,13 @@ podman exec crowdsec cscli decisions list  # every decision the engine holds
 sudo nft list table inet stack_bans        # what is actually being dropped
 podman exec crowdsec cscli metrics         # lines read/parsed/whitelisted per log
 tail -f $DATA_DIR/ids/suricata/eve.json | jq 'select(.event_type=="alert")'
+./scripts/logs.sh --since 6h --unit suricata.service   # the same alerts, searchable
 ```
+
+eve.json is also shipped into the log store (`vector` reads it as a file; see
+[Logs and history](#logs-and-history)), so an alert can be read next to what
+nginx-proxy-manager, the daemons and BoltMesh were doing at the same moment
+instead of in a separate `tail`.
 
 `deploy/ids.timer` runs the roll-up every five minutes at `*:2/5` — deliberately
 between the monitor's sweeps — and `scripts/monitor.sh` alerts on a stale or

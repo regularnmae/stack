@@ -67,6 +67,14 @@ Volume=/etc/machine-id:/etc/machine-id:ro
 # opened, so a re-rendered file would never reach the running process.
 Volume=@CONFIG_DIR@/logs/vector:/etc/vector:ro
 Volume=@DATA_DIR@/logs/vector:/var/lib/vector:z
+# Suricata's eve.json, read-only. The PARENT directory is mounted, not
+# ids/suricata: the root tier owns ids/suricata, and a bind-mount source that
+# does not exist yet would be created by podman as the host user, handing the
+# rootful sensor a user-owned directory to write into. $DATA_DIR/ids always
+# exists (install.sh creates it for crowdsec), and the file source simply waits
+# until the sensor creates eve.json. :ro, and this container has SELinux off, so
+# the root-owned 0644 file is readable through the user-owned parent.
+Volume=@DATA_DIR@/ids:/ids:ro
 
 # The image's entrypoint is /usr/bin/vector; Exec= supplies its arguments (the
 # image's own default points at /etc/vector/vector.yaml, which does not exist

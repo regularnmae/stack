@@ -8,12 +8,19 @@
 #                       REQUIRED on systemd 250-257 (the source refuses to start
 #                       with false there); data_dir keeps a cursor per batch so a
 #                       restart resumes rather than replaying.
+#   sources.suricata    the sensor's eve.json -- alerts, DNS/TLS/HTTP context --
+#                       which is a file, not stdout, so journald never sees it.
+#                       Parsed per line and labelled unit=suricata.service.
 #   transforms.normalize
 #                       turns journald's CAPITALISED fields into the three
 #                       labels the store is queried by (host/unit/container),
-#                       maps PRIORITY to a name, and drops the metadata that is
+#                       maps PRIORITY to a name, parses BoltMesh's JSON logs into
+#                       level/logger/message, and drops the metadata that is
 #                       either huge (_CMDLINE, ~1 KB per entry) or useless in a
 #                       search UI (__CURSOR, _BOOT_ID, CODE_*, _AUDIT_*).
+#   transforms.suricata_normalize
+#                       parses eve.json's line into fields, normalizes Suricata's
+#                       "+0000" timestamp and writes a readable message.
 #   sinks.victoria_logs native /insert/jsonline, so every remaining field stays
 #                       searchable. Only host/unit/container become *streams*:
 #                       CONTAINER_ID would create a new stream per container
@@ -68,6 +75,27 @@ if .container == "" { del(.container) }
 .priority = "informational"
 if exists(.PRIORITY) { .priority = to_syslog_level(to_int(.PRIORITY) ?? 6) ?? "informational" }
 
+# BoltMesh's backend and worker log structured JSON (structlog) to stdout, so
+# journald stores the whole object as one string and tags every line with the
+# same syslog priority. Parse it for those two containers: the human message
+# becomes the log line, level/logger become searchable fields, and the app's
+# level replaces journald's -- otherwise `logs.sh --priority warning` would miss
+# every BoltMesh warning because stdout is always informational.
+if .container == "boltmesh-backend" || .container == "boltmesh-worker" {
+    parsed, err = parse_json(.message)
+    if err == null && is_object(parsed) {
+        .level = downcase(to_string(parsed.levelname) ?? "")
+        .logger = to_string(parsed.name) ?? ""
+        inner = to_string(parsed.message) ?? ""
+        if inner != "" { .message = inner }
+        if .level == "error" || .level == "critical" || .level == "fatal" { .priority = "err" }
+        if .level == "warning" { .priority = "warning" }
+        if .level == "debug" { .priority = "debug" }
+        if .level == "" { del(.level) }
+        if .logger == "" { del(.logger) }
+    }
+}
+
 del(.CONTAINER_NAME)
 del(.CONTAINER_ID)
 del(.CONTAINER_ID_FULL)
@@ -108,9 +136,56 @@ del(.SYSLOG_FACILITY)
 del(.source_type)
 '''
 
+# ---------------------------------------------------------------------------
+# Suricata: the sensor's own alert/DNS/TLS log
+# ---------------------------------------------------------------------------
+# eve.json is a root-owned file the rootful sensor writes under $DATA_DIR/ids
+# (0644, so this container's host user can read it; the mount is :ro). The
+# journald source cannot see it -- Suricata writes to a file, not stdout -- so
+# the alerts would otherwise stay a `jq` session away from every other log.
+#
+# One JSON object per line, so the source reads lines and the transform parses
+# them. `read_from = "beginning"` covers the current day on first start;
+# checkpoints in data_dir resume from there, and Suricata's rename-based daily
+# rotation is followed as a new inode (already-ingested lines are not repeated).
+# Rotated files (eve.json.YYYYMMDD) are deliberately not matched: the store
+# keeps 14 days of what it ingests, and re-reading yesterday's file on every
+# Vector restart would duplicate it.
+[sources.suricata]
+type = "file"
+include = ["/ids/suricata/eve.json"]
+read_from = "beginning"
+
+[transforms.suricata_normalize]
+type = "remap"
+inputs = ["suricata"]
+source = '''
+parsed, err = parse_json(.message)
+del(.file)
+del(.source_type)
+if err == null && is_object(parsed) {
+    . = merge(., object!(parsed))
+    # Suricata writes "+0000", which is not RFC3339 and is not what the store's
+    # _time_field parses. Normalize it here (and fall back to arrival time
+    # rather than dropping an event over its clock).
+    .ts = parse_timestamp(to_string(.timestamp) ?? "", "%Y-%m-%dT%H:%M:%S%.f%z") ?? now()
+    .timestamp = .ts
+    del(.ts)
+    # The sensor is a system unit; label its entries like every other service so
+    # `logs.sh --unit suricata.service` is the one way to ask.
+    .unit = "suricata.service"
+    .message = to_string(.event_type) ?? "suricata"
+    if .event_type == "alert" {
+        .message = "ALERT " + (to_string(.alert.signature) ?? "?")
+    } else if exists(.src_ip) {
+        .message = (to_string(.event_type) ?? "suricata") + " " + (to_string(.src_ip) ?? "?") + " -> " + (to_string(.dest_ip) ?? "?")
+    }
+}
+'''
+
 [sinks.victoria_logs]
 type = "http"
-inputs = ["normalize"]
+inputs = ["normalize", "suricata_normalize"]
 uri = "http://victoria-logs:9428/insert/jsonline?_stream_fields=host,unit,container&_msg_field=message&_time_field=timestamp"
 encoding.codec = "json"
 framing.method = "newline_delimited"

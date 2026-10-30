@@ -546,6 +546,22 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   with no healthcheck as "up" -- `victoria-logs` is distroless and the netcheck
   pair only sleeps, so neither can define a health command; their functional
   checks are the LogsQL query and the probes themselves.
+- **Two more sources feed the store, and each needed a correction.** Suricata's
+  `eve.json` is a file (the sensor never writes alerts to stdout), read by
+  `vector`'s file source and labelled `unit=suricata.service`; the container
+  mounts the **parent** `$DATA_DIR/ids`, not `ids/suricata`, because a
+  bind-mount source that does not exist is created by podman as the host user,
+  and the root tier owns that directory (the rootful sensor must not write into
+  a user-owned directory). Suricata stamps `+0000`, which is not RFC3339, so the
+  remap normalizes it -- otherwise the store falls back to arrival time and the
+  alert timeline drifts. Rotated `eve.json.YYYYMMDD` files are deliberately not
+  matched; a fresh start backfills the current day (~21k events / 12 MB here,
+  ~2 MB compressed in the store) and checkpoints resume from there. BoltMesh's
+  backend and worker write structlog JSON to stdout: the remap parses it for
+  those two containers only, promotes `level`/`logger`, replaces `message` with
+  the human line, and **overrides `priority`** with the app's level, because
+  journald reports every stdout line as informational -- without that,
+  `--priority warning` silently misses every BoltMesh warning.
 - **The monitor queries a store exactly once, and only to prove the log
   pipeline is alive.** `scripts/logs.sh --health` (newest entry within
   `MONITOR_LOGS_MAX_AGE_S`, default 900) is the one exception to "alerting never
