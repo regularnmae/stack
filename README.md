@@ -987,9 +987,14 @@ them:
 daemon is left holding a credential that nobody recorded:
 
 ```sh
-./scripts/rotate.sh --status   # what is pending and where it stopped
-./scripts/rotate.sh --resume   # finish it with the SAME values (never re-mints)
+./scripts/rotate.sh --status        # what is pending, and which step it stopped at
+./scripts/rotate.sh --resume        # finish it with the SAME values (never re-mints)
+./scripts/rotate.sh --resume --yes  # when the target demands --yes (wallet, restic)
 ```
+
+`--resume` also refuses to restart a daemon that is already running the journaled
+value — it checks the container's own command line — so finishing a rotation that
+was interrupted after the restart costs a verification, not a second outage.
 
 `--force` skips the preflight (an unhealthy daemon, or a nightly backup in
 flight, which would otherwise snapshot one side of a credential pair).
