@@ -28,10 +28,21 @@ Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
 # NOTE: Exec= replaces the image CMD, so the image's default flags
 # must be restated verbatim, with our additions appended.
 # (--non-interactive is prepended by the entrypoint itself.)
+#
+# --block-sync-size: the compiled default is 20
+# (BLOCKS_SYNCHRONIZING_DEFAULT_COUNT). Every batch is one download span, one
+# verify pass and one LMDB transaction, so a larger batch amortises that setup.
+# It is not free to raise: at 200 this node downloaded ~1 MB/s for 25 minutes
+# and committed nothing -- height frozen, data.mdb untouched, no error logged --
+# so the value stays within what the span scheduler completes between
+# announcements. Measured here, archival sync at 58% on XFS over a rotational
+# disk: 20 -> 56 blocks/min, 50 -> 64-67 blocks/min, the daemon's own estimate
+# falling from 22-24 days to ~16. Only initial sync is affected.
 Exec=--rpc-restricted-bind-ip=0.0.0.0 \
      --rpc-restricted-bind-port=18089 \
      --no-igd --no-zmq --enable-dns-blocklist \
-     --ban-list=/home/monero/ban_list.txt
+     --ban-list=/home/monero/ban_list.txt \
+     --block-sync-size=50
 
 # The image build drops the Dockerfile HEALTHCHECK (the OCI image
 # config has no healthcheck field), so define it here instead. This
