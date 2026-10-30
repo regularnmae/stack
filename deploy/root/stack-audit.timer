@@ -1,0 +1,16 @@
+# The schedule for the audit summary.
+#
+# Every five minutes, like monitor.timer, so an event reaches the sweep that
+# follows it. The report reads a window since its own last run, so the period
+# does not affect coverage -- only the latency between a change and the page.
+[Unit]
+Description=Run stack-audit every five minutes
+
+[Timer]
+OnBootSec=120s
+OnUnitActiveSec=300s
+AccuracySec=10s
+Unit=stack-audit.service
+
+[Install]
+WantedBy=timers.target

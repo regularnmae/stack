@@ -308,6 +308,37 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   because a silent log-format change turns detection off; and the whitelist in
   `s02-enrich/` protects the host's **own** address, which is what onion traffic
   and Uptime-Kuma's self-checks look like in the log.
+- **Rate limiting is per ingress, and the onion case is the awkward one:**
+  every `.onion` visitor reaches NPM as the host's own address (tor forwards to
+  `host.containers.internal`), so the onion zone is keyed on `$server_name` and is
+  a *global* brake (60 r/s, burst 120) -- there is no such thing as a per-client
+  limit there. Clearweb hosts use `$binary_remote_addr`. The MCP host gets
+  `limit_conn` only and never `limit_req`: JSON-RPC bursts are legitimate and
+  `GET /mcp` is an SSE stream, so a request-rate limit either does nothing or
+  cuts healthy clients. Zones live in `deploy/npm/http.conf` ->
+  `$DATA_DIR/npm/data/nginx/custom/http.conf`, the one NPM directory that is never
+  regenerated; the directives are per host in `advanced_config`. A new file in
+  that directory is created with the *default* SELinux label even though the tree
+  is mounted `:z`, and nginx then refuses to load it -- `install.sh` chcons it,
+  because a deploy does not necessarily restart NPM.
+- **The audit tier watches files only, because directory watches do nothing on
+  this kernel.** Measured: `-w /etc/sudoers.d/ -p wa` (and the
+  `-a always,exit -F dir=… -F perm=wa` form) records nothing for a file created
+  inside it, while the same watch on a file fires. Entry creation -- a new unit
+  file, a sudoers drop-in, a cron job -- is covered instead by the hash diff in
+  `deploy/root/audit-report.sh` over `/etc/systemd/system`,
+  `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d` and
+  `/etc/ssh/sshd_config.d`, which also names the file. Keys split the verdict:
+  `stack_hard` (account databases, sudoers, sshd, audit's own config -- nothing
+  in this repo writes them) fails the sweep, `stack_data` (the stack's secrets,
+  which rotation and deploys do write) only reports. Two EL10 details:
+  `auditctl`/`augenrules` are the separate **`audit-rules`** package, so a host
+  can run auditd with no way to add a rule; and **never run `auditctl -D`** --
+  doing it once on this host left the kernel accepting rules while emitting no
+  events at all, not even the next rule's CONFIG_CHANGE, until a reboot. Remove
+  our rules one at a time (`auditctl -W <rule>`), anything else is left alone.
+  `augenrules` exits non-zero on "Rule exists" even when the ruleset is already
+  right, so `install.sh` judges the result by `auditctl -l`, not the exit code.
   `podman exec crowdsec cscli …` is how decisions are read (no credentials on the
   host), and `Network=none` was rejected because the agent installs hub parsers
   on first boot. Suricata costs ~550 MB with the full ET

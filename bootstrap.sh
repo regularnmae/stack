@@ -71,6 +71,16 @@ command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y gi
 # scripts/npm-hosts.sh (the host has no curl either; netcheck carries it).
 command -v jq >/dev/null 2>&1 || { log "installing jq"; sudo dnf install -y jq; }
 
+# audit-rules provides auditctl/augenrules, which load the stack's audit rules
+# (deploy/root/audit.rules). EL10 split them out of the `audit` package, so a
+# host with auditd running can still have no way to add a rule -- which is
+# exactly the state this host was in: a daemon watching nothing.
+if [ ! -x /usr/sbin/augenrules ]; then
+    log "installing audit-rules (auditctl/augenrules)"
+    sudo dnf install -y audit-rules >/dev/null 2>&1 \
+        || warn "could not install audit-rules; the stack's audit watches will not load"
+fi
+
 # Rootless networking needs one of these; both are optional per release.
 command -v slirp4netns >/dev/null 2>&1 || sudo dnf install -y slirp4netns >/dev/null 2>&1 || true
 command -v pasta >/dev/null 2>&1 || sudo dnf install -y passt >/dev/null 2>&1 || true

@@ -78,6 +78,7 @@ MONITOR_XMR_LAG_BLOCKS="${MONITOR_XMR_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MON
 MONITOR_IDS_MAX_AGE_MIN="${MONITOR_IDS_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_IDS_MAX_AGE_MIN)}"
 MONITOR_IDS_ALERT_WARN="${MONITOR_IDS_ALERT_WARN:-$(env_value "$MONITOR_ENV" MONITOR_IDS_ALERT_WARN)}"
 MONITOR_BOUNCER_MAX_AGE_MIN="${MONITOR_BOUNCER_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_BOUNCER_MAX_AGE_MIN)}"
+MONITOR_AUDIT_MAX_AGE_MIN="${MONITOR_AUDIT_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_AUDIT_MAX_AGE_MIN)}"
 
 # Defaults live here, not only in monitor.env, so an older env file (one written
 # before these checks existed) still monitors. The helper and the one threshold
@@ -117,6 +118,8 @@ THRESH_IDS_ALERTS=$(num_or "${MONITOR_IDS_ALERT_WARN:-}" 20)
 # The applier runs every minute; five missed runs is a stopped timer or a wedged
 # nft, and either one means decisions are being made but nothing is enforcing.
 THRESH_BOUNCER_AGE_M=$(num_or "${MONITOR_BOUNCER_MAX_AGE_MIN:-}" 5)
+# The audit report runs every five minutes; four missed runs is a stopped timer.
+THRESH_AUDIT_AGE_M=$(num_or "${MONITOR_AUDIT_MAX_AGE_MIN:-}" 20)
 
 PROBLEMS=()
 WARNS=()
@@ -702,6 +705,34 @@ else
     fi
 fi
 
+# The audit report: host-level changes that no script in this repo makes
+# (account databases, sudoers, sshd, audit's own config), plus the hash diff over
+# the persistence directories -- which is the part that catches a *new* unit file,
+# because this kernel emits no audit events for directory watches.
+AUDIT_STATUS_FILE="$AUDIT_DIR/auditd.status"
+audit_fim=0
+if [ -f /etc/systemd/system/stack-audit.timer ]; then
+    if [ ! -f "$AUDIT_STATUS_FILE" ]; then
+        soft "no audit report yet (stack-audit.timer has not run)"
+    else
+        ares=$(env_value "$AUDIT_STATUS_FILE" result)
+        aok=$(num_or "$(env_value "$AUDIT_STATUS_FILE" ok_epoch)" "")
+        adetail=$(env_value "$AUDIT_STATUS_FILE" detail)
+        audit_fim=$(num_or "$(env_value "$AUDIT_STATUS_FILE" fim)" 0)
+        if [ "$ares" = fail ]; then
+            fail "host-level configuration changed: ${adetail:-see $AUDIT_STATUS_FILE}"
+        elif [ -z "$aok" ]; then
+            soft "the audit report has no ok_epoch yet"
+        else
+            aage_m=$(( ($(date +%s) - aok) / 60 ))
+            if [ "$aage_m" -gt "$THRESH_AUDIT_AGE_M" ]; then
+                fail "the audit report has not run for ${aage_m} min (systemctl status stack-audit.timer)"
+            else
+                ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported"
+            fi
+        fi
+    fi
+fi
 # The applier. A separate check from the engines on purpose: detection can be
 # perfectly healthy while nothing enforces (a stopped timer, a wrong key, an nft
 # that refuses the table), and that is the state where the host believes it is
@@ -756,6 +787,7 @@ status=ok
     printf 'stack_ids_alerts %s\n' "${ids_alerts:-0}"
     printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
     printf 'stack_bouncer_bans %s\n' "${bouncer_bans:-0}"
+    printf 'stack_audit_fim_changes %s\n' "${audit_fim:-0}"
 } | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" || soft "could not write monitor.prom"
 
 {

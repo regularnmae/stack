@@ -685,8 +685,7 @@ fi
 # The applier. Detection can be healthy while nothing enforces, which is the one
 # state where the host looks protected and is not -- so it is checked separately
 # from the engines, and it is a *system* unit (root, nftables).
-if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
-    if systemctl is-active --quiet stack-bouncer.timer 2>/dev/null; then
+if [ -f /etc/systemd/system/stack-bouncer.timer ]; then    if systemctl is-active --quiet stack-bouncer.timer 2>/dev/null; then
         pass "stack-bouncer.timer is active (decisions -> nftables)"
     else
         bad "stack-bouncer.timer is not active (sudo systemctl status stack-bouncer.timer)"
@@ -704,6 +703,35 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
     fi
 else
     warn "the bouncer is not installed (sudo ./bootstrap.sh) -- decisions are not enforced"
+fi
+
+# Audit: the rules watch host-level files nothing in this repo writes, and the
+# report's hash diff covers the entry creation this kernel will not audit (a new
+# unit file, a new sudoers drop-in).
+if [ -f /etc/systemd/system/stack-audit.timer ]; then
+    if systemctl is-active --quiet stack-audit.timer 2>/dev/null; then
+        pass "stack-audit.timer is active (audit + persistence-dir hashes)"
+    else
+        bad "stack-audit.timer is not active (sudo systemctl status stack-audit.timer)"
+    fi
+    if [ -f "$DATA_DIR/audit/auditd.status" ]; then
+        a_result=$(env_value "$DATA_DIR/audit/auditd.status" result)
+        a_fim=$(env_value "$DATA_DIR/audit/auditd.status" fim)
+        if [ "$a_result" = ok ]; then
+            pass "audit report ok (${a_fim:-0} persistence-dir change(s) since the last run)"
+        else
+            bad "audit report: $(env_value "$DATA_DIR/audit/auditd.status" detail)"
+        fi
+    else
+        warn "the audit report has not run yet (systemctl start stack-audit)"
+    fi
+    # The ruleset itself cannot be checked from here: `auditctl -l` needs
+    # CAP_AUDIT_CONTROL, so an unprivileged verify would always see zero rules and
+    # warn about nothing. The status file above is the signal (a report that runs
+    # at all means auditd answered), and `sudo auditctl -l | grep stack_` is the
+    # manual check.
+else
+    warn "the audit tier is not installed (sudo ./bootstrap.sh)"
 fi
 
 # ---------------------------------------------------------------------------

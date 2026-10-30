@@ -1,0 +1,56 @@
+## Audit rules for the stack.
+##
+## Installed to /etc/audit/rules.d/60-stack.rules by deploy/install.sh --root and
+## loaded with `augenrules --load`. auditd was already running on this host with
+## an empty rules.d -- a daemon with nothing to watch.
+##
+## FILE watches only, and that is a measured decision, not a stylistic one: on
+## this kernel/auditd (EL10, audit 4.0.3) a watch on a directory emits nothing --
+## `-w /etc/sudoers.d/ -p wa` (with and without the trailing slash, and the
+## `-a always,exit -F dir=... -F perm=wa` form) produced no record for a file
+## created inside it, while the same watch on a *file* fires normally. So the
+## entry-creation events that directory watches are supposed to give -- a new unit
+## file, a new sudoers.d drop-in, a new cron job, which are the classic
+## persistence moves -- are covered by the hash diff in
+## /etc/stack-ids/audit-report.sh instead. That is the more reliable of the two on
+## any kernel, and it says exactly which file appeared.
+##
+## Keys, because the right response differs:
+##
+##   stack_hard  host account/auth/audit config that NO script in this repo
+##               writes. An event is a failure: scripts/monitor.sh pages.
+##   stack_data  the stack's own secrets. Rotation and deploys touch these on
+##               purpose, so an event is reported, not paged.
+##
+## Volume: a handful of events per deploy and per rotation, zero at steady state.
+
+# A bigger backlog than the 64 KB default: a deploy can write several hundred
+# events in a burst, and the kernel drops the overflow silently.
+-b 8192
+
+## --- account and privilege databases ---------------------------------------
+-w /etc/passwd -p wa -k stack_hard
+-w /etc/shadow -p wa -k stack_hard
+-w /etc/group -p wa -k stack_hard
+-w /etc/gshadow -p wa -k stack_hard
+
+## --- sudo ----------------------------------------------------------------
+## The directory's contents are covered by the hash diff (see the header); the
+## main file is not, because editing it in place is the common move.
+-w /etc/sudoers -p wa -k stack_hard
+
+## --- ssh ----------------------------------------------------------------
+-w /etc/ssh/sshd_config -p wa -k stack_hard
+
+## --- audit's own configuration -------------------------------------------
+## Whoever can edit these can blind the host, which is the first thing a careful
+## intruder does. (A new file in rules.d shows up in the hash diff.)
+-w /etc/audit/auditd.conf -p wa -k stack_hard
+
+## --- the stack's secrets -------------------------------------------------
+-w @DATA_DIR@/config/stack/secrets.env -p wa -k stack_data
+-w @DATA_DIR@/cln/bitcoin/hsm_secret -p wa -k stack_data
+
+## Make the rules immutable until the next reboot? Deliberately NOT: bootstrap
+## re-renders them, and an immutable ruleset would also stop a responder from
+## adding a watch during an incident.

@@ -1,0 +1,17 @@
+# stack-audit: summarise /var/log/audit/audit.log for the monitor.
+#
+# A root oneshot, because the log is mode 0600 root:adm and the monitor runs as
+# the stack user. It reads and reports; it never changes a rule.
+#
+# The rules themselves are /etc/audit/rules.d/60-stack.rules (deploy/root/
+# audit.rules), installed by `deploy/install.sh --root`. Without this unit an
+# event would only ever be a line in a file nobody opens -- which is what
+# an audit daemon with an empty rules.d already was on this host.
+[Unit]
+Description=Summarise stack audit events for the monitor (stack-audit)
+After=auditd.service
+
+[Service]
+Type=oneshot
+ExecStart=/etc/stack-ids/audit-report.sh
+TimeoutStartSec=60

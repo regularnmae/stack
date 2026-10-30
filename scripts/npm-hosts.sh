@@ -247,6 +247,37 @@ for entry in "${NPM_HOSTS[@]}"; do
         advanced="$ADVANCED_JSON"
     fi
 
+    # Rate limiting. The zones are declared in
+    # $DATA_DIR/npm/data/nginx/custom/http.conf (deploy/npm/http.conf, seeded by
+    # install.sh); this is where they are pointed at a vhost, because which one
+    # applies depends on what the vhost is.
+    #
+    # A .onion is keyed on $server_name, never the address: tor forwards to
+    # host.containers.internal, so every onion visitor arrives as the host's own
+    # IP and a per-IP bucket would be one global one anyway -- spelled out as a
+    # global brake instead of an accident.
+    case "$domain" in
+        *.onion)
+            # Ingress first: the onion host also carries the MCP locations, and
+            # an mcp-flag branch that overwrote this would silently drop the only
+            # brake the onion side has.
+            limits='limit_req zone=stack_onion burst=120 nodelay;'
+            ;;
+        *)
+            if has_flag "$flags" mcp; then
+                # The MCP edge gets limit_conn only: it is a JSON-RPC endpoint (a
+                # client legitimately bursts) and a streamable-HTTP transport
+                # whose GET /mcp is a long-lived SSE connection, so a request rate
+                # there either does nothing or cuts healthy clients. The bearer
+                # token is the real control.
+                limits='limit_conn stack_conn 200;'
+            else
+                limits='limit_req zone=stack_ip burst=60 nodelay;\nlimit_conn stack_conn 40;'
+            fi
+            ;;
+    esac
+    advanced="${advanced:+$advanced\n}$limits"
+
     # A `.onion` needs no certificate and must not be force-SSL: tor encrypts and
     # authenticates the onion, Let's Encrypt cannot issue for it, and the hidden
     # service reaches NPM in plain HTTP (through the host gateway -- see

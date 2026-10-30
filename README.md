@@ -1009,6 +1009,50 @@ transaction a minute). EVE JSON rotates daily and is pruned at
 `IDS_RETENTION_DAYS` (14) by `/etc/tmpfiles.d/stack-ids.conf`; `$DATA_DIR/ids`
 is regenerable and stays out of the backup set.
 
+### Rate limiting (the onion's only defence)
+
+Every visitor to a `.onion` vhost reaches NPM as the host's **own** address, so
+no IP-based control — ban, fail2ban, CrowdSec — can touch them individually.
+What is left is a global brake, and that is `stack_onion`: a request-rate zone
+keyed on `$server_name` rather than the client address, at 60 r/s with a 120
+burst. The clearweb vhosts get `stack_ip` keyed on the real address (30 r/s,
+burst 60) plus `stack_conn` (40 concurrent).
+
+The MCP host gets **`limit_conn` only**, never `limit_req`: it is JSON-RPC (a
+client legitimately bursts) and its `GET /mcp` is a long-lived SSE stream, where
+a request-rate limit either does nothing or cuts healthy clients.
+
+The zones are declared in `deploy/npm/http.conf`, seeded to
+`$DATA_DIR/npm/data/nginx/custom/http.conf` — the one NPM directory that is never
+regenerated. The directives themselves are per host, in the `advanced_config`
+field `scripts/npm-hosts.sh` sends, because which limit applies depends on what
+the vhost is. Measured on this host: a 100-request burst produced 16 × `503`
+while a normal page load was unaffected.
+
+### Host integrity
+
+`auditd` was already running on this host with an **empty** `rules.d` — a daemon
+watching nothing. `deploy/root/audit.rules` now watches the files this repo never
+writes: the account databases, `sudoers`, `sshd_config`, `auditd.conf`, and the
+stack's own `secrets.env` and `hsm_secret`. `stack-audit.timer` turns the
+root-only log into `audit/$DATA_DIR/auditd.status`, which the monitor pages on.
+
+Two things about it are worth knowing:
+
+* **Directory watches do not work on this kernel.** `-w /etc/sudoers.d/ -p wa`
+  (with and without the trailing slash, and the `-a always,exit -F dir=…` form)
+  produces no record for a file created inside it, while the same watch on a file
+  fires normally. Entry creation — a new unit file, a new sudoers drop-in, a new
+  cron job, the classic persistence moves — is therefore covered by a **hash diff**
+  in the same report: every file under `/etc/systemd/system`,
+  `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d` and
+  `/etc/ssh/sshd_config.d` is hashed each run, and anything new or changed is
+  counted and named. That also survives environments where audit is unavailable.
+* Events carry a **key** (`stack_hard` for host-level config the repo never
+  writes, `stack_data` for the stack's secrets), and only `stack_hard` fails the
+  sweep. Rotation and deploys touch the data-dir files on purpose; a monitor that
+  pages on its own deploy stops being read.
+
 ## Status page
 
 `uptime-kuma` serves a public status page on
