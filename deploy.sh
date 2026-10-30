@@ -367,9 +367,10 @@ start_daemons() {
     # The lightningd image's entrypoint stays alive as PID 1 even after the
     # daemon dies (e.g. its bcli plugin backed into a bitcoind that was still
     # loading its wallet), so the quadlet unit reads "active" and systemd's
-    # Restart=always never sees anything to restart. An active unit whose
-    # container healthcheck reports unhealthy is exactly that zombie; restart
-    # it instead of leaving it in place for the wait below.
+    # Restart=always never sees anything to restart. The unit's
+    # HealthOnFailure=kill is what ends that container now; this check stays as
+    # the fallback for one created before that line existed, since an active
+    # unit whose healthcheck reports unhealthy is exactly that zombie.
     if [ "$DRY_RUN" = 0 ] && systemctl --user is-active --quiet lightningd.service \
         && [ "$(podman inspect -f '{{.State.Health.Status}}' lightningd 2>/dev/null)" = unhealthy ]; then
         warn "lightningd container is up but the daemon is dead inside; restarting it"

@@ -54,13 +54,22 @@ Exec=--network=bitcoin \
      --always-use-proxy=true \
      --bind-addr=0.0.0.0:9735
 
-# The image's entrypoint.sh stays alive as PID 1 even after lightningd dies,
-# so systemd reported the unit "active" while the daemon was gone. This
-# healthcheck makes that failure visible.
+# The image's entrypoint.sh stays alive as PID 1 even after lightningd dies
+# (e.g. bcli timed out while bitcoind was still opening its wallet), so the
+# unit reported "active" while the daemon -- and clnrest, whose loopback publish
+# NPM fronts as clnrest.<host> -- was gone. The healthcheck makes that failure
+# visible; HealthOnFailure=kill makes it terminal, so the container exits and
+# Restart=always below recreates it. podman's man page says the same thing:
+# inside a unit prefer kill/stop over restart, and let systemd's restart policy
+# be the one that acts.
+#
+# Deliberately NOT on monero-wallet-rpc: its healthcheck is red by design for as
+# long as the wallet is refreshing, and killing it would restart that refresh.
 HealthCmd=lightning-cli getinfo
 HealthInterval=60s
 HealthStartPeriod=5m
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

@@ -77,9 +77,16 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   runs the wallet step between `monerod` and the wallet RPC.
 - **lightningd dies with its container left "Up":** bcli can time out while
   bitcoind is still loading its wallet, the entrypoint then keeps PID 1 alive,
-  the unit reads "active" and `Restart=always` never fires. So `deploy.sh`
-  restarts a still-active but `unhealthy` lightningd, waits for `getwalletinfo`
-  before waiting on lightningd, and dumps the log on any timeout.
+  the unit reads "active" and `Restart=always` never fires -- which is how
+  clnrest answers 502 through NPM while the unit looks fine. The unit therefore
+  carries `HealthOnFailure=kill` (podman's own advice: inside a unit prefer
+  kill/stop so systemd's restart policy is the one that acts), so the failing
+  healthcheck ends the container and `Restart=always` recreates it. `deploy.sh`
+  still restarts a still-active but `unhealthy` lightningd, as the fallback for
+  a container older than that unit line, waits for `getwalletinfo` before
+  waiting on lightningd, and dumps the log on any timeout. Not on
+  `monero-wallet-rpc`: its healthcheck is red for as long as the wallet
+  refreshes, so killing it would restart the refresh from scratch.
 - **CLN peers and channels come from `listpeerchannels`/`listpeers`, never
   `listchannels` or `getinfo`'s `num_peers`:** the gossmap's `active` is an
   operator setting that stays true while a peer is offline, and `num_peers`
