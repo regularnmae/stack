@@ -1,0 +1,21 @@
+# The schedule for stack-bouncer.
+#
+# A SYSTEM timer (root), unlike monitor.timer / metrics.timer / ids.timer: this
+# one writes nftables, which needs CAP_NET_ADMIN.
+#
+# Every minute: CrowdSec's scenarios are leaky buckets over 10 s windows, so a
+# decision usually exists within seconds of the traffic that caused it. A minute
+# of extra exposure on a vhost that nginx already rate-limits is a fine trade for
+# not running nft four times as often.
+[Unit]
+Description=Run stack-bouncer every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+# Catch up once after a suspend/reboot rather than firing a burst.
+AccuracySec=5s
+Unit=stack-bouncer.service
+
+[Install]
+WantedBy=timers.target

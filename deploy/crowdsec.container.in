@@ -1,0 +1,103 @@
+# CrowdSec: the behaviour engine that turns nginx-proxy-manager's access logs
+# into decisions. Rootless and ordinary -- it reads files, it never touches the
+# wire, so it needs none of the privileges Suricata does.
+#
+# The division of labour matters: Suricata sees packets (and nothing inside
+# TLS), CrowdSec sees requests (and nothing about the network). This unit is the
+# only thing that can attribute an attack to a *client*, because NPM logs the
+# real address -- the `.onion` path excepted, where every visitor is the host's
+# own address and scripts/ids.sh reports on it instead.
+#
+# Local only, by decision: DISABLE_ONLINE_API=true means no console enrolment,
+# no CAPI community blocklist, and no telemetry leaving this host. Every
+# decision is derived from this host's own logs.
+#
+# THIS FILE IS A TEMPLATE (.container.in): deploy/install.sh substitutes
+# @CROWDSEC_BOUNCER_KEY@ from $DATA_DIR/config/stack/secrets.env. It carries a
+# secret because the LAPI must know the key the bouncer presents, so it follows
+# the same rule as the other three secret-bearing units -- never a committed
+# .container, never an env file (Quadlet does not expand variables in Exec=).
+#
+# Enforcement: decisions are applied by `stack-bouncer` (deploy/root/bouncer.sh,
+# a root oneshot on a timer), which polls this container's LAPI over loopback and
+# writes an nftables set with per-entry timeouts. There is no official firewall
+# bouncer IMAGE any more (docker.io/crowdsecurity/cs-firewall-bouncer answers
+# "access denied"), and the packaged one would be a second daemon outside this
+# repo's control -- so the applier is ours, and CrowdSec keeps the part that is
+# hard (decision lifecycle, TTLs, dedup).
+[Unit]
+Description=CrowdSec (local detection from nginx-proxy-manager logs)
+After=network-online.target npm-network-network.service
+Wants=network-online.target
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=crowdsec
+Image=docker.io/crowdsecurity/crowdsec:v1.8.2
+# Outbound for the hub (parsers/scenarios) at first boot, and inbound from the
+# bouncer's loopback publish below.
+Network=npm-network.network
+# The LAPI, on the host's loopback ONLY, for stack-bouncer. 8081 because 8080 is
+# searxng's loopback publish. Inside the container the LAPI already listens on
+# 0.0.0.0:8080 (this image's default), so the publish is what makes it reachable
+# from the host -- and it is key-gated: a request without the bouncer key gets
+# 403. Nothing on the LAN or the internet can see it.
+PublishPort=127.0.0.1:8081:8080
+
+# CrowdSec keeps its own config here: the image's entrypoint seeds
+# /etc/crowdsec from /staging on first start and installs the hub items named in
+# the environment below. A volume, not an anonymous dir, so a restart does not
+# re-download the hub index and the parser set survives.
+Volume=@DATA_DIR@/ids/crowdsec/etc:/etc/crowdsec:z
+# Its sqlite decisions DB and hub datafiles. Regenerable (the decisions are a
+# cache of the last few hours of logs): outside BACKUP_PATHS.
+Volume=@DATA_DIR@/ids/crowdsec/data:/var/lib/crowdsec/data:z
+
+# nginx-proxy-manager's access logs -- the whole point of this container. NPM
+# writes them as container root, which is this same user under rootless podman,
+# so a read-only bind needs no relabel and no ownership change.
+Volume=@DATA_DIR@/npm/data/logs:/var/log/npm:ro
+
+# This repo's parser and scenarios, rendered by deploy/install.sh into
+# $CONFIG_DIR/ids/crowdsec/ so @LAN@-style placeholders resolve. Individual file
+# binds, not a directory mount: /etc/crowdsec belongs to the image's entrypoint,
+# which seeds it and installs hub items into the same tree, and it only skips
+# its seeding when config.yaml/local_api_credentials.yaml are absent -- which
+# stays true because nothing below touches those two files.
+Volume=@CONFIG_DIR@/ids/crowdsec/acquis.d/stack.yaml:/etc/crowdsec/acquis.d/stack.yaml:ro,z
+Volume=@CONFIG_DIR@/ids/crowdsec/parsers/s01-parse/stack-npm.yaml:/etc/crowdsec/parsers/s01-parse/stack-npm.yaml:ro,z
+Volume=@CONFIG_DIR@/ids/crowdsec/parsers/s02-enrich/stack-whitelists.yaml:/etc/crowdsec/parsers/s02-enrich/stack-whitelists.yaml:ro,z
+Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-probing.yaml:/etc/crowdsec/scenarios/stack-http-probing.yaml:ro,z
+Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-authfail.yaml:/etc/crowdsec/scenarios/stack-http-authfail.yaml:ro,z
+Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-flood.yaml:/etc/crowdsec/scenarios/stack-http-flood.yaml:ro,z
+
+# The machine name the agent registers under in its own LAPI. Stable, so a
+# re-created container keeps its credentials.
+Environment=CUSTOM_HOSTNAME=stack-ids
+# No console, no community blocklist, no telemetry -- see the header.
+Environment=DISABLE_ONLINE_API=true
+# WAL keeps the sqlite writer from blocking the agent's output routine.
+Environment=USE_WAL=true
+# Registers the bouncer and its key in this LAPI on start (the image's entrypoint
+# reads BOUNCER_KEY_<name> and calls `cscli bouncers add` when the name is absent).
+# The name must match nothing else: stack-bouncer authenticates as "firewall".
+Environment=BOUNCER_KEY_firewall=@CROWDSEC_BOUNCER_KEY@
+# The base parsers the acquisition needs. Everything stack-specific is the file
+# mounts above; these two are generic and come from the hub: non-syslog turns a
+# raw log line into an event, dateparse-enrich turns evt.StrTime into evt.Time
+# (the leaky buckets in our scenarios are time-based, so without it every
+# decision would be instant).
+Environment="PARSERS=crowdsecurity/syslog-logs crowdsecurity/dateparse-enrich"
+
+# LAPI reachable and the agent answering: `cscli lapi status` is the one command
+# that proves the DB, the API and the credentials together.
+HealthCmd=/usr/local/bin/cscli -c /etc/crowdsec/config.yaml lapi status
+HealthInterval=60s
+HealthTimeout=15s
+HealthRetries=3
+# First boot installs hub items; a slow mirror must not paint it unhealthy.
+HealthStartPeriod=180s
+
+[Service]
+# Same reason as the health start period.
+TimeoutStartSec=300

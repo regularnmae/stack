@@ -1,0 +1,31 @@
+# stack-bouncer: apply CrowdSec's decisions to the host's nftables.
+#
+# A root oneshot on a timer, not a container: it needs nft(8) on the host's
+# network namespace, and the upstream bouncer image no longer exists. It talks to
+# the crowdsec container's LAPI over 127.0.0.1:8081 (its loopback publish) with
+# the key in /etc/stack-ids/bouncer.env.
+#
+# It drops packets, which is exactly why it is separate from everything else:
+# ./deploy.sh --only <service> cannot bounce it, `systemctl stop stack-bouncer.timer`
+# stops enforcement without touching detection, and the set it writes is one
+# inspectable nft table (`nft list table inet stack_bans`).
+#
+# Deployment: deploy/install.sh --root installs the script, its env file and
+# this unit; `sudo ./bootstrap.sh` is the only way to change them (they are
+# root-owned so a compromised stack user cannot rewrite what root executes every
+# minute).
+[Unit]
+Description=Apply CrowdSec decisions to nftables (stack-bouncer)
+# The LAPI lives in a rootless container on npm-network; this waits for the
+# network, and the crowdsec unit's own restart loop is what recovers it.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# --dry-run is the debugging path: it prints the rules and applies nothing.
+ExecStart=/etc/stack-ids/bouncer.sh
+# A hung LAPI read must not pile runs up behind the timer. The script's own
+# /dev/tcp read has no timeout, and bash has no portable one -- so systemd is the
+# backstop.
+TimeoutStartSec=30

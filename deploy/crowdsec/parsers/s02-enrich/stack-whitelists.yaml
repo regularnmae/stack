@@ -1,0 +1,41 @@
+# Whitelists: the traffic that must never produce a decision, whatever a
+# scenario says about it.
+#
+# Everything here was found the hard way in this stack's own logs, and each
+# entry is a *blind spot that would otherwise be a self-inflicted outage* rather
+# than a false positive:
+#
+#   * 127.0.0.1 / 192.168.1.112 -- nginx-proxy-manager logs the `.onion`
+#     proxies' clients as the HOST'S OWN address (tor forwards to
+#     host.containers.internal, so NPM sees the host). Banning it would take
+#     every onion service down at once.
+#   * 10.89.0.0/24 -- the podman network: uptime-kuma probing NPM, the
+#     searxng/boltmesh containers calling back through the proxy.
+#   * 192.168.0.0/16 / 172.16.0.0/12 -- the LAN. A ban here is a ban of the
+#     operator; the LAN is already behind firewalld.
+#   * Uptime-Kuma's user agent -- its checks arrive from the host's *public*
+#     address (they go out to the internet and come back through the router),
+#     every 60 s per vhost, including a steady 401 on the token-gated ones. No
+#     rule may ever ban the operator's own monitoring.
+#
+# This is a whitelist, not a suppression of detection: the events still appear in
+# `cscli decisions list --all` and in ids.sh's counters, they just never become a
+# ban. Add the WAN address itself only if the operator's own monitoring is ever
+# replaced by something without a recognisable user agent.
+name: stack/whitelists
+description: "stack internals, LAN, onion proxy path and the host's own monitoring"
+whitelist:
+  reason: "stack internal traffic (see the file header)"
+  expression:
+    - "evt.Meta.source_ip == '127.0.0.1'"
+    - "evt.Meta.source_ip == '::1'"
+    - "evt.Meta.source_ip startsWith '10.89.'"
+    - "evt.Meta.source_ip startsWith '192.168.'"
+    - "evt.Meta.source_ip startsWith '172.16.'"
+    - "evt.Meta.source_ip startsWith '172.17.'"
+    - "evt.Meta.source_ip startsWith '172.18.'"
+    - "evt.Meta.source_ip startsWith '172.19.'"
+    - "evt.Meta.source_ip startsWith '172.2'"
+    - "evt.Meta.source_ip startsWith '172.30.'"
+    - "evt.Meta.source_ip startsWith '172.31.'"
+    - "evt.Meta.http_user_agent startsWith 'Uptime-Kuma/'"

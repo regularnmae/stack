@@ -38,17 +38,19 @@ the MCP server.
 ./deploy.sh --only monitor          # run the health + spend checks now
 ./deploy.sh --only npm-hosts        # (re)reconcile every proxy host in nginx-proxy-manager
 ./deploy.sh --only tor              # re-render the onion services into torrc and restart tor
+./deploy.sh --only crowdsec         # re-render its parser/scenarios and restart the engine
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / verify / inspect
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
+./scripts/ids.sh -v                 # the IDS roll-up, by hand (ids.timer runs it every 5 min)
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
 ./scripts/rotate.sh --list          # credentials this repo can rotate (+ --dry-run)
 ./scripts/rotate.sh --status        # a pending rotation journal, last 10 runs
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
 ./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh scripts/ids.sh deploy/root/bouncer.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong
@@ -247,7 +249,75 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   share a path one labels private.
 - **`sudo` lives only in `bootstrap.sh`.** `deploy.sh`, `install.sh`, `verify.sh`
   and the `scripts/` helpers never call it; an unprepared data dir is an error
-  carrying the one-time commands, not a prompt.
+  carrying the one-time commands, not a prompt. The one thing bootstrap uses it
+  for beyond provisioning is the **root tier** (`deploy/install.sh --root`): the
+  Suricata sensor, which cannot be rootless because AF_PACKET needs
+  `CAP_NET_RAW` in the init user namespace. That is why bootstrap is a
+  **two-pass** install -- the sensor's unit and config reference `@DATA_DIR@`,
+  so the first run (before any data dir exists) only prints a notice and the
+  rerun after the first `./deploy.sh` installs it. Everything it installs is
+  root-owned: the unit in `/etc/containers/systemd/`, the config in
+  `/etc/stack-ids/`, the tmpfiles rule in `/etc/tmpfiles.d/`. That unit is mode
+  0644 (not the 0600 the user units get) because `verify.sh` diffs it against
+  `deploy/root/` to catch drift and it carries no secret -- the secret-bearing
+  templates are the *user* units. Nothing
+  root-owned is *read* from `$DATA_DIR` -- the sensor only writes its logs there
+  (root-owned, 0644, so the unprivileged `scripts/ids.sh` can read them), and a
+  user-writable config consumed by a root container would be a privilege
+  boundary. A change to `deploy/root/` therefore needs `sudo ./bootstrap.sh`
+  again; `verify.sh` warns when the rendered unit has drifted from the repo.
+- **Intrusion detection is two engines and two privilege domains:**
+  `suricata` (rootful, `deploy/root/`, enp8s0 + lo) sees packets and no TLS
+  content; `crowdsec` (rootless) sees NPM's access log and nothing on the wire.
+  Neither is redundant: NPM terminates TLS, so the request exists only in its
+  log, and the onion traffic exists only on the wire as ciphertext. Silencing
+  either one loses a distinct half. `DISABLE_ONLINE_API=true` is deliberate
+  ("local detection only": no console, no CAPI blocklist, no telemetry).
+  **Enforcement is `stack-bouncer`** (`deploy/root/bouncer.sh`, a root oneshot on
+  a one-minute system timer): it polls the LAPI over the crowdsec container's
+  loopback publish `127.0.0.1:8081` (8080 is searxng) with
+  `CROWDSEC_BOUNCER_KEY` and writes the `inet stack_bans` set, each element
+  carrying the decision's own duration as an nft timeout. There is no upstream
+  bouncer image any more (`crowdsecurity/cs-firewall-bouncer` answers *access
+  denied*), which is why the applier is ours: CrowdSec keeps the decision
+  lifecycle, we own the plumbing.
+  Four traps, all found by running it: (1) the LAPI answers **`null`**, not
+  `[]`, when nothing is banned -- a strict array check reads that as a protocol
+  error and blocks enforcement; (2) `nft -f` **merges** a table declaration
+  rather than recreating it, so re-declaring the chain each run appends a
+  duplicate drop rule every minute -- create the table only when missing, then
+  `flush set` and re-add; (3) `CROWDSEC_BOUNCER_KEY` must **never** be
+  regenerated (the container registers that exact key at start; a new one leaves
+  a stale bouncer and a LAPI answering 403, i.e. silent non-enforcement), and it
+  is the one secret appended to `secrets.env` rather than written by its heredoc,
+  because it has to exist on hosts deployed before it; (4) the script refuses
+  private space **and every address the host holds** -- `192.168.1.112` is what
+  onion traffic and Uptime-Kuma look like, so banning it takes the onion
+  services, the status page and the operator's own SSH session down together.
+  Failure directions are chosen: an unreachable LAPI leaves existing bans alone
+  (never read "no decisions" as "unban all"), and a failed `nft -f` rolls back
+  atomically. `scripts/monitor.sh` fails on a stale `audit/bouncer.status`, which
+  is the only signal that detection is healthy while nothing enforces.
+  `scripts/ids.sh` rolls the engines up into `$DATA_DIR/audit/ids.status` (the
+  `backup-verify.status` pattern) rather than letting the monitor reach into a
+  rootful unit and a `podman exec`; a stale status is the failure signal.
+  Two more traps: NPM writes a **custom log_format**, not `combined`, so the
+  stock nginx parser matches nothing --
+  `deploy/crowdsec/parsers/s01-parse/stack-npm.yaml` owns both shapes and
+  `verify.sh` replays a sample line through `cscli explain` on every sweep,
+  because a silent log-format change turns detection off; and the whitelist in
+  `s02-enrich/` protects the host's **own** address, which is what onion traffic
+  and Uptime-Kuma's self-checks look like in the log.
+  `podman exec crowdsec cscli …` is how decisions are read (no credentials on the
+  host), and `Network=none` was rejected because the agent installs hub parsers
+  on first boot. Suricata costs ~550 MB with the full ET
+  Open ruleset, which `start.sh` refreshes best-effort at container start and
+  falls back from to the twelve local rules. Two tuning facts learned by running
+  it here: `tpacket-v3` is impossible on `lo` (the engine dies at startup with
+  "failed to mmap"), and the ET TOR family must be disabled through
+  `disable.conf`'s `re:` filter -- `suricata-update`'s `group:` matching does
+  not resolve ET's rule-file groups, and this host's own tor client otherwise
+  buries the inbound reputation alerts.
 - **The subnet is pinned** (`10.89.0.0/24`) because `tor.container` pins
   `--ip=10.89.0.240` and both `bitcoin.conf` (`rpcallowip`) and `torrc`
   (`SocksPolicy`) allow it; `tor` is addressed by that IP, not by name

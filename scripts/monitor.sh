@@ -75,6 +75,9 @@ MONITOR_FULCRUM_LAG_BLOCKS="${MONITOR_FULCRUM_LAG_BLOCKS:-$(env_value "$MONITOR_
 MONITOR_BTC_MIN_PEERS="${MONITOR_BTC_MIN_PEERS:-$(env_value "$MONITOR_ENV" MONITOR_BTC_MIN_PEERS)}"
 MONITOR_MEMPOOL_MB="${MONITOR_MEMPOOL_MB:-$(env_value "$MONITOR_ENV" MONITOR_MEMPOOL_MB)}"
 MONITOR_XMR_LAG_BLOCKS="${MONITOR_XMR_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MONITOR_XMR_LAG_BLOCKS)}"
+MONITOR_IDS_MAX_AGE_MIN="${MONITOR_IDS_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_IDS_MAX_AGE_MIN)}"
+MONITOR_IDS_ALERT_WARN="${MONITOR_IDS_ALERT_WARN:-$(env_value "$MONITOR_ENV" MONITOR_IDS_ALERT_WARN)}"
+MONITOR_BOUNCER_MAX_AGE_MIN="${MONITOR_BOUNCER_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_BOUNCER_MAX_AGE_MIN)}"
 
 # Defaults live here, not only in monitor.env, so an older env file (one written
 # before these checks existed) still monitors. The helper and the one threshold
@@ -102,6 +105,18 @@ THRESH_MEMPOOL_MB=$(num_or "${MONITOR_MEMPOOL_MB:-}" 250)
 # means a wedged-but-alive RPC surface serving a stale chain. While not
 # synchronized the grace covers it, like the other chain checks.
 THRESH_XMR_LAG=$(num_or "${MONITOR_XMR_LAG_BLOCKS:-}" 3)
+# The IDS roll-up runs every five minutes; 20 gives it four missed runs (or one
+# long deploy that restarted the engines) before the sweep calls it stale. This
+# is the check that notices a sensor that died quietly -- its unit can read
+# "active" while the engine inside has stopped turning.
+THRESH_IDS_AGE_M=$(num_or "${MONITOR_IDS_MAX_AGE_MIN:-}" 20)
+# A warn threshold, not a failure: one Suricata alert is not a page, and an
+# operator who gets paged per alert stops reading them. The rate lives in
+# VictoriaMetrics.
+THRESH_IDS_ALERTS=$(num_or "${MONITOR_IDS_ALERT_WARN:-}" 20)
+# The applier runs every minute; five missed runs is a stopped timer or a wedged
+# nft, and either one means decisions are being made but nothing is enforcing.
+THRESH_BOUNCER_AGE_M=$(num_or "${MONITOR_BOUNCER_MAX_AGE_MIN:-}" 5)
 
 PROBLEMS=()
 WARNS=()
@@ -640,7 +655,84 @@ if [ "$audit_trips" = 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. the record, the heartbeat, the alert
+# 5. intrusion detection -- through ids.sh's status file, never directly
+# ---------------------------------------------------------------------------
+head3 "intrusion detection"
+# The engines are not touched from here: Suricata is a rootful system unit whose
+# logs live in a root-owned directory, and crowdsec is queried through
+# `podman exec`. scripts/ids.sh (deploy/ids.timer, at *:2/5 so it lands between
+# sweeps) does both and leaves a verdict in $DATA_DIR/audit/ids.status. A wedged
+# engine therefore shows up as a stale or failed status, which is the same
+# contract as the backup drill's verdict -- and the reason a dead sensor cannot
+# look healthy just because its unit is "active".
+IDS_STATUS_FILE="$AUDIT_DIR/ids.status"
+ids_alerts=0
+ids_decisions=0
+ids_up=0
+if [ ! -f "$IDS_STATUS_FILE" ]; then
+    soft "no IDS status yet (deploy/ids.timer has not run; sudo ./bootstrap.sh installs the sensor)"
+else
+    ires=$(env_value "$IDS_STATUS_FILE" result)
+    iok=$(num_or "$(env_value "$IDS_STATUS_FILE" ok_epoch)" "")
+    idetail=$(env_value "$IDS_STATUS_FILE" detail)
+    ids_alerts=$(num_or "$(env_value "$IDS_STATUS_FILE" alerts)" 0)
+    ids_decisions=$(num_or "$(env_value "$IDS_STATUS_FILE" decisions)" 0)
+    isuri=$(env_value "$IDS_STATUS_FILE" suricata)
+    icrowd=$(env_value "$IDS_STATUS_FILE" crowdsec)
+    if [ "$ires" = fail ]; then
+        fail "intrusion detection is degraded: ${idetail:-see $AUDIT_LOG}"
+        ids_up=0
+    elif [ -z "$iok" ]; then
+        soft "IDS status has no ok_epoch yet"
+    else
+        ids_age_s=$(( $(date +%s) - iok ))
+        ids_age_m=$(( ids_age_s / 60 ))
+        if [ "$ids_age_m" -gt "$THRESH_IDS_AGE_M" ]; then
+            fail "the IDS has not reported for ${ids_age_m} min (ids.timer stopped, or ids.sh cannot read the sensor)"
+        else
+            ids_up=1
+            ok "IDS: suricata=$isuri crowdsec=$icrowd, $ids_alerts alert(s), $ids_decisions decision(s)"
+        fi
+    fi
+    # Alerts are a report, not a page: Suricata's output needs a human to read it,
+    # and a page per alert would make the sweep's signal unreadable. The counter
+    # goes to VictoriaMetrics so a change in *rate* is visible without one.
+    if [ "$ids_alerts" -gt "$THRESH_IDS_ALERTS" ]; then
+        soft "$ids_alerts Suricata alert(s) since the last report (threshold $THRESH_IDS_ALERTS) -- read $DATA_DIR/ids/suricata/eve.json"
+    fi
+fi
+
+# The applier. A separate check from the engines on purpose: detection can be
+# perfectly healthy while nothing enforces (a stopped timer, a wrong key, an nft
+# that refuses the table), and that is the state where the host believes it is
+# protected and is not.
+BOUNCER_STATUS_FILE="$AUDIT_DIR/bouncer.status"
+bouncer_bans=0
+if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
+    if [ ! -f "$BOUNCER_STATUS_FILE" ]; then
+        soft "no bouncer status yet (stack-bouncer.timer has not run)"
+    else
+        bres=$(env_value "$BOUNCER_STATUS_FILE" result)
+        bok=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" ok_epoch)" "")
+        bdetail=$(env_value "$BOUNCER_STATUS_FILE" detail)
+        bouncer_bans=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" banned)" 0)
+        if [ "$bres" = fail ]; then
+            fail "the bouncer is not applying decisions: ${bdetail:-see $AUDIT_DIR/bouncer.status}"
+        elif [ -z "$bok" ]; then
+            soft "bouncer status has no ok_epoch yet"
+        else
+            bage_m=$(( ($(date +%s) - bok) / 60 ))
+            if [ "$bage_m" -gt "$THRESH_BOUNCER_AGE_M" ]; then
+                fail "the bouncer has not applied decisions for ${bage_m} min (systemctl status stack-bouncer.timer)"
+            else
+                ok "bouncer: ${bouncer_bans} address(es) banned"
+            fi
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. the record, the heartbeat, the alert
 # ---------------------------------------------------------------------------
 status=ok
 [ "${#PROBLEMS[@]}" -gt 0 ] && status=fail
@@ -660,6 +752,10 @@ status=ok
     [ -n "$backup_count" ] && printf 'stack_backup_snapshots %s\n' "$backup_count"
     [ -n "$backup_verify_age_s" ] && printf 'stack_backup_verify_age_seconds %s\n' "$backup_verify_age_s"
     [ -n "$backup_verify_ok" ] && printf 'stack_backup_verify_ok %s\n' "$backup_verify_ok"
+    printf 'stack_ids_up %s\n' "${ids_up:-0}"
+    printf 'stack_ids_alerts %s\n' "${ids_alerts:-0}"
+    printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
+    printf 'stack_bouncer_bans %s\n' "${bouncer_bans:-0}"
 } | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" || soft "could not write monitor.prom"
 
 {

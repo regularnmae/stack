@@ -1,0 +1,28 @@
+# Authentication failures against the token-gated endpoints.
+#
+# What is gated here: the MCP edge (one bearer token per server), clnrest (a CLN
+# rune), xmr-rpc (basic auth) and BoltMesh's own login. All of them answer 401
+# on a bad credential, so the signal is identical whatever is being guessed.
+#
+# The tokens are 256-bit hex, so online guessing does not work against them --
+# this rule is about volume, not feasibility: a client retrying hundreds of times
+# is either a misconfigured integration that needs a human, or a credential
+# stuffing run against BoltMesh's user accounts, which are human-chosen. Both are
+# worth a temporary ban and a page.
+#
+# 5 failures in 10 s is above every legitimate retry pattern seen on this host
+# (the health checks that produce a 401 do it once a minute, and are whitelisted
+# by user agent anyway).
+type: leaky
+name: stack/http-authfail
+description: "repeated 401/403 against a gated vhost"
+filter: "evt.Meta.log_type == 'npm_access' && (evt.Meta.http_status == '401' || evt.Meta.http_status == '403')"
+groupby: evt.Meta.source_ip
+capacity: 5
+leakspeed: 10s
+blackhole: 5m
+labels:
+  service: npm
+  type: auth
+  remediation: true
+  confidence: 3

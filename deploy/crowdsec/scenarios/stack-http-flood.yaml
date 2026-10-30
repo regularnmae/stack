@@ -1,0 +1,25 @@
+# Request flooding: one client asking for far more than a browser or a bot's
+# polite crawl ever does.
+#
+# This is the rule that protects the *availability* of the one public box, not
+# its confidentiality -- the vhosts are TLS-terminated by nginx and the app is
+# behind a queue. The capacity is deliberately huge (300 requests in 10 s, i.e.
+# 30/s sustained) because anything tighter collides with:
+#   * uptime-kuma (9 vhosts x 1 request/min = 0.15/s, whitelisted anyway),
+#   * a page's asset load (one index.html plus its bundles),
+#   * searxng's own image fetches.
+# A client that trips this is a flood, a scrape or a very broken loop, and a
+# 10-minute ban is proportionate.
+type: leaky
+name: stack/http-flood
+description: "one client flooding the public vhosts"
+filter: "evt.Meta.log_type == 'npm_access'"
+groupby: evt.Meta.source_ip
+capacity: 300
+leakspeed: 10s
+blackhole: 10m
+labels:
+  service: npm
+  type: flood
+  remediation: true
+  confidence: 2

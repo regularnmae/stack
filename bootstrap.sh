@@ -170,6 +170,39 @@ else
     sudo firewall-cmd --reload >/dev/null || true
 fi
 
+# ---------------------------------------------------------------------------
+# 9. the root tier: the intrusion-detection sensor
+# ---------------------------------------------------------------------------
+# One unit in this repo runs as root: Suricata, because AF_PACKET capture needs
+# CAP_NET_RAW in the init user namespace (deploy/root/suricata.container owns the
+# long version). Everything else stays rootless, and this is the only place that
+# writes outside the user's home.
+#
+# It is a *second* pass on purpose: the sensor's config references the data dir,
+# which does not exist until deploy.sh has run. So the first bootstrap skips this
+# step with a notice, and the follow-up run (bootstrap is idempotent) installs it.
+# Rendering lives in deploy/install.sh --root so that the installer stays the one
+# authority on what gets installed -- this script only supplies the data dir.
+IDS_DATA_DIR="${STACK_DATA_DIR:-}"
+if [ -z "$IDS_DATA_DIR" ]; then
+    DATA_POINTER="${STACK_DATA_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/stack/data-dir.env}"
+    if [ -r "$DATA_POINTER" ]; then
+        # shellcheck disable=SC1090
+        . "$DATA_POINTER"
+        IDS_DATA_DIR="${STACK_DATA_DIR:-}"
+    fi
+fi
+
+if [ ! -x "$REPO_DIR/deploy/install.sh" ]; then
+    log "no stack checkout yet; re-run bootstrap.sh after the first deploy.sh to install the IDS sensor"
+elif [ -z "$IDS_DATA_DIR" ] || [ ! -d "$IDS_DATA_DIR" ]; then
+    log "no data dir yet; re-run bootstrap.sh after the first deploy.sh to install the IDS sensor"
+else
+    log "installing the root tier (Suricata IDS) with data dir $IDS_DATA_DIR"
+    sudo "$REPO_DIR/deploy/install.sh" --root --data-dir "$IDS_DATA_DIR" \
+        || warn "could not install the root tier; run: sudo $REPO_DIR/deploy/install.sh --root --data-dir $IDS_DATA_DIR"
+fi
+
 cat <<EOF
 
 Bootstrap complete.

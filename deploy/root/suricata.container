@@ -1,0 +1,90 @@
+# Suricata, the stack's network IDS -- the one rootful unit in this repo.
+#
+# WHY A ROOT TIER EXISTS AT ALL: AF_PACKET capture on enp8s0 needs CAP_NET_RAW
+# in the *init* user namespace. A rootless container cannot have it (the
+# capability is granted by the owning user namespace, which for rootless podman
+# is the user's own), and a rootless container on the host network still runs as
+# an unprivileged user against a netns it does not own -- the kernel refuses the
+# socket ("af-packet: eth0: failed to create socket: Operation not permitted").
+# So this unit, and only this unit, is rendered into /etc/containers/systemd/ and
+# started as a rootful Quadlet by `sudo ./bootstrap.sh` (deploy/install.sh
+# --root). Everything else in the stack stays rootless.
+#
+# It is IDS-ONLY. Nothing in this stack drops packets in the packet path: the
+# enforcement lives in the crowdsec unit's bouncer in phase 3, at the nftables
+# level, with TTLs. That keeps a sensor crash or a bad rules reload from being
+# an outage.
+#
+# What it can and cannot see is documented in deploy/root/suricata/suricata.yaml
+# (short version: the LAN NIC and lo; not the rootless container bridge, and not
+# inside TLS, which nginx-proxy-manager terminates).
+[Unit]
+Description=Suricata IDS (stack sensor on enp8s0 + lo)
+# A sensor that starts before the LAN is up captures nothing until something
+# restarts it; the interfaces are brought up by NetworkManager.
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=suricata
+Image=docker.io/jasonish/suricata:8.0.8
+# Host network on purpose: the sensor has to see the same namespace that
+# nginx-proxy-manager binds 80/443 in, including the loopback publishes it
+# proxies to. A podman network would give it a private eth0 that sees nothing
+# but its own traffic.
+Network=host
+# NET_RAW to open the capture socket, NET_ADMIN for the af-packet ring options
+# (promiscuous mode, fanout), SYS_NICE so the worker threads can raise their
+# scheduling priority. Root's other capabilities are left as podman's defaults;
+# this container runs no untrusted code.
+AddCapability=NET_RAW
+AddCapability=NET_ADMIN
+AddCapability=SYS_NICE
+
+# EVE JSON, the engine log and suricata-update's log. Root-owned because the
+# container writes as root; scripts/ids.sh only reads them (0644), and Suricata
+# rotates eve.json itself (rotate-interval in the yaml), so nothing needs to
+# delete root-owned files. Outside BACKUP_PATHS: regenerable telemetry.
+Volume=@DATA_DIR@/ids/suricata:/var/log/suricata:z
+# /var/lib/suricata holds the ruleset suricata-update downloads (46 MB with ET
+# Open) and its cache. On the data disk, not in an anonymous volume, so a
+# restart does not re-download it and a host without internet still starts on
+# the previous set.
+Volume=@DATA_DIR@/ids/suricata/lib:/var/lib/suricata:z
+# The config is rooted in /etc/stack-ids, rendered by install.sh --root from
+# deploy/root/suricata/. Deliberately NOT $DATA_DIR: a user-writable config
+# consumed by a rootful container is a privilege boundary, and the data dir is
+# writable by the stack user.
+Volume=/etc/stack-ids/suricata:/etc/suricata-stack:ro,z
+
+# The image's own entrypoint takes a bare "-i <iface>"; this one copies
+# local.rules into place, refreshes ET Open best-effort and execs the engine.
+Entrypoint=/bin/sh
+Exec=/etc/suricata-stack/start.sh
+
+# Proof the engine loaded rules and is turning over, not just that a process
+# exists. The socket is a POSITIONAL argument to suricatasc (the 8.x Rust
+# rewrite takes no -s/--socket flag) and its built-in default is
+# /var/run/suricata/suricata-command.socket, a subdirectory this config does not
+# use -- so the path is spelled out, and without it the healthcheck reports
+# "Unable to connect" and the container turns unhealthy while the engine runs
+# perfectly.
+HealthCmd=/usr/bin/suricatasc -c uptime /run/suricata-command.socket
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+# Rules load before the engine answers: 46 MB of signatures takes ~30 s here.
+HealthStartPeriod=180s
+# A red healthcheck after that start period means the engine is no longer
+# answering, and a container that reads "Up" while the engine is wedged is the
+# failure mode this repo documents for lightningd. Kill it and let the Quadlet
+# default Restart=always recreate it.
+HealthOnFailure=kill
+
+[Service]
+# A cold start includes the rule update (bounded at 180 s in start.sh); the
+# default 90 s would mark the unit failed mid-download.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

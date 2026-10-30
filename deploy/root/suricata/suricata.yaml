@@ -1,0 +1,222 @@
+%YAML 1.1
+---
+# Suricata configuration for this stack -- NOT the shipped default.
+#
+# It is deliberately short: only what this host needs to see, and everything
+# else left at Suricata's compiled defaults. The shipped /etc/suricata/
+# suricata.yaml (94 KB, mostly commented-out tuning for 10 Gbit sensors) is not
+# used; deploy/root/suricata/start.sh passes -c this file.
+#
+# What it watches, and why only that:
+#   enp8s0  the LAN NIC, and the only interface that carries internet traffic
+#           (the router forwards 80/443 to nginx-proxy-manager, which runs on
+#           the host network). TLS is terminated by NPM, so this sees handshakes,
+#           scans, DNS and the plaintext of anything that is not TLS.
+#   lo      the host loopback, where NPM reaches every container's loopback
+#           publish -- including the MCP servers' plaintext HTTP and the
+#           daemon RPC ports. This is the only place the stack's own API traffic
+#           exists in the clear.
+#
+# It does NOT see: container-to-container traffic on npm-network (that is a
+# bridge inside the rootless user netns, and a rootful sensor cannot enter it),
+# or the contents of a TLS connection (NPM terminates it; the app-layer view of
+# those requests is nginx-proxy-manager's access log, which the crowdsec unit
+# reads -- see deploy/crowdsec/).
+#
+# Validated with: suricata -T -c this-file
+
+vars:
+  address-groups:
+    # 10.89.0.0/24 is the pinned podman network, 192.168.1.0/24 the LAN.
+    HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.0/8]"
+    EXTERNAL_NET: "!$HOME_NET"
+    HTTP_SERVERS: "[$HOME_NET,93.177.140.197]"
+    SMTP_SERVERS: "$HOME_NET"
+    SQL_SERVERS: "$HOME_NET"
+    DNS_SERVERS: "[$HOME_NET,1.1.1.1,8.8.8.8]"
+    TELNET_SERVERS: "$HOME_NET"
+    AIM_SERVERS: "$EXTERNAL_NET"
+    DC_SERVERS: "$HOME_NET"
+    DNP3_SERVER: "$HOME_NET"
+    DNP3_CLIENT: "$HOME_NET"
+    MODBUS_CLIENT: "$HOME_NET"
+    MODBUS_SERVER: "$HOME_NET"
+    ENIP_CLIENT: "$HOME_NET"
+    ENIP_SERVER: "$HOME_NET"
+  port-groups:
+    # The stack's public surface (stack.conf's FIREWALL_PORTS) plus the daemon
+    # and MCP ports NPM reaches over loopback.
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    ORACLE_PORTS: 1521
+    SSH_PORTS: 22
+    DNP3_PORTS: 20000
+    MODBUS_PORTS: 502
+    FILE_DATA_PORTS: "[$HTTP_PORTS]"
+    FTP_PORTS: 21
+    GENEVE_PORTS: 6081
+    VXLAN_PORTS: 4789
+    TEREDO_PORTS: 3544
+
+default-log-dir: /var/log/suricata/
+
+stats:
+  enabled: no
+
+outputs:
+  # No fast.log: EVE carries the same alerts as JSON with more context, and
+  # two logs to correlate is how alerting gets ignored.
+  - fast:
+      enabled: no
+
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      # Rotated by Suricata itself so nothing here needs to delete root-owned
+      # files. 14 days is scripts/ids.sh's retention too (it prunes the
+      # rotated files it can see, and warns if it cannot).
+      rotate-interval: 1d
+      # Local timestamps: an alert at 03:12 should read as 03:12 in the
+      # operator's own timezone, next to the monitor's audit log.
+      community-id: yes
+      types:
+        - alert:
+            # The payload of a scan is what makes the alert actionable; keep it
+            # bounded so one 10 MB upload cannot fill the disk.
+            payload: no
+            payload-printable: yes
+            packet: no
+            metadata: yes
+        - http:
+            extended: no
+        - tls:
+            extended: no
+        - dns:
+            # Only query metadata, never the transaction volume.
+            query: yes
+            answer: no
+        - anomaly:
+            enabled: yes
+        # flow is deliberately off: on this host it is 95% of the volume and
+        # says nothing that the alert/http/tls records do not.
+        - flow:
+            enabled: no
+        - stats:
+            enabled: no
+
+logging:
+  default-log-level: notice
+  # No per-thread log files: one file the monitor can read.
+  outputs:
+    - console:
+        enabled: no
+    - file:
+        enabled: yes
+        level: notice
+        filename: suricata.log
+
+af-packet:
+  - interface: enp8s0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    # 2 of 4 cores: bitcoind/monerod/fulcrum/nginx already compete for this
+    # host's CPU, and the LAN link is not the bottleneck.
+    threads: 2
+    buffer-size: 32768
+    tpacket-v3: yes
+    ring-size: 32768
+    # The NIC offloads checksum computation; without this every packet on the
+    # LAN reads as a bad checksum.
+    checksum-validation: no
+  - interface: lo
+    cluster-id: 98
+    cluster-type: cluster_flow
+    defrag: yes
+    threads: 1
+    buffer-size: 32768
+    # tpacket_v3 is required for enp8s0 and IMPOSSIBLE on lo: the loopback
+    # device has no ethernet offload and no block-based ring, so the mmap fails
+    # ("af-packet: lo: failed to mmap: Invalid argument") and the engine dies on
+    # startup. Copy mode + tpacket v2 is the supported path there, and the extra
+    # copy on a host's own loopback costs nothing measurable.
+    tpacket-v3: no
+    checksum-validation: no
+
+pcap:
+  - interface: default
+
+app-layer:
+  protocols:
+    http:
+      enabled: yes
+      # MCP is streamed over SSE: the response body can stay open for a long
+      # time, so the parser must not hold the transaction waiting for EOF.
+      libhtp:
+        default-config:
+          personality: IDS
+          request-body-limit: 100kb
+          response-body-limit: 100kb
+          # The MCP serve endpoints answer with text/event-stream and no
+          # Content-Length; treat it as a stream, not a broken response.
+          response-body-decompress-layer-limit: 2
+    tls:
+      enabled: yes
+      detection-ports:
+        dp: 443
+    dns:
+      tcp:
+        enabled: yes
+      udp:
+        enabled: yes
+    ssh:
+      enabled: yes
+    # ftp/smtp/imap/smb are left at their defaults (enabled). Disabling them
+    # silently breaks rule loading: ET ships signatures for the smtp/ftp
+    # protocols, and a parser that is off makes every one of those rules a hard
+    # "protocol cannot be used in a signature" error, so Suricata refuses to
+    # start with the full ruleset. The parsers cost nothing until something
+    # speaks the protocol, and nothing here does.
+
+stream:
+  memcap: 128mb
+  checksum-validation: no
+  inline: no
+  reassembly:
+    memcap: 128mb
+    depth: 1mb
+
+flow:
+  memcap: 128mb
+  hash-size: 65536
+  prealloc: 10000
+
+# The control socket: HealthCmd in the unit asks it for uptime, which proves the
+# engine is alive and not merely the process. Bound to the container's own /run,
+# never to the host.
+unix-command:
+  enabled: auto
+  filename: /run/suricata-command.socket
+
+detect:
+  profile: medium
+  custom-values:
+    toclient-groups: 3
+    toserver-groups: 25
+  sgh-mpm-context: auto
+  inspection-recursion-limit: 3000
+
+default-rule-path: /var/lib/suricata/rules
+
+# suricata.rules is written by suricata-update at container start (see
+# start.sh); local.rules is this repo's own set, copied in at the same time.
+# start.sh creates an empty suricata.rules when the update could not run, so a
+# host with no internet still starts with the local rules.
+rule-files:
+  - suricata.rules
+  - local.rules
+
+classification-file: /etc/suricata/classification.config
+reference-config-file: /etc/suricata/reference.config
+threshold-file: /etc/suricata-stack/threshold.conf

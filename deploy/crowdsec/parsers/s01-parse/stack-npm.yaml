@@ -1,0 +1,78 @@
+# Parser for nginx-proxy-manager's access logs.
+#
+# NPM does NOT write the nginx "combined" format. Its proxy hosts log through a
+# custom log_format, so the stock crowdsecurity/nginx parser matches nothing and
+# this file exists:
+#
+#   [30/Oct/2026:13:31:19 +0000] - 200 200 - GET https btc.boltmesh.net "/" \
+#     [Client 93.177.140.197] [Length 59776] [Gzip -] [Sent-to 127.0.0.1] \
+#     "Uptime-Kuma/2.5.7" "-"
+#
+# Two shapes are accepted: the proxy-host format above, and the plain combined
+# format NPM uses for default-host_access.log (the catch-all vhost). Whoever
+# changes NPM's log format breaks detection silently, which is why verify.sh
+# replays a sample line through the parser.
+#
+# The status appears twice (NPM logs both the client-facing and the
+# upstream-facing code); the client-facing one is the Meta.http_status, because
+# that is what the attacker was answered.
+name: stack/npm-logs
+description: "nginx-proxy-manager access log (custom proxy format and combined)"
+filter: "evt.Line.Labels.type == 'npm'"
+# A line this parser cannot recognise is dropped, not passed on: the generic
+# parsers downstream (dateparse-enrich, whitelists) assume these fields exist.
+onsuccess: next_stage
+nodes:
+  # ---- NPM proxy-host format -------------------------------------------
+  - grok:
+      pattern: '^\[%{DATA:timestamp}\] - %{INT:status} %{INT:status_upstream} - %{WORD:method} %{WORD:scheme} %{IPORHOST:vhost} "%{DATA:request_uri}" \[Client %{IPORHOST:remote_addr}\] \[Length %{INT:body_bytes}\] \[Gzip %{DATA:gzip}\] \[Sent-to %{IPORHOST:upstream_addr}\] "%{DATA:http_user_agent}" "%{DATA:http_referer}"$'
+      apply_on: Line.Raw
+    statics:
+      - meta: log_type
+        value: npm_access
+      - meta: service
+        value: npm
+      - meta: source_ip
+        expression: evt.Parsed.remote_addr
+      - meta: http_status
+        expression: evt.Parsed.status
+      - meta: http_path
+        expression: evt.Parsed.request_uri
+      - meta: http_verb
+        expression: evt.Parsed.method
+      - meta: http_user_agent
+        expression: evt.Parsed.http_user_agent
+      - meta: http_referer
+        expression: evt.Parsed.http_referer
+      - meta: http_host
+        expression: evt.Parsed.vhost
+      # The client-facing status is the one that matters; NPM logs the upstream
+      # status too (they differ on a 502, which is how a dead upstream shows up).
+      - target: evt.StrTime
+        expression: evt.Parsed.timestamp
+    onsuccess: next_stage
+
+  # ---- plain combined (default-host_access.log) --------------------------
+  - grok:
+      pattern: '^%{IPORHOST:remote_addr} - %{DATA:remote_user} \[%{DATA:timestamp}\] "%{WORD:method} %{DATA:request_uri} HTTP/%{DATA:http_version}" %{INT:status} %{INT:body_bytes} "%{DATA:http_referer}" "%{DATA:http_user_agent}"$'
+      apply_on: Line.Raw
+    statics:
+      - meta: log_type
+        value: npm_access
+      - meta: service
+        value: npm
+      - meta: source_ip
+        expression: evt.Parsed.remote_addr
+      - meta: http_status
+        expression: evt.Parsed.status
+      - meta: http_path
+        expression: evt.Parsed.request_uri
+      - meta: http_verb
+        expression: evt.Parsed.method
+      - meta: http_user_agent
+        expression: evt.Parsed.http_user_agent
+      - meta: http_referer
+        expression: evt.Parsed.http_referer
+      - target: evt.StrTime
+        expression: evt.Parsed.timestamp
+    onsuccess: next_stage

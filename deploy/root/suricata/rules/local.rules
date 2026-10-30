@@ -1,0 +1,68 @@
+# This stack's own Suricata rules -- hand-written, high precision, and the only
+# rules that are allowed to describe this host's topology.
+#
+# The ET Open set (suricata.rules, fetched at container start) covers generic
+# exploit/scan signatures. Everything below is about *this* deployment: the
+# ports that exist, what should never reach them, and what a request to them
+# must look like. A rule here that can fire during normal operation is a bug --
+# the cost of a noisy IDS is that its alerts stop being read.
+#
+# Sids are grouped: 9000xxx is the public surface, 9001xxx the daemon ports,
+# 9002xxx the proxies. Keep them stable; scripts/ids.sh's bridge to crowdsec
+# matches on them.
+
+# ---------------------------------------------------------------------------
+# 9000xxx -- the public surface (nginx-proxy-manager on the host network)
+# ---------------------------------------------------------------------------
+# NPM's admin UI (81) is in FIREWALL_PORTS for LAN access. Anything arriving
+# from outside the LAN is either a port scan or a router forward nobody meant to
+# create.
+alert tcp $EXTERNAL_NET any -> $HOME_NET 81 (msg:"STACK nginx-proxy-manager admin port reached from the internet"; flow:to_server,established; classtype:attempted-admin; sid:9000001; rev:1;)
+
+# The same for the raw Electrum ports, which are LAN-only by design.
+alert tcp $EXTERNAL_NET any -> $HOME_NET 50001 (msg:"STACK Fulcrum Electrum TCP reached from the internet"; flow:to_server,established; classtype:policy-violation; sid:9000002; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 50002 (msg:"STACK Fulcrum Electrum TLS reached from the internet"; flow:to_server,established; classtype:policy-violation; sid:9000003; rev:1;)
+
+# An HTTP request whose Host is neither a declared vhost nor an .onion address
+# is hitting the default host -- that vhost exists only to answer scanners, so
+# every request to it is worth knowing about. The list mirrors NPM_HOSTS in
+# stack.conf by hand: a new host there means a new alternation here, and a stale
+# list only costs a false "undeclared Host" alert (the rule is an alert, never a
+# drop, so drift cannot take a vhost down).
+#
+# Direction and port are pinned to NPM's clearweb HTTP listener on purpose.
+# Without them the rule also fires on every plaintext HTTP request on lo (the
+# node-exporter scrape carries Host: 0.0.0.0:9100, the MCP health checks carry
+# 127.0.0.1) -- which is how a rule becomes noise within its first minute.
+alert http any any -> any 80 (msg:"STACK HTTP request to an undeclared Host"; flow:to_server,established; http.host; pcre:"/^(?!(?:boltmesh\.net|api\.boltmesh\.net|mcp\.boltmesh\.net|search\.boltmesh\.net|clnrest\.boltmesh\.net|xmr-rpc\.boltmesh\.net|btc\.boltmesh\.net|xmr\.boltmesh\.net|status\.boltmesh\.net|.*\.onion)$)/i"; classtype:policy-violation; sid:9000004; rev:2;)
+
+# ---------------------------------------------------------------------------
+# 9001xxx -- daemon ports that are never public
+# ---------------------------------------------------------------------------
+# bitcoind RPC/P2P, monerod RPC/P2P, monero-wallet-rpc, lightningd's REST. None
+# is published beyond the podman network; a packet from off-host means
+# something un-published itself (a stray PublishPort, a forwarding rule, a
+# container on the host network).
+alert tcp $EXTERNAL_NET any -> $HOME_NET 8332 (msg:"STACK bitcoind RPC reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001001; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 8333 (msg:"STACK bitcoind P2P reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001002; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 18089 (msg:"STACK monerod restricted RPC reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001003; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 18083 (msg:"STACK monero-wallet-rpc reached from off-host"; flow:to_server,established; classtype:attempted-admin; sid:9001004; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 3010 (msg:"STACK clnrest reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001005; rev:1;)
+
+# tor's control port is driven by lightningd over the podman network; anything
+# else touching it could be re-pointing an onion service.
+alert tcp !10.89.0.240 any -> $HOME_NET 9051 (msg:"STACK tor control port reached by a non-tor peer"; flow:to_server,established; classtype:attempted-admin; sid:9001006; rev:1;)
+
+# ---------------------------------------------------------------------------
+# 9002xxx -- the proxy layer's own traps
+# ---------------------------------------------------------------------------
+# BoltMesh's admin/bootstrap endpoints are not part of the public API; a probe
+# for them is reconnaissance, not a client.
+alert http any any -> any any (msg:"STACK probe for a BoltMesh internal endpoint"; flow:to_server,established; http.uri; content:"/api/"; nocase; pcre:"/\/api\/(?:v1\/)?(?:internal|admin|debug|setup|metrics)\b/i"; classtype:web-application-activity; sid:9002001; rev:1;)
+
+# MCP over streamable HTTP uses both verbs: POST for JSON-RPC and GET for the
+# server-sent-events stream, so a rule that expects POST-only fires on the SSE
+# handshake of every healthy client (it did, on the first minute of running).
+# What is left is the method set no MCP client uses -- a scanner that found the
+# vhost and is probing it, or someone poking a live endpoint by hand.
+alert http any any -> any any (msg:"STACK unexpected HTTP method on an MCP endpoint"; flow:to_server,established; http.uri; content:"/mcp"; http.method; content:!"POST"; content:!"GET"; classtype:web-application-activity; sid:9002002; rev:2;)

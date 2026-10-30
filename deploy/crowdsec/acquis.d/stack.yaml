@@ -1,0 +1,20 @@
+# Acquisition for the nginx-proxy-manager access logs -- the stack's only
+# plaintext view of attacker-controlled requests.
+#
+# NPM terminates TLS on :80/:443, so Suricata sees a handshake and this file
+# sees the request. Every vhost that NPM_Hosts declares writes its own
+# proxy-host-N_access.log; default-host_access.log is the catch-all vhost, which
+# exists only to answer scanners (any request to it is already interesting).
+#
+# The glob deliberately excludes the stream logs (fallback_stream_access.log,
+# Fulcrum's Electrum traffic, a different format) and letsencrypt-requests_*,
+# which is NPM's own ACME client talking to itself.
+#
+# `labels.type` is what the parser's filter matches; it must agree with
+# deploy/crowdsec/parsers/s01-parse/stack-npm.yaml.
+source: file
+filenames:
+  - /var/log/npm/proxy-host-*_access.log
+  - /var/log/npm/default-host_access.log
+labels:
+  type: npm

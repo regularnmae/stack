@@ -39,6 +39,187 @@ STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
 # this default covers a checkout whose stack.conf predates the monitoring block.
 METRICS_RETENTION="${METRICS_RETENTION:-30d}"
 export STACK_BACKUP_DIR
+
+# ---------------------------------------------------------------------------
+# the root tier
+# ---------------------------------------------------------------------------
+# `--root` installs deploy/root/, the ONE privileged unit in this repo: the
+# Suricata sensor, which needs CAP_NET_RAW in the init user namespace and
+# therefore cannot be a rootless Quadlet (see deploy/root/suricata.container).
+# bootstrap.sh is its only caller, under sudo; the user-side install below never
+# runs in this mode, so nothing here creates a root-owned file inside the data
+# dir.
+#
+# The split is deliberate: $DATA_DIR stays user-owned (the sensor only writes
+# its logs into $DATA_DIR/ids, which the host user can read and this script
+# creates), while everything a rootful container *reads* lives root-owned under
+# /etc/stack-ids. A user-writable config consumed by a root container would be a
+# privilege boundary.
+# Escape a value for sed's replacement side (&, \, |). Defined here, above the
+# root-tier block, because that block renders files too -- defining it later (as
+# it once was) silently substituted an empty string into every @DATA_DIR@, since
+# a failed command substitution in an argument does not trip `set -e`.
+esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
+
+ROOT_UNIT_DIR=/etc/containers/systemd
+ROOT_CONFIG_DIR=/etc/stack-ids
+
+root_render() { # src dest mode [data-dir]
+    local tmp
+    mkdir -p "$(dirname "$2")"
+    tmp=$(mktemp)
+    sed -e "s|@DATA_DIR@|$(esc "$4")|g" \
+        -e "s|@CONFIG_DIR@|$(esc "$4/config")|g" \
+        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
+        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" \
+        "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
+    install -m "$3" "$tmp" "$2"
+    rm -f "$tmp"
+}
+
+install_root_tier() {
+    local data="$1" f bkey benv bouncer_installed=0
+    [ "$(id -u)" = 0 ] || die "install.sh --root must run as root (bootstrap.sh calls it with sudo)"
+    [ -n "$data" ] || die "install.sh --root needs --data-dir (bootstrap.sh passes the resolved data dir)"
+    [ -d "$data" ] || die "$data does not exist; run ./deploy.sh once first, or pass the right --data-dir"
+    [ -f "$DEPLOY_DIR/root/suricata.container" ] || die "missing $DEPLOY_DIR/root/suricata.container"
+
+    log "installing the root tier (Suricata) for data dir $data"
+
+    # The configuration the container reads. Root-owned: a rootful container
+    # consuming a file the stack user can edit is a privilege boundary.
+    install -d -m 755 "$ROOT_CONFIG_DIR/suricata" "$ROOT_CONFIG_DIR/suricata/rules"
+    for f in suricata.yaml threshold.conf disable.conf; do
+        root_render "$DEPLOY_DIR/root/suricata/$f" "$ROOT_CONFIG_DIR/suricata/$f" 644 "$data"
+    done
+    root_render "$DEPLOY_DIR/root/suricata/start.sh" "$ROOT_CONFIG_DIR/suricata/start.sh" 755 "$data"
+    root_render "$DEPLOY_DIR/root/suricata/rules/local.rules" \
+        "$ROOT_CONFIG_DIR/suricata/rules/local.rules" 644 "$data"
+
+    # $DATA_DIR/ids is the one directory with two owners: the sensor's state
+    # (ids/suricata, root-owned, because a rootful container writes it) and the
+    # crowdsec state next to it (ids/crowdsec, user-owned, because that container
+    # is rootless). The parent goes to the invoking user so the *user-side*
+    # install can keep creating ids/crowdsec/ on later deploys -- root writes
+    # ids/suricata/ regardless of the mode bits. 0755/0644 so the unprivileged
+    # scripts/ids.sh can read eve.json.
+    install -d -m 755 "$data/ids"
+    if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+        chown "$SUDO_UID:$SUDO_GID" "$data/ids" || warn "could not hand $data/ids back to uid $SUDO_UID"
+    fi
+    install -d -m 755 "$data/ids/suricata" "$data/ids/suricata/lib"
+
+    # Retention for Suricata's rotated EVE files, which no unprivileged process
+    # may delete. tmpfiles.d owns that, on the same schedule as the rest of the
+    # host's cleanup.
+    root_render /dev/stdin /etc/tmpfiles.d/stack-ids.conf 644 "$data" <<'EOF'
+# Written by deploy/install.sh --root; do not edit (deploy/root/ owns it).
+# Suricata rotates eve.json daily (rotate-interval) and never prunes; the files
+# are root-owned, so this is the only thing that can delete them.
+d @DATA_DIR@/ids/suricata 0755 root root -
+e @DATA_DIR@/ids/suricata/*.json.* - - - @IDS_RETENTION_DAYS@d
+EOF
+
+    # The unit itself. Render, then let systemd regenerate suricata.service from
+    # it -- the same render-then-daemon-reload cycle as the user side, just in
+    # the system manager. Mode 0644, unlike the 0600 user units: a system unit in
+    # /etc carries no secret (the secret-bearing templates are the *user* units
+    # with @PLACEHOLDERS@), and this one has to be readable by the unprivileged
+    # ./verify.sh, which diffs it against the repo to catch drift.
+    root_render "$DEPLOY_DIR/root/suricata.container" "$ROOT_UNIT_DIR/suricata.container" 644 "$data"
+
+    # A silent substitution failure is worse than a loud one: an empty @DATA_DIR@
+    # renders a unit that mounts /ids/suricata, which podman rejects only after
+    # systemd has already tried to start it (this happened once -- the helper that
+    # escapes sed replacements was defined below its first use, and a failed
+    # $(...) in an argument does not trip set -e). Nothing reaches the system
+    # manager under test.
+    grep -qF "$data/ids/suricata" "$ROOT_UNIT_DIR/suricata.container" \
+        || die "rendered $ROOT_UNIT_DIR/suricata.container does not reference $data/ids/suricata -- the substitution failed"
+    grep -qF "$data/ids/suricata" /etc/tmpfiles.d/stack-ids.conf \
+        || die "rendered /etc/tmpfiles.d/stack-ids.conf does not reference $data/ids/suricata -- the substitution failed"
+
+    # ------------------------------------------------------------------
+    # stack-bouncer: CrowdSec's decisions -> nftables
+    # ------------------------------------------------------------------
+    # Its key is generated by the *user-side* install (it has to be in
+    # secrets.env, where the crowdsec template reads it), so a root phase that
+    # runs before the first ./deploy.sh has nothing to install yet -- the second
+    # bootstrap pass picks it up. Same two-pass reason as the sensor itself.
+    local bkey
+    bkey=$(env_value "$data/config/stack/secrets.env" CROWDSEC_BOUNCER_KEY)
+    if [ -z "$bkey" ]; then
+        warn "no CROWDSEC_BOUNCER_KEY in $data/config/stack/secrets.env yet; skipping the bouncer (re-run sudo ./bootstrap.sh after ./deploy.sh)"
+    else
+        root_render "$DEPLOY_DIR/root/bouncer.sh" "$ROOT_CONFIG_DIR/bouncer.sh" 755 "$data"
+        # Root-owned 0600, deliberately not $DATA_DIR/config: this key reads every
+        # decision, and root must not take instructions from a file the stack user
+        # can write.
+        benv=$(mktemp)
+        {
+            printf '# Written by deploy/install.sh --root; do not edit (deploy/root/ owns it).\n'
+            printf 'CROWDSEC_BOUNCER_KEY=%s\n' "$bkey"
+            printf 'LAPI=127.0.0.1:8081\n'
+            printf 'DATA_DIR=%s\n' "$data"
+        } > "$benv"
+        install -m 600 "$benv" "$ROOT_CONFIG_DIR/bouncer.env"
+        rm -f "$benv"
+        root_render "$DEPLOY_DIR/root/stack-bouncer.service" /etc/systemd/system/stack-bouncer.service 644 "$data"
+        root_render "$DEPLOY_DIR/root/stack-bouncer.timer" /etc/systemd/system/stack-bouncer.timer 644 "$data"
+        bouncer_installed=1
+    fi
+
+    systemctl daemon-reload
+    systemd-tmpfiles --create /etc/tmpfiles.d/stack-ids.conf 2>/dev/null \
+        || warn "could not apply /etc/tmpfiles.d/stack-ids.conf"
+    # Quadlet turns the rendered .container into suricata.service, and the
+    # generator's [Install] WantedBy=multi-user.target is what pulls it in at
+    # boot -- exactly like the rootless units, which are never `systemctl --user
+    # enable`d either. `systemctl enable` is REFUSED for a generated unit
+    # ("transient or generated"), so starting is all there is to do here. A
+    # failure is a warning, not a failed bootstrap: the rest of the stack is
+    # unaffected by a sensor that cannot open its interface (a renamed NIC is the
+    # usual cause).
+    if systemctl start suricata 2>/dev/null; then
+        log "suricata started"
+    else
+        warn "suricata did not start; check: journalctl -u suricata"
+    fi
+    # The applier. Unlike the Quadlet units this one is a real system unit, so it
+    # is enabled the ordinary way; the first run is triggered here so the status
+    # file the monitor reads exists immediately rather than in a minute.
+    if [ "${bouncer_installed:-0}" = 1 ]; then
+        if systemctl enable --now stack-bouncer.timer >/dev/null 2>&1; then
+            log "stack-bouncer.timer enabled (decisions -> nftables every minute)"
+            systemctl start stack-bouncer.service >/dev/null 2>&1 \
+                || warn "stack-bouncer's first run failed; see: systemctl status stack-bouncer"
+        else
+            warn "could not enable stack-bouncer.timer"
+        fi
+    fi
+    log "root tier installed; run ./verify.sh to check the sensor"
+}
+
+ROOT_TIER=0
+ROOT_DATA_DIR=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root)     ROOT_TIER=1 ;;
+        --data-dir) ROOT_DATA_DIR="${2:?--data-dir needs a path}"; shift ;;
+        -h|--help)  usage_header "$0"
+                    printf '  --root            install the rootful IDS tier (bootstrap.sh only)\n'
+                    printf '  --data-dir <path> with --root: the existing data dir to point it at\n'
+                    exit 0 ;;
+        *)          die "unknown argument: $1 (try --help)" ;;
+    esac
+    shift
+done
+
+if [ "$ROOT_TIER" = 1 ]; then
+    install_root_tier "$ROOT_DATA_DIR"
+    exit 0
+fi
+
 # The backup set. Not defaulted here: an empty set would render a backup unit
 # that copies nothing, so a stack.conf that lost the declaration is a hard error
 # rather than a silent empty snapshot.
@@ -75,6 +256,7 @@ UNITS=(
     "backup.container:backup.container"
     "victoriametrics.container:victoriametrics.container"
     "node-exporter.container:node-exporter.container"
+    "crowdsec.container.in:crowdsec.container"
 )
 
 # Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir).
@@ -86,6 +268,8 @@ USER_UNITS=(
     "monitor.timer"
     "metrics.service"
     "metrics.timer"
+    "ids.service"
+    "ids.timer"
 )
 # The subset that is enabled --now. monitor.service and metrics.service have no
 # [Install] -- only their timers activate them -- so they must not be enabled on
@@ -95,6 +279,7 @@ USER_TIMERS=(
     "backup-verify.timer"
     "monitor.timer"
     "metrics.timer"
+    "ids.timer"
 )
 
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
@@ -179,8 +364,6 @@ chown_image_uid() {
     podman unshare chown -R 1000:1000 "$@" 2>/dev/null \
         || log "could not chown $* -- run: podman unshare chown -R 1000:1000 $*"
 }
-
-esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
 
 # The backup set (BACKUP_PATHS in stack.conf) rendered the two ways
 # deploy/backup.container needs it: one read-only Volume= per entry, and the
@@ -307,6 +490,25 @@ MONERO_RPC_LOGIN=$MONERO_RPC_LOGIN
 EOF
     log "wrote $SECRETS_FILE (mode 600)"
 fi
+
+# The bouncer's key is the one secret NOT in that heredoc: it has to exist on a
+# host deployed before the bouncer did, and ensure_secret would never touch an
+# existing file. So it is read and only *appended* when missing -- which also
+# covers a fresh host, whose file the block above just wrote.
+#
+# NEVER regenerate it. deploy/crowdsec.container.in renders it into
+# BOUNCER_KEY_firewall, and the image's entrypoint registers that exact key in
+# its LAPI on start; a new value would leave the old bouncer registered and
+# enforcement silently dead (the LAPI answers 403 and stack-bouncer reports "LAPI
+# unreachable" -- the status file exists for exactly this).
+CROWDSEC_BOUNCER_KEY=$(read_secret CROWDSEC_BOUNCER_KEY)
+if [ -z "$CROWDSEC_BOUNCER_KEY" ]; then
+    CROWDSEC_BOUNCER_KEY=$(rand_hex)
+    printf 'CROWDSEC_BOUNCER_KEY=%s\n' "$CROWDSEC_BOUNCER_KEY" >> "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
+    log "generated CROWDSEC_BOUNCER_KEY and appended it to $SECRETS_FILE"
+fi
+export CROWDSEC_BOUNCER_KEY
 
 # ---------------------------------------------------------------------------
 # 2. bitcoind config + ownership (fresh host)
@@ -1067,6 +1269,7 @@ render_unit() {
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
         -e "s|@MONERO_WALLET_PASSWORD@|$(esc "$MONERO_WALLET_PASSWORD")|g" \
         -e "s|@MONERO_RPC_LOGIN@|$(esc "$MONERO_RPC_LOGIN")|g" \
+        -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
         "$src" > "$tmp"
     # @BACKUP_VOLUMES@ becomes one Volume= line per BACKUP_PATHS entry, which a
@@ -1086,6 +1289,20 @@ render_unit() {
     [ -L "$target" ] && rm -f "$target"
     install -m 600 "$tmp" "$target"
     rm -f "$tmp"
+}
+
+# Render a whole directory tree through render_unit, preserving its shape. Used
+# for the CrowdSec config (parsers/, scenarios/, acquis.d/), whose files the
+# container mounts one by one -- a directory mount over /etc/crowdsec would
+# fight the image's own entrypoint, which seeds the rest of that tree.
+sync_tree() { # src-dir dest-dir
+    local src="$1" dest="$2" rel
+    [ -d "$src" ] || return 0
+    ( cd "$src" && find . -type f -print ) | while IFS= read -r rel; do
+        rel="${rel#./}"
+        mkdir -p "$dest/$(dirname "$rel")"
+        render_unit "$src/$rel" "$dest/$rel"
+    done
 }
 
 mkdir -p "$QUADLET_DIR"
@@ -1115,6 +1332,23 @@ for u in "${USER_UNITS[@]}"; do
     render_unit "$DEPLOY_DIR/$u" "$target"
 done
 log "installed ${#USER_UNITS[@]} user unit(s) into $USER_UNIT_DIR"
+
+# ---------------------------------------------------------------------------
+# the IDS config tree
+# ---------------------------------------------------------------------------
+# CrowdSec's parser, scenarios, whitelists and acquisition, rendered into
+# $CONFIG_DIR/ids/crowdsec and mounted file by file by deploy/crowdsec.container.
+# Rendered rather than mounted from the repo for the same reason as the
+# VictoriaMetrics scrape config: what the container reads is an install artifact,
+# so a change lands on a deploy -- and deploy.sh's unit_digest hashes this tree
+# under the stem "crowdsec", so a changed parser restarts the unit instead of
+# waiting for the next reboot.
+sync_tree "$DEPLOY_DIR/crowdsec" "$CONFIG_DIR/ids/crowdsec"
+# The container's own state: /etc/crowdsec (seeded on first start, then the hub
+# installs live there) and the sqlite decisions DB. Both regenerable, so both
+# stay outside BACKUP_PATHS.
+mkdir -p "$DATA_DIR/ids/crowdsec/etc" "$DATA_DIR/ids/crowdsec/data"
+log "rendered the crowdsec config into $CONFIG_DIR/ids/crowdsec"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload

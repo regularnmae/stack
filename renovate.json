@@ -108,6 +108,21 @@
         "Merging this changes the tag only: the host keeps running the old image until `./deploy.sh --only <service>` pulls the new one, followed by `./verify.sh`.",
         "Consensus daemons: read the upstream release notes first. `lightningd` wallet migrations are forward-only, so run `./scripts/backup.sh backup` before deploying it; Monero upgrades are driven by a hardfork height and the daemon and wallet move as a pair."
       ]
+    },
+    {
+      "description": "the two IDS images: same tag-only landing as the units above, with one difference -- suricata is the repo's only ROOTFUL unit, rendered by `deploy/install.sh --root` into /etc/containers/systemd, which only bootstrap.sh may call. So its redeploy is `sudo ./bootstrap.sh`, never `./deploy.sh --only suricata` (there is no user unit by that name)",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/jasonish/suricata",
+        "docker.io/crowdsecurity/crowdsec"
+      ],
+      "automerge": false,
+      "prBodyNotes": [
+        "crowdsec lands with `./deploy.sh --only crowdsec` -- that unit is rootless and ordinary, and the redeploy also re-renders its parser/scenarios.",
+        "suricata lands with `sudo ./bootstrap.sh`: it is the one rootful unit (AF_PACKET needs CAP_NET_RAW in the init namespace), so there is no `./deploy.sh --only suricata`. Afterwards `./verify.sh` and `./scripts/ids.sh -v`; the unit's healthcheck (`suricatasc -c uptime`) is what proves the new engine loaded its rules."
+      ]
     }
   ],
   "customManagers": [

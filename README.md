@@ -38,6 +38,9 @@ stack runs and one script that fixes a deployment problem.
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` | — |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` | — |
+| `crowdsec` | `docker.io/crowdsecurity/crowdsec:v1.8.2` | — | `$DATA_DIR/ids/crowdsec` |
+| `suricata` ⚙️ | `docker.io/jasonish/suricata:8.0.8` | host network (IDS only, publishes nothing) | `$DATA_DIR/ids/suricata` |
+| `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — (writes the `inet stack_bans` nft set) | `$DATA_DIR/audit/bouncer.status` |
 
 `bitcoind` and `monerod` are **full (archival) nodes**, storing and validating
 the whole chain; `fulcrum` indexes that chain for Bitcoin wallets over the
@@ -119,6 +122,8 @@ container, no DNS and no certificate needed. See
 > ```
 
 🔑 = a money-moving surface. Spending is **off** by default on both.
+⚙️ = the stack's only rootful unit (needs `CAP_NET_RAW` to capture packets);
+everything else runs rootless. See [Intrusion detection](#intrusion-detection).
 
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
 `monero-wallet-rpc/`, `tor/`, `config/`, `npm/`, `audit/`, and the BoltMesh
@@ -874,6 +879,136 @@ with no alert configured) and folded into the monitor's alert and heartbeat. It
 is **not** a gate: it cannot stop a spend, only make one impossible to miss.
 `audit/` is part of the [backup set](#backup--restore).
 
+## Intrusion detection
+
+Two engines, because the traffic splits in a way one product cannot cover.
+`nginx-proxy-manager` terminates TLS, so the wire carries handshakes and scans
+while the request itself exists only in NPM's access log:
+
+| Engine | Sees | Runs as | Installed by |
+| --- | --- | --- | --- |
+| `suricata` | packets on `enp8s0` and `lo` | **rootful** (AF_PACKET needs `CAP_NET_RAW` in the init namespace) | `sudo ./bootstrap.sh` |
+| `crowdsec` | NPM's access logs → decisions | rootless | `./deploy.sh` |
+
+That rootful unit is the one exception to "everything runs rootless", and it is
+why `bootstrap.sh` is a **two-pass** install: the sensor's config references the
+data dir, which does not exist until `./deploy.sh` has run. The first bootstrap
+prints a notice; re-running it after the first deploy installs the sensor. The
+rendered unit lives in `/etc/containers/systemd/`, its config in
+`/etc/stack-ids/`, and `./verify.sh` warns when the two have drifted apart.
+
+### What each can and cannot see
+
+* **Suricata** sees the LAN NIC and the host loopback — the latter is where each
+  MCP server's plaintext HTTP and the daemon RPC ports live. It cannot see the
+  rootless container bridge (a rootful sensor cannot enter the user's network
+  namespace) and it cannot see inside TLS.
+* **CrowdSec** sees every request NPM served, which is the whole attack surface
+  of the public vhosts. It cannot attribute anything on the `.onion` vhosts: tor
+  forwards to `host.containers.internal`, so NPM logs the host's own address for
+  every onion visitor.
+
+It is **detection then enforcement**: CrowdSec's decisions are applied to
+nftables by `stack-bouncer` (below). Nothing in the *packet* path is inline —
+enforcement happens at the kernel's input hook, with per-entry timeouts, so a
+sensor crash or a rules reload cannot be an outage.
+
+It is also **local only**: `DISABLE_ONLINE_API=true` means no console
+enrolment, no community blocklist and no telemetry leaving the host. The cost is
+that a known-bad address is only banned here after it has misbehaved here.
+
+### Enforcement
+
+Decisions are applied by `stack-bouncer` — a root oneshot on a one-minute timer
+(`deploy/root/bouncer.sh`, installed to `/etc/stack-ids/`). It polls the
+crowdsec container's LAPI over its loopback publish (`127.0.0.1:8081`, key-gated:
+an unauthenticated request gets 403) and writes one nftables set:
+
+```
+table inet stack_bans
+  set banned_v4 { type ipv4_addr; flags timeout; }
+  set banned_v6 { type ipv6_addr; flags timeout; }
+  chain input  { type filter hook input priority -10; ip saddr @banned_v4 drop; ... }
+```
+
+Each element carries the decision's own duration as an nft timeout, so a ban
+expires even if everything above it dies. The set is refreshed wholesale every
+minute in one transaction — the LAPI's list is the truth — which also means
+`nft flush table inet stack_bans` cannot unban anyone permanently.
+
+There is no upstream bouncer image any more (`crowdsecurity/cs-firewall-bouncer`
+answers *access denied*), and the packaged one would be a second daemon outside
+this repo's control. CrowdSec keeps the hard half (decision lifecycle, TTLs,
+dedup); this is the plumbing, and it is ~120 lines you can read.
+
+```sh
+sudo /etc/stack-ids/bouncer.sh --dry-run    # the rules it would apply, applied to nothing
+sudo nft list table inet stack_bans         # who is banned right now
+systemctl stop stack-bouncer.timer          # the kill switch: detection keeps working
+```
+
+Three properties worth knowing:
+
+* **Never bans the operator.** The script refuses private space, the podman
+  network, and every address the host itself holds — checked at run time, so a
+  DHCP change cannot produce a self-ban. Banning `192.168.1.112` would cut the
+  `.onion` proxies, the status page and your own SSH session at once.
+* **Fails open in the safe direction.** An unreachable LAPI or a non-JSON answer
+  leaves the existing bans alone (it never reads "no decisions" as "unban
+  everything"), and a failed `nft -f` rolls back atomically.
+* **Its key is never regenerated.** `CROWDSEC_BOUNCER_KEY` in
+  `config/stack/secrets.env` is registered into the LAPI by the crowdsec
+  container at start; a new value leaves the old bouncer registered and
+  enforcement silently dead. `scripts/monitor.sh` fails on a stale
+  `audit/bouncer.status` for exactly that reason.
+
+### Reading it
+
+```sh
+./scripts/ids.sh -v                       # the roll-up, by hand
+cat $DATA_DIR/audit/ids.status            # what monitor.timer reads
+podman exec crowdsec cscli decisions list  # every decision the engine holds
+sudo nft list table inet stack_bans        # what is actually being dropped
+podman exec crowdsec cscli metrics         # lines read/parsed/whitelisted per log
+tail -f $DATA_DIR/ids/suricata/eve.json | jq 'select(.event_type=="alert")'
+```
+
+`deploy/ids.timer` runs the roll-up every five minutes at `*:2/5` — deliberately
+between the monitor's sweeps — and `scripts/monitor.sh` alerts on a stale or
+failed status, so a sensor that dies quietly cannot look healthy. Alert counts
+are a *warning*, not a page: one Suricata alert needs a human to read it, and the
+rate is in VictoriaMetrics (`stack_ids_alerts`).
+
+### The whitelist is load-bearing
+
+`deploy/crowdsec/parsers/s02-enrich/stack-whitelists.yaml` exists because a naive
+threshold is a self-inflicted outage on this host, not a false positive:
+
+* the onion proxies and Uptime-Kuma's self-checks are logged as the host's **own**
+  address (`192.168.1.112` / the WAN IP), so banning it would take every onion
+  service and the status page down at once;
+* Uptime-Kuma probes nine vhosts a minute, including a permanent 401 on the
+  token-gated ones;
+* the podman network (`10.89.0.0/24`) and the LAN are internal by definition.
+
+Read that file before tightening a scenario. `scripts/verify.sh` replays a sample
+access-log line through `cscli explain` on every sweep, because a change to NPM's
+`log_format` would otherwise disable detection silently.
+
+Two survivors of a real scan are worth knowing about: `93.123.109.247`
+(`tlm-scanner/2.0`, ~7,500 requests, 100% 404, `/.git/…` and traversal probes)
+was probing this host before the sensor existed, and the `default-host` vhost
+exists only to answer that kind of traffic — any request to it is worth a look.
+
+### Resources and retention
+
+~550 MB RSS for Suricata with the full ET Open ruleset (refreshed at container
+start, best effort — a host without internet starts on the twelve local rules),
+~150 MB for CrowdSec, and nothing measurable for the bouncer (one nft
+transaction a minute). EVE JSON rotates daily and is pruned at
+`IDS_RETENTION_DAYS` (14) by `/etc/tmpfiles.d/stack-ids.conf`; `$DATA_DIR/ids`
+is regenerable and stays out of the backup set.
+
 ## Status page
 
 `uptime-kuma` serves a public status page on
@@ -1292,6 +1427,7 @@ stack/
   scripts/wallets.sh      # Monero + Bitcoin create/restore
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
+  scripts/ids.sh          # scheduled IDS roll-up (ids.timer): suricata + crowdsec
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   scripts/rotate.sh       # rotate one credential + every dependent service
   scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
@@ -1304,6 +1440,12 @@ stack/
                           #   Quadlet has no .timer type)
     monitor.service       # the monitor script as a plain user unit
     npm-network.network
+    crowdsec.container    # rootless: NPM access log -> decisions (local only)
+    ids.service ids.timer # the IDS roll-up (plain user units)
+    root/                 # the ONE rootful tier: suricata.container + its config,
+                          #   rendered by install.sh --root (bootstrap.sh only)
+    crowdsec/             # this repo's parser, scenarios, whitelists, acquisition;
+                          #   rendered into $CONFIG_DIR/ids/crowdsec
     searxng/{settings.yml,limiter.toml}
     examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by hand
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates

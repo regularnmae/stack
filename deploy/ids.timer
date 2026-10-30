@@ -1,0 +1,17 @@
+# The schedule for the IDS roll-up.
+#
+# Quadlet has no .timer type, so this is a plain systemd USER unit (like
+# monitor.timer and metrics.timer). The minute offset is deliberate: monitor.timer
+# runs at *:0/5, and the sweep should read a status file written *before* it, not
+# race this script for the same file.
+[Unit]
+Description=Run the IDS roll-up every five minutes
+
+[Timer]
+OnCalendar=*:2/5
+RandomizedDelaySec=20s
+Persistent=true
+Unit=ids.service
+
+[Install]
+WantedBy=timers.target

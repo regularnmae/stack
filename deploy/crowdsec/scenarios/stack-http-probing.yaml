@@ -1,0 +1,26 @@
+# Directory probing: a client that generates 404s at a rate no human does.
+#
+# Calibration is not hypothetical -- this host has already been scanned:
+# 93.123.109.247 (UA tlm-scanner/2.0) made ~7,500 requests across two vhosts,
+# 100% 404, probing /.git/logs/refs/heads/master and path traversal. At capacity
+# 10 / leakspeed 10s that client is banned after ten requests, i.e. within the
+# first second of the run.
+#
+# `distinct: evt.Meta.http_path` counts *different* paths, so a client hammering
+# one broken link (a real user with a bookmark) never trips it, while a scanner
+# walking a wordlist trips it almost immediately. That distinction is the whole
+# value of the rule.
+type: leaky
+name: stack/http-probing
+description: "many distinct 404s from one client: directory/wordlist scanning"
+filter: "evt.Meta.log_type == 'npm_access' && evt.Meta.http_status == '404'"
+distinct: evt.Meta.http_path
+groupby: evt.Meta.source_ip
+capacity: 10
+leakspeed: 10s
+blackhole: 5m
+labels:
+  service: npm
+  type: scan
+  remediation: true
+  confidence: 3

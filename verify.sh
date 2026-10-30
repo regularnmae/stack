@@ -57,7 +57,7 @@ if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        victoriametrics node-exporter
+        victoriametrics node-exporter crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -65,7 +65,7 @@ else
     containers=(
         bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-rpc lightningd
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        victoriametrics node-exporter
+        victoriametrics node-exporter crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -619,6 +619,91 @@ if [ "$DEEP" = 1 ]; then
     else
         warn "victoriametrics has no stack_metrics_timestamp series yet (first scrape?)"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+head2 "Intrusion detection"
+# Two tiers, and they fail differently:
+#   crowdsec is an ordinary rootless user unit, so this sweep can talk to it.
+#   suricata is the repo's one ROOTFUL unit (AF_PACKET needs CAP_NET_RAW in the
+#   init namespace), installed by `sudo ./bootstrap.sh` into the system manager.
+#   A host that has not re-run bootstrap simply has no sensor -- report that as a
+#   warning, not a failure, so an older host does not fail every sweep.
+if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container" ]; then
+    # The parser is the whole detection chain's front door. One replayed log line
+    # through cscli explain proves it still matches NPM's format -- a log-format
+    # change would otherwise disable detection silently.
+    sample='[30/Oct/2026:13:31:19 +0000] - 404 404 - GET https api.example.invalid "/probe" [Client 203.0.113.9] [Length 22] [Gzip -] [Sent-to 127.0.0.1] "verify/1.0" "-"'
+    if explain=$(podman exec crowdsec cscli explain --type npm --log "$sample" 2>/dev/null); then
+        if printf '%s' "$explain" | grep -q 'stack/npm-logs' \
+           && printf '%s' "$explain" | grep -q 'parser success'; then
+            pass "crowdsec parses nginx-proxy-manager's log format"
+        else
+            warn "crowdsec did not parse a sample access log line (parser or log_format changed)"
+        fi
+    else
+        warn "could not ask crowdsec to explain a sample line"
+    fi
+else
+    warn "crowdsec unit is not installed (run deploy/install.sh)"
+fi
+
+if [ -f /etc/containers/systemd/suricata.container ]; then
+    if systemctl is-active --quiet suricata 2>/dev/null; then
+        pass "suricata is active"
+    else
+        bad "suricata is not active (sudo systemctl status suricata)"
+    fi
+    # A rendered unit that no longer matches the repo means someone edited
+    # deploy/root/ without re-running bootstrap -- the running sensor is then not
+    # the one in git, which is exactly the drift the digest check exists for.
+    if [ -f "$REPO_DIR/deploy/root/suricata.container" ]; then
+        want=$(mktemp)
+        sed -e "s|@DATA_DIR@|$DATA_DIR|g" "$REPO_DIR/deploy/root/suricata.container" > "$want"
+        if diff -q "$want" /etc/containers/systemd/suricata.container >/dev/null 2>&1; then
+            pass "rendered suricata unit matches deploy/root/"
+        else
+            warn "rendered suricata unit differs from deploy/root/ (sudo ./bootstrap.sh re-renders it)"
+        fi
+        rm -f "$want"
+    fi
+else
+    warn "the root tier is not installed (run: sudo ./bootstrap.sh) -- no network IDS"
+fi
+
+if [ -f "$DATA_DIR/audit/ids.status" ]; then
+    ids_result=$(env_value "$DATA_DIR/audit/ids.status" result)
+    if [ "$ids_result" = ok ]; then
+        pass "IDS roll-up reports ok"
+    else
+        bad "IDS roll-up reports ${ids_result:-unknown} ($DATA_DIR/audit/ids.status)"
+    fi
+else
+    warn "no IDS status yet (deploy/ids.timer has not run)"
+fi
+
+# The applier. Detection can be healthy while nothing enforces, which is the one
+# state where the host looks protected and is not -- so it is checked separately
+# from the engines, and it is a *system* unit (root, nftables).
+if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
+    if systemctl is-active --quiet stack-bouncer.timer 2>/dev/null; then
+        pass "stack-bouncer.timer is active (decisions -> nftables)"
+    else
+        bad "stack-bouncer.timer is not active (sudo systemctl status stack-bouncer.timer)"
+    fi
+    if [ -f "$DATA_DIR/audit/bouncer.status" ]; then
+        b_result=$(env_value "$DATA_DIR/audit/bouncer.status" result)
+        b_banned=$(env_value "$DATA_DIR/audit/bouncer.status" banned)
+        if [ "$b_result" = ok ]; then
+            pass "bouncer: ${b_banned:-0} address(es) in the nftables ban set"
+        else
+            bad "bouncer last run failed: $(env_value "$DATA_DIR/audit/bouncer.status" detail)"
+        fi
+    else
+        warn "the bouncer has not written a status yet (systemctl start stack-bouncer)"
+    fi
+else
+    warn "the bouncer is not installed (sudo ./bootstrap.sh) -- decisions are not enforced"
 fi
 
 # ---------------------------------------------------------------------------

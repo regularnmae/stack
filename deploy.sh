@@ -188,6 +188,15 @@ unit_digest() {
     if [ -s "$DATA_DIR/tor/torrc" ]; then
         sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 " tor.unit" }'
     fi
+    # The crowdsec config is not a unit either, and the container reads it only
+    # at start: a changed parser, scenario or whitelist would otherwise wait for
+    # the next reboot. One digest over the rendered tree, under the stem
+    # "crowdsec", so restart_changed_units bounces exactly that unit.
+    if [ -d "$DATA_DIR/config/ids/crowdsec" ]; then
+        find "$DATA_DIR/config/ids/crowdsec" -type f -print0 2>/dev/null \
+            | sort -z | xargs -0 -r sha256sum 2>/dev/null \
+            | sha256sum | awk '{ print $1 " crowdsec.unit" }'
+    fi
 }
 
 # .container only, never *.network: a network cannot be restarted under the
@@ -324,6 +333,11 @@ start_infra() {
     start_unit searxng
     start_unit uptime-kuma
     start_unit nginx-proxy-manager
+    # CrowdSec reads nginx-proxy-manager's access log, so it starts after the
+    # proxy does (the log directory is NPM's). Nothing gates on it: a crowdsec
+    # that fails to start leaves detection off, not the site down, and
+    # scripts/monitor.sh reports the stale status.
+    start_unit crowdsec
 
     if [ "$SKIP_DAEMONS" = 1 ]; then
         log "skipping the chain daemons (--skip-daemons)"
