@@ -478,6 +478,13 @@ back in.
 > cleanly even if `lightningd.sqlite3` is torn, so the worst case is a
 > force-close and on-chain recovery, not lost funds; the wallet is written
 > periodically, so a live copy is safe in practice.
+>
+> "Safe" means *funds*: a wallet cache is a cache. One captured while the wallet
+> was rebuilding, or torn mid-write, is rejected when it is loaded, and the
+> wallet then rescans from its restore height — minutes to hours against a busy
+> `monerod`, with the RPC unavailable until it finishes (the daemons report it
+> as unhealthy, and `scripts/monitor.sh` says so). The keys file is the part that
+> matters, and it always restores.
 
 ## Monitoring & the spend tripwire
 
