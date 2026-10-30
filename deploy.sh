@@ -323,11 +323,34 @@ ensure_network() {
     fi
 }
 
+# The `--only` branches run their checks (verify.sh inside the monitor sweep,
+# npm-hosts, kuma-monitors, the app health handshakes) through the two curl
+# clients, and never reach start_infra. Start them here -- a start is a no-op
+# when they are already up -- so `./deploy.sh --only monitor` on a freshly
+# booted host does not fail with "netcheck is not running".
+ensure_netcheck() {
+    [ "$DRY_RUN" = 1 ] && return 0
+    # A rebuilt image would otherwise never reach the running container (start
+    # is a no-op on an active unit); the same refresh start_infra does.
+    refresh_image_unit netcheck "$NETCHECK_IMAGE"
+    refresh_image_unit netcheck-host "$NETCHECK_IMAGE"
+    systemctl --user start netcheck.service netcheck-host.service 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # 3. start the infrastructure, in dependency order
 # ---------------------------------------------------------------------------
 start_infra() {
     ensure_network
+    # The curl clients every host-side check execs into. First, because the
+    # checks that read a service by name (verify.sh, npm-hosts.sh,
+    # kuma-monitors.sh, the MCP handshakes) all go through them, and
+    # refresh_image_unit because install.sh rebuilds the image in place: a
+    # `start` on an already-active unit would keep the old bits.
+    refresh_image_unit netcheck "$NETCHECK_IMAGE"
+    start_unit netcheck
+    refresh_image_unit netcheck-host "$NETCHECK_IMAGE"
+    start_unit netcheck-host
     # Monitoring first: it depends on nothing, it is cheap, and starting it
     # before the daemons is what puts a whole initial sync in the history
     # instead of beginning mid-way through it.
@@ -707,6 +730,7 @@ if [ -n "$ONLY" ]; then
     # A hand-removed network would make every restart below fail; recreate it
     # from the unit exactly as the full deploy does.
     ensure_network
+    ensure_netcheck
     if in_list "$ONLY" "${APP_REPOS[@]}"; then
         fetch_repos "$ONLY"
         install_units

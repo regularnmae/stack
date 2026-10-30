@@ -1,0 +1,31 @@
+# Quadlet unit for the long-lived curl client on the HOST network.
+#
+# The pair to netcheck.container, and the reason it exists: nginx-proxy-manager
+# runs on the host network (so clients' real addresses reach its logs and the
+# X-Forwarded-For it sets) and binds 127.0.0.1:81 itself. A container on
+# npm-network cannot reach a loopback bind -- pasta delivers a container's
+# host.containers.internal dial into the host namespace, not onto host loopback,
+# and host + bridge on one container is rejected by podman outright. So
+# net_curl_host execs into this one.
+#
+# Both sleepers are the same image (built by install.sh); only their network
+# differs. Nothing listens here and nothing is published.
+#
+# install.sh renders this into ~/.config/containers/systemd/, where quadlet
+# turns it into netcheck-host.service.
+[Unit]
+Description=netcheck-host (long-lived curl client on the host network)
+After=network-online.target
+
+[Container]
+ContainerName=netcheck-host
+Image=localhost/netcheck:local
+Network=host
+Exec=sleep infinity
+
+[Service]
+Restart=always
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

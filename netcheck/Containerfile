@@ -3,12 +3,15 @@
 # Everything the host-side scripts need to read -- verify.sh,
 # scripts/monitor.sh, scripts/spend-audit.sh -- is read by container name, as
 # <container>:<port> on npm-network, because the app images vary and several
-# carry no curl. net_curl in scripts/lib.sh runs this image as a throwaway
-# container to do exactly that, the same shape as the apprise image monitor.sh
-# already runs. net_curl_host, next to it, runs the same image on the host
-# network: nginx-proxy-manager is the one service that is not a peer here -- it
-# runs on the host network (so clients' real addresses reach its logs) and binds
-# :80/:443/:81 itself, so it is read on 127.0.0.1.
+# carry no curl. net_curl in scripts/lib.sh EXECS into a long-lived container
+# running this image (deploy/netcheck.container) rather than starting a new one
+# per probe: each `podman run` used to create a veth pair and a cgroup scope,
+# which the kernel logged as ~12k lines an hour -- the biggest stream in the
+# journal. net_curl_host, next to it, execs into deploy/netcheck-host.container,
+# the same image on the host network: nginx-proxy-manager is the one service
+# that is not a peer here -- it runs on the host network (so clients' real
+# addresses reach its logs) and binds :80/:443/:81 itself, so it is read on
+# 127.0.0.1, which a bridge-network container cannot reach.
 #
 # The base is pinned -- tag *and* digest -- so a rebuild ships the same OS bits.
 # The apk package deliberately is *not* version-pinned: Alpine keeps only the
@@ -20,8 +23,9 @@
 # tag is deliberately versionless (localhost/netcheck:local): the versions live
 # only here, not duplicated across stack.conf, the scripts and the README.
 #
-# No ENTRYPOINT/CMD: every use names its own command (net_curl passes the curl
-# argv straight through), so there is nothing to override.
+# No ENTRYPOINT/CMD: the unit runs it as `sleep infinity` (deploy/netcheck
+# .container) and net_curl execs `curl` into that running container, so there is
+# nothing to override.
 #
 # Build:  podman build -t localhost/netcheck:local netcheck/
 FROM docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a

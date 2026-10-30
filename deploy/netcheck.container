@@ -1,0 +1,44 @@
+# Quadlet unit for the long-lived curl client on npm-network.
+#
+# Every host-side check that reads a service by name goes through net_curl
+# (scripts/lib.sh), because the app images vary and several carry no curl. That
+# used to be a throwaway `podman run` per probe, and verify.sh alone makes
+# dozens per sweep: each one created a veth pair and a cgroup scope, which the
+# kernel logged as ~12k lines an hour (the single biggest stream in the
+# journal) -- and journald paid for the churn twice over once the log store
+# started indexing it.
+#
+# So the client is a container that simply stays up, and net_curl execs into it
+# (`podman exec netcheck curl ...`). Exec output goes to the caller, not the
+# journal, so a probe adds no log line at all.
+#
+# A second container (netcheck-host) runs the same image on the host network:
+# podman refuses host + bridge on one container ("cannot set multiple networks
+# without bridge network mode"), and nginx-proxy-manager binds 127.0.0.1 where
+# only a host-netns client can reach it. Both are sleepers -- the image has no
+# entrypoint, so Exec= is the whole command.
+#
+# install.sh renders this into ~/.config/containers/systemd/, where quadlet
+# turns it into netcheck.service.
+[Unit]
+Description=netcheck (long-lived curl client on npm-network)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=netcheck
+# Built by install.sh from netcheck/Containerfile (localhost/netcheck:local;
+# Renovate ignores localhost/*). deploy.sh calls refresh_image_unit so a
+# rebuilt image reaches this already-running container -- `systemctl start` is
+# a no-op on an active unit, which is how such a bump would otherwise never
+# reach the host.
+Image=localhost/netcheck:local
+Network=npm-network.network
+Exec=sleep infinity
+
+[Service]
+Restart=always
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

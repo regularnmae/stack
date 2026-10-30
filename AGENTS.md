@@ -523,16 +523,29 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   stream, and `_CMDLINE`/`CONTAINER_ID*` are deleted before ingest (VRL: a
   missing path is an error, so `.container == ""` must be tested *before*
   `del(.container)` or every `unit` is silently lost).
-- **Throwaway probe containers must not journal their output.** `net_curl`,
-  `net_curl_host`, `kuma-ctl` and the apprise probe run with
-  `--log-driver=none`: without it, `verify.sh`'s `node-exporter /metrics` fetch
-  (a few thousand lines, six sweeps an hour) was about a third of the journal
-  and would be a third of the log store. The driver only controls persistence;
-  the attached `podman run` still hands stdout to the caller's command
-  substitution. `wait_healthy` treats a container with no healthcheck as "up"
-  -- `victoria-logs`' image is distroless (no shell, so podman cannot run a
-  health command), and the real check is the LogsQL query in `verify.sh`/the
-  monitor.
+- **The host-side probes exec into two long-lived `netcheck` containers; they do
+  not `podman run` per probe.** `net_curl`/`net_curl_host` run
+  `podman --events-backend=none exec` against `netcheck` (npm-network) and
+  `netcheck-host` (host network). A throwaway container per probe created a veth
+  pair and a cgroup scope each time, and `verify.sh` makes dozens per sweep --
+  the kernel logged ~12k lines an hour of veth churn, the biggest stream in the
+  journal, and journald paid for it twice once the log store indexed it. Two
+  containers, not one, because podman rejects host + bridge on the same
+  container ("cannot set multiple networks without bridge network mode") and
+  NPM's admin API is a `127.0.0.1` bind that only a host-netns client can reach.
+  `--events-backend=none` keeps the exec session
+  (`exec_create`/`exec_start`/`exec_died`) out of journald too. `netcheck_ready`
+  fails with the one-line fix when either is stopped; `deploy.sh` starts them
+  first in `start_infra`, after `refresh_image_unit` because install.sh rebuilds
+  the image in place (a plain `start` on an active unit keeps the old bits), and
+  `ensure_netcheck` covers every `--only` branch (the monitor's verify sweep,
+  npm-hosts, kuma-monitors all probe). `kuma-ctl` and the apprise probe are
+  still one-shot `podman run`s and keep `--log-driver=none`: the driver only
+  controls persistence, so their stdout still reaches the caller's command
+  substitution while the journal stays clean. `wait_healthy` treats a container
+  with no healthcheck as "up" -- `victoria-logs` is distroless and the netcheck
+  pair only sleeps, so neither can define a health command; their functional
+  checks are the LogsQL query and the probes themselves.
 - **The monitor queries a store exactly once, and only to prove the log
   pipeline is alive.** `scripts/logs.sh --health` (newest entry within
   `MONITOR_LOGS_MAX_AGE_S`, default 900) is the one exception to "alerting never
@@ -549,9 +562,9 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   fronts publishes on the host's **loopback** (`PublishPort=127.0.0.1:<port>:…`),
   which is what `NPM_HOSTS`/`MCP_HOSTS` point at, and only 80/443/81 plus
   Fulcrum's raw ports stay LAN-reachable. Host-side checks still read
-  `container:8000` on `npm-network` through `net_curl` (the throwaway
-  `localhost/netcheck:local` image), with `net_curl_host` for NPM's own admin API
-  on `127.0.0.1:81`. The units set `HealthCmd=`/`HealthInterval=`, so podman
+  `container:8000` on `npm-network` through `net_curl` (exec'd into the
+  long-lived `netcheck` container; `netcheck-host` is the same image on the host
+  network for NPM's own admin API on `127.0.0.1:81`). The units set `HealthCmd=`/`HealthInterval=`, so podman
   really does report `(healthy)` and `deploy.sh` waits with `wait_healthy`; the
   MCP probe is an authenticated `initialize`, strictly stronger than a `/health`
   GET.

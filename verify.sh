@@ -57,7 +57,7 @@ if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        victoriametrics node-exporter victoria-logs vector crowdsec
+        netcheck netcheck-host victoriametrics node-exporter victoria-logs vector crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -65,14 +65,16 @@ else
     containers=(
         bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-rpc lightningd
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        victoriametrics node-exporter victoria-logs vector crowdsec
+        netcheck netcheck-host victoriametrics node-exporter victoria-logs vector crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 fi
-# victoria-logs' image is distroless (no shell), so podman cannot run a health
-# command in it; its liveness is proven by the Logs section below instead.
-healthless=" victoria-logs "
+# victoria-logs' image is distroless (no shell), and the two netcheck clients
+# just sleep until something execs into them; none can define a health command,
+# and each has a functional check elsewhere (the Logs section, and every probe
+# that uses net_curl at all).
+healthless=" victoria-logs netcheck netcheck-host "
 for c in "${containers[@]}"; do
     line=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
     if [ -z "$line" ]; then
@@ -81,7 +83,7 @@ for c in "${containers[@]}"; do
         pass "$c: $line"
     elif printf '%s' "$line" | grep -q '^Up'; then
         case "$healthless" in
-            *" $c "*) pass "$c: $line (no healthcheck by design; the Logs section probes it)" ;;
+            *" $c "*) pass "$c: $line (no healthcheck by design)" ;;
             *)        warn "$c: $line (no health status)" ;;
         esac
     else

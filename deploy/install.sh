@@ -282,6 +282,8 @@ fi
 # config dir, so none is a plain symlink any more. Pairs are "source:target".
 UNITS=(
     "npm-network.network:npm-network.network"
+    "netcheck.container:netcheck.container"
+    "netcheck-host.container:netcheck-host.container"
     "nginx-proxy-manager.container:nginx-proxy-manager.container"
     "valkey.container:valkey.container"
     "searxng.container:searxng.container"
@@ -713,10 +715,10 @@ ensure_local_image() { # image build-context
         || die "could not build $image"
 }
 
-# netcheck: the curl client the host-side checks run. scripts/lib.sh's net_curl
-# runs it as a throwaway container to read a service by name on npm-network, and
-# net_curl_host the same image on the host network for nginx-proxy-manager,
-# which binds 127.0.0.1:81 there.
+# netcheck: the curl client the host-side checks exec into. scripts/lib.sh's
+# net_curl runs it in a long-lived container to read a service by name on
+# npm-network, and net_curl_host the same image in a second one on the host
+# network for nginx-proxy-manager, which binds 127.0.0.1:81 there.
 if command -v podman >/dev/null 2>&1; then
     ensure_local_image "$NETCHECK_IMAGE" "$REPO_DIR/netcheck"
 fi

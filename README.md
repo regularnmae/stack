@@ -26,6 +26,7 @@ stack runs and one script that fixes a deployment problem.
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — | — |
 | `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
+| `netcheck`, `netcheck-host` | `localhost/netcheck:local` (built from `netcheck/Containerfile`) | — | — |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
 | `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network, `:9100` (wildcard bind; LAN closed by firewall) | — (serves `$DATA_DIR/monitoring/textfile`) |
@@ -86,10 +87,11 @@ loopback** only — the `127.0.0.1:…` entries above, i.e.
 `stack.conf` name `127.0.0.1`, not a container. A loopback bind is invisible to
 the LAN, so NPM (which terminates TLS) plus each server's bearer token are still
 the one way in for a client. The host-side checks (`verify.sh`, the monitor) read
-the services by container name on `npm-network`, through a throwaway curl
-container on that network — `netcheck/Containerfile`, run by `net_curl` in
-`scripts/lib.sh`; `net_curl_host` is that same container on the host network, for
-NPM's own admin API on `127.0.0.1:81`. The proxy hosts are declared in `NPM_HOSTS`
+the services by container name on `npm-network`, through `net_curl` in
+`scripts/lib.sh`, which execs into the long-lived **`netcheck`** container
+(`netcheck/Containerfile`); `net_curl_host` uses **`netcheck-host`**, the same
+image on the host network, for NPM's own admin API on `127.0.0.1:81`. The proxy
+hosts are declared in `NPM_HOSTS`
 (`stack.conf`) and reconciled from this repo by `scripts/npm-hosts.sh` — see
 [Proxy hosts (nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager). The hosts
 themselves live in NPM's database, not in this repo.

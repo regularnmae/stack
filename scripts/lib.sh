@@ -28,43 +28,54 @@ rand_hex() {
 }
 
 # The image the host-side checks speak through: a curl client (see
-# netcheck/Containerfile), built by deploy/install.sh. It is a throwaway
-# container rather than a host package, so the host needs only podman for a
-# check to reach a service (the app images vary, and several carry no curl).
-# stack.conf sets it; the default here covers a script run with a stale
-# environment.
+# netcheck/Containerfile), built by deploy/install.sh. It is a container rather
+# than a host package, so the host needs only podman for a check to reach a
+# service (the app images vary, and several carry no curl).
+#
+# The checks EXEC into a long-lived container instead of starting a throwaway
+# one per probe. That is not tidiness: verify.sh makes dozens of probes in a
+# sweep, and each `podman run` created a veth pair and a cgroup scope, which the
+# kernel logged as a line per step -- about 12k lines an hour, the biggest
+# stream in the journal, and a third of what the log store was indexing.
+# `podman exec` output goes to the caller, not to journald.
+#
+# Two containers because podman refuses host + bridge on one ("cannot set
+# multiple networks without bridge network mode"), and nginx-proxy-manager's
+# admin API is a 127.0.0.1 bind only a host-netns client can reach.
 NETCHECK_IMAGE="${NETCHECK_IMAGE:-localhost/netcheck:local}"
+NETCHECK_CONTAINER="${NETCHECK_CONTAINER:-netcheck}"
+NETCHECK_HOST_CONTAINER="${NETCHECK_HOST_CONTAINER:-netcheck-host}"
 
-# Fail before podman does, so a host that has not run deploy/install.sh reads as
-# one clear error rather than a podman stack trace.
-netcheck_ready() {
-    if podman image exists "$NETCHECK_IMAGE" 2>/dev/null; then
+# Is the client up? Fail before podman does, so a host that has not run
+# deploy/install.sh (or whose container was stopped) reads as one clear error
+# rather than a podman stack trace. Takes the container name so each helper
+# checks only the one it uses.
+netcheck_ready() { # container
+    local c="${1:-$NETCHECK_CONTAINER}"
+    if [ "$(podman inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ]; then
         return 0
     fi
-    printf 'ERROR: %s is missing; run deploy/install.sh to build it\n' "$NETCHECK_IMAGE" >&2
+    printf 'ERROR: %s is not running; run deploy/install.sh, then systemctl --user start %s\n' "$c" "$c" >&2
     return 127
 }
 
-# Run curl against a container on npm-network, from a throwaway container.
-# Arguments are curl's, verbatim, so call sites read exactly as they did when
-# this was a host curl against a published loopback port:
+# Run curl against a container on npm-network, from the long-lived netcheck
+# container. Arguments are curl's, verbatim, so call sites read exactly as they
+# did when this was a host curl against a published loopback port:
 #   net_curl -s -o /dev/null -w '%{http_code}' http://searxng-mcp:8000/health
 # -i keeps stdin attached, which is how a caller passes a secret in a curl
 # config (`-K -`) rather than on a command line that `ps` can read.
-#
-# --log-driver=none is load-bearing, not tidiness. A throwaway container's
-# stdout is written to journald as it runs, so verify.sh reading node-exporter's
-# /metrics (a few thousand lines) put a full copy in the journal on every sweep
-# -- about a third of the journal's lines, and now a third of what the log store
-# would index. The driver only controls persistence: the output still reaches
-# the attached `podman run` and therefore the caller's command substitution.
 net_curl() {
-    netcheck_ready || return 127
-    podman run --rm --log-driver=none -i --network npm-network "$NETCHECK_IMAGE" curl "$@"
+    netcheck_ready "$NETCHECK_CONTAINER" || return 127
+    # --events-backend=none: an exec session logs exec_create/exec_start/
+    # exec_died to journald, and verify.sh makes dozens of probes per sweep --
+    # the probe's own result is what matters, not a record of having asked.
+    podman --events-backend=none exec -i "$NETCHECK_CONTAINER" curl "$@"
 }
 
-# The same, from the host's own network namespace. It is for the one service
-# that is not on npm-network: nginx-proxy-manager runs on the host network
+# The same, from the host's own network namespace -- through netcheck-host, the
+# second long-lived client. It is for the one service that is not on
+# npm-network: nginx-proxy-manager runs on the host network
 # (deploy/nginx-proxy-manager.container) so that its logs and the
 # X-Forwarded-For it sets carry a client's real address. That also means it
 # binds :80/:443/:81 itself and speaks to the app tier on the loopback publishes
@@ -72,8 +83,8 @@ net_curl() {
 # is reached by looping back to this host:
 #   net_curl_host -s -o /dev/null -w '%{http_code}' http://127.0.0.1:81/
 net_curl_host() {
-    netcheck_ready || return 127
-    podman run --rm --log-driver=none -i --network host "$NETCHECK_IMAGE" curl "$@"
+    netcheck_ready "$NETCHECK_HOST_CONTAINER" || return 127
+    podman --events-backend=none exec -i "$NETCHECK_HOST_CONTAINER" curl "$@"
 }
 
 # Wait for a container's own healthcheck to report healthy. Shared by deploy.sh
