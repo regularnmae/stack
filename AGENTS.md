@@ -162,6 +162,20 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   The drill proves restore *mechanics* only: not that an offsite repo is
   reachable, and not that the wallet or the daemons come up on the restored
   state.
+- **Restore before deploy, replay the dump after, migrate last.** The order is
+  load-bearing, not stylistic: `install.sh` seeds `bitcoin.conf` and `torrc` once
+  and never overwrites them, so a `./deploy.sh` that runs first writes a *fresh*
+  RPC password into `bitcoin.conf` and the restored `config/stack/secrets.env`
+  then disagrees with the daemon. Restoring first makes every seed-once file come
+  from the snapshot, which is also why `scripts/backup.sh` reads
+  `RESTIC_REPOSITORY`/`RESTIC_PASSWORD` from the environment first. The database
+  comes back as a file (`postgres-dump/all.sql`): replay it into the empty
+  cluster the deploy started, then `./deploy.sh --only boltmesh` to
+  `alembic upgrade head` — the dump is as old as the snapshot, the code is not.
+  The operator steps, the per-scenario runbooks and the post-recovery checklist
+  are README's "Disaster recovery"; `scripts/backup.sh restore` writes the whole
+  set in place, and a single-path restore is a raw restic invocation documented
+  there.
 - **Both daemons are full (archival) nodes:** the chains are large (roughly
   800 GB Bitcoin / 250 GB Monero in late 2026) and the data disk must be sized
   for that. `install.sh` seeds `bitcoin.conf` only when it is missing, so an

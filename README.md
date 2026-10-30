@@ -125,7 +125,8 @@ A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
 database as a `pg_dumpall`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`, and `backup-verify.timer` restores one snapshot a week to
 prove it works. It is the one thing that recovers you if the data disk
-itself is lost — see [Backup & restore](#backup--restore).
+itself is lost — see [Backup & restore](#backup--restore) and the
+[Disaster recovery](#disaster-recovery) runbooks.
 
 A health monitor and spend tripwire run every five minutes from `monitor.timer`;
 they alert (and fail a dead-man's-switch heartbeat) once you fill in
@@ -377,6 +378,11 @@ wallet still opens (its password is in `config/stack/secrets.env`), and the
 client tokens are
 unchanged.
 
+That is the *lucky* reinstall: the data disk survived. If it did not — a lost
+disk, a new host, a compromised machine — the chains and the index have to be
+rebuilt and the state comes out of the backup repository: see
+[Disaster recovery](#disaster-recovery).
+
 ## Backup & restore
 
 `install.sh` installs a nightly, encrypted [restic](https://restic.net) backup of
@@ -437,47 +443,219 @@ reads the repository and password from the **environment first**, then the file,
 which is what makes recovery possible at all — the backed-up `backup.env` lives
 inside the repository, so it cannot be the only source of the key that opens it.
 
-### Restoring onto a fresh host
+### Disaster recovery
 
-If the disk that held `$DATA_DIR` is gone (or you want a second host), restore
-from the repository **before** `./deploy.sh`:
+Four things decide whether a bad day costs an afternoon or a week: the
+repository is **off the data disk**, `RESTIC_PASSWORD` is **off the host**, the
+Monero seed is **on paper**, and you restore **before** running `./deploy.sh`.
+The runbooks below assume all four; the last one covers losing them.
+
+#### Before you need it
+
+- `RESTIC_REPOSITORY` and `RESTIC_PASSWORD`, in a password manager or on paper.
+  They encrypt and locate everything else; without them nothing here is
+  recoverable. Point the repository at an offsite target (`s3:`, `b2:`,
+  `sftp:`) — a same-disk repository survives deletion, not the disk.
+- The Monero **25-word seed**, written down when the wallet was created. The
+  wallet file is in the backup, but the seed is what survives losing both.
+- An SSH key that can clone the private `boltmesh-labs` repos, and DNS for the
+  public hostnames (nginx-proxy-manager requests their certificates).
+- Nothing else: `config/`, `tor/onion/`, `cln/` and the wallet all come out of
+  the repository, and `scripts/backup.sh` reads the location and password from
+  the environment first for exactly this reason.
+
+#### Pick the runbook
+
+| What happened | Go to | Lost since the snapshot |
+| --- | --- | --- |
+| bad config, torn wallet cache, lost onion key, broken CLN state — disk fine | [State is wrong, disk is fine](#state-is-wrong-disk-is-fine) | that state only |
+| data disk lost, host replaced, OS reinstalled onto a new disk | [The data disk is gone](#the-data-disk-is-gone-or-a-new-host) | everything written after it |
+| host compromised | [The host was compromised](#the-host-was-compromised) | everything, plus every credential |
+| repository or its password lost | [When a piece is missing](#when-a-piece-is-missing) | whatever is not off-host |
+
+#### State is wrong, disk is fine
+
+Restoring **in place** is safe as long as nothing is writing to the directories
+being replaced, so stop the daemons that own them — they are the ones whose
+data is in the backup set:
 
 ```sh
-export RESTIC_REPOSITORY=s3:…      # or /repo for the local default
-export RESTIC_PASSWORD=…           # from your password manager
-
-git clone https://github.com/regularnmae/stack ~/build/stack
-cd ~/build/stack
-./bootstrap.sh
-./scripts/backup.sh restore latest # writes cln/, monero-wallet-rpc/, tor/, config/, npm/, audit/, uptime-kuma/, postgres-dump/
-./deploy.sh                        # adopts the restored secrets and wallet
+systemctl --user stop lightningd monero-wallet-rpc tor nginx-proxy-manager uptime-kuma
+./scripts/backup.sh ls latest      # what the snapshot holds, before overwriting anything
+./scripts/backup.sh restore latest # in place; add -y when there is no TTY
+./deploy.sh                        # adopts, re-renders, restarts, reconciles, verifies
+./verify.sh --deep
 ```
 
-This works because `install.sh` never overwrites an existing file and resolves
-secrets in the order `secrets.env → the installed unit → the daemon's config →
-generate`: a restored `config/` and wallet are adopted as-is instead of being
-regenerated. The Monero wallet directory comes back owned by the image uid
-(`scripts/backup.sh` fixes that up), so `monero-wallet-rpc` opens it directly.
-
-**The database is not restored by that step.** `postgres-dump/` comes back as a
-file (`all.sql`), and `./deploy.sh` starts an empty `postgres` next to it. Replay
-it once the stack is up, with the API and the worker stopped so nothing writes
-underneath the load:
+`restore` writes the whole set, which is the right default: the snapshot is the
+source of truth, and a partly-restored host is how you get two versions of the
+same secret. For one path only — a lost `tor/onion/`, a corrupted
+`config/stack/secrets.env` — mount just that directory and ask restic for just
+that path (the environment file supplies the repository, password and cache):
 
 ```sh
-systemctl --user stop boltmesh-backend.service boltmesh-worker.service
-podman exec -i postgres psql -U vpnuser -d postgres < "$DATA_DIR/postgres-dump/all.sql"
-systemctl --user start boltmesh-backend.service boltmesh-worker.service
+podman run --rm \
+  -v "$HOME/data-backup:/repo:z" -v "$DATA_DIR/backup-cache:/cache:z" \
+  -v "$DATA_DIR/config:/data/config:z" \
+  --env-file "$DATA_DIR/config/backup/backup.env" \
+  docker.io/restic/restic:0.19.1 restore latest --target / --include /data/config
 ```
 
-The dump was taken with `pg_dumpall --clean --if-exists`, so it recreates the
-`vpndb` database itself. It also carries the role, which already exists on a host
-whose `postgres/` was just initialised with the same credentials: `psql` reports
-those role errors (`already exists`, or a role it will not drop while you are
-connected as it), carries on because it is not run with `ON_ERROR_STOP`, and the
-database load is what matters. Confirm the schema landed with
-`podman exec postgres psql -U vpnuser -d vpndb -c '\dt'` before letting the API
-back in.
+Then restart what reads it (`./deploy.sh` for config, `./deploy.sh --only tor`
+for the onion keys). Keep the single-directory mount: a target of `/` with the
+whole data dir mounted is an in-place restore of everything, which is the
+previous runbook.
+
+#### The data disk is gone (or a new host)
+
+Order is load-bearing: **restore, then deploy.** `install.sh` seeds
+`bitcoin.conf` and `torrc` once and never overwrites them, so a `./deploy.sh`
+that runs first writes a *fresh* RPC password into `bitcoin.conf`, and the
+restored `config/stack/secrets.env` then disagrees with the daemon. Restoring
+first means every seed-once file is derived from the snapshot.
+
+1. Rebuild the host and the data disk, then get this repo:
+
+   ```sh
+   git clone https://github.com/regularnmae/stack ~/build/stack
+   cd ~/build/stack
+   ./bootstrap.sh
+   ```
+
+2. Open the repository **from the environment** (there is no `backup.env` on a
+   fresh host — that is why the order is environment first), and prove the
+   password before writing anything:
+
+   ```sh
+   export RESTIC_REPOSITORY=s3:…   # or /repo, or the path of a copied repository
+   export RESTIC_PASSWORD=…        # from your password manager
+   ./scripts/backup.sh list        # a snapshot list here means the repo and key are right
+   ```
+
+3. Restore into the data dir. Setting `STACK_DATA_DIR` for this one command
+   both places the files and remembers the answer, so `deploy.sh` will not
+   prompt later:
+
+   ```sh
+   STACK_DATA_DIR=/data/stack ./scripts/backup.sh restore latest -y
+   ```
+
+   It writes `cln/`, `monero-wallet-rpc/`, `tor/`, `config/`, `npm/`, `audit/`,
+   `uptime-kuma/` and `postgres-dump/`, and hands the wallet directory back to
+   the image uid, so `monero-wallet-rpc` opens it directly.
+
+4. Deploy. This adopts the restored secrets (never overwriting an existing
+   file), seeds `bitcoin.conf`/`torrc` from them, builds the images, proves the
+   restored CLN runes with `checkrune` (minting new ones if the node does not
+   know them), re-derives `config/boltmesh/gateway.env`, and reconciles the
+   proxy hosts and the status page:
+
+   ```sh
+   ./deploy.sh
+   ```
+
+5. Replay the database. It comes back as a file, not a running server, and the
+   `postgres` that `deploy.sh` started is empty:
+
+   ```sh
+   systemctl --user stop boltmesh-backend.service boltmesh-worker.service
+   podman exec -i postgres psql -U vpnuser -d postgres < "$DATA_DIR/postgres-dump/all.sql"
+   ./deploy.sh --only boltmesh     # alembic upgrade head, then start the API + worker
+   ```
+
+   The dump was taken with `pg_dumpall --clean --if-exists`, so it recreates the
+   `vpndb` database itself. It also carries the role, which already exists on a
+   host whose `postgres/` was just initialised with the same credentials:
+   `psql` reports those role errors (`already exists`, or a role it will not
+   drop while you are connected as it), carries on because it is not run with
+   `ON_ERROR_STOP`, and the database load is what matters. Confirm the schema
+   landed with `podman exec postgres psql -U vpnuser -d vpndb -c '\dt'`, then
+   migrate: the dump is as old as the snapshot, and the code is not.
+
+6. Check it with [After any recovery](#after-any-recovery). The chains and
+   Fulcrum start from zero — see [What comes back](#what-comes-back-what-re-downloads)
+   for what that costs in time.
+
+#### The host was compromised
+
+Assume every secret in the snapshot is known to whoever had the host: restoring
+it is the fastest way back, not a recovery. Follow the runbook above, then treat
+every credential as burned:
+
+```sh
+./scripts/rotate.sh --list            # what this repo can rotate
+./scripts/rotate.sh --dry-run <target>
+./scripts/rotate.sh <target>          # write, re-render, restart, prove
+```
+
+That covers every target `--list` shows: the RPC passwords, the CLN runes, the
+MCP tokens, SearXNG's key, the postgres role, BoltMesh's keys, the restic key
+and the wallet password. Two preflights will stop you on a host that was just
+restored, on purpose:
+
+- `monero-wallet` refuses without a snapshot younger than 24 h (and `--yes`).
+  Take one first (`./deploy.sh --only backup`) rather than reaching for
+  `--force`: the new password is the one value nobody can recover.
+- `restic` adds the new key, proves it, and only then removes the old one, so a
+  run that dies in between leaves two working keys, not none.
+
+What rotation cannot fix, and what to do instead:
+
+- **The wallet's keys**, not just its password. A fresh password does not
+  un-share the file. Create a new wallet from a new seed and sweep the funds
+  into it; the restored file is burned.
+- **CLN's `hsm_secret`**, which is the node's signing key. Treat the channels as
+  lost: force-close them yourself so the funds land in a wallet you control, and
+  open new channels from a fresh node.
+- **The old snapshots.** Rotating the restic key protects new snapshots; the old
+  password still opens everything already in the repository. Start a fresh
+  repository, or accept that the old snapshots are readable.
+- **The onion addresses.** Nothing rotates them; if the old keys must be
+  considered public, delete `tor/onion/<name>/` so tor generates new ones, then
+  tell every client — the address is the key.
+- **Anything the tokens grant outside this stack** — revoke those at the
+  provider.
+
+#### When a piece is missing
+
+- **The repository is gone** and there is no offsite copy: nothing in it is
+  recoverable. The stack comes back with new identities — a new CLN node, new
+  onion addresses, a new wallet (funds only from the seed) — and every token
+  re-issued, so every client must be updated. This is the case `s3:`/`b2:`
+  exists to prevent.
+- **`RESTIC_PASSWORD` is gone**: the repository is unreadable. No recovery, no
+  workaround.
+- **`tor/onion/` is gone**, the rest restored: every `.onion` address changes.
+  The wildcard `*.onion` proxy host keeps working, but clients holding the old
+  address do not.
+- **`cln/` is gone**, `config/` restored: a new node identity. The runes in
+  `config/lightning-mcp/node.env` are dead; `./deploy.sh` proves them with
+  `checkrune` and mints new ones, and the MCP servers restart with the new
+  values. The channels are gone with the `hsm_secret` — CLN has no seed phrase,
+  which is why `cln/` is the most valuable directory in the set.
+- **`monero-wallet-rpc/` is gone**, `config/` restored: the password is there
+  but the wallet is not. Run `scripts/wallets.sh --monero` and choose restore;
+  it rescans from the restore height you give it.
+
+#### What comes back, what re-downloads
+
+| Path | Backed up | After a fresh-host restore |
+| --- | --- | --- |
+| `config/`, `tor/`, `npm/`, `audit/`, `uptime-kuma/` | yes | exactly as snapshotted |
+| `cln/` | yes | channels as of the snapshot; an older state can force-close |
+| `monero-wallet-rpc/` | yes | opens directly; may rescan against `monerod` |
+| `postgres-dump/all.sql` | yes | a file — replay it (step 5) |
+| `bitcoin/` | no | re-download; `bitcoin.conf` is seeded from the restored secret |
+| `monero/` | no | re-download |
+| `fulcrum/` | no | re-index from block 0: weeks on this disk (see [Full nodes and disk](#full-nodes-and-disk)) |
+| `searxng/`, `monitoring/` | no | recreated; the metrics history is gone |
+| `postgres/` | no | a new cluster, then the dump is replayed into it |
+| the bitcoind wallet | no | a new empty descriptor wallet (export a `.dat` if you keep funds there) |
+
+Rough order of magnitude on a rotational disk: bitcoind validation is days to
+weeks, monerod a few days, Fulcrum's index weeks. All three run at the same
+time, and none of them blocks the wallet, CLN, BoltMesh or the MCP surface from
+coming up — the stack is *serving* long before it is *synced*.
 
 > **Consistency:** the job snapshots `cln/` and the wallet while their daemons
 > are running. CLN's `hsm_secret` and `emergency.recover` are static and restore
@@ -491,6 +669,29 @@ back in.
 > `monerod`, with the RPC unavailable until it finishes (the daemons report it
 > as unhealthy, and `scripts/monitor.sh` says so). The keys file is the part that
 > matters, and it always restores.
+
+#### After any recovery
+
+```sh
+./verify.sh --deep                  # containers, MCP handshakes, chains, Fulcrum
+./scripts/monitor.sh                # the sweep, including backup age and the drill
+./scripts/spend-audit.sh            # ENABLE_SPENDING=0 and no drift
+./scripts/backup.sh verify          # the new repository restores too
+```
+
+Then look at the things a sweep cannot judge:
+
+- `podman exec lightningd lightning-cli listpeerchannels` — are the channels
+  back, and in the state you expect?
+- `systemctl --user list-timers` — backup, drill, monitor and metrics all
+  scheduled; `./scripts/backup.sh list` shows the nightly job writing again.
+- the `.onion` addresses match what clients hold (`./deploy.sh` and
+  `scripts/npm-hosts.sh` print them).
+- `config/rotation/*.pending` — a snapshot can carry an unfinished rotation;
+  `scripts/rotate.sh --status` explains it and `--resume` finishes it.
+- the spend baseline: `audit/` came back from the snapshot, so if anything
+  happened after it, `scripts/spend-audit.sh --rebaseline` is the deliberate
+  "this is known-good now" act.
 
 ### Verifying the backups
 
