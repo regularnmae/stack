@@ -294,10 +294,16 @@ xmrwallet_token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP
 if [ -n "$xmrwallet_token" ]; then
     w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
     w_h=$(printf '%s' "$w_body" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
-    if [ -n "$node_h" ] && [ -n "$w_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
+    if [ -z "$w_h" ]; then
+        # No answer at all is not "fine": the wallet RPC is down, wedged or (the
+        # usual cause) rebuilding its cache, and nothing else notices -- the
+        # container can sit "Up (unhealthy)" for hours while every sweep reports
+        # the height as "?".
+        fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-rpc)"
+    elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
         soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
     else
-        ok "monero-wallet height ${w_h:-?}"
+        ok "monero-wallet height $w_h"
     fi
 fi
 
