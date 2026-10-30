@@ -390,6 +390,28 @@ else
     soft "could not identify the block device holding $DATA_DIR"
 fi
 
+# A credential rotation that died half-way leaves a journal behind, and nothing
+# else notices: the daemons still hold the old value while the configs hold the
+# new one, so the next restart is the surprise. The journal is the only state
+# scripts/rotate.sh keeps, and `--resume` is the safe way out of it.
+if compgen -G "$CONFIG_DIR/rotation/*.pending" >/dev/null; then
+    for jf in "$CONFIG_DIR"/rotation/*.pending; do
+        jt=$(basename "$jf" .pending)
+        js=$(sed -n 's/^started=//p' "$jf" 2>/dev/null | head -n1)
+        jstep=$(sed -n 's/^step=//p' "$jf" 2>/dev/null | head -n1)
+        jage=""
+        if [ -n "$js" ] && js_epoch=$(date -d "$js" +%s 2>/dev/null); then
+            jsecs=$(( $(date +%s) - js_epoch ))
+            if [ "$jsecs" -ge 3600 ]; then jage="$(( jsecs / 3600 ))h old"
+            else jage="$(( jsecs / 60 ))m old"
+            fi
+        fi
+        fail "credential rotation of $jt unfinished (step ${jstep:-?}${jage:+, started $jage}); finish it with scripts/rotate.sh --resume"
+    done
+else
+    ok "no pending credential rotation"
+fi
+
 # backup age: a timer that fires is not a repository that has a snapshot, and a
 # fire-and-forget backup is the failure you find out about on restore day.
 if command -v jq >/dev/null 2>&1; then

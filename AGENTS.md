@@ -254,6 +254,18 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   applied (`--status`/`--resume`, never a second mint), the spend baseline is
   rehashed per file rather than `--rebaseline`d, and `rotation.log` records the
   act without the value. No timer: these tokens have clients outside the stack.
+  Phase 1 is the four in-stack credentials (`bitcoin-rpc`, `monero-rpc`,
+  `tor-control`, `runes`), plus `token:<server>` (proves the new bearer TOKEN and
+  the old one's 401; `--spend` only proves the reload, since the spend token is
+  exercised by a spend call), `searxng-secret` and `monero-wallet`
+  (`change_wallet_password` at the daemon, `--yes` + a <24h snapshot, and the
+  journal records that the daemon call landed so `--resume` never sends it
+  twice). **Any daemon-side mutation must be guarded for `--dry-run` inside the
+  function that performs it, not only at the call site** -- an unguarded
+  `change_wallet_password` during a dry run once changed a live wallet's
+  password to a value nothing had recorded, which cost a restore from backup
+  and a cache rebuild. `scripts/monitor.sh` alerts on any leftover
+  `config/rotation/*.pending` for the same reason.
 - **The monitor is a read-only host script, not a container:** `monitor.timer` (a
   plain user unit) schedules `monitor.service`, which runs
   `scripts/monitor.sh --quiet` with an optional

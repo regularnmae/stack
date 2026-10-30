@@ -22,6 +22,14 @@
 #   runes          Core Lightning runes (lightning-mcp's read/spend pair and
 #                  BoltMesh's gateway rune): mint, swap, verify, THEN blacklist
 #                  the old ones. --scope read|spend|boltmesh|all (default all).
+#   token:<server> one MCP server's bearer token (token.env) -- the credential
+#                  with the most copies outside the stack. --spend rotates the
+#                  additional spend token of a money server instead.
+#   searxng-secret SearXNG's settings.yml secret_key (limiter/session signing).
+#   monero-wallet  the wallet FILE's password: change_wallet_password at the
+#                  daemon, then the rendered unit and secrets.env. --yes
+#                  required and a recent backup demanded: this is the one value
+#                  that cannot be recovered if it is lost.
 #
 # Why this is not "rewrite the env file and restart": part of each credential
 # lives in a file install.sh seeds ONCE and never rewrites -- bitcoind's own
@@ -50,6 +58,8 @@ DRY_RUN=0
 FORCE=0
 RESUME=0
 ROTATE_USER=0
+ASSUME_YES=0
+SPEND_ONLY=0
 RUNE_SCOPE="all"
 TARGET=""
 JOURNAL=""
@@ -78,6 +88,8 @@ while [ $# -gt 0 ]; do
         --dry-run)  DRY_RUN=1; shift ;;
         --force)    FORCE=1; shift ;;
         --user)     ROTATE_USER=1; shift ;;
+        --yes)      ASSUME_YES=1; shift ;;
+        --spend)    SPEND_ONLY=1; shift ;;
         --scope)    RUNE_SCOPE="${2:?--scope needs read|spend|boltmesh|all}"; shift 2 ;;
         -h|--help)  usage_header "$0"; exit 0 ;;
         -*)         die "unknown argument: $1 (try --help)" ;;
@@ -98,15 +110,23 @@ targets (each one writes its source of truth, re-renders, restarts, verifies):
   runes          CLN runes -> lightning-mcp/node.env, boltmesh/gateway.env;
                  the old runes are blacklisted only after the new ones work
                  (--scope read|spend|boltmesh|all, default all)
+  token:<server> one MCP bearer token (token.env), then prove the new one works
+                 and the old one is refused; --spend rotates the spend token of
+                 monero-wallet-mcp/lightning-mcp instead of the read token
+                 servers: searxng-mcp bitcoin-node-mcp monero-node-mcp
+                          monero-wallet-mcp lightning-mcp
+  searxng-secret SearXNG's settings.yml secret_key
+  monero-wallet  the wallet file's password (--yes; demands a recent backup)
 
 flags: --dry-run (print the plan)  --force (ignore preflight, e.g. a running
-backup)  --resume (finish a pending journal)  --status  --list
+backup)  --resume (finish a pending journal)  --yes  --spend  --status  --list
 EOF
     exit 0
 fi
 
 resolve_data_dir
 SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
+SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 ROT_DIR="$CONFIG_DIR/rotation"
 
 # The rune restriction JSON, built from the allowlists stack.conf declares --
@@ -398,11 +418,32 @@ mcp_ok() { # container token tool args
 # a refusal happens BEFORE the journal exists: "bitcoind is unhealthy" must not
 # leave a pending rotation that the next run has to --resume.
 preflight_target() { # target
+    local age
     case "$1" in
         bitcoin-rpc) require_healthy bitcoind ;;
         monero-rpc)  require_healthy monero-wallet-rpc ;;
         tor-control) require_healthy tor lightningd ;;
         runes)       require_healthy lightningd ;;
+        token:*)     require_healthy "${1#token:}" ;;
+        searxng-secret) require_healthy searxng ;;
+        monero-wallet)
+            require_healthy monero-wallet-rpc
+            # The one credential here that cannot be recovered if it is lost:
+            # both the acknowledgement and a restore point are prerequisites.
+            if [ "$DRY_RUN" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
+                die "the wallet file's password is the one value nobody can recover; re-run with --yes"
+            fi
+            age=$(backup_age_h || true)
+            if [ -z "$age" ] || [ "$age" -gt 24 ]; then
+                if [ "$FORCE" = 1 ] || [ "$DRY_RUN" = 1 ]; then
+                    say "no backup in the last 24h (${age:+${age}h old}${age:-unreadable}); continuing"
+                else
+                    die "the newest restic snapshot is ${age:+${age}h old}${age:-unreadable}; take one first: ./deploy.sh --only backup (or --force)"
+                fi
+            else
+                say "newest restic snapshot is ${age}h old"
+            fi
+            ;;
     esac
 }
 
@@ -749,6 +790,258 @@ apply_runes() {
     complete
 }
 
+
+# ---------------------------------------------------------------------------
+# target: token:<server>
+# ---------------------------------------------------------------------------
+# The MCP bearer tokens are the stack's most-copied secret: every client config
+# holds one. Rotating therefore has two halves -- the server's token.env and,
+# for the client, a pointer at that file (the value is never printed, and
+# ~/.config/opencode/mcp.env already reads it from there at shell start).
+TOKEN_SERVERS=(searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp)
+
+# env-file | read-token var | a read tool it answers | its args | spend-token var
+token_spec() { # server
+    case "$1" in
+        searxng-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/searxng-mcp/token.env" \
+                SEARXNG_MCP_TOKEN get_time '{"tz":"UTC"}' "" ;;
+        bitcoin-node-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/bitcoin-node-mcp/token.env" \
+                BITCOIN_MCP_TOKEN get_blockchain_info '{}' "" ;;
+        monero-node-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/monero-node-mcp/token.env" \
+                MONERO_MCP_TOKEN get_info '{}' "" ;;
+        monero-wallet-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/monero-wallet-mcp/token.env" \
+                MONERO_MCP_TOKEN get_balance '{}' MONERO_MCP_SPEND_TOKEN ;;
+        lightning-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/lightning-mcp/token.env" \
+                LIGHTNING_MCP_TOKEN getinfo '{}' LIGHTNING_MCP_SPEND_TOKEN ;;
+        *) return 1 ;;
+    esac
+}
+
+# The endpoint's own gate, the same probe verify.sh runs every sweep: an
+# unauthenticated -- or revoked -- token gets 401 on /mcp. The token goes in a
+# curl config on stdin, so it never reaches a podman argv.
+http_code_token() { # container token
+    printf 'header = "Authorization: Bearer %s"\n' "$2" | \
+        net_curl -s -o /dev/null -w '%{http_code}' -m 10 -K - \
+            -X POST "http://$1:8000/mcp" -H 'Content-Type: application/json' -d '{}' 2>/dev/null
+}
+
+verify_token() { # server envfile readvar tool args old-read-token [spend]
+    local server="$1" envf="$2" readvar="$3" tool="$4" args="$5" old="$6" spend="${7:-0}"
+    local token code
+    [ "$DRY_RUN" = 0 ] || return 0
+    token=$(env_value "$envf" "$readvar")
+    if mcp_ok "$server" "$token" "$tool" "$args"; then
+        log "$server answers $tool with the new token"
+    else
+        die "$server did not answer with the new token; check: podman logs $server"
+    fi
+    if [ "$spend" = 1 ]; then
+        # A spend token is only checked by a spend tool, which this must never
+        # call. The proof here is the restart plus the read path above: the
+        # server reloaded its env and still serves. Prove the token itself on a
+        # host that deliberately turns ENABLE_SPENDING on.
+        say "the spend token itself is only exercised by a spend call; not attempted"
+        return 0
+    fi
+    [ -n "$old" ] || return 0
+    code=$(http_code_token "$server" "$old")
+    if [ "$code" = 401 ]; then
+        log "the old token is refused (401)"
+    else
+        warn "the old token still answers ($code); check: podman logs $server"
+    fi
+}
+
+apply_token() {
+    local server="$1" spec envf readvar tool args spendvar var key old new
+    spec=$(token_spec "$server") || die "no bearer token for '$server' (servers: ${TOKEN_SERVERS[*]})"
+    IFS='|' read -r envf readvar tool args spendvar <<< "$spec"
+    [ -f "$envf" ] || die "missing $envf; run deploy/install.sh first"
+
+    var="$readvar"
+    key="NEW_TOKEN"
+    if [ "$SPEND_ONLY" = 1 ]; then
+        [ -n "$spendvar" ] || die "$server has no spend token (only monero-wallet-mcp and lightning-mcp do)"
+        var="$spendvar"
+        key="NEW_SPEND_TOKEN"
+    fi
+
+    # The old value has to survive into the journal: proving it is now refused
+    # is half the rotation, and a resume wants to know what it replaced.
+    old=$(env_value "$envf" "$var")
+    new=$(gen "$key")
+    journal_put OLD_TOKEN "$old"
+
+    journal_put step "token.env"
+    set_env_key "$envf" "$var" "$new"
+
+    journal_put step "restart"
+    restart_if_deployed "$server"
+
+    journal_put step "verify"
+    verify_token "$server" "$envf" "$readvar" "$tool" "$args" "$old" "$SPEND_ONLY"
+
+    # token.env of the two money servers is hash-baselined by spend-audit.
+    rehash_audit "$envf"
+    complete
+}
+
+# ---------------------------------------------------------------------------
+# target: searxng-secret
+# ---------------------------------------------------------------------------
+# settings.yml is seeded once (install.sh only copies it when it is missing), so
+# the key is replaced in place. Only the `secret_key:` line is touched; it signs
+# the limiter's sessions, so the visible effect of a rotation is that existing
+# rate-limit state is dropped.
+set_searxng_secret() { # value
+    local v="$1" f="$SEARXNG_DATA_DIR/settings.yml" tmp
+    [ -f "$f" ] || die "missing $f; run deploy/install.sh first"
+    if [ "$DRY_RUN" = 1 ]; then say "would set secret_key in $f"; return 0; fi
+    # $DATA_DIR/searxng belongs to the image uid, so a temp file cannot be
+    # created beside the file (mktemp -> EACCES) even though settings.yml itself
+    # is the host user's. Build the new content in the 0700 rotation dir instead
+    # and write the existing file in place (cat >, so the inode keeps its mode).
+    tmp=$(mktemp "$ROT_DIR/.settings.XXXXXX")
+    if ! V="$v" awk '
+        BEGIN { v = ENVIRON["V"]; found = 0 }
+        /^[[:space:]]+secret_key:/ { print "  secret_key: \"" v "\""; found = 1; next }
+        { print }
+        END { if (!found) { print "no secret_key: line in settings.yml" > "/dev/stderr"; exit 1 } }
+    ' "$f" > "$tmp"; then
+        rm -f "$tmp"
+        die "could not rewrite $f"
+    fi
+    cat "$tmp" > "$f"
+    rm -f "$tmp"
+}
+
+apply_searxng_secret() {
+    local new code
+    new=$(gen NEW_SEARXNG_SECRET)
+
+    journal_put step "settings.yml"
+    set_searxng_secret "$new"
+
+    journal_put step "restart:searxng"
+    restart_unit_and_wait searxng
+
+    journal_put step "verify"
+    if [ "$DRY_RUN" = 0 ]; then
+        code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://searxng:8080/ 2>/dev/null || true)
+        if [ "$code" = 200 ]; then
+            log "searxng serves its front page with the new secret_key"
+        else
+            die "searxng answered $code; check: podman logs searxng"
+        fi
+    fi
+    complete
+}
+
+# ---------------------------------------------------------------------------
+# target: monero-wallet
+# ---------------------------------------------------------------------------
+# The wallet file's password is the only value here that nobody can recover if
+# it is lost, so it is changed in the one place that can change it (the wallet
+# RPC, which owns the file) and then copied into the journal BEFORE anything
+# else, in case the run dies between the two.
+wallet_change_password() { # old new
+    local login json
+    # A dry run must never reach this. It is the one call in the whole script
+    # that changes something no file records, so the guard lives here, not only
+    # at the call site: a future caller cannot reintroduce the bug.
+    if [ "$DRY_RUN" = 1 ]; then
+        say "would change the wallet file's password at monero-wallet-rpc"
+        return 0
+    fi
+    login=$(env_value "$SECRETS_FILE" MONERO_RPC_LOGIN)
+    [ -n "$login" ] || die "no MONERO_RPC_LOGIN in $SECRETS_FILE"
+    json=$(printf '{"jsonrpc":"2.0","id":"0","method":"change_wallet_password","params":{"old_password":"%s","new_password":"%s"}}' "$1" "$2")
+    # -u is the wallet's own RPC login, which already sits on the container's
+    # PID-1 command line (--rpc-login in the rendered unit), so passing it here
+    # is not a new exposure; the JSON carries the wallet-file passwords, so it
+    # goes in on stdin rather than in an argv.
+    printf '%s' "$json" | net_curl -s -m 120 -u "$login" --digest \
+        -H 'Content-Type: application/json' --data-binary @- \
+        http://monero-wallet-rpc:18083/json_rpc
+}
+
+verify_monero_wallet() {
+    local token
+    [ "$DRY_RUN" = 0 ] || return 0
+    token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
+    if mcp_ok monero-wallet-mcp "$token" get_balance '{}'; then
+        log "the wallet opens with the new password (get_balance answered)"
+    else
+        die "the wallet did not open; the new password is in $JOURNAL -- check: podman logs monero-wallet-rpc"
+    fi
+}
+
+apply_monero_wallet() {
+    local old new resp
+    old=$(env_value "$SECRETS_FILE" MONERO_WALLET_PASSWORD)
+    [ -n "$old" ] || die "no MONERO_WALLET_PASSWORD in $SECRETS_FILE"
+    new=$(gen NEW_MONERO_WALLET_PASSWORD)
+
+    if [ "$DRY_RUN" = 1 ]; then
+        say "would change the wallet file's password, then rewrite the unit and secrets.env"
+    elif [ "$(journal_get WALLET_CHANGED)" = 1 ]; then
+        say "the wallet already carries the journaled password; continuing after the change"
+    else
+        # Both sides of the one call that cannot be undone are journaled first:
+        # after this line the old password may stop being the truth at any
+        # moment, and a resume has to be able to tell which case it is in.
+        journal_put OLD_WALLET_PASSWORD "$old"
+        journal_put step "wallet password"
+        resp=$(wallet_change_password "$old" "$new" || true)
+        case "$resp" in
+            *'"error"'*)
+                warn "monero-wallet-rpc refused the change: $resp"
+                die "nothing was written; the wallet still opens with the current password"
+                ;;
+            *'"result"'*)
+                journal_put WALLET_CHANGED 1
+                log "the wallet file now has the new password"
+                ;;
+            *)
+                die "no answer from monero-wallet-rpc (is it healthy?): the wallet is UNCHANGED"
+                ;;
+        esac
+    fi
+
+    journal_put step "config files"
+    set_env_key "$SECRETS_FILE" MONERO_WALLET_PASSWORD "$new"
+
+    journal_put step "re-render"
+    install_rerender
+
+    journal_put step "restart:monero-wallet-rpc"
+    restart_unit_and_wait monero-wallet-rpc "$MONERO_WALLET_WAIT"
+
+    journal_put step "restart:dependents"
+    restart_if_deployed monero-wallet-mcp boltmesh-backend boltmesh-worker
+
+    journal_put step "verify"
+    verify_monero_wallet
+    complete
+}
+
+# The newest restic snapshot's age in hours (empty when it cannot be read).
+backup_age_h() {
+    command -v jq >/dev/null 2>&1 || return 1
+    local json latest s
+    json=$("$REPO_DIR/scripts/backup.sh" list --json 2>/dev/null) || return 1
+    latest=$(printf '%s' "$json" | jq -r 'map(.time) | max // empty' 2>/dev/null) || return 1
+    [ -n "$latest" ] || return 1
+    s=$(date -d "$latest" +%s 2>/dev/null) || return 1
+    printf '%s' $(( ($(date +%s) - s) / 3600 ))
+}
+
 # ---------------------------------------------------------------------------
 # the run
 # ---------------------------------------------------------------------------
@@ -808,9 +1101,19 @@ fi
 
 [ -n "$TARGET" ] || die "no target; try --list"
 case "$TARGET" in
-    bitcoin-rpc|monero-rpc|tor-control|runes) ;;
+    bitcoin-rpc|monero-rpc|tor-control|runes|searxng-secret|monero-wallet) ;;
+    token:*)
+        token_spec "${TARGET#token:}" >/dev/null \
+            || die "unknown server '${TARGET#token:}' (servers: ${TOKEN_SERVERS[*]})"
+        ;;
     *) die "unknown target: $TARGET (try --list)" ;;
 esac
+if [ "$SPEND_ONLY" = 1 ]; then
+    case "$TARGET" in
+        token:*) ;;
+        *) die "--spend only applies to token:<server>" ;;
+    esac
+fi
 preflight_target "$TARGET"
 if [ "$RESUME" = 0 ]; then
     journal_begin "$TARGET"
@@ -822,5 +1125,8 @@ case "$TARGET" in
     monero-rpc)  apply_monero_rpc ;;
     tor-control) apply_tor_control ;;
     runes)       apply_runes ;;
+    token:*)     apply_token "${TARGET#token:}" ;;
+    searxng-secret) apply_searxng_secret ;;
+    monero-wallet)  apply_monero_wallet ;;
     *)           die "unknown target: $TARGET (try --list)" ;;
 esac

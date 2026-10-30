@@ -493,8 +493,8 @@ that closes that gap.
   it serves against bitcoind's height), CLN peers and **offline channels**, the
   Monero wallet's lag behind `monerod`, the host itself (disk and inode space,
   disk saturation, backup age, certificate expiry, units that crash-looped
-  since the last sweep, and the metrics collector going quiet) — then the spend
-  tripwire.
+  since the last sweep, the metrics collector going quiet, and a credential
+  rotation left half-finished) — then the spend tripwire.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
   `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
@@ -898,6 +898,8 @@ in dependency order:
 ./scripts/rotate.sh bitcoin-rpc --dry-run   # the plan, no values, no writes
 ./scripts/rotate.sh bitcoin-rpc             # rotate, re-render, restart, verify
 ./scripts/rotate.sh runes --scope spend     # read | spend | boltmesh | all
+./scripts/rotate.sh token:lightning-mcp     # one server's bearer token
+./scripts/rotate.sh token:lightning-mcp --spend
 ```
 
 | Target | Rotates | Restarts |
@@ -906,6 +908,9 @@ in dependency order:
 | `monero-rpc` | `monero-wallet-rpc`'s `--rpc-login` | monero-wallet-rpc, then monero-wallet-mcp, BoltMesh |
 | `tor-control` | Tor's control password (lightningd's statictor) | tor, then lightningd |
 | `runes` | the CLN runes: lightning-mcp's read/spend pair and BoltMesh's gateway | lightning-mcp and/or BoltMesh |
+| `token:<server>` | one MCP server's bearer token (`--spend` rotates a money server's spend token instead) | that server |
+| `searxng-secret` | SearXNG's `settings.yml` `secret_key` | searxng |
+| `monero-wallet` | the wallet file's password (`--yes`, and a snapshot younger than 24h) | monero-wallet-rpc → wallet-mcp, BoltMesh |
 
 None of it is scheduled. These credentials are also held by clients outside the
 stack (an MCP client's config, a wallet, nginx-proxy-manager), so a rotation on a
@@ -930,6 +935,22 @@ them:
   leaves the old rune working instead of leaving the server unable to read the
   node. `runes` rehashes only `node.env` in the spend baseline, so the tripwire
   does not report a rotation as policy drift.
+- **A token rotation proves both halves.** The new bearer token has to answer a
+  real tool call, and the old one has to be refused with 401; the old value is
+  kept in the journal just long enough to test it. Nothing prints a token: the
+  clients that hold one read it from `$DATA_DIR/config/<server>/token.env`
+  (`~/.config/opencode/mcp.env` does exactly that at shell start), so a new
+  shell is all a client needs. A *spend* token is only exercised by a spend
+  call, which the script never makes — it proves the server reloaded and keeps
+  serving, and says so.
+- **`monero-wallet` is the careful one.** The wallet file's password exists in
+  exactly two places — the file, and the rendered unit — so the change is made
+  at the daemon (`change_wallet_password` over the wallet RPC), and both sides
+  of that call are journaled *before* it is sent, because after it lands the old
+  password may already be dead. It demands `--yes` and a snapshot younger than
+  24 hours, and `--resume` knows from the journal whether the daemon call
+  already happened (it must not be sent twice). Losses are not on the table: a
+  Monero wallet is deterministic, so the worst case is a rescan from a snapshot.
 
 **If a run dies half-way** the new values are already journaled (mode 600,
 `$DATA_DIR/config/rotation/<target>.pending`) with the stage it reached, and no
