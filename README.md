@@ -665,10 +665,20 @@ coming up — the stack is *serving* long before it is *synced*.
 >
 > "Safe" means *funds*: a wallet cache is a cache. One captured while the wallet
 > was rebuilding, or torn mid-write, is rejected when it is loaded, and the
-> wallet then rescans from its restore height — minutes to hours against a busy
-> `monerod`, with the RPC unavailable until it finishes (the daemons report it
-> as unhealthy, and `scripts/monitor.sh` says so). The keys file is the part that
-> matters, and it always restores.
+> wallet then rescans from its restore height — hours, not minutes, with the RPC
+> unavailable until it finishes (the daemons report it as unhealthy, and
+> `scripts/monitor.sh` says so). The keys file is the part that matters, and it
+> always restores.
+>
+> The hours are the daemon's fault, not the wallet's: `monerod`'s RPC answers in
+> seconds rather than milliseconds while it syncs (measured on this host during
+> the Bitcoin/Monero/Fulcrum catch-up: 5.8 s for a six-block
+> `get_block_headers_range`, 10 s for `get_info`), and a rescan is a long series
+> of such calls, with `--untrusted-daemon` adding the wallet's own verification
+> instead of a shortcut. Expect it to bind only at the end, and note that the
+> refresh logs at INFO while the unit leaves `wallet.wallet2` at WARNING —
+> `podman logs` shows nothing until `Binding on 0.0.0.0:18083`. Do not restart it
+> to "check": every restart throws the pass away.
 
 #### After any recovery
 
