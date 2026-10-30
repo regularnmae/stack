@@ -56,7 +56,10 @@ TRACKED=(
 
 TRIPS=()
 trip() { TRIPS+=("$*"); printf 'TRIP: %s\n' "$*"; }
-note() { printf 'audit: %s\n' "$*"; }
+# Notes go to stderr: the outgoing-activity set is built from the stdout of
+# lightning_outgoing/monero_outgoing, so a note on stdout ("get_transfers
+# unavailable") would be read as a new payment hash and trip the wire.
+note() { printf 'audit: %s\n' "$*" >&2; }
 
 # ---------------------------------------------------------------------------
 # policy drift
@@ -116,7 +119,10 @@ lightning_outgoing() {
     local token body
     token=$(env_value "$CONFIG_DIR/lightning-mcp/token.env" LIGHTNING_MCP_TOKEN)
     [ -n "$token" ] || { note "no LIGHTNING_MCP_TOKEN; skipping lightning activity"; return 0; }
-    body=$(mcp_call lightning-mcp "$token" listpays '{}') || body=""
+    # A generous timeout: the wallet answers this in ~15 s while it refreshes,
+    # and the default 20 s turned a slow-but-working source into "unavailable",
+    # which silently skips the activity half of the tripwire.
+    body=$(mcp_call lightning-mcp "$token" listpays '{}' 60) || body=""
     [ -n "$body" ] || { note "lightning listpays unavailable"; return 0; }
     printf '%s' "$body" \
         | grep -oE 'payment_hash\\?":[[:space:]]*\\?"[0-9a-f]{64}' \
@@ -128,7 +134,7 @@ monero_outgoing() {
     token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
     [ -n "$token" ] || { note "no MONERO_MCP_TOKEN; skipping monero activity"; return 0; }
     body=$(mcp_call monero-wallet-mcp "$token" get_transfers \
-        '{"incoming":false,"pool":false,"pending":false,"failed":false,"outgoing":true}') || body=""
+        '{"incoming":false,"pool":false,"pending":false,"failed":false,"outgoing":true}' 60) || body=""
     [ -n "$body" ] || { note "monero get_transfers unavailable"; return 0; }
     printf '%s' "$body" \
         | grep -oE 'txid\\?":[[:space:]]*\\?"[0-9a-f]{64}' \
