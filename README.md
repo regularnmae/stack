@@ -1002,7 +1002,7 @@ exists only to answer that kind of traffic — any request to it is worth a look
 
 ### Resources and retention
 
-~550 MB RSS for Suricata with the full ET Open ruleset (refreshed at container
+~650 MB RSS for Suricata with the full ET Open ruleset (refreshed at container
 start, best effort — a host without internet starts on the twelve local rules),
 ~150 MB for CrowdSec, and nothing measurable for the bouncer (one nft
 transaction a minute). EVE JSON rotates daily and is pruned at

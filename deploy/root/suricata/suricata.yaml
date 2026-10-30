@@ -125,8 +125,13 @@ af-packet:
     # host's CPU, and the LAN link is not the bottleneck.
     threads: 2
     buffer-size: 32768
+    # Block-based ring: the NIC path supports it, and it is what keeps a worker
+    # asleep on an idle link.
     tpacket-v3: yes
-    ring-size: 32768
+    # 4096 blocks x 32 KB = 128 MB of ring per thread, mmapped at start. The
+    # shipped default is 2048; 32768 (1 GB) bought nothing on a 1 Gbps LAN link
+    # and is what made this unit's VIRT read 1.3 GB.
+    ring-size: 4096
     # The NIC offloads checksum computation; without this every packet on the
     # LAN reads as a bad checksum.
     checksum-validation: no
@@ -134,14 +139,21 @@ af-packet:
     cluster-id: 98
     cluster-type: cluster_flow
     defrag: yes
+    # ONE thread: loopback carries the host's own API traffic, not the LAN.
     threads: 1
+    # tpacket-v3 IS required here, and it only works with a block size above the
+    # loopback MTU. The first attempt used the default 32 KB block, which is
+    # smaller than lo's 65536-byte MTU, so the ring mmap failed ("af-packet: lo:
+    # failed to mmap: Invalid argument") and the engine could not start. Falling
+    # back to copy mode (tpacket-v2) made it start but burn a full core: the
+    # worker spun at 98% on an interface carrying ~30 packets/s.
+    #
+    # 128 KB is the smallest power-of-two block that fits a 64 KB frame, and 512
+    # blocks (64 MB) is plenty for loopback's rate.
+    tpacket-v3: yes
+    block-size: 131072
+    ring-size: 512
     buffer-size: 32768
-    # tpacket_v3 is required for enp8s0 and IMPOSSIBLE on lo: the loopback
-    # device has no ethernet offload and no block-based ring, so the mmap fails
-    # ("af-packet: lo: failed to mmap: Invalid argument") and the engine dies on
-    # startup. Copy mode + tpacket v2 is the supported path there, and the extra
-    # copy on a host's own loopback costs nothing measurable.
-    tpacket-v3: no
     checksum-validation: no
 
 pcap:

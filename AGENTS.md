@@ -341,14 +341,20 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   right, so `install.sh` judges the result by `auditctl -l`, not the exit code.
   `podman exec crowdsec cscli …` is how decisions are read (no credentials on the
   host), and `Network=none` was rejected because the agent installs hub parsers
-  on first boot. Suricata costs ~550 MB with the full ET
+  on first boot. Suricata costs ~650 MB with the full ET
   Open ruleset, which `start.sh` refreshes best-effort at container start and
-  falls back from to the twelve local rules. Two tuning facts learned by running
-  it here: `tpacket-v3` is impossible on `lo` (the engine dies at startup with
-  "failed to mmap"), and the ET TOR family must be disabled through
-  `disable.conf`'s `re:` filter -- `suricata-update`'s `group:` matching does
-  not resolve ET's rule-file groups, and this host's own tor client otherwise
-  buries the inbound reputation alerts.
+  falls back from to the twelve local rules. Three tuning facts learned by running
+  it here: (1) `tpacket-v3` on `lo` needs a block size **above the loopback MTU**
+  (128 KB, not the 32 KB default) -- with the default the ring mmap fails with
+  "Invalid argument", and the copy-mode fallback it forced made the worker spin at
+  **98% of a core on an interface carrying 30 packets/s**, which read as normal
+  load until `ps -L` showed one thread hot and the other two idle; (2) the ET TOR
+  family must be disabled through `disable.conf`'s `re:` filter --
+  `suricata-update`'s `group:` matching does not resolve ET's rule-file groups,
+  and this host's own tor client otherwise buries the inbound reputation alerts;
+  (3) ring sizes are per interface and mmapped at start: 4096 blocks x 32 KB for
+  the LAN NIC is 128 MB per thread, and the 32768 I copied from a tuning example
+  bought nothing while making VIRT read 1.3 GB.
 - **The subnet is pinned** (`10.89.0.0/24`) because `tor.container` pins
   `--ip=10.89.0.240` and both `bitcoin.conf` (`rpcallowip`) and `torrc`
   (`SocksPolicy`) allow it; `tor` is addressed by that IP, not by name
