@@ -907,6 +907,7 @@ in dependency order:
 ./scripts/rotate.sh runes --scope spend     # read | spend | boltmesh | all
 ./scripts/rotate.sh token:lightning-mcp     # one server's bearer token
 ./scripts/rotate.sh token:lightning-mcp --spend
+./scripts/rotate.sh postgres
 ```
 
 | Target | Rotates | Restarts |
@@ -918,6 +919,9 @@ in dependency order:
 | `token:<server>` | one MCP server's bearer token (`--spend` rotates a money server's spend token instead) | that server |
 | `searxng-secret` | SearXNG's `settings.yml` `secret_key` | searxng |
 | `monero-wallet` | the wallet file's password (`--yes`, and a snapshot younger than 24h) | monero-wallet-rpc → wallet-mcp, BoltMesh |
+| `postgres` | the `vpnuser` role's password (`ALTER ROLE`) | postgres → BoltMesh |
+| `boltmesh-keys` | the four signing keys/node pepper (`--yes`: ends every session and node token) | BoltMesh |
+| `restic` | the backup repository's key (`key add` → verify → `key remove`, `--yes`) | nothing |
 
 None of it is scheduled. These credentials are also held by clients outside the
 stack (an MCP client's config, a wallet, nginx-proxy-manager), so a rotation on a
@@ -950,6 +954,25 @@ them:
   shell is all a client needs. A *spend* token is only exercised by a spend
   call, which the script never makes — it proves the server reloaded and keeps
   serving, and says so.
+- **A secret that lives in a database is changed there first.** `postgres`
+  runs `ALTER ROLE … PASSWORD` through psql on stdin, then rewrites `db.env`
+  (`POSTGRES_PASSWORD` *and* the `DATABASE_URL` that embeds it) and `dump.env`,
+  restarts postgres so its own environment agrees, and only counts it done when
+  the role authenticates **over the podman network** — the image's `pg_hba.conf`
+  trusts `127.0.0.1`, so a loopback probe succeeds with any password. The
+  nightly `pg_dumpall` carries the role's new hash; a dump taken before the
+  rotation would restore the old one.
+- **`restic` adds before it removes.** The new key is created with
+  `key add --new-password-file`, proven with `restic snapshots`, and only then is
+  the old key removed — a run that dies in between leaves two working keys, not
+  zero. Both passwords reach the container as 0600 files in the rotation dir
+  (mounted at `/rot`), never on a command line. Note that
+  `scripts/backup.sh` reads `RESTIC_PASSWORD` from the **environment first**, so
+  a shell that exports the old value keeps using it until you update it.
+- **`boltmesh-keys` is a logout button wearing a rotation's clothes.** It rewrites
+  `SECRET_KEY`/`REFRESH_SECRET_KEY` (every session ends), `NODE_SECRET_KEY` and
+  `BOOTSTRAP_SECRET_PEPPER` (every registered server and outstanding bootstrap
+  secret stops verifying), and requires `--yes`.
 - **`monero-wallet` is the careful one.** The wallet file's password exists in
   exactly two places — the file, and the rendered unit — so the change is made
   at the daemon (`change_wallet_password` over the wallet RPC), and both sides

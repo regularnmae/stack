@@ -266,6 +266,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   password to a value nothing had recorded, which cost a restore from backup
   and a cache rebuild. `scripts/monitor.sh` alerts on any leftover
   `config/rotation/*.pending` for the same reason.
+  The rest (`postgres`, `boltmesh-keys`, `restic`) follow the same rule: change
+  the daemon/authority first (ALTER ROLE, key add), keep the client copy in its
+  env file, and prove the new value end to end. Two traps worth remembering:
+  the postgres image's `pg_hba.conf` trusts `127.0.0.1`, so a password check over
+  loopback succeeds with anything and says nothing (use the podman-network
+  address, as `pg_tcp_login` does), and `restic` must add, prove, then remove —
+  never remove first.
 - **The monitor is a read-only host script, not a container:** `monitor.timer` (a
   plain user unit) schedules `monitor.service`, which runs
   `scripts/monitor.sh --quiet` with an optional

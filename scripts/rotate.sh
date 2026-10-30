@@ -72,6 +72,7 @@ STARTED=0
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
+RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
 BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
 MONERO_WALLET_WAIT="${MONERO_WALLET_WAIT:-300}"
 LN_WAIT="${LN_WAIT:-300}"
@@ -117,6 +118,11 @@ targets (each one writes its source of truth, re-renders, restarts, verifies):
                           monero-wallet-mcp lightning-mcp
   searxng-secret SearXNG's settings.yml secret_key
   monero-wallet  the wallet file's password (--yes; demands a recent backup)
+  postgres       the vpnuser role's password -> db.env, dump.env, BoltMesh
+  boltmesh-keys  SECRET_KEY/REFRESH_SECRET_KEY/NODE_SECRET_KEY/BOOTSTRAP_SECRET_PEPPER
+                 (--yes: every session and node token ends)
+  restic         the backup repository's key: add, prove, then remove the old
+                 one (--yes)
 
 flags: --dry-run (print the plan)  --force (ignore preflight, e.g. a running
 backup)  --resume (finish a pending journal)  --yes  --spend  --status  --list
@@ -127,6 +133,8 @@ fi
 resolve_data_dir
 SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
+BOLT_DIR="$CONFIG_DIR/boltmesh"
+BACKUP_ENV="$CONFIG_DIR/backup/backup.env"
 ROT_DIR="$CONFIG_DIR/rotation"
 
 # The rune restriction JSON, built from the allowlists stack.conf declares --
@@ -426,6 +434,19 @@ preflight_target() { # target
         runes)       require_healthy lightningd ;;
         token:*)     require_healthy "${1#token:}" ;;
         searxng-secret) require_healthy searxng ;;
+        postgres)    require_healthy postgres ;;
+        boltmesh-keys)
+            require_healthy boltmesh-backend
+            if [ "$DRY_RUN" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
+                die "this ends every BoltMesh session and invalidates every node token; re-run with --yes"
+            fi
+            ;;
+        restic)
+            [ -f "$BACKUP_ENV" ] || die "missing $BACKUP_ENV; run deploy/install.sh first"
+            if [ "$DRY_RUN" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
+                die "the restic password is the only key to the backups; re-run with --yes"
+            fi
+            ;;
         monero-wallet)
             require_healthy monero-wallet-rpc
             # The one credential here that cannot be recovered if it is lost:
@@ -1031,6 +1052,201 @@ apply_monero_wallet() {
     complete
 }
 
+
+# ---------------------------------------------------------------------------
+# target: postgres
+# ---------------------------------------------------------------------------
+# The role's password lives in the cluster, not in a file: db.env and dump.env
+# carry the client's copy of it. So the ALTER comes first and the files follow --
+# a crash in between leaves the running backend working (it already
+# authenticated) and the next ./deploy.sh restarting it into a failure, which
+# --resume fixes with the journaled value.
+pg_sql() { # sql on stdin, against the stack's own database
+    podman exec -i postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1 -q
+}
+
+# Log in as vpnuser with an explicitly supplied password, from the container's
+# podman-network address. NOT over 127.0.0.1: the postgres image's pg_hba trusts
+# loopback (`host all all 127.0.0.1/32 trust`), so a probe there succeeds with
+# any password and proves nothing. The password goes in on stdin, never an argv.
+pg_tcp_login() { # password -> 0 when it authenticates
+    local out
+    out=$(printf '%s\n' "$1" | podman exec -i postgres sh -c \
+        'PGPASSWORD=$(cat) psql -h "$(hostname -i)" -U vpnuser -d vpndb -tAc "select 1"' 2>/dev/null || true)
+    [ "$(printf '%s' "$out" | tr -d '[:space:]')" = 1 ]
+}
+
+verify_postgres() {
+    local new old
+    new=$(journal_get NEW_POSTGRES_PASSWORD)
+    old=$(journal_get OLD_POSTGRES_PASSWORD)
+    [ "$DRY_RUN" = 0 ] || return 0
+    if pg_tcp_login "$new"; then
+        log "vpnuser authenticates over the podman network with the new password"
+    else
+        die "vpnuser did not authenticate with the new password; the journal holds it"
+    fi
+    if [ -n "$old" ] && [ "$old" != "$new" ]; then
+        if pg_tcp_login "$old"; then
+            warn "the OLD password still authenticates; check: podman exec postgres psql -U vpnuser -c '\\du'"
+        else
+            log "the old password is refused"
+        fi
+    fi
+    if podman container exists boltmesh-backend 2>/dev/null; then
+        if net_curl -fsS http://boltmesh-backend:8000/health >/dev/null 2>&1; then
+            log "boltmesh-backend is healthy on the new DATABASE_URL"
+        else
+            warn "boltmesh-backend is not healthy yet; check: podman logs boltmesh-backend"
+        fi
+    fi
+}
+
+apply_postgres() {
+    local new old
+    old=$(env_value "$BOLT_DIR/db.env" POSTGRES_PASSWORD)
+    [ -n "$old" ] || die "no POSTGRES_PASSWORD in $BOLT_DIR/db.env; run deploy/install.sh first"
+    new=$(gen NEW_POSTGRES_PASSWORD)
+    journal_put OLD_POSTGRES_PASSWORD "$old"
+
+    journal_put step "ALTER ROLE"
+    if [ "$DRY_RUN" = 1 ]; then
+        say "would set vpnuser's password at postgres (ALTER ROLE ... PASSWORD)"
+    else
+        if ! printf "BEGIN;\nALTER ROLE vpnuser PASSWORD '%s';\nCOMMIT;\n" "$new" | pg_sql; then
+            die "psql refused the password change; nothing was written"
+        fi
+        log "the vpnuser role carries the new password"
+    fi
+
+    journal_put step "config files"
+    set_env_key "$BOLT_DIR/db.env" POSTGRES_PASSWORD "$new"
+    set_env_key "$BOLT_DIR/db.env" DATABASE_URL "postgresql+asyncpg://vpnuser:$new@postgres:5432/vpndb"
+    set_env_key_if_file "$BOLT_DIR/dump.env" PGPASSWORD "$new"
+
+    # postgres itself only uses POSTGRES_PASSWORD on an empty cluster, but the
+    # restart keeps podman inspect agreeing with the role it serves.
+    journal_put step "restart:postgres"
+    restart_unit_and_wait postgres "${POSTGRES_WAIT:-180}"
+
+    journal_put step "restart:dependents"
+    restart_if_deployed boltmesh-backend boltmesh-worker
+
+    journal_put step "verify"
+    verify_postgres
+    say "the next backup's pg_dumpall carries the new hash; a dump taken before this rotation would restore the old one"
+    complete
+}
+
+# ---------------------------------------------------------------------------
+# target: boltmesh-keys
+# ---------------------------------------------------------------------------
+# The JWT signing keys and the node-bootstrap pepper. Regenerating them is a
+# deliberate, user-visible act: every session ends and every node token minted
+# from NODE_SECRET_KEY/BOOTSTRAP_SECRET_PEPPER stops verifying.
+apply_boltmesh_keys() {
+    local f="$BOLT_DIR/secrets.env" k v
+    [ -f "$f" ] || die "missing $f; run deploy/install.sh first"
+    for k in SECRET_KEY REFRESH_SECRET_KEY NODE_SECRET_KEY BOOTSTRAP_SECRET_PEPPER; do
+        v=$(gen "NEW_$k")
+        journal_put step "$k"
+        set_env_key "$f" "$k" "$v"
+    done
+
+    journal_put step "restart"
+    restart_if_deployed boltmesh-backend boltmesh-worker
+
+    journal_put step "verify"
+    if [ "$DRY_RUN" = 0 ]; then
+        if net_curl -fsS http://boltmesh-backend:8000/health >/dev/null 2>&1; then
+            log "boltmesh-backend is healthy with the new keys"
+        else
+            die "boltmesh-backend did not come back; check: podman logs boltmesh-backend"
+        fi
+    fi
+    complete
+}
+
+# ---------------------------------------------------------------------------
+# target: restic
+# ---------------------------------------------------------------------------
+# The one secret whose loss loses the backups, so the new key is ADDED and
+# proven before the old one is removed, and the add is idempotent-safe: a run
+# that dies after it leaves two working keys.
+restic_run() { # restic args...
+    local repo cache
+    repo=$(env_value "$BACKUP_ENV" RESTIC_REPOSITORY)
+    cache=$(env_value "$BACKUP_ENV" RESTIC_CACHE_DIR)
+    [ -n "$repo" ] || die "no RESTIC_REPOSITORY in $BACKUP_ENV"
+    podman run --rm -i \
+        -v "$STACK_BACKUP_DIR:/repo:z" \
+        -v "$DATA_DIR/backup-cache:/cache:z" \
+        -v "$ROT_DIR:/rot:z" \
+        --env RESTIC_CACHE_DIR="${cache:-/cache}" \
+        "$RESTIC_IMAGE" --repo "$repo" "$@"
+}
+
+restic_write_passwords() { # current new
+    # -p/--password-file on the command line would be fine (a path is not a
+    # secret), but the VALUES have to reach the container somehow: a 0600 file
+    # in the 0700 rotation dir, mounted at /rot, keeps them out of any argv.
+    ( umask 077
+      printf '%s\n' "$1" > "$ROT_DIR/.current.pw"
+      printf '%s\n' "$2" > "$ROT_DIR/.new.pw" )
+}
+
+restic_cleanup() {
+    rm -f "$ROT_DIR/.current.pw" "$ROT_DIR/.new.pw"
+}
+
+apply_restic() {
+    local cur new old_id count
+    cur=$(env_value "$BACKUP_ENV" RESTIC_PASSWORD)
+    [ -n "$cur" ] || die "no RESTIC_PASSWORD in $BACKUP_ENV; run deploy/install.sh first"
+
+    if [ "$DRY_RUN" = 1 ]; then
+        say "would add a restic key with a new password (key add --new-password-file)"
+        say "would prove it reads the repository (restic snapshots), then remove the current key"
+        say "would rewrite RESTIC_PASSWORD in $BACKUP_ENV"
+        complete
+        return 0
+    fi
+
+    new=$(gen NEW_RESTIC_PASSWORD)
+    restic_write_passwords "$cur" "$new"
+
+    journal_put step "key list"
+    old_id=$(restic_run key list --json --password-file /rot/.current.pw \
+        | jq -r '[.[] | select(.current)][0].id // empty' 2>/dev/null || true)
+    [ -n "$old_id" ] || die "could not read the current restic key id; nothing was changed"
+
+    journal_put step "key add"
+    restic_run key add --password-file /rot/.current.pw --new-password-file /rot/.new.pw >/dev/null \
+        || die "restic refused the new key; the repository is unchanged"
+
+    journal_put step "verify"
+    if ! restic_run snapshots --latest 1 --password-file /rot/.new.pw >/dev/null 2>&1; then
+        # Two keys are alive here, so this is recoverable: rerun the target.
+        restic_cleanup
+        die "the new key cannot read the repository; the old key is still valid -- re-run the target"
+    fi
+    log "the new restic key opens the repository"
+
+    journal_put step "key remove"
+    restic_run key remove "$old_id" --password-file /rot/.new.pw >/dev/null \
+        || die "restic refused to remove the old key (both keys still work); re-run the target"
+
+    count=$(restic_run key list --json --password-file /rot/.new.pw | jq 'length' 2>/dev/null || echo "")
+    [ "$count" = 1 ] || warn "the repository reports ${count:-?} keys; check: restic key list"
+
+    journal_put step "backup.env"
+    set_env_key "$BACKUP_ENV" RESTIC_PASSWORD "$new"
+    restic_cleanup
+
+    say "if RESTIC_PASSWORD is exported in your shell, update it: the environment wins over backup.env"
+    complete
+}
+
 # The newest restic snapshot's age in hours (empty when it cannot be read).
 backup_age_h() {
     command -v jq >/dev/null 2>&1 || return 1
@@ -1101,7 +1317,7 @@ fi
 
 [ -n "$TARGET" ] || die "no target; try --list"
 case "$TARGET" in
-    bitcoin-rpc|monero-rpc|tor-control|runes|searxng-secret|monero-wallet) ;;
+    bitcoin-rpc|monero-rpc|tor-control|runes|searxng-secret|monero-wallet|postgres|boltmesh-keys|restic) ;;
     token:*)
         token_spec "${TARGET#token:}" >/dev/null \
             || die "unknown server '${TARGET#token:}' (servers: ${TOKEN_SERVERS[*]})"
@@ -1128,5 +1344,8 @@ case "$TARGET" in
     token:*)     apply_token "${TARGET#token:}" ;;
     searxng-secret) apply_searxng_secret ;;
     monero-wallet)  apply_monero_wallet ;;
+    postgres)       apply_postgres ;;
+    boltmesh-keys)  apply_boltmesh_keys ;;
+    restic)         apply_restic ;;
     *)           die "unknown target: $TARGET (try --list)" ;;
 esac
