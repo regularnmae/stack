@@ -101,3 +101,12 @@ HealthStartPeriod=180s
 [Service]
 # Same reason as the health start period.
 TimeoutStartSec=300
+
+[Install]
+# WITHOUT THIS the unit never starts at boot: Quadlet generates the .service, but
+# it is pulled in through this [Install] (the generator only creates the symlink
+# target). Every other container in deploy/ has the same section -- this one was
+# missing it, so after the first reboot crowdsec simply was not running, and
+# stack-bouncer failed every minute with "LAPI unreachable" (which is how it was
+# noticed: enforcement failing loudly, not silently).
+WantedBy=default.target

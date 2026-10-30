@@ -339,6 +339,21 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   our rules one at a time (`auditctl -W <rule>`), anything else is left alone.
   `augenrules` exits non-zero on "Rule exists" even when the ruleset is already
   right, so `install.sh` judges the result by `auditctl -l`, not the exit code.
+  **And on this host the kernel audit subsystem is inert**: it initializes
+  disabled (`audit_enabled=0` in dmesg, journald "Collecting audit messages is
+  disabled"), `auditctl -s` nevertheless reports `enabled 1`, and no kernel record
+  is ever written -- not even the CONFIG_CHANGE for loading the rules at boot, and
+  it survived a reboot. The watches stay loaded (they are right if auditing is
+  ever on) but the report marks itself `audit=inert` and the sweep says so, so
+  nobody reads "no host-level changes" as coverage. The hash diff is the half
+  that actually works.
+- **A Quadlet unit without `[Install]` never starts at boot.** `crowdsec` was
+  written without it, so after the first reboot it was simply absent, and the
+  only visible symptom was `stack-bouncer` failing every minute with "LAPI
+  unreachable" -- the applier failing loudly is what made it findable. Every
+  other container in `deploy/` has `[Install] WantedBy=default.target`; the
+  generator creates the `.wants` symlink from it, so `systemctl enable` is neither
+  needed nor possible ("transient or generated").
   `podman exec crowdsec cscli …` is how decisions are read (no credentials on the
   host), and `Network=none` was rejected because the agent installs hub parsers
   on first boot. Suricata costs ~650 MB with the full ET

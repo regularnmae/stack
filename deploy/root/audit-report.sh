@@ -111,6 +111,22 @@ fi
 result=ok
 [ "$hard" -gt 0 ] && result=fail
 
+# Is the audit half actually live? This host boots with the kernel audit
+# subsystem initialized disabled ("audit: initializing netlink subsys (disabled)",
+# audit_enabled=0 in dmesg) and, although `auditctl -s` then reports
+# enabled 1, no kernel record is ever written -- not even the CONFIG_CHANGE for
+# loading the rules at boot. Measured across a reboot, so it is not leftover
+# state: the watches are loaded and inert. Saying so is the difference between
+# "nothing happened" and "nothing is being watched".
+audit_state=live
+if [ -x /usr/sbin/auditctl ]; then
+    n_watch=$(/usr/sbin/auditctl -l 2>/dev/null | grep -c -- '-k stack_' || true)
+    n_kern=$(ausearch -m CONFIG_CHANGE -ts boot 2>/dev/null | grep -c 'type=CONFIG_CHANGE' || true)
+    if [ "${n_watch:-0}" -gt 0 ] && [ "${n_kern:-0}" -eq 0 ]; then
+        audit_state=inert
+    fi
+fi
+
 prev_ok=""
 [ -f "$STATUS" ] && prev_ok=$(sed -n 's/^ok_epoch=//p' "$STATUS" | tail -1)
 case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
@@ -127,6 +143,7 @@ tmp=$(mktemp "$DATA_DIR/audit/.auditd.XXXXXX") || exit 1
     printf 'tier=%s\n' "$tier"
     printf 'data=%s\n' "$data"
     printf 'fim=%s\n' "$fim_changes"
+    printf 'audit=%s\n' "$audit_state"
     printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
 } > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$STATUS"
 
@@ -135,7 +152,7 @@ tmp=$(mktemp "$DATA_DIR/audit/.auditd.XXXXXX") || exit 1
 printf '%s\n' "$now" > "$CURSOR"
 
 if [ "$SHOW" = 1 ]; then
-    printf 'since %s: hard=%s tier=%s data=%s fim=%s\n' "$since" "$hard" "$tier" "$data" "$fim_changes"
+    printf 'since %s: hard=%s tier=%s data=%s fim=%s audit=%s\n' "$since" "$hard" "$tier" "$data" "$fim_changes" "$audit_state"
     [ -n "$detail" ] && printf 'hard detail: %s\n' "$detail"
 fi
 

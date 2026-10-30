@@ -728,7 +728,11 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
             if [ "$aage_m" -gt "$THRESH_AUDIT_AGE_M" ]; then
                 fail "the audit report has not run for ${aage_m} min (systemctl status stack-audit.timer)"
             else
-                ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported"
+                if [ "$(env_value "$AUDIT_STATUS_FILE" audit)" = inert ]; then
+                    ok "audit: ${audit_fim} persistence-dir change(s); the kernel audit subsystem emits nothing on this host, so the hash diff is the live check"
+                else
+                    ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported"
+                fi
             fi
         fi
     fi

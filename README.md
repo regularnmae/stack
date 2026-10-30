@@ -1052,6 +1052,15 @@ Two things about it are worth knowing:
   writes, `stack_data` for the stack's secrets), and only `stack_hard` fails the
   sweep. Rotation and deploys touch the data-dir files on purpose; a monitor that
   pages on its own deploy stops being read.
+* **On this host the kernel audit subsystem is inert.** It initializes disabled
+  (`audit: initializing netlink subsys (disabled)`, `audit_enabled=0` in dmesg)
+  and, although `auditctl -s` then reports `enabled 1`, no kernel record is ever
+  written — not even the `CONFIG_CHANGE` for loading the rules at boot. That
+  survives a reboot, so it is not leftover state. The rules stay loaded (they are
+  correct if the host is ever booted with auditing on), the report says
+  `audit=inert` in its status and the sweep says so in plain words, and the
+  **hash diff is the live check** — which is why it is the part that has to be
+  right.
 
 ## Status page
 
