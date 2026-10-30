@@ -150,6 +150,9 @@ fi
 # config on stdin.
 runtime_args=(
     --rm
+    # A one-shot probe, not a service: its output is read on the terminal, and
+    # keeping a copy in journald only adds noise to the log store.
+    --log-driver=none
     --network npm-network
     -e "KUMA_URL=${KUMA_URL:-http://uptime-kuma:3001}"
     -e "KUMA_USERNAME=$KUMA_USERNAME"

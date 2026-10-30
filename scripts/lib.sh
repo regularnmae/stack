@@ -51,9 +51,16 @@ netcheck_ready() {
 #   net_curl -s -o /dev/null -w '%{http_code}' http://searxng-mcp:8000/health
 # -i keeps stdin attached, which is how a caller passes a secret in a curl
 # config (`-K -`) rather than on a command line that `ps` can read.
+#
+# --log-driver=none is load-bearing, not tidiness. A throwaway container's
+# stdout is written to journald as it runs, so verify.sh reading node-exporter's
+# /metrics (a few thousand lines) put a full copy in the journal on every sweep
+# -- about a third of the journal's lines, and now a third of what the log store
+# would index. The driver only controls persistence: the output still reaches
+# the attached `podman run` and therefore the caller's command substitution.
 net_curl() {
     netcheck_ready || return 127
-    podman run --rm -i --network npm-network "$NETCHECK_IMAGE" curl "$@"
+    podman run --rm --log-driver=none -i --network npm-network "$NETCHECK_IMAGE" curl "$@"
 }
 
 # The same, from the host's own network namespace. It is for the one service
@@ -66,7 +73,7 @@ net_curl() {
 #   net_curl_host -s -o /dev/null -w '%{http_code}' http://127.0.0.1:81/
 net_curl_host() {
     netcheck_ready || return 127
-    podman run --rm -i --network host "$NETCHECK_IMAGE" curl "$@"
+    podman run --rm --log-driver=none -i --network host "$NETCHECK_IMAGE" curl "$@"
 }
 
 # Wait for a container's own healthcheck to report healthy. Shared by deploy.sh
@@ -77,6 +84,25 @@ net_curl_host() {
 wait_healthy() { # container timeout
     local c="$1" t="${2:-180}" deadline st=""
     [ "${DRY_RUN:-0}" = 1 ] && return 0
+
+    # No healthcheck to wait on: victoria-logs' image is distroless (no shell,
+    # so podman cannot run a health command), and a unit like that would wait
+    # out every timeout for a "(healthy)" that never appears. "Up" is the only
+    # state to wait for; the functional check lives in verify.sh.
+    if [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$c" 2>/dev/null)" != yes ]; then
+        deadline=$(( $(date +%s) + t ))
+        while :; do
+            st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
+            case "$st" in
+                *Up*) log "$c is running (no healthcheck defined)"; return 0 ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                warn "$c did not start after ${t}s (status: ${st:-container missing})"
+                return 1
+            fi
+            sleep 2
+        done
+    fi
 
     # Prefer podman's own health wait: it wakes the instant the state changes
     # instead of a shell `sleep 5` loop that spawns podman and date per tick.

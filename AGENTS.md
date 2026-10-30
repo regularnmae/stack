@@ -36,6 +36,9 @@ the MCP server.
 ./deploy.sh --only backup           # run the backup job now
 ./deploy.sh --only backup-verify    # run the restore drill now (weekly on a timer)
 ./deploy.sh --only monitor          # run the health + spend checks now
+./deploy.sh --only victoria-logs    # after a LOGS_* change or an image bump
+./deploy.sh --only vector           # after deploy/logs/vector.toml changes
+./scripts/logs.sh --since 1h        # cross-service log search (LogsQL; UI on :9428)
 ./deploy.sh --only npm-hosts        # (re)reconcile every proxy host in nginx-proxy-manager
 ./deploy.sh --only tor              # re-render the onion services into torrc and restart tor
 ./deploy.sh --only crowdsec         # re-render its parser/scenarios and restart the engine
@@ -50,7 +53,7 @@ the MCP server.
 ./scripts/rotate.sh --status        # a pending rotation journal, last 10 runs
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
 ./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh scripts/ids.sh deploy/root/bouncer.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh deploy/root/bouncer.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong
@@ -224,8 +227,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   entry plus the path list in `Exec=`), and `scripts/backup.sh` derives its own
   mounts, restic arguments, restore directories and confirmation prompt from the
   same array, so a hand run and the nightly job copy the same thing. Chains, the
-  Fulcrum index, `searxng/`, `monitoring/` and the raw `postgres/` cluster stay
-  out so restic never walks them. `tor/` is in it for `tor/onion/` — a lost key
+  Fulcrum index, `searxng/`, `monitoring/`, `logs/` and the raw `postgres/`
+  cluster stay out so restic never walks them. `tor/` is in it for `tor/onion/` — a lost key
   is a new `.onion` address. `postgres-dump.container` `pg_dumpall`s into
   `$DATA_DIR/postgres-dump`; its libpq settings belong in
   `config/boltmesh/dump.env`, **not** `db.env` (`PGHOST`/`PGUSER` in the server's
@@ -468,6 +471,74 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `$DATA_DIR/monitoring` is regenerable and outside the backup set, and
   `monitor.prom` carries the sweep's own numbers. The series and the
   observe/decide split are documented in `scripts/metrics.sh`.
+- **Logs: journald is the source, `vector` the only shipper, `victoria-logs` the
+  history.** Nothing in the units sets a log driver: podman's default is
+  journald, so every container's stdout and every host script's output is
+  already in the **system** journal (`journalctl --user` is empty on this host
+  -- user-unit output lands in the system journal with `_SYSTEMD_USER_UNIT`).
+  `bootstrap.sh` makes journald persistent and bounded (`/var/log/journal`, 2 G,
+  7 days) because the default was volatile, a 32 MB ring in `/run` that a
+  reboot erased; `vector` reads the journal and pushes to `victoria-logs`
+  (`LOGS_RETENTION`/`LOGS_MAX_BYTES` in `stack.conf`), which is loopback-only,
+  not in `NPM_HOSTS`, not in `FIREWALL_PORTS`, and **not** in `BACKUP_PATHS`.
+  `scripts/logs.sh` is the CLI over the same store. Read it over an SSH tunnel
+  (`ssh -L 9428:…`, then `/select/vmui`), like `vmui`; there is no Grafana, by
+  the same reasoning as the metrics store.
+- **Reading the host journal from a rootless container is two settings, and
+  both were measured.** `GroupAdd=keep-groups` (the journal files carry an ACL
+  for the login user's groups, and supplementary groups are dropped by default
+  -- without it `journalctl` says "No journal files were opened due to
+  insufficient permissions") **and** `SecurityLabelDisable=true` (the host label
+  on the journal directories is unreadable to a container domain, and
+  relabelling `/run` is not an option -- so mount them plain `:ro`, never
+  `:z`). `vector` is the second unit after `node-exporter` with SELinux
+  separation off; the mounts are `:ro` and it publishes nothing. Two further
+  traps, both found only after persistence "worked":
+  `Volume=/etc/machine-id:...:ro` -- journalctl resolves `/var/log/journal/<id>`
+  from *its own* machine-id, so without it the container looks for the image's
+  id, finds nothing and reports "No journal files were found" (the `/run`-only
+  mount happened to work because that directory is scanned whole); and **both**
+  `/run/log/journal` and `/var/log/journal` must be mounted, because journald
+  starts volatile and is switched by a flush.
+- **`Storage=persistent` does not take effect on restart -- only on a flush.**
+  journald starts on the runtime journal and switches on `journalctl --flush`
+  (SIGUSR1; journald.conf(5) says so, and systemd-journal-flush.service does it
+  at boot). Restarting the service with the right config therefore changes
+  nothing, which is exactly the state this host was in: config effective,
+  `/var/log/journal` empty, `journalctl` logging only "Runtime Journal".
+  `bootstrap.sh` writes the drop-in, pre-creates `/var/log/journal/<id>` with
+  `root:systemd-journal` and the tmpfiles ACL (`systemd-tmpfiles --create
+  --prefix /var/log/journal` -- the ACL is what `vector` reads through), then
+  restarts **and flushes**, and judges the result by whether a `*.journal` exists
+  under `/var/log/journal`, never by the config file. `verify.sh` does the same.
+- **`vector`'s journald source: `current_boot_only=false` does not work on
+  systemd 250-257** ("not supported for systemd versions 250 through 257"), so
+  it is pinned `true` -- a restart resumes from its `data_dir` checkpoint rather
+  than replaying, and entries from an earlier boot are not re-read (the journal
+  itself keeps them for `podman logs`). Labels are only
+  `host`/`unit`/`container`: `container` comes from `CONTAINER_NAME`; `unit` is
+  set only for non-container entries, and podman's generated scopes
+  (`libpod-conmon-<id>.scope`, `<64hex>-<invocation>.service`) are dropped --
+  one name per container start is not a label. `priority` is a field, not a
+  stream, and `_CMDLINE`/`CONTAINER_ID*` are deleted before ingest (VRL: a
+  missing path is an error, so `.container == ""` must be tested *before*
+  `del(.container)` or every `unit` is silently lost).
+- **Throwaway probe containers must not journal their output.** `net_curl`,
+  `net_curl_host`, `kuma-ctl` and the apprise probe run with
+  `--log-driver=none`: without it, `verify.sh`'s `node-exporter /metrics` fetch
+  (a few thousand lines, six sweeps an hour) was about a third of the journal
+  and would be a third of the log store. The driver only controls persistence;
+  the attached `podman run` still hands stdout to the caller's command
+  substitution. `wait_healthy` treats a container with no healthcheck as "up"
+  -- `victoria-logs`' image is distroless (no shell, so podman cannot run a
+  health command), and the real check is the LogsQL query in `verify.sh`/the
+  monitor.
+- **The monitor queries a store exactly once, and only to prove the log
+  pipeline is alive.** `scripts/logs.sh --health` (newest entry within
+  `MONITOR_LOGS_MAX_AGE_S`, default 900) is the one exception to "alerting never
+  queries the pipeline": the failure it catches is the pipeline's own silent
+  death, and a failure there can only *add* an alert. Everything else still
+  reads the daemons and the host directly.
 - **nginx-proxy-manager runs on the host network, and health comes from podman.**
   `Network=host` with no `PublishPort=`, so NPM's own nginx binds :80/:443/:81 in
   the host's namespace and every request carries the client's real address; a

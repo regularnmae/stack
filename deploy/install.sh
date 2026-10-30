@@ -38,6 +38,9 @@ STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
 # Not optional: render_unit substitutes it into the victoriametrics unit, and
 # this default covers a checkout whose stack.conf predates the monitoring block.
 METRICS_RETENTION="${METRICS_RETENTION:-30d}"
+# The same for the log store: rendered into victoria-logs.container.
+LOGS_RETENTION="${LOGS_RETENTION:-14d}"
+LOGS_MAX_BYTES="${LOGS_MAX_BYTES:-10GiB}"
 export STACK_BACKUP_DIR
 
 # ---------------------------------------------------------------------------
@@ -304,6 +307,8 @@ UNITS=(
     "backup.container:backup.container"
     "victoriametrics.container:victoriametrics.container"
     "node-exporter.container:node-exporter.container"
+    "victoria-logs.container:victoria-logs.container"
+    "vector.container:vector.container"
     "crowdsec.container.in:crowdsec.container"
 )
 
@@ -656,6 +661,21 @@ chmod 0755 "$DATA_DIR/monitoring/textfile" 2>/dev/null || true
 mkdir -p "$CONFIG_DIR/monitoring/vm"
 ( umask 077; cat "$DEPLOY_DIR/monitoring/scrape.yml" > "$CONFIG_DIR/monitoring/vm/scrape.yml" )
 log "wrote $CONFIG_DIR/monitoring/vm/scrape.yml"
+
+# Logs: the store, the shipper's checkpoint, and the shipper's config.
+#
+# victoria-logs and vector both run as container root == the login user under
+# rootless podman (like victoriametrics), so a plain mkdir is enough -- no
+# podman-unshare chown, unlike bitcoind and monero-wallet-rpc.
+#
+# The config is rendered on every run from deploy/logs/vector.toml, in place and
+# through the directory mount, for the same two reasons as scrape.yml above: a
+# single-file bind mount keeps the inode it opened, and a replaced inode is
+# invisible to the process watching the directory. The file itself is
+# secret-free (no @PLACEHOLDERS@), so it renders like the other plain configs.
+mkdir -p "$DATA_DIR/logs/vl" "$DATA_DIR/logs/vector" "$CONFIG_DIR/logs/vector"
+( umask 077; cat "$DEPLOY_DIR/logs/vector.toml" > "$CONFIG_DIR/logs/vector/vector.toml" )
+log "wrote $CONFIG_DIR/logs/vector/vector.toml"
 
 # The backup job's restic cache (regenerable) and its repository. The repo is
 # outside $DATA_DIR on purpose, so wiping the data dir does not delete it.
@@ -1121,6 +1141,8 @@ MONITOR_VERIFY_ARGS=--deep
 #   restarts:    systemd restarts of any stack unit between two sweeps.
 #   metrics:     seconds before stack.prom counts as stale (the collector is a
 #                60s timer; five missed ticks is a real failure).
+#   logs:        seconds before the newest log entry counts as stale (vector
+#                ships continuously; 15 minutes is a stopped pipeline, not lag).
 #   fulcrum:     blocks Fulcrum's Electrum index may lag bitcoind (it polls every
 #                5s when healthy, so the default 12 means "stopped following").
 MONITOR_DISK_FREE_PCT=10
@@ -1131,6 +1153,7 @@ MONITOR_BACKUP_VERIFY_MAX_AGE_H=192
 MONITOR_CERT_MIN_DAYS=14
 MONITOR_RESTART_MAX=3
 MONITOR_METRICS_MAX_AGE_S=300
+MONITOR_LOGS_MAX_AGE_S=900
 MONITOR_FULCRUM_LAG_BLOCKS=12
 EOF
     log "wrote $MON_ENV (mode 600) -- empty targets: journal-only until filled in"
@@ -1319,6 +1342,8 @@ render_unit() {
         -e "s|@MONERO_RPC_LOGIN@|$(esc "$MONERO_RPC_LOGIN")|g" \
         -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
+        -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
+        -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \
         "$src" > "$tmp"
     # @BACKUP_VOLUMES@ becomes one Volume= line per BACKUP_PATHS entry, which a
     # sed replacement cannot carry (its value is multi-line and would need the
@@ -1444,6 +1469,7 @@ Done. Everything the stack owns lives under:
     config/         <- all bearer tokens and secrets (mode 600)
     audit/          <- the monitor's log and the spend tripwire baselines
     monitoring/     <- the metrics store and node-exporter's textfile (regenerable)
+    logs/           <- the log store and vector's checkpoint (regenerable)
     backup-verify/  <- the restore drill's scratch target (regenerable, wiped each run)
   $STACK_BACKUP_DIR
     the restic repository the nightly backup writes (backup.timer);
@@ -1464,6 +1490,10 @@ The monitor runs every 5 minutes (monitor.timer) and alerts only once
 Metrics are collected every minute (metrics.timer) and stored for
   ${METRICS_RETENTION} in $DATA_DIR/monitoring/vm; read them at
   http://127.0.0.1:8428/vmui over an SSH tunnel (no public host, on purpose).
+Logs are shipped from journald every second into $DATA_DIR/logs/vl and kept for
+  ${LOGS_RETENTION} (${LOGS_MAX_BYTES} cap). Search them with scripts/logs.sh, or
+  open http://127.0.0.1:9428/select/vmui over an SSH tunnel:
+  ssh -L 9428:127.0.0.1:9428 <host>
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $CONFIG_DIR/npm/api.env has the nginx-proxy-manager admin login
   (scripts/npm-hosts.sh, which ./deploy.sh runs).

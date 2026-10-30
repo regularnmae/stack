@@ -6,6 +6,8 @@
 #   * net.ipv4.ip_unprivileged_port_start=80, so nginx-proxy-manager can bind
 #     80/443/81 without root
 #   * firewalld enabled and the stack's ports opened (FIREWALL_PORTS)
+#   * journald made persistent and bounded, so the container logs survive a
+#     reboot (they are the source the log store collects from)
 #   * the build dir and the quadlet directory (deploy.sh creates the data dirs)
 #
 # Run as your normal login user -- it uses sudo for the privileged parts. The
@@ -121,13 +123,76 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. firewalld
+# 6. journald persistence (the source every log line is collected from)
+# ---------------------------------------------------------------------------
+# journald defaults to Storage=auto, which means VOLATILE when /var/log/journal
+# does not exist -- and on this host it did not, so the whole journal was a
+# 32 MB ring in /run that a reboot erased. Every container's stdout and every
+# host script writes there, so that was the stack's only record of what
+# happened, gone.
+#
+# Persistent, and bounded: ~10 MB of text an hour compresses to roughly 1.5 GB
+# a day on this host, so 2 GB is about a day and a half on the root filesystem
+# (36 GB free). The log store keeps 14 days; this only has to cover `podman
+# logs` across a reboot and the window before `vector` has shipped an entry.
+JOURNALD_DROPIN=/etc/systemd/journald.conf.d/99-stack.conf
+# Persistent means "journald is actually writing under /var/log/journal", not
+# "the config file says so". Two things make the difference, both measured:
+#   * journald starts on the runtime journal and only switches on a flush
+#     (`journalctl --flush`, or SIGUSR1; systemd-journal-flush.service does it
+#     at boot, which is why restarting the service alone changes nothing);
+#   * /var/log/journal must carry the tmpfiles ACL (group wheel r-x) that the
+#     rootless vector container reads through -- a plain `install -d` has none.
+journald_persistent() {
+    [ -n "$(find /var/log/journal -name '*.journal' -print -quit 2>/dev/null)" ]
+}
+
+if grep -q '^Storage=persistent' "$JOURNALD_DROPIN" 2>/dev/null && journald_persistent; then
+    log "journald is already persistent ($JOURNALD_DROPIN)"
+else
+    log "making journald persistent and bounded (2G, 7 days)"
+    sudo install -d -m 2755 /var/log/journal
+    # journald creates this on flush; creating it here makes the group and the
+    # inherited ACL deterministic from the first boot.
+    sudo install -d -m 2755 -o root -g systemd-journal "/var/log/journal/$(cat /etc/machine-id)"
+    sudo install -d -m 755 "$(dirname "$JOURNALD_DROPIN")"
+    if ! grep -q '^Storage=persistent' "$JOURNALD_DROPIN" 2>/dev/null; then
+        sudo tee "$JOURNALD_DROPIN" >/dev/null <<'EOF'
+# Written by bootstrap.sh; the stack's containers and host scripts all log to
+# journald, and the default (volatile) threw the record away on every reboot.
+[Journal]
+Storage=persistent
+SystemMaxUse=2G
+SystemMaxFileSize=200M
+MaxRetentionSec=7d
+EOF
+    fi
+    # tmpfiles owns /var/log/journal: it sets root:systemd-journal and the
+    # inheritable ACL (group adm + wheel r-x) that the rootless vector container
+    # reads the journal through.
+    sudo systemd-tmpfiles --create --prefix /var/log/journal \
+        || warn "could not apply tmpfiles to /var/log/journal; the shipper may not be able to read it"
+    sudo systemctl restart systemd-journald \
+        || warn "could not restart systemd-journald"
+    # The step that actually switches storage. Without it journald keeps
+    # logging to /run even though the config says persistent (journald.conf(5):
+    # "journald will initially use volatile storage, until a call to journalctl
+    # --flush ... will cause it to switch to persistent logging").
+    sudo journalctl --flush >/dev/null 2>&1 \
+        || warn "journalctl --flush failed; journald may stay on the runtime journal"
+    if ! journald_persistent; then
+        warn "journald is still writing to /run/log/journal; check 'systemctl status systemd-journald'"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7. firewalld
 # ---------------------------------------------------------------------------
 log "enabling firewalld"
 sudo systemctl enable --now firewalld >/dev/null 2>&1 || warn "could not enable firewalld"
 
 # ---------------------------------------------------------------------------
-# 7. directories
+# 8. directories
 # ---------------------------------------------------------------------------
 log "creating $BUILD_DIR and the quadlet directory"
 mkdir -p "$BUILD_DIR" "$DATA_HOME/.config/containers/systemd"
@@ -148,7 +213,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. firewalld ports
+# 9. firewalld ports
 # ---------------------------------------------------------------------------
 # The list lives in stack.conf. From a checkout it was sourced at the top; under
 # `curl | bash` there was no manifest until the clone above, so read it from
@@ -181,7 +246,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. the root tier: the intrusion-detection sensor
+# 10. the root tier: the intrusion-detection sensor
 # ---------------------------------------------------------------------------
 # One unit in this repo runs as root: Suricata, because AF_PACKET capture needs
 # CAP_NET_RAW in the init user namespace (deploy/root/suricata.container owns the
@@ -221,6 +286,7 @@ Bootstrap complete.
   linger      $(loginctl show-user "$USER_NAME" 2>/dev/null | sed -n 's/^Linger=//p')
   port start  $(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null)
   firewall    $(systemctl is-active firewalld 2>/dev/null || echo unknown) (${#FIREWALL_PORTS[@]} ports)
+  journald    $(journald_persistent && echo persistent || echo volatile)
   build       $BUILD_DIR
 
 Next:

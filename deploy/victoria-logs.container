@@ -1,0 +1,63 @@
+# Quadlet unit for VictoriaLogs, the stack's log store.
+#
+# What it is: the searchable history behind `scripts/logs.sh` and the LogsQL UI,
+# fed by `vector` straight from journald. Alerting never depends on it -- the
+# monitor's only query here is the one that asks "is anything still arriving?".
+#
+# Single node, one process. VictoriaLogs stores one directory per day and
+# deletes whole partitions, so retention is a flag, not a compaction job: 14
+# days by default (LOGS_RETENTION in stack.conf) with a hard disk cap
+# (LOGS_MAX_BYTES) so a log storm cannot fill the data disk. The store is
+# regenerable and therefore OUTSIDE the backup set, like the metrics store.
+#
+# install.sh renders this into ~/.config/containers/systemd/, where quadlet
+# turns it into victoria-logs.service.
+[Unit]
+Description=VictoriaLogs (log store for the stack)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=victoria-logs
+# Renovate's Quadlet manager follows this tag; ./deploy.sh --only victoria-logs
+# is what pulls a merged bump.
+Image=docker.io/victoriametrics/victoria-logs:v1.53.0
+Network=npm-network.network
+
+# Loopback only, like the metrics store, and for the same reason: VictoriaLogs
+# has no authentication of its own and every public host in this stack is
+# declared in NPM_HOSTS and TLS-terminated. Read it over an SSH tunnel:
+#   ssh -L 9428:127.0.0.1:9428 thishost
+#   then http://127.0.0.1:9428/select/vmui
+# Nothing is opened in the firewall, and there is no NPM host.
+#
+# The log *content* is the reason to keep it that closed: every container's
+# stdout is in here, and a token echoed into a log line is one more copy of it.
+PublishPort=127.0.0.1:9428:9428
+
+# The store itself. Regenerable: losing it costs the history, nothing else, so
+# it stays out of BACKUP_PATHS. The image runs as container root == the login
+# user under rootless podman (like victoriametrics), so install.sh only creates
+# the directory.
+Volume=@DATA_DIR@/logs/vl:/victoria-logs-data:z
+
+# One Exec= line (a Quadlet Exec= is a single command). -retention.maxDiskSpace
+# UsageBytes drops the oldest whole partitions when the store exceeds the cap;
+# it is a second, independent bound on top of the time-based one, because a
+# crash-looping service can write far more than a healthy day's worth. Victoria
+# Logs always keeps at least the two most recent days.
+Exec=-storageDataPath=/victoria-logs-data -retentionPeriod=@LOGS_RETENTION@ -retention.maxDiskSpaceUsageBytes=@LOGS_MAX_BYTES@ -httpListenAddr=:9428
+
+# No HealthCmd on purpose: the image is distroless (no shell, no wget), and
+# podman runs a string health command through the container's /bin/sh, so any
+# probe would fail. The functional check is outside the unit -- verify.sh and
+# the monitor both ask the HTTP API a real LogsQL question, which is strictly
+# stronger than a liveness endpoint. deploy.sh's wait_healthy knows a
+# healthcheck-less container is "up" rather than waiting out its timeout.
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

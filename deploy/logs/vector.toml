@@ -1,0 +1,123 @@
+# Vector config: journald -> VictoriaLogs. Rendered into
+# $CONFIG_DIR/logs/vector (mounted at /etc/vector) by deploy/install.sh from
+# this file, on every run.
+#
+# The shape is deliberate:
+#
+#   sources.journal     reads the host journal. current_boot_only=true is
+#                       REQUIRED on systemd 250-257 (the source refuses to start
+#                       with false there); data_dir keeps a cursor per batch so a
+#                       restart resumes rather than replaying.
+#   transforms.normalize
+#                       turns journald's CAPITALISED fields into the three
+#                       labels the store is queried by (host/unit/container),
+#                       maps PRIORITY to a name, and drops the metadata that is
+#                       either huge (_CMDLINE, ~1 KB per entry) or useless in a
+#                       search UI (__CURSOR, _BOOT_ID, CODE_*, _AUDIT_*).
+#   sinks.victoria_logs native /insert/jsonline, so every remaining field stays
+#                       searchable. Only host/unit/container become *streams*:
+#                       CONTAINER_ID would create a new stream per container
+#                       start, and `priority` as a stream would multiply every
+#                       service by eight.
+#
+# Nothing here is operator-tuned: retention and the disk cap are stack.conf
+# (LOGS_RETENTION/LOGS_MAX_BYTES), and the URL is the unit name on npm-network.
+
+data_dir = "/var/lib/vector"
+
+# Loopback inside the container, for the unit's health check only. Not
+# published, so nothing outside can reach it.
+[api]
+enabled = true
+address = "127.0.0.1:8686"
+
+[sources.journal]
+type = "journald"
+current_boot_only = true
+since_now = false
+data_dir = "/var/lib/vector"
+
+[transforms.normalize]
+type = "remap"
+inputs = ["journal"]
+source = '''
+.container = to_string(.CONTAINER_NAME) ?? ""
+
+# Container output is written by conmon, whose cgroup unit is a
+# libpod-conmon-<id>.scope -- one per start, and not a unit anybody queries. The
+# container name is the label that matters, so a container line gets no `unit`
+# at all; host scripts (monitor.sh and friends) do get theirs.
+#
+# This runs BEFORE the empty `.container` is deleted: a missing path is an error
+# in VRL, not an empty string, so testing `.container == ""` after removing it
+# silently skips every unit (measured -- it is why `--unit monitor.service`
+# matched nothing while podman's own events sat in the store unlabelled).
+.unit = ""
+if .container == "" && exists(._SYSTEMD_USER_UNIT) { .unit = to_string(._SYSTEMD_USER_UNIT) ?? "" }
+if .unit == "" && exists(._SYSTEMD_UNIT) { .unit = to_string(._SYSTEMD_UNIT) ?? "" }
+if starts_with(.unit, "user@") || starts_with(.unit, "system-") || .unit == "init.scope" { .unit = "" }
+# Podman also writes events from the container's own transient scope
+# (64 hex + "-<invocation>.service"), which is a fresh name per start -- not a
+# unit, and exactly the high-cardinality label a query UI must not carry.
+if match(.unit, r'^[0-9a-f]{64}-') { .unit = "" }
+if .unit == "" { del(.unit) }
+if .container == "" { del(.container) }
+
+# "err"/"warning"/"info"... instead of 3/4/6, so a query reads like an operator
+# thinks. The numeric field is dropped below.
+.priority = "informational"
+if exists(.PRIORITY) { .priority = to_syslog_level(to_int(.PRIORITY) ?? 6) ?? "informational" }
+
+del(.CONTAINER_NAME)
+del(.CONTAINER_ID)
+del(.CONTAINER_ID_FULL)
+del(.CONTAINER_PARTIAL_MESSAGE)
+del(._SYSTEMD_UNIT)
+del(._SYSTEMD_USER_UNIT)
+del(._SYSTEMD_CGROUP)
+del(._SYSTEMD_INVOCATION_ID)
+del(._SYSTEMD_OWNER_UID)
+del(._SYSTEMD_SLICE)
+del(._SYSTEMD_USER_SLICE)
+del(.__CURSOR)
+del(.__SEQNUM)
+del(.__SEQNUM_ID)
+del(.__MONOTONIC_TIMESTAMP)
+del(.__REALTIME_TIMESTAMP)
+del(._BOOT_ID)
+del(._MACHINE_ID)
+del(._CMDLINE)
+del(._EXE)
+del(._COMM)
+del(._PID)
+del(._UID)
+del(._GID)
+del(._CAP_EFFECTIVE)
+del(._SELINUX_CONTEXT)
+del(._TRANSPORT)
+del(._RUNTIME_SCOPE)
+del(._AUDIT_LOGINUID)
+del(._AUDIT_SESSION)
+del(._SOURCE_REALTIME_TIMESTAMP)
+del(.SOURCE_REALTIME_TIMESTAMP)
+del(.CODE_FILE)
+del(.CODE_LINE)
+del(.CODE_FUNC)
+del(.PRIORITY)
+del(.SYSLOG_FACILITY)
+del(.source_type)
+'''
+
+[sinks.victoria_logs]
+type = "http"
+inputs = ["normalize"]
+uri = "http://victoria-logs:9428/insert/jsonline?_stream_fields=host,unit,container&_msg_field=message&_time_field=timestamp"
+encoding.codec = "json"
+framing.method = "newline_delimited"
+# VictoriaLogs' push endpoint is a POST-only writer; the sink's own health probe
+# (a GET on the same URI) would 405 and mark Vector unhealthy forever.
+healthcheck.enabled = false
+# A restart of the store must not lose the buffered batch: keep retrying for a
+# day, then let the journal be the fallback (it is persistent and bounded).
+request.retry_max_duration_secs = 86400
+request.timeout_secs = 30

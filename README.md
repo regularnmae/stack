@@ -29,6 +29,8 @@ stack runs and one script that fixes a deployment problem.
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
 | `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network, `:9100` (wildcard bind; LAN closed by firewall) | — (serves `$DATA_DIR/monitoring/textfile`) |
+| `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.53.0` | `127.0.0.1:9428` | `$DATA_DIR/logs/vl` |
+| `vector` | `docker.io/timberio/vector:0.61.0-debian` | — | `$DATA_DIR/logs/vector` (checkpoint) |
 | `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` | — |
 | `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` | — |
 | `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` | — |
@@ -150,10 +152,11 @@ curl -fsSL https://raw.githubusercontent.com/regularnmae/stack/main/bootstrap.sh
 `bootstrap.sh` installs podman/firewalld/git/jq, enables user linger, sets
 `net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
 80/443/81 rootless), opens the stack's ports (`FIREWALL_PORTS`) in firewalld,
-creates the build dir and the quadlet directory, and clones this repo to
-`~/build/stack`. `deploy.sh` then resolves and creates the data directories,
-clones the app repos, builds every image, starts everything in order and
-verifies.
+makes journald persistent and bounded (so the container logs survive a reboot
+and the log store has something to collect), creates the build dir and the
+quadlet directory, and clones this repo to `~/build/stack`. `deploy.sh` then
+resolves and creates the data directories, clones the app repos, builds every
+image, starts everything in order and verifies.
 
 With git already present, the equivalent is:
 
@@ -309,6 +312,8 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `audit/` — the monitor's log and the spend tripwire baselines
   - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
     (both regenerable, both excluded from backups)
+  - `logs/` — the log store (`vl/`) and `vector`'s checkpoint; journald history,
+    regenerable and excluded from backups
   - `backup-cache/` — restic's cache (regenerable)
   - `backup-verify/` — the restore drill's scratch target; a copy of the backup
     set, wiped before and after every drill (regenerable, excluded from backups)
@@ -783,8 +788,9 @@ that closes that gap.
   it serves against bitcoind's height), CLN peers and **offline channels**, the
   Monero wallet's lag behind `monerod`, the host itself (disk and inode space,
   disk saturation, backup age, certificate expiry, units that crash-looped
-  since the last sweep, the metrics collector going quiet, and a credential
-  rotation left half-finished) — then the spend tripwire.
+  since the last sweep, the metrics collector going quiet, the log pipeline
+  going quiet, and a credential rotation left half-finished) — then the spend
+  tripwire.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
   `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
@@ -814,7 +820,8 @@ installed and active. The host checks' thresholds are the same file
 (`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
 `MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`, `MONITOR_METRICS_MAX_AGE_S`,
 `MONITOR_FULCRUM_LAG_BLOCKS`, `MONITOR_BTC_MIN_PEERS`, `MONITOR_MEMPOOL_MB`,
-`MONITOR_XMR_LAG_BLOCKS`, `MONITOR_NET_DROP`, `MONITOR_TEMP_MAX`, …);
+`MONITOR_XMR_LAG_BLOCKS`, `MONITOR_NET_DROP`, `MONITOR_TEMP_MAX`,
+`MONITOR_LOGS_MAX_AGE_S`, …);
 each falls back to its default in the script, so a monitor.env written before a
 check existed still monitors.
 
@@ -855,8 +862,60 @@ Two consequences worth knowing:
   graphs stop while the containers are healthy, check that first — `verify.sh`
   has a check for it (`node-exporter /metrics` must carry `stack_*` series).
 
-No Grafana: `vmui` is a PromQL frontend with charts, and one less container on a
-disk that is the stack's bottleneck is worth more than dashboards.
+### Logs and history
+
+journald is the source: podman's default log driver writes every container's
+stdout there, and the host scripts (`monitor.sh`, `metrics.sh`, `ids.sh`,
+`backup.sh`) log there too — so no unit needed a logging change to be
+collected. What was missing was search across services and any history at all:
+journald was **volatile** (a 32 MB ring in `/run`), so a reboot erased the only
+record. Three pieces fix that:
+
+| | |
+| --- | --- |
+| `bootstrap.sh` | makes journald persistent and bounded (`/var/log/journal`, 2 GB, 7 days), so `podman logs` works across a reboot |
+| `vector` | ships the journal to `victoria-logs` continuously; it checkpoints one cursor per batch, so a restart resumes instead of replaying |
+| `victoria-logs` | the store and the LogsQL UI: 14 days (`LOGS_RETENTION`) or 10 GiB (`LOGS_MAX_BYTES`), whichever comes first |
+
+Search it from the CLI — this is the cross-service timeline that used to mean
+five `podman logs -f` windows:
+
+```sh
+./scripts/logs.sh --since 30m                        # everything, labelled
+./scripts/logs.sh --since 2h --container lightningd
+./scripts/logs.sh --since 1h --grep 'WARN|ERR' --priority warning
+./scripts/logs.sh --since 24h --stats                # who is spamming
+./scripts/logs.sh --follow --container boltmesh-backend
+./scripts/logs.sh --health                           # is anything still arriving?
+```
+
+…or open the LogsQL UI over an SSH tunnel, exactly like `vmui`:
+
+```sh
+ssh -L 9428:127.0.0.1:9428 you@host      # then http://127.0.0.1:9428/select/vmui
+```
+
+`victoria-logs` publishes on the host's **loopback only**: it has no
+authentication of its own, and every log line every container wrote is in it
+(including any token someone echoed). It is not in `NPM_HOSTS` and adds nothing
+to the firewall — if you ever want it on the LAN, put it behind NPM with basic
+auth *and* declare it, the same rule as `vmui`.
+
+Two consequences worth knowing:
+
+- **`$DATA_DIR/logs` is not in the backup set.** It is history, not state, like
+  the metrics store: losing it costs the history, and the journal's own 7 days
+  cover a restore.
+- **The monitor makes exactly one query against a store, and it is this one.**
+  It asks "has anything arrived in the last 15 minutes?", because the failure
+  that matters is the silent one (all three units read "active" while nothing
+  is shipping). A dead store therefore *adds* an alert; every other check still
+  reads the daemons and the host directly, so the pipeline can never silence
+  one. `verify.sh` runs the same query plus a real LogsQL search.
+
+No Grafana, for logs either: `vmui` and VictoriaLogs' own LogsQL UI answer the
+two questions ("how did it move" and "what did it say"), and one less container
+on a disk that is the stack's bottleneck is worth more than dashboards.
 
 ### The spend tripwire
 
@@ -1480,6 +1539,7 @@ stack/
   scripts/wallets.sh      # Monero + Bitcoin create/restore
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
+  scripts/logs.sh         # cross-service log search over victoria-logs (LogsQL)
   scripts/ids.sh          # scheduled IDS roll-up (ids.timer): suricata + crowdsec
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   scripts/rotate.sh       # rotate one credential + every dependent service
@@ -1499,6 +1559,9 @@ stack/
                           #   rendered by install.sh --root (bootstrap.sh only)
     crowdsec/             # this repo's parser, scenarios, whitelists, acquisition;
                           #   rendered into $CONFIG_DIR/ids/crowdsec
+    logs/vector.toml      # the shipper's config (journald -> victoria-logs),
+                          #   rendered into $CONFIG_DIR/logs/vector
+    monitoring/scrape.yml # what victoriametrics scrapes, rendered into place
     searxng/{settings.yml,limiter.toml}
     examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by hand
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates

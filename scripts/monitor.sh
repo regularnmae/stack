@@ -68,6 +68,7 @@ MONITOR_BACKUP_VERIFY_MAX_AGE_H="${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-$(env_value 
 MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONITOR_CERT_MIN_DAYS)}"
 MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
 MONITOR_METRICS_MAX_AGE_S="${MONITOR_METRICS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_METRICS_MAX_AGE_S)}"
+MONITOR_LOGS_MAX_AGE_S="${MONITOR_LOGS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_LOGS_MAX_AGE_S)}"
 MONITOR_FULCRUM_LAG_BLOCKS="${MONITOR_FULCRUM_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MONITOR_FULCRUM_LAG_BLOCKS)}"
 # The chain section (below) reads these before the host checks define theirs, so
 # they resolve here too, next to THRESH_FULCRUM_LAG which unblocks that order:
@@ -351,6 +352,10 @@ THRESH_VERIFY_H=$(num_or "${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-}" 192)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
 THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
 THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
+# The log pipeline: how old the newest entry in the store may be. The shipper
+# runs continuously, so this is a "stopped shipping" alarm, not a threshold --
+# 15 minutes gives a restart of vector or the store room to come back.
+THRESH_LOGS_S=$(num_or "${MONITOR_LOGS_MAX_AGE_S:-}" 900)
 # The NIC's errs+drop columns, delta'd between sweeps like the restart counters:
 # a carrier dropping packets is invisible to every chain check (all of them
 # see is a slow sync) and to node-exporter's *counters* until someone looks.
@@ -568,6 +573,24 @@ if systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
     fi
 else
     soft "metrics.timer is not active; the metrics pipeline is not checked"
+fi
+
+# The log pipeline. This is the ONE query the sweep makes against a store, and
+# it is here because the question *is* the pipeline's own liveness: journald ->
+# vector -> victoria-logs is three processes, and the failure that matters is
+# the silent one (every unit "active", nothing arriving). A dead store or an
+# empty window adds a problem; it cannot hide any other check, because every
+# other check reads the daemons and the host directly.
+logs_ok=0
+if systemctl --user is-active --quiet vector.service 2>/dev/null; then
+    if logs_detail=$("$REPO_DIR/scripts/logs.sh" --health --window "$THRESH_LOGS_S" --quiet 2>&1); then
+        logs_ok=1
+        ok "logs: entries arrived in the last ${THRESH_LOGS_S}s"
+    else
+        fail "log pipeline stopped: ${logs_detail:-no entries in the last ${THRESH_LOGS_S}s} (systemctl --user status vector victoria-logs)"
+    fi
+else
+    soft "vector.service is not active; log shipping is not checked"
 fi
 
 # The carrier, read the way the restart counters above are: delta'd between
@@ -792,6 +815,7 @@ status=ok
     printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
     printf 'stack_bouncer_bans %s\n' "${bouncer_bans:-0}"
     printf 'stack_audit_fim_changes %s\n' "${audit_fim:-0}"
+    printf 'stack_logs_ok %s\n' "${logs_ok:-0}"
 } | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" || soft "could not write monitor.prom"
 
 {
@@ -832,7 +856,7 @@ notify() { # title body
     local -a urls=()
     read -r -a urls <<< "$MONITOR_APPRISE_URLS"
     [ "${#urls[@]}" -gt 0 ] || return 0
-    podman run --rm "$APPRISE_IMAGE" apprise -t "$1" -b "$2" "${urls[@]}" >/dev/null 2>&1 \
+    podman run --rm --log-driver=none "$APPRISE_IMAGE" apprise -t "$1" -b "$2" "${urls[@]}" >/dev/null 2>&1 \
         || soft "apprise notification failed"
 }
 

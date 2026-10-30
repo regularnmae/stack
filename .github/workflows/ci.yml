@@ -28,7 +28,7 @@ jobs:
             bootstrap.sh deploy.sh verify.sh \
             deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
             scripts/monitor.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh \
-            scripts/kuma-monitors.sh scripts/ids.sh deploy/root/bouncer.sh
+            scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh deploy/root/bouncer.sh
       - name: syntax check
         run: |
           for f in bootstrap.sh deploy.sh verify.sh \

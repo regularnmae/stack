@@ -57,7 +57,7 @@ if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        victoriametrics node-exporter crowdsec
+        victoriametrics node-exporter victoria-logs vector crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -65,11 +65,14 @@ else
     containers=(
         bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-rpc lightningd
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        victoriametrics node-exporter crowdsec
+        victoriametrics node-exporter victoria-logs vector crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 fi
+# victoria-logs' image is distroless (no shell), so podman cannot run a health
+# command in it; its liveness is proven by the Logs section below instead.
+healthless=" victoria-logs "
 for c in "${containers[@]}"; do
     line=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
     if [ -z "$line" ]; then
@@ -77,7 +80,10 @@ for c in "${containers[@]}"; do
     elif printf '%s' "$line" | grep -q '(healthy)'; then
         pass "$c: $line"
     elif printf '%s' "$line" | grep -q '^Up'; then
-        warn "$c: $line (no health status)"
+        case "$healthless" in
+            *" $c "*) pass "$c: $line (no healthcheck by design; the Logs section probes it)" ;;
+            *)        warn "$c: $line (no health status)" ;;
+        esac
     else
         bad "$c: $line"
     fi
@@ -622,6 +628,56 @@ if [ "$DEEP" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+head2 "Logs"
+# journald -> vector -> victoria-logs. History, not alerting (the monitor's one
+# store query is the pipeline's own liveness), but a silently dead shipper is
+# otherwise invisible: every unit reads "active" while the store stops growing.
+if systemctl --user is-active --quiet vector.service 2>/dev/null; then
+    pass "vector.service is active"
+else
+    warn "vector.service is not active (systemctl --user status vector)"
+fi
+vl_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://victoria-logs:9428/health 2>/dev/null) || vl_code=""
+[ -n "$vl_code" ] || vl_code=000
+if [ "$vl_code" = 200 ]; then
+    pass "victoria-logs /health 200"
+else
+    bad "victoria-logs /health -> $vl_code"
+fi
+# A real LogsQL query, not the liveness endpoint: it proves the journal ->
+# shipper -> store path, not just that the process is up.
+logs_q=$(net_curl -s -m 15 --get --data-urlencode 'query=_time:15m | stats count() as n' \
+    http://victoria-logs:9428/select/logsql/query 2>/dev/null) || logs_q=""
+logs_n=$(printf '%s' "$logs_q" | jq -r '.n // empty' 2>/dev/null) || logs_n=""
+case "$logs_n" in ''|*[!0-9]*) logs_n=0 ;; esac
+if [ "$logs_n" -gt 0 ]; then
+    pass "log store has $logs_n entries from the last 15m"
+else
+    bad "no log entries in the last 15m (vector is not shipping)"
+fi
+if [ -x "$REPO_DIR/scripts/logs.sh" ] && "$REPO_DIR/scripts/logs.sh" --health --quiet >/dev/null 2>&1; then
+    pass "scripts/logs.sh --health"
+elif [ -x "$REPO_DIR/scripts/logs.sh" ]; then
+    warn "scripts/logs.sh --health failed (the check above says why)"
+fi
+# journald is the source. Volatile storage means a reboot erases the record even
+# with the store in place, because the shipper only reads the current boot. The
+# config alone is not proof: a /var/log/journal that tmpfiles has not prepared
+# leaves journald on /run while Storage=persistent is in force.
+if [ -n "$(find /var/log/journal -name '*.journal' -print -quit 2>/dev/null)" ]; then
+    pass "journald is persistent ($(du -sh /var/log/journal 2>/dev/null | cut -f1))"
+elif grep -qs '^Storage=persistent' /etc/systemd/journald.conf.d/99-stack.conf; then
+    warn "journald is configured persistent but still writes to /run (sudo ./bootstrap.sh re-applies tmpfiles)"
+else
+    warn "journald is volatile (sudo ./bootstrap.sh makes it persistent; the store still covers reboots)"
+fi
+if [ -d "$DATA_DIR/logs/vl" ]; then
+    pass "log store present ($(du -sh "$DATA_DIR/logs/vl" 2>/dev/null | cut -f1))"
+else
+    warn "no log store yet ($DATA_DIR/logs/vl); the first shipper run creates it"
+fi
+
+# ---------------------------------------------------------------------------
 head2 "Intrusion detection"
 # Two tiers, and they fail differently:
 #   crowdsec is an ordinary rootless user unit, so this sweep can talk to it.
@@ -742,6 +798,6 @@ if [ "$fails" = 0 ]; then
     exit 0
 fi
 printf '%d check(s) failed.\n' "$fails"
-printf 'Logs:  podman logs <container>\n'
+printf 'Logs:  scripts/logs.sh --since 15m   (or podman logs <container>)\n'
 printf 'Units: systemctl --user status <service>.service\n'
 exit 1

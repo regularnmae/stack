@@ -1,0 +1,87 @@
+# Quadlet unit for Vector, the stack's log shipper: journald -> VictoriaLogs.
+#
+# Why a shipper at all: podman's default log driver is journald, so *every*
+# container's stdout and every host script's output is already in one place.
+# What journald cannot do is search across services or keep more than a couple
+# of days -- this unit turns that one local journal into entries VictoriaLogs
+# can index, label and retain.
+#
+# Vector's journald source checkpoints into data_dir (one cursor per batch), so
+# a restart resumes where it stopped instead of duplicating the journal. Its
+# `current_boot_only` MUST stay true on systemd 250-257: with `false` the source
+# refuses to start ("not supported for systemd versions 250 through 257"), which
+# is this host. The consequence is that entries written while Vector was stopped
+# *in an earlier boot* are not re-read; the journal itself is persistent from
+# bootstrap, so `podman logs`/`journalctl` still have them.
+#
+# install.sh renders this into ~/.config/containers/systemd/, where quadlet
+# turns it into vector.service.
+[Unit]
+Description=Vector (journald -> VictoriaLogs shipper)
+After=network-online.target npm-network-network.service victoria-logs.service
+# Wants=, not Requires=: if the store is down Vector must still start (it keeps
+# retrying the sink) rather than taking the shipper down with it.
+Wants=victoria-logs.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=vector
+# The Debian image, not -alpine and not -distroless: the journald source needs
+# the systemd journal library and runs `journalctl` as a child, and the health
+# check below needs bash. Renovate's Quadlet manager follows the tag.
+Image=docker.io/timberio/vector:0.61.0-debian
+Network=npm-network.network
+
+# Reading the host journal from a rootless container takes TWO things, and
+# neither is optional (both were measured on this host):
+#
+#   GroupAdd=keep-groups
+#       The journal files are root:systemd-journal with an ACL for the login
+#       user's groups. The container's root maps to that user, but supplementary
+#       groups are dropped by default, so without this the read is EACCES and
+#       journalctl sees no entries at all.
+#   SecurityLabelDisable=true
+#       The journal directories carry the host's SELinux label, which a
+#       container domain may not read. Relabelling /run (or /var/log) is not an
+#       option, so this is the second unit (after node-exporter) with SELinux
+#       separation off. It is acceptable here because the mounts are :ro and the
+#       container publishes nothing to the LAN; the exception is documented in
+#       AGENTS.md.
+GroupAdd=keep-groups
+SecurityLabelDisable=true
+# BOTH journal directories. journald starts volatile and is switched to
+# /var/log/journal by `journalctl --flush` (systemd-journal-flush.service at
+# boot); the shipper has to see whichever one is live, and journalctl merges
+# the two when both are mounted. Mounting only /run is how the pipeline goes
+# quiet the moment persistence starts working.
+Volume=/run/log/journal:/run/log/journal:ro
+Volume=/var/log/journal:/var/log/journal:ro
+# journalctl resolves the journal directory from THIS file. Without it the
+# container uses the image's machine-id, finds no /var/log/journal/<id>, and
+# reports "No journal files were found" -- measured, and why the /run-only
+# mount happened to work (that directory is scanned whole).
+Volume=/etc/machine-id:/etc/machine-id:ro
+# The shipper's config (rendered by install.sh from deploy/logs/vector.toml) and
+# its checkpoint directory. The config is a directory mount for the same reason
+# as VictoriaMetrics' scrape.yml: a single-file bind mount keeps the inode it
+# opened, so a re-rendered file would never reach the running process.
+Volume=@CONFIG_DIR@/logs/vector:/etc/vector:ro
+Volume=@DATA_DIR@/logs/vector:/var/lib/vector:z
+
+# The image's entrypoint is /usr/bin/vector; Exec= supplies its arguments (the
+# image's own default points at /etc/vector/vector.yaml, which does not exist
+# here). The API is loopback-only inside the container and exists for the health
+# check -- it proves the process is alive and serving, while the real question
+# ("are entries arriving?") is answered by verify.sh and the monitor.
+Exec=--config /etc/vector/vector.toml
+HealthCmd=bash -c "exec 3<>/dev/tcp/127.0.0.1/8686"
+HealthInterval=60s
+HealthStartPeriod=15s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

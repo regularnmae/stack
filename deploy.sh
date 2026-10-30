@@ -36,6 +36,12 @@ NPM_UNIT_CHANGED=0
 # shellcheck source=scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
+# Fallbacks for a manifest that predates the log block, so the summary below
+# still prints something true (install.sh carries the same defaults, and a
+# rendered unit must not fail on a stale checkout).
+LOGS_RETENTION="${LOGS_RETENTION:-14d}"
+LOGS_MAX_BYTES="${LOGS_MAX_BYTES:-10GiB}"
+
 # git must never prompt mid-deploy: on a host with no credentials that is a
 # one-time setup step, not a question, and a prompt would hang the run.
 # BatchMode makes ssh fail fast too (no passphrase or host-key prompt). An
@@ -197,6 +203,13 @@ unit_digest() {
             | sort -z | xargs -0 -r sha256sum 2>/dev/null \
             | sha256sum | awk '{ print $1 " crowdsec.unit" }'
     fi
+    # The log shipper's config is rendered by install.sh, not mounted from the
+    # repo, and Vector reads it only at start (there is no reload). Hash it under
+    # the unit's stem so a changed transform restarts exactly that unit, the same
+    # contract as crowdsec's tree.
+    if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
+        sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 " vector.unit" }'
+    fi
 }
 
 # .container only, never *.network: a network cannot be restarted under the
@@ -320,6 +333,12 @@ start_infra() {
     # instead of beginning mid-way through it.
     start_unit node-exporter
     start_unit victoriametrics
+    # The log pipeline: journald -> vector -> victoria-logs. Same reasoning as
+    # the metrics store -- it depends on nothing, and starting it before the
+    # daemons is what captures their first minutes. vector buffers and retries
+    # if the store is not up yet, so the order inside this pair is not gating.
+    start_unit victoria-logs
+    start_unit vector
     # tor first: lightningd requires it and addresses it by its pinned IP. Its
     # image is the one install.sh rebuilds in place, so bounce it first when the
     # container predates the image (see refresh_image_unit).
@@ -850,6 +869,10 @@ Stack deployed.
                     loopback-only by design -- read it over an SSH tunnel:
                     ssh -L 8428:127.0.0.1:8428 <host>, then
                     http://127.0.0.1:8428/vmui (30d of history)
+  Logs:             journald -> vector -> victoria-logs, ${LOGS_RETENTION} or
+                    ${LOGS_MAX_BYTES} (whichever comes first), also loopback-only:
+                    scripts/logs.sh --since 1h, or ssh -L 9428:127.0.0.1:9428
+                    <host> then http://127.0.0.1:9428/select/vmui
 
 Chain sync continues in the background (both daemons are full nodes, so the
 first sync downloads and validates the whole Bitcoin and Monero chains). Re-run
