@@ -17,6 +17,16 @@ env_value() {
     sed -n "s/^$key=//p" "$file" | head -n1 | tr -d '\r'
 }
 
+# A fresh secret. Hex only, on purpose: these values end up in a rendered
+# systemd Exec= line (Quadlet splits it on whitespace and quotes nothing) and in
+# podman argv, so a value with a space, a quote or a dollar sign would be a
+# foot-gun in three places at once. 32 bytes = the 64 characters bitcoind, Tor,
+# Monero and CLN all accept.
+rand_hex() {
+    openssl rand -hex 32 2>/dev/null && return 0
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+
 # The image the host-side checks speak through: a curl client (see
 # netcheck/Containerfile), built by deploy/install.sh. It is a throwaway
 # container rather than a host package, so the host needs only podman for a
@@ -57,6 +67,60 @@ net_curl() {
 net_curl_host() {
     netcheck_ready || return 127
     podman run --rm -i --network host "$NETCHECK_IMAGE" curl "$@"
+}
+
+# Wait for a container's own healthcheck to report healthy. Shared by deploy.sh
+# (which starts the units) and scripts/rotate.sh (which restarts the ones a
+# rotated credential touches), so both wait the same way. Honours DRY_RUN when
+# the caller sets it, and returns non-zero after the timeout rather than dying:
+# the caller decides whether that is fatal.
+wait_healthy() { # container timeout
+    local c="$1" t="${2:-180}" deadline st=""
+    [ "${DRY_RUN:-0}" = 1 ] && return 0
+
+    # Prefer podman's own health wait: it wakes the instant the state changes
+    # instead of a shell `sleep 5` loop that spawns podman and date per tick.
+    # `podman wait` has no --timeout of its own (it was never a flag -- passing
+    # one made every wait fail instantly, so the caller always saw "not
+    # healthy"), so coreutils `timeout` bounds it; killing the client leaves the
+    # container alone. Only when the container defines a healthcheck, else
+    # podman has nothing to wait on.
+    if command -v timeout >/dev/null 2>&1 \
+        && podman wait --help 2>/dev/null | grep -q -- '--condition' \
+        && [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$c" 2>/dev/null)" = yes ]; then
+        timeout "$t" podman wait --condition=healthy --condition=unhealthy --interval 2 "$c" >/dev/null 2>&1 || true
+        st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
+        case "$st" in
+            *"(healthy)"*) log "$c is healthy"; return 0 ;;
+        esac
+        warn "$c not healthy after ${t}s (status: ${st:-container missing})"
+        return 1
+    fi
+
+    # Fallback (no podman --condition, or no healthcheck): poll.
+    deadline=$(( $(date +%s) + t ))
+    while :; do
+        st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
+        case "$st" in *"(healthy)"*) log "$c is healthy"; return 0 ;; esac
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            warn "$c not healthy after ${t}s (status: ${st:-container missing})"
+            return 1
+        fi
+        sleep 5
+    done
+}
+
+# A CLN rune restriction: one alternatives group naming method prefixes, in the
+# JSON shape `createrune` wants (an array of groups, each an array of
+# alternatives). Declared once in stack.conf (CLN_READ_METHODS and friends) so
+# deploy/install.sh and scripts/rotate.sh mint the SAME runes -- a rotator that
+# granted more, or less, than the installer would be a security bug.
+rune_json() { # prefix...
+    local out="" p
+    for p in "$@"; do
+        out+="${out:+,}\"method^$p\""
+    done
+    printf '[[%s]]' "$out"
 }
 
 # --- the Electrum protocol (Fulcrum) ----------------------------------------

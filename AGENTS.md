@@ -43,9 +43,11 @@ the MCP server.
 ./scripts/backup.sh                 # restic backup / restore / inspect
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
+./scripts/rotate.sh --list          # credentials this repo can rotate (+ --dry-run)
+./scripts/rotate.sh --status        # a pending rotation journal, last 10 runs
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
 ./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong
@@ -237,6 +239,21 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   servers' `spend.env` (never seed `1`); `scripts/spend-audit.sh` asserts it,
   hash-baselines both `spend.env`, both token files and `node.env` (the spend
   rune), and diffs outgoing `listpays`/`get_transfers` against a baseline.
+- **Rotation goes through the same two authorities as install, so it cannot
+  drift from it:** `scripts/rotate.sh` writes the source of truth, re-runs
+  `deploy/install.sh` to re-render (never a unit by hand), restarts the affected
+  units and only then revokes (`destroyrune`, the old RPC password). The three
+  seed-once files are why a rotation is not an env edit — `bitcoin.conf` is
+  edited inside the container, `torrc` only in its `HashedControlPassword` line
+  (the onion block is `install.sh`'s), and `btc-explorer.env`/
+  `bitcoin-node-mcp/upstream.env` are rewritten because install.sh never
+  refreshes them. The CLN method allowlists live in `stack.conf`
+  (`CLN_READ_METHODS`/`CLN_SPEND_METHODS`/`BOLTMESH_RUNE_METHODS`, rendered by
+  `rune_json`) precisely so the installer and the rotator mint the same runes.
+  New values are journaled under `$DATA_DIR/config/rotation/` before they are
+  applied (`--status`/`--resume`, never a second mint), the spend baseline is
+  rehashed per file rather than `--rebaseline`d, and `rotation.log` records the
+  act without the value. No timer: these tokens have clients outside the stack.
 - **The monitor is a read-only host script, not a container:** `monitor.timer` (a
   plain user unit) schedules `monitor.service`, which runs
   `scripts/monitor.sh --quiet` with an optional

@@ -250,42 +250,6 @@ refresh_image_unit() { # container image -> restart when the container is older
     wait_healthy "$name" "$APP_HEALTH_WAIT" || true
 }
 
-wait_healthy() { # container timeout
-    local c="$1" t="${2:-180}" deadline st=""
-    [ "$DRY_RUN" = 1 ] && return 0
-
-    # Prefer podman's own health wait: it wakes the instant the state changes
-    # instead of a shell `sleep 5` loop that spawns podman and date per tick.
-    # `podman wait` has no --timeout of its own (it was never a flag -- passing
-    # one made every wait fail instantly, so the caller always saw "not
-    # healthy"), so coreutils `timeout` bounds it; killing the client leaves the
-    # container alone. Only when the container defines a healthcheck, else
-    # podman has nothing to wait on.
-    if command -v timeout >/dev/null 2>&1 \
-        && podman wait --help 2>/dev/null | grep -q -- '--condition' \
-        && [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$c" 2>/dev/null)" = yes ]; then
-        timeout "$t" podman wait --condition=healthy --condition=unhealthy --interval 2 "$c" >/dev/null 2>&1 || true
-        st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
-        case "$st" in
-            *"(healthy)"*) log "$c is healthy"; return 0 ;;
-        esac
-        warn "$c not healthy after ${t}s (status: ${st:-container missing})"
-        return 1
-    fi
-
-    # Fallback (no podman --condition, or no healthcheck): poll.
-    deadline=$(( $(date +%s) + t ))
-    while :; do
-        st=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
-        case "$st" in *"(healthy)"*) log "$c is healthy"; return 0 ;; esac
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-            warn "$c not healthy after ${t}s (status: ${st:-container missing})"
-            return 1
-        fi
-        sleep 5
-    done
-}
-
 wait_cmd() { # description timeout cmd...
     local desc="$1" t="$2"; shift 2
     local deadline

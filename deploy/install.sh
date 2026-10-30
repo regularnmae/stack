@@ -94,12 +94,16 @@ USER_TIMERS=(
 )
 
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
-READ_METHODS='"method^getinfo","method^listfunds","method^listchannels","method^listpeers","method^listinvoices","method^listpays","method^decode"'
-SPEND_METHODS="$READ_METHODS,\"method^invoice\",\"method^pay\",\"method^keysend\",\"method^withdraw\",\"method^close\""
+# The prefixes themselves are declared in stack.conf (CLN_READ_METHODS,
+# CLN_SPEND_METHODS, BOLTMESH_RUNE_METHODS) because scripts/rotate.sh mints the
+# same runes on a rotation; rune_json (scripts/lib.sh) turns each array into the
+# restriction JSON. SPEND is the read set plus the payment methods.
+SPEND_RESTRICTIONS=$(rune_json "${CLN_READ_METHODS[@]}" "${CLN_SPEND_METHODS[@]}")
+READ_RESTRICTIONS=$(rune_json "${CLN_READ_METHODS[@]}")
 # BoltMesh's Lightning gateway only creates invoices and reads them back (the
 # clnrest calls are /v1/invoice and /v1/listinvoices), so its rune is a subset:
 # no pay/keysend/withdraw/close. getinfo is included so `checkrune` proves it.
-BOLTMESH_METHODS='"method^getinfo","method^listinvoices","method^invoice"'
+BOLTMESH_RESTRICTIONS=$(rune_json "${BOLTMESH_RUNE_METHODS[@]}")
 
 # ---------------------------------------------------------------------------
 # where the data lives
@@ -111,11 +115,6 @@ ensure_data_dir_selinux
 SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 TOR_DIR="$DATA_DIR/tor"
-
-rand_hex() {
-    openssl rand -hex 32 2>/dev/null && return 0
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
-}
 
 write_secret() {
     local path="$1"
@@ -977,8 +976,8 @@ if command -v podman >/dev/null 2>&1 \
     && ! { rune_usable "$read_rune" && rune_usable "$spend_rune"; }; then
     if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
         log "creating runes on the node"
-        new_read=$(create_rune "[[$READ_METHODS]]")
-        new_spend=$(create_rune "[[$SPEND_METHODS]]")
+        new_read=$(create_rune "$READ_RESTRICTIONS")
+        new_spend=$(create_rune "$SPEND_RESTRICTIONS")
         if [ -n "$new_read" ] && [ -n "$new_spend" ]; then
             read_rune="$new_read"
             spend_rune="$new_spend"
@@ -1022,7 +1021,7 @@ BOLT_GATEWAY="$BOLT_DB/gateway.env"
 bolt_rune=$(env_value "$BOLT_GATEWAY" LIGHTNING_API_KEY)
 if command -v podman >/dev/null 2>&1 && ! rune_usable "$bolt_rune"; then
     if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
-        new_bolt_rune=$(create_rune "[[$BOLTMESH_METHODS]]")
+        new_bolt_rune=$(create_rune "$BOLTMESH_RESTRICTIONS")
         if [ -n "$new_bolt_rune" ]; then
             bolt_rune="$new_bolt_rune"
             log "created a usable BoltMesh rune"

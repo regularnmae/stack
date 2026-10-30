@@ -887,6 +887,62 @@ line.
 `install.sh` seeds on a fresh host and hands to the image uid. It is edited
 through the container: `podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf`.
 
+### Rotating a credential
+
+`scripts/rotate.sh` changes one credential and brings every consumer of it along
+in dependency order:
+
+```sh
+./scripts/rotate.sh --list                  # the targets and what each one touches
+./scripts/rotate.sh --status                # a pending journal + the last 10 runs
+./scripts/rotate.sh bitcoin-rpc --dry-run   # the plan, no values, no writes
+./scripts/rotate.sh bitcoin-rpc             # rotate, re-render, restart, verify
+./scripts/rotate.sh runes --scope spend     # read | spend | boltmesh | all
+```
+
+| Target | Rotates | Restarts |
+| --- | --- | --- |
+| `bitcoin-rpc` | `bitcoind`'s RPC password (and `--user`) | bitcoind, then fulcrum, lightningd, bitcoin-node-mcp, btc-explorer |
+| `monero-rpc` | `monero-wallet-rpc`'s `--rpc-login` | monero-wallet-rpc, then monero-wallet-mcp, BoltMesh |
+| `tor-control` | Tor's control password (lightningd's statictor) | tor, then lightningd |
+| `runes` | the CLN runes: lightning-mcp's read/spend pair and BoltMesh's gateway | lightning-mcp and/or BoltMesh |
+
+None of it is scheduled. These credentials are also held by clients outside the
+stack (an MCP client's config, a wallet, nginx-proxy-manager), so a rotation on a
+timer would break them silently; it is an operator action, and the entry it
+leaves in `$DATA_DIR/audit/rotation.log` is the record (never a value).
+
+Three things make it more than an env-file edit, and `rotate.sh` is built around
+them:
+
+- **Part of each credential lives in a file `install.sh` never refreshes.**
+  `bitcoin.conf`, `torrc` and the per-app `upstream.env`/`btc-explorer.env` are
+  seeded once, so the script edits them in place (`bitcoin.conf` from inside the
+  container, only the `HashedControlPassword` line of `torrc`) *and* rewrites
+  `secrets.env` and the rest, so the next install renders the same value. A
+  rotation is never just one file.
+- **A re-render does not change a running container.** Every target restarts its
+  own dependents in order and waits for podman's health, so a credential the
+  daemon has not picked up cannot look rotated.
+- **Revocation is last.** The CLN runes are minted, proved with `checkrune`, put in
+  `lightning-mcp/node.env`/`boltmesh/gateway.env`, proven again through the server
+  with `getinfo`, and only then blacklisted with `destroyrune` — a failed swap
+  leaves the old rune working instead of leaving the server unable to read the
+  node. `runes` rehashes only `node.env` in the spend baseline, so the tripwire
+  does not report a rotation as policy drift.
+
+**If a run dies half-way** the new values are already journaled (mode 600,
+`$DATA_DIR/config/rotation/<target>.pending`) with the stage it reached, and no
+daemon is left holding a credential that nobody recorded:
+
+```sh
+./scripts/rotate.sh --status   # what is pending and where it stopped
+./scripts/rotate.sh --resume   # finish it with the SAME values (never re-mints)
+```
+
+`--force` skips the preflight (an unhealthy daemon, or a nightly backup in
+flight, which would otherwise snapshot one side of a credential pair).
+
 ## Layout
 
 ```
@@ -903,6 +959,7 @@ stack/
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
+  scripts/rotate.sh       # rotate one credential + every dependent service
   scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
   scripts/kuma-monitors.sh # the status page's monitors (KUMA_MONITORS) + page, via socket.io
   deploy/
