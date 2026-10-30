@@ -24,7 +24,8 @@ QUADLET_DIR="$CONFIG_HOME/containers/systemd"
 # Plain systemd user units live here, not in the quadlet dir: Quadlet generates
 # .service files from .container/.volume/.network/... but has no .timer type,
 # and the health monitor is a host script rather than a container. backup.timer,
-# monitor.timer and monitor.service are installed as ordinary user units.
+# backup-verify.service, backup-verify.timer, monitor.timer and monitor.service
+# are installed as ordinary user units.
 USER_UNIT_DIR="$CONFIG_HOME/systemd/user"
 
 # shellcheck source=../scripts/lib.sh
@@ -79,6 +80,8 @@ UNITS=(
 # Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir).
 USER_UNITS=(
     "backup.timer"
+    "backup-verify.service"
+    "backup-verify.timer"
     "monitor.service"
     "monitor.timer"
     "metrics.service"
@@ -89,6 +92,7 @@ USER_UNITS=(
 # their own.
 USER_TIMERS=(
     "backup.timer"
+    "backup-verify.timer"
     "monitor.timer"
     "metrics.timer"
 )
@@ -859,6 +863,9 @@ MONITOR_VERIFY_ARGS=--deep
 #                sustained contention is what makes every chain crawl.
 #   backup:      hours since the last successful restic snapshot (a timer that
 #                fires is not the same as a repository that has a snapshot).
+#   drill:       hours since the last successful restore drill (scripts/backup.sh
+#                verify). Keyed on the last SUCCESS, so a drill that skips for
+#                lack of disk space cannot look healthy just because it ran.
 #   cert:        days of remaining validity on the shortest-lived certificate
 #                nginx-proxy-manager holds (a failed renewal is otherwise silent).
 #   restarts:    systemd restarts of any stack unit between two sweeps.
@@ -870,6 +877,7 @@ MONITOR_DISK_FREE_PCT=10
 MONITOR_INODES_FREE_PCT=5
 MONITOR_IO_UTIL_PCT=90
 MONITOR_BACKUP_MAX_AGE_H=36
+MONITOR_BACKUP_VERIFY_MAX_AGE_H=192
 MONITOR_CERT_MIN_DAYS=14
 MONITOR_RESTART_MAX=3
 MONITOR_METRICS_MAX_AGE_S=300
@@ -1128,8 +1136,11 @@ Done. Everything the stack owns lives under:
     config/         <- all bearer tokens and secrets (mode 600)
     audit/          <- the monitor's log and the spend tripwire baselines
     monitoring/     <- the metrics store and node-exporter's textfile (regenerable)
+    backup-verify/  <- the restore drill's scratch target (regenerable, wiped each run)
   $STACK_BACKUP_DIR
-    the restic repository the nightly backup writes (backup.timer)
+    the restic repository the nightly backup writes (backup.timer);
+    backup-verify.timer restores it to a scratch dir every week and records the
+    verdict in $DATA_DIR/audit/backup-verify.status
 
 Next:  ./deploy.sh         # build images, start everything, verify
 The two explorers are built by ./deploy.sh from btc-explorer/ and xmr-explorer/

@@ -682,6 +682,13 @@ if [ -n "$ONLY" ]; then
         # runs it once now instead of waiting for the schedule.
         install_units
         start_unit backup
+    elif [ "$ONLY" = backup-verify ]; then
+        # The weekly restore drill (scripts/backup.sh verify): run one now rather
+        # than waiting for Sunday. It reads only the repository, so it is safe on
+        # a host whose stack is serving; the verdict lands in
+        # $DATA_DIR/audit/backup-verify.status.
+        install_units
+        start_unit backup-verify
     elif [ "$ONLY" = monitor ]; then
         # Like backup: install.sh has (re)enabled monitor.timer; run the sweep
         # once now. monitor.service is oneshot and takes no arguments.
@@ -819,7 +826,9 @@ Stack deployed.
                     declared in KUMA_MONITORS in stack.conf and reconciled
                     once $DATA_DIR/config/uptime-kuma/api.env has the login
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
-  Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR
+  Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR;
+                    weekly restore drill (backup-verify.timer), verdict in
+                    $DATA_DIR/audit/backup-verify.status
   Monitoring:       every 5 min (monitor.timer) + spend tripwire; both alert
                     only once $DATA_DIR/config/monitoring/monitor.env is filled in
   Metrics:          every minute (metrics.timer) into victoriametrics, which is

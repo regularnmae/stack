@@ -473,6 +473,19 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet ba
 else
     warn "backup.timer is not active (systemctl --user status backup.timer)"
 fi
+# The restore drill: a timer that fires is not a backup that restores, and the
+# weekly run is the only thing that ever opens a snapshot for real.
+BACKUP_VERIFY_TIMER="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/backup-verify.timer"
+if [ -f "$BACKUP_VERIFY_TIMER" ]; then
+    pass "backup-verify.timer installed"
+else
+    bad "backup-verify.timer is not installed (run deploy/install.sh)"
+fi
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet backup-verify.timer 2>/dev/null; then
+    pass "backup-verify.timer is active"
+else
+    warn "backup-verify.timer is not active (systemctl --user status backup-verify.timer)"
+fi
 if [ "$DEEP" = 1 ]; then
     # Freshness is best-effort and a fresh host legitimately has no snapshot, so
     # this only warns. A failure means the repository or password is wrong.
@@ -481,6 +494,27 @@ if [ "$DEEP" = 1 ]; then
         pass "backup repository has snapshots"
     else
         warn "no backup snapshots yet (expected until the first backup runs)"
+    fi
+    # The drill's own verdict, written by scripts/backup.sh verify. The age is
+    # measured from the last success, so a drill that keeps skipping is visible.
+    VSTATUS="$DATA_DIR/audit/backup-verify.status"
+    if [ -f "$VSTATUS" ]; then
+        vres=$(sed -n 's/^result=//p' "$VSTATUS" | head -n1)
+        vok=$(sed -n 's/^ok_epoch=//p' "$VSTATUS" | head -n1)
+        vdet=$(sed -n 's/^detail=//p' "$VSTATUS" | head -n1)
+        case "$vok" in
+            ''|*[!0-9]*) warn "backup restore drill has no recorded success yet" ;;
+            *)
+                vage=$(( ( $(date +%s) - vok ) / 3600 ))
+                if [ "$vres" = fail ]; then
+                    bad "last backup restore drill failed: ${vdet:-run scripts/backup.sh verify}"
+                else
+                    pass "last backup restore drill passed ${vage}h ago"
+                fi
+                ;;
+        esac
+    else
+        warn "no backup restore drill yet (expected until backup-verify.timer runs)"
     fi
 fi
 

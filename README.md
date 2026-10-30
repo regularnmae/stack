@@ -123,7 +123,8 @@ container, no DNS and no certificate needed. See
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
 `monero-wallet-rpc/`, `tor/`, `config/`, `npm/`, `audit/`, and the BoltMesh
 database as a `pg_dumpall`) runs from `backup.timer` into
-`$STACK_BACKUP_DIR`. It is the one thing that recovers you if the data disk
+`$STACK_BACKUP_DIR`, and `backup-verify.timer` restores one snapshot a week to
+prove it works. It is the one thing that recovers you if the data disk
 itself is lost — see [Backup & restore](#backup--restore).
 
 A health monitor and spend tripwire run every five minutes from `monitor.timer`;
@@ -180,6 +181,7 @@ a hand rebuild (`--only` forces one anyway). Common flags:
 ./deploy.sh --only boltmesh           # rebuild + migrate the whole BoltMesh tier
 ./deploy.sh --only explorers          # rebuild both explorer images
 ./deploy.sh --only backup             # run the backup job now
+./deploy.sh --only backup-verify      # run the restore drill now (weekly on a timer)
 ./deploy.sh --only monitor            # run the health + spend checks now
 ./deploy.sh --only npm-hosts           # re-apply every proxy host in NPM
 ./deploy.sh --only tor                 # re-render the onion services and restart tor
@@ -302,6 +304,8 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
     (both regenerable, both excluded from backups)
   - `backup-cache/` — restic's cache (regenerable)
+  - `backup-verify/` — the restore drill's scratch target; a copy of the backup
+    set, wiped before and after every drill (regenerable, excluded from backups)
 
 The explorers keep no data directory: both are stateless and read their daemon
 over RPC. Their only persistent input is
@@ -409,8 +413,10 @@ one-line edit in `stack.conf` rather than four edits in two files.
 - `deploy/backup.timer` — the schedule (`*-*-* 03:30:00`, plus 30 min of
   jitter). Quadlet has no `.timer` type, so this is an ordinary systemd **user**
   unit at `~/.config/systemd/user/backup.timer`, enabled by `install.sh`.
+- `deploy/backup-verify.service` + `deploy/backup-verify.timer` — the weekly
+  restore drill (below), also plain user units.
 - `scripts/backup.sh` — run it by hand and inspect what you have:
-  `backup | init | list | ls | check | forget | restore <snap> | unlock`.
+  `backup | init | list | ls | check | verify | forget | restore <snap> | unlock`.
   `ls [<snap>]` lists the paths inside a snapshot, which is how you prove a
   given run really holds the database dump and not just the wallet. `backup`
   also takes the same pre-backup `pg_dumpall` as the unit (it starts
@@ -485,6 +491,67 @@ back in.
 > `monerod`, with the RPC unavailable until it finishes (the daemons report it
 > as unhealthy, and `scripts/monitor.sh` says so). The keys file is the part that
 > matters, and it always restores.
+
+### Verifying the backups
+
+A nightly snapshot that has never been opened is a hope, not a backup, so a
+second timer opens one:
+
+- `deploy/backup-verify.timer` runs `scripts/backup.sh verify` every Sunday at
+  05:30 (plus up to 30 min of jitter) — two hours after the nightly job, so it
+  proves a *fresh* snapshot and cannot collide with the backup's restic lock.
+- The drill reads a slice of the repository's pack data
+  (`restic check --read-data-subset=n/4`, rotating, so the whole repository is
+  read every four weeks), restores the snapshot into `$DATA_DIR/backup-verify`
+  with `restic restore --verify`, and asserts that every directory in
+  `BACKUP_PATHS` came back non-empty along with the markers in
+  `BACKUP_VERIFY_PATHS` (`cln/bitcoin/hsm_secret`, the wallet's `.keys`,
+  `tor/onion`, `config/stack/secrets.env`, NPM's sqlite database,
+  uptime-kuma's embedded mariadb). The database dump must also carry its
+  `pg_dumpall` completion trailer, which is what catches a dump killed
+  mid-write.
+- It never touches the live data dirs: only the repository, restic's cache and
+  the scratch target are mounted, and that tree is removed on every exit path.
+  A restore larger than `BACKUP_VERIFY_MAX_MB` (5 GiB) or one that does not fit
+  in the free space is skipped and recorded as such rather than attempted.
+- The verdict lands in `$DATA_DIR/audit/backup-verify.status` (result, snapshot
+  id, file and byte counts, and the last *success*). `scripts/monitor.sh` fails
+  on a failed drill and on a last success older than
+  `MONITOR_BACKUP_VERIFY_MAX_AGE_H` (192 h by default), so a drill that keeps
+  skipping is an alert rather than a green tick.
+
+Run it by hand:
+
+```sh
+./scripts/backup.sh verify              # check + restore + assertions
+./scripts/backup.sh verify --keep       # leave the restored tree to inspect it
+./scripts/backup.sh verify --snapshot <id>
+./scripts/backup.sh verify --no-check   # skip the read-data check, still restore
+./deploy.sh --only backup-verify        # what the timer does
+```
+
+What it proves is the mechanics: the password opens the repository, the pack
+data is intact, a snapshot restores, and the files that matter are inside it.
+What it does **not** prove is what only a real recovery exercises — that an
+*offsite* repository is reachable (the default one is on the same disk, so a
+drill against it survives nothing the disk does not), that the restored wallet
+opens and re-syncs, or that the daemons come up on the restored state. That is
+what the walkthrough above is for, and it is worth running once against a spare
+host rather than trusting a green drill.
+
+The database is the one part a file-level check cannot settle, so replay it on
+demand:
+
+```sh
+./scripts/backup.sh verify --with-db
+```
+
+That restores as usual and then replays `postgres-dump/all.sql` into a throwaway
+`postgres` container, asserting the dump produces tables (the database name is
+not hardcoded: whatever the dump creates is discovered and counted). It is
+deliberately not part of the weekly run — it puts the postgres image in the
+drill's path, and the weekly run should stay deterministic. Do it before a
+release, or quarterly.
 
 ## Monitoring & the spend tripwire
 

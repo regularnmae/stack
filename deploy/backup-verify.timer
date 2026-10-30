@@ -1,0 +1,21 @@
+# The schedule for the restore drill in backup-verify.service.
+#
+# Quadlet has no .timer type, so this is a plain systemd USER unit (like
+# backup.timer). deploy/install.sh installs it to ~/.config/systemd/user/ and
+# runs `systemctl --user enable --now backup-verify.timer`; it activates
+# backup-verify.service.
+[Unit]
+Description=Weekly restore drill for the stack's restic backup
+
+[Timer]
+# Weekly, two hours after the nightly backup (03:30 plus up to 30m of jitter) so
+# the drill proves a FRESH snapshot and cannot collide with the backup's restic
+# lock. A post-downtime catch-up can still overlap (both timers are Persistent);
+# scripts/backup.sh verify waits for the lock and records a skip if it loses.
+OnCalendar=Sun 05:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=backup-verify.service
+
+[Install]
+WantedBy=timers.target

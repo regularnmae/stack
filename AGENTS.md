@@ -34,13 +34,14 @@ the MCP server.
 ./deploy.sh                         # fetch repos, build, start, verify
 ./deploy.sh --only <name>           # one service; --dry-run to plan
 ./deploy.sh --only backup           # run the backup job now
+./deploy.sh --only backup-verify    # run the restore drill now (weekly on a timer)
 ./deploy.sh --only monitor          # run the health + spend checks now
 ./deploy.sh --only npm-hosts        # (re)reconcile every proxy host in nginx-proxy-manager
 ./deploy.sh --only tor              # re-render the onion services into torrc and restart tor
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
-./scripts/backup.sh                 # restic backup / restore / inspect
+./scripts/backup.sh                 # restic backup / restore / verify / inspect
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
 ./scripts/rotate.sh --list          # credentials this repo can rotate (+ --dry-run)
@@ -142,6 +143,25 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`
   type), so `install.sh` renders it into `~/.config/systemd/user/` and enables it.
+- **The backup is drilled weekly, and the drill's verdict is a file, not an exit
+  code.** `deploy/backup-verify.timer` (Sunday 05:30, two hours clear of the
+  nightly job) runs `scripts/backup.sh verify`: `restic check
+  --read-data-subset=n/4` with a rotating counter, a `restore --target /restore`
+  into `$DATA_DIR/backup-verify` (the live data dirs are **not** mounted, which is
+  what makes it safe on a serving host), and assertions that every `BACKUP_PATHS`
+  entry came back non-empty plus the `BACKUP_VERIFY_PATHS` markers and the dump's
+  `pg_dumpall` completion trailer. It writes
+  `$DATA_DIR/audit/backup-verify.status`, and **that file is what
+  `scripts/monitor.sh` reads** — a failed oneshot unit is otherwise just a line
+  in `systemctl --user status`. The age check keys on `ok_epoch` (the last
+  success), so a drill that skips forever (over `BACKUP_VERIFY_MAX_MB`, or
+  without 1.5× the restore size free) fails instead of looking healthy. The
+  scratch tree is `trap`-removed on every exit path and must stay out of
+  `BACKUP_PATHS`; `--with-db` replays the dump into a throwaway postgres and is
+  manual on purpose, because the weekly run must not depend on pulling an image.
+  The drill proves restore *mechanics* only: not that an offsite repo is
+  reachable, and not that the wallet or the daemons come up on the restored
+  state.
 - **Both daemons are full (archival) nodes:** the chains are large (roughly
   800 GB Bitcoin / 250 GB Monero in late 2026) and the data disk must be sized
   for that. `install.sh` seeds `bitcoin.conf` only when it is missing, so an

@@ -64,6 +64,7 @@ MONITOR_DISK_FREE_PCT="${MONITOR_DISK_FREE_PCT:-$(env_value "$MONITOR_ENV" MONIT
 MONITOR_INODES_FREE_PCT="${MONITOR_INODES_FREE_PCT:-$(env_value "$MONITOR_ENV" MONITOR_INODES_FREE_PCT)}"
 MONITOR_IO_UTIL_PCT="${MONITOR_IO_UTIL_PCT:-$(env_value "$MONITOR_ENV" MONITOR_IO_UTIL_PCT)}"
 MONITOR_BACKUP_MAX_AGE_H="${MONITOR_BACKUP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_MAX_AGE_H)}"
+MONITOR_BACKUP_VERIFY_MAX_AGE_H="${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_VERIFY_MAX_AGE_H)}"
 MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONITOR_CERT_MIN_DAYS)}"
 MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
 MONITOR_METRICS_MAX_AGE_S="${MONITOR_METRICS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_METRICS_MAX_AGE_S)}"
@@ -107,6 +108,8 @@ WARNS=()
 verify_failures=0
 backup_age_s=""
 backup_count=""
+backup_verify_age_s=""
+backup_verify_ok=""
 say()  { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
 head3() { say ""; say "$*"; }
 ok()   { say "  ok    $*"; }
@@ -326,6 +329,7 @@ THRESH_DISK=$(num_or "${MONITOR_DISK_FREE_PCT:-}" 10)
 THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
 THRESH_IO=$(num_or "${MONITOR_IO_UTIL_PCT:-}" 90)
 THRESH_BACKUP_H=$(num_or "${MONITOR_BACKUP_MAX_AGE_H:-}" 36)
+THRESH_VERIFY_H=$(num_or "${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-}" 192)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
 THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
 THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
@@ -443,6 +447,38 @@ if command -v jq >/dev/null 2>&1; then
     fi
 else
     soft "jq missing; skipped the backup age check"
+fi
+
+# The restore drill (scripts/backup.sh verify, run weekly by backup-verify.timer):
+# a repository that opens and lists is not a repository that restores. The age is
+# measured from the last SUCCESS, not the last run -- a drill that skips (no disk
+# space, an oversized set) must not look healthy just because the timer fired.
+VERIFY_STATUS_FILE="$AUDIT_DIR/backup-verify.status"
+if [ -f "$VERIFY_STATUS_FILE" ]; then
+    vres=$(env_value "$VERIFY_STATUS_FILE" result)
+    vok=$(num_or "$(env_value "$VERIFY_STATUS_FILE" ok_epoch)" "")
+    vdetail=$(env_value "$VERIFY_STATUS_FILE" detail)
+    if [ "$vres" = fail ]; then
+        fail "backup restore drill failed: ${vdetail:-run scripts/backup.sh verify}"
+        backup_verify_ok=0
+    elif [ -n "$vok" ]; then
+        backup_verify_age_s=$(( $(date +%s) - vok ))
+        vage_h=$(( backup_verify_age_s / 3600 ))
+        if [ "$vage_h" -gt "$THRESH_VERIFY_H" ]; then
+            fail "no successful backup restore drill for ${vage_h}h (threshold ${THRESH_VERIFY_H}h, last result ${vres:-?})"
+            backup_verify_ok=0
+        elif [ "$vres" = skip ]; then
+            soft "backup restore drill skipped: ${vdetail:-no detail} (last success ${vage_h}h ago)"
+            backup_verify_ok=1
+        else
+            ok "backup restore drill passed ${vage_h}h ago"
+            backup_verify_ok=1
+        fi
+    else
+        soft "backup restore drill has no recorded success yet (expected until the first run)"
+    fi
+else
+    soft "no backup restore drill yet (expected until backup-verify.timer runs)"
 fi
 
 # Certificate expiry: NPM renews by itself, and fails silently. One cert per
@@ -622,6 +658,8 @@ status=ok
     printf 'stack_monitor_warnings %s\n' "${#WARNS[@]}"
     [ -n "$backup_age_s" ] && printf 'stack_backup_age_seconds %s\n' "$backup_age_s"
     [ -n "$backup_count" ] && printf 'stack_backup_snapshots %s\n' "$backup_count"
+    [ -n "$backup_verify_age_s" ] && printf 'stack_backup_verify_age_seconds %s\n' "$backup_verify_age_s"
+    [ -n "$backup_verify_ok" ] && printf 'stack_backup_verify_ok %s\n' "$backup_verify_ok"
 } | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" || soft "could not write monitor.prom"
 
 {
