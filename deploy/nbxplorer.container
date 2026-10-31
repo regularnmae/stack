@@ -25,7 +25,7 @@ Environment=NBXPLORER_BTCRPCUSER=@BITCOIN_RPC_USER@
 Environment=NBXPLORER_BTCRPCPASSWORD=@BITCOIN_RPC_PASSWORD@
 # The BTCPay database cluster already exists; NBXplorer creates its own database
 # and runs its migrations on first start (the btcpay role has CREATEDB).
-Environment=NBXPLORER_POSTGRES=User ID=btcpay;Password=@BTCPAY_DB_PASSWORD@;Host=postgres;Port=5432;Database=nbxplorer;
+Environment="NBXPLORER_POSTGRES=User ID=btcpay;Password=@BTCPAY_DB_PASSWORD@;Host=postgres;Port=5432;Database=nbxplorer;"
 Environment=NBXPLORER_SIGNALFILESDIR=/datadir
 Environment=NBXPLORER_COOKIEFILE=/datadir/.cookie
 

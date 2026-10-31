@@ -33,7 +33,7 @@ Environment=BTCPAY_CHAINS=btc
 # webhook URL is internal, so this only affects links rendered by the UI.
 Environment=BTCPAY_EXTERNALURL=http://localhost:49392/
 Environment=BTCPAY_BTCEXPLORERURL=http://nbxplorer:32838/
-Environment=BTCPAY_POSTGRES=User ID=btcpay;Password=@BTCPAY_DB_PASSWORD@;Host=postgres;Port=5432;Database=btcpay;
+Environment="BTCPAY_POSTGRES=User ID=btcpay;Password=@BTCPAY_DB_PASSWORD@;Host=postgres;Port=5432;Database=btcpay;"
 Environment=BTCPAY_BTCEXPLORERCOOKIEFILE=/nbxplorer/Main/.cookie
 # The existing CLN node over its unix socket. BTCPay treats it as the server's
 # internal node, which is what btcpay-bootstrap selects for BTC-LN.
