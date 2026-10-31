@@ -19,7 +19,7 @@ Requires=npm-network-network.service postgres.service nbxplorer.service
 
 [Container]
 ContainerName=btcpay
-Image=docker.io/btcpayserver/btcpayserver:2.4.5
+Image=docker.io/btcpayserver/btcpayserver:2.4.7
 Network=npm-network.network
 
 # Admin UI through an SSH tunnel only. 127.0.0.1 keeps it off the LAN and the
