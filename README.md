@@ -1353,10 +1353,12 @@ agent-mcp bitcoin-node --list
 It is not a service — no unit, no container, no port, nothing in the backup set,
 and `--skip-agent-skills` leaves a host that only serves untouched. It adds no
 credential either: `servers.json` expands `$AGENT_MCP_BASE_URL` (default
-`$MCP_HOST`) and reads each server's token straight from
-`$DATA_DIR/config/<server>/token.env` on every call, so `scripts/rotate.sh`
-needs no second step and no copy can go stale. The skills are read-only by
-construction, because the servers they call are.
+`https://mcp.boltmesh.net`, i.e. the default `MCP_HOST`) and reads each server's
+token straight from `$DATA_DIR/config/<server>/token.env` on every call, so
+`scripts/rotate.sh` needs no second step and no copy can go stale. A host that
+changed `MCP_HOST` exports `AGENT_MCP_BASE_URL` to match; `./verify.sh` warns
+when the two disagree. The skills are read-only by construction, because the
+servers they call are.
 
 The path prefixes live in that registry rather than being derived from
 `MCP_HOSTS`, so moving one means editing both — `./verify.sh` fails on the

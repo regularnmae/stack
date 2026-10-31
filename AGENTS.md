@@ -688,9 +688,11 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `servers.json`), never seeded into `~/.config/agent-skills/env`, because a
   copy goes stale the moment `scripts/rotate.sh` rotates a token; and the URL
   *prefixes* are hardcoded in `servers.json` (only the host comes from
-  `$AGENT_MCP_BASE_URL`, defaulting to `MCP_HOST`), so `verify.sh` compares the
-  resolved registry with `MCP_HOSTS` and fails on the drift. `agent-mcp` is
-  python3 (stdlib only), which `bootstrap.sh` now installs for it.
+  `$AGENT_MCP_BASE_URL`, defaulting to `mcp.boltmesh.net`, the default
+  `MCP_HOST`; a host that changed `MCP_HOST` must export it, and `verify.sh`
+  warns when the two disagree), so `verify.sh` compares the resolved registry
+  with `MCP_HOSTS` and fails on the drift. `agent-mcp` is python3 (stdlib only),
+  which `bootstrap.sh` now installs for it.
 
 ## Interface contract with the app repos
 
