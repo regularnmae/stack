@@ -27,7 +27,7 @@ Network=npm-network.network
 
 Volume=@DATA_DIR@/btcpay/xmr-wallet:/wallet:z
 
-Exec=monero-wallet-rpc --non-interactive --rpc-bind-ip=0.0.0.0 --confirm-external-bind --rpc-bind-port=18083 --disable-rpc-login --trusted-daemon --daemon-address=monerod:18089 --wallet-dir=/wallet
+Exec=monero-wallet-rpc --non-interactive --rpc-bind-ip=0.0.0.0 --confirm-external-bind --rpc-bind-port=18083 --disable-rpc-login --untrusted-daemon --daemon-address=monerod:18089 --wallet-dir=/wallet
 
 # A wallet RPC is red for as long as the wallet refreshes, so killing it would
 # restart the refresh from scratch (same rule as the retired backend wallet).
