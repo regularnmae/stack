@@ -28,10 +28,17 @@ EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 # The image ships no HEALTHCHECK. Probe over TCP rather than the Unix socket so
 # the check is meaningful and needs no shell or environment expansion -- a
 # $VAR here would be expanded by the systemd generator, not the container.
+#
+# 5 retries, not 3: after a crash, postgres answers only once WAL replay
+# finishes, and 3 probes (90s) can kill it mid-recovery -- the one state where a
+# restart makes the next start slower, not faster.
+# health-lint: HC005 5 retries -- crash recovery (WAL replay) outlasts 3 probes
 HealthCmd=pg_isready -h 127.0.0.1 -U vpnuser -d vpndb
 HealthInterval=30s
+HealthTimeout=10s
 HealthStartPeriod=30s
 HealthRetries=5
+HealthOnFailure=kill
 
 [Service]
 Restart=always

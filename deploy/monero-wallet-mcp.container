@@ -30,9 +30,10 @@ PublishPort=127.0.0.1:8103:8000
 
 HealthCmd=python /app/healthcheck.py
 HealthInterval=30s
+HealthTimeout=10s
 HealthRetries=3
 HealthStartPeriod=10s
-HealthOnFailure=restart
+HealthOnFailure=kill
 
 [Service]
 Restart=always

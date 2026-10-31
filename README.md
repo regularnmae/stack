@@ -783,6 +783,14 @@ Nothing in the stack pages on its own: a container has a healthcheck and
 stalled chain or a spend is otherwise silent. `install.sh` installs a monitor
 that closes that gap.
 
+The healthchecks themselves follow a contract: every container unit either
+defines one or is declared healthless in `stack.conf` with a reason, and
+`./scripts/healthcheck-lint.sh` fails the build when a unit drifts from it
+(explicit interval/start/retries/timeout, a bounded HTTP probe, and
+`HealthOnFailure=kill` so the restart is systemd's and the monitor's restart
+counter can see it). The rules, the two exemptions and why a probe must not
+check the data path are in `AGENTS.md`, "Healthchecks follow a contract".
+
 - `scripts/monitor.sh` — runs every five minutes from
   `deploy/monitor.timer`. Read-only: it starts nothing and rewrites no config.
   It runs `verify.sh` for the container/MCP base checks and adds the ones

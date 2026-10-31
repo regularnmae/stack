@@ -17,8 +17,10 @@ Network=npm-network.network
 # The valkey image ships no HEALTHCHECK; PING is the canonical liveness probe.
 HealthCmd=valkey-cli ping
 HealthInterval=30s
+HealthTimeout=10s
 HealthStartPeriod=10s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

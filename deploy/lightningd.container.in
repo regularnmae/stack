@@ -67,6 +67,7 @@ Exec=--network=bitcoin \
 # long as the wallet is refreshing, and killing it would restart that refresh.
 HealthCmd=lightning-cli getinfo
 HealthInterval=60s
+HealthTimeout=15s
 HealthStartPeriod=5m
 HealthRetries=3
 HealthOnFailure=kill

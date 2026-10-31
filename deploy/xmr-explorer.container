@@ -36,10 +36,12 @@ Exec=--bind=0.0.0.0:31312 --daemon=monerod:18089
 # while monerod is in initial sync its restricted RPC can be slow enough that
 # the page times out; verify.sh checks the home page separately and warns rather
 # than fails in that window.
-HealthCmd=curl -fsS -o /dev/null http://127.0.0.1:31312/style.css
+HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:31312/style.css
 HealthInterval=60s
+HealthTimeout=10s
 HealthStartPeriod=30s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

@@ -70,11 +70,15 @@ else
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 fi
-# victoria-logs' image is distroless (no shell), and the two netcheck clients
-# just sleep until something execs into them; none can define a health command,
-# and each has a functional check elsewhere (the Logs section, and every probe
-# that uses net_curl at all).
-healthless=" victoria-logs netcheck netcheck-host "
+# The units that cannot define a health command are declared once, in
+# stack.conf's HEALTHLESS_UNITS (each with its reason): victoria-logs' image is
+# distroless, and the two netcheck clients just sleep until something execs
+# into them. scripts/healthcheck-lint.sh keeps that declaration and the units
+# in agreement; here it only decides what an "Up but unprobed" container means.
+healthless=" "
+for _u in "${HEALTHLESS_UNITS[@]:-}"; do
+    healthless+="${_u%%|*} "
+done
 for c in "${containers[@]}"; do
     line=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
     if [ -z "$line" ]; then

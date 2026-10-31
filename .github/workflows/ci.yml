@@ -28,12 +28,18 @@ jobs:
             bootstrap.sh deploy.sh verify.sh \
             deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
             scripts/monitor.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh \
-            scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh deploy/root/bouncer.sh
+            scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh scripts/healthcheck-lint.sh \
+            deploy/root/bouncer.sh
+      # The healthcheck contract (AGENTS.md): explicit keys, a bounded probe,
+      # systemd owning the restart. Reads deploy/ templates, so it needs no host.
+      - name: healthcheck contract
+        run: ./scripts/healthcheck-lint.sh
       - name: syntax check
         run: |
           for f in bootstrap.sh deploy.sh verify.sh \
                    deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
                    scripts/monitor.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh \
-                   scripts/kuma-monitors.sh scripts/ids.sh deploy/root/bouncer.sh; do
+                   scripts/kuma-monitors.sh scripts/ids.sh scripts/healthcheck-lint.sh \
+                   deploy/root/bouncer.sh; do
             bash -n "$f"
           done

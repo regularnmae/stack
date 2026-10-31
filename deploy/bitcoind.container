@@ -38,8 +38,10 @@ Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 # datadir. The call is loopback in-container, so rpcallowip still applies.
 HealthCmd=bitcoin-cli getblockchaininfo
 HealthInterval=60s
+HealthTimeout=15s
 HealthStartPeriod=2m
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

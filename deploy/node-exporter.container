@@ -67,10 +67,12 @@ Exec=--web.listen-address=:9100 --path.procfs=/host/proc --path.sysfs=/host/sys 
 
 # The image ships busybox wget (verified) and runs as nobody: scraping its own
 # /metrics proves the listener, and a truncated body would fail the fetch.
-HealthCmd=wget -q -O /dev/null http://0.0.0.0:9100/metrics
+HealthCmd=wget -q -T 4 -t 1 -O /dev/null http://0.0.0.0:9100/metrics
 HealthInterval=60s
+HealthTimeout=10s
 HealthStartPeriod=15s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

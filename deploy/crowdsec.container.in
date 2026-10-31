@@ -95,6 +95,7 @@ HealthCmd=/usr/local/bin/cscli -c /etc/crowdsec/config.yaml lapi status
 HealthInterval=60s
 HealthTimeout=15s
 HealthRetries=3
+HealthOnFailure=kill
 # First boot installs hub items; a slow mirror must not paint it unhealthy.
 HealthStartPeriod=180s
 

@@ -35,10 +35,12 @@ EnvironmentFile=@CONFIG_DIR@/btc-explorer/btc-explorer.env
 
 # The app has no dedicated health endpoint; / renders the RPC-backed home page.
 # curl is in the image (the final stage is Debian slim, which has no wget).
-HealthCmd=curl -fsS -o /dev/null http://127.0.0.1:3002/
+HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:3002/
 HealthInterval=60s
+HealthTimeout=10s
 HealthStartPeriod=30s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

@@ -29,10 +29,17 @@ Volume=@DATA_DIR@/uptime-kuma:/app/data:z
 # `extra/healthcheck` is the Go binary the image ships for exactly this; it
 # GETs http://127.0.0.1:3001 inside the container. The long start period
 # matters: on a version bump kuma migrates its sqlite before it opens :3001.
+#
+# 5 retries, not 3, for a related reason: the migration is not bounded by the
+# start period when a large DB is being upgraded, and 3 failed probes would kill
+# the container between the migration and the first answer.
+# health-lint: HC005 5 retries -- a schema migration can outlast a 3-probe window
 HealthCmd=extra/healthcheck
 HealthInterval=60s
+HealthTimeout=15s
 HealthStartPeriod=180s
 HealthRetries=5
+HealthOnFailure=kill
 
 [Service]
 Restart=always

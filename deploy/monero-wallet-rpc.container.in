@@ -49,8 +49,15 @@ Exec=--wallet-file=/home/monero/wallet/mainnet \
 
 # Image ships /healthcheck.sh: calls get_version over JSON-RPC
 # with digest auth (creds/port auto-detected from PID 1).
+#
+# No HealthOnFailure on purpose (one of the two probed units without it): the
+# check is red for as long as the wallet refreshes, and killing the container
+# restarts that refresh from scratch. A dead wallet RPC is caught by
+# monitor.sh's wallet-lag check instead.
+# health-lint: HC008 red for a whole wallet refresh; kill restarts the refresh
 HealthCmd=/healthcheck.sh
 HealthInterval=60s
+HealthTimeout=15s
 HealthStartPeriod=2m
 HealthRetries=3
 

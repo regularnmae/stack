@@ -53,10 +53,12 @@ Environment=DISABLE_IPV6=true
 
 # The image ships no HEALTHCHECK; curl is present (wget is not). The admin UI
 # on 81 answering proves NPM's nginx/node are alive rather than wedged.
-HealthCmd=curl -fsS -o /dev/null http://127.0.0.1:81/
+HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:81/
 HealthInterval=30s
+HealthTimeout=10s
 HealthStartPeriod=30s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

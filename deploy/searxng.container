@@ -28,10 +28,12 @@ Volume=@DATA_DIR@/searxng:/etc/searxng:z
 
 # The image ships no HEALTHCHECK; SearXNG exposes /healthz for exactly this.
 # wget is present in the image (curl is not).
-HealthCmd=wget -q -O /dev/null http://127.0.0.1:8080/healthz
+HealthCmd=wget -q -T 4 -t 1 -O /dev/null http://127.0.0.1:8080/healthz
 HealthInterval=30s
+HealthTimeout=10s
 HealthStartPeriod=30s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

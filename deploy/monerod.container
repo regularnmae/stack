@@ -51,8 +51,10 @@ Exec=--rpc-restricted-bind-ip=0.0.0.0 \
 # from PID 1's cmdline.
 HealthCmd=/healthcheck.sh
 HealthInterval=60s
+HealthTimeout=15s
 HealthStartPeriod=2m
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

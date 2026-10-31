@@ -51,10 +51,12 @@ Volume=@DATA_DIR@/monitoring/vm:/victoria-metrics-data:z
 Exec=-storageDataPath=/victoria-metrics-data -httpListenAddr=:8428 -retentionPeriod=@METRICS_RETENTION@ -promscrape.config=/etc/vm/scrape.yml -promscrape.configCheckInterval=30s
 
 # The image ships wget (verified), and /-/healthy is VM's own liveness endpoint.
-HealthCmd=wget -q -O /dev/null http://127.0.0.1:8428/-/healthy
+HealthCmd=wget -q -T 4 -t 1 -O /dev/null http://127.0.0.1:8428/-/healthy
 HealthInterval=60s
+HealthTimeout=10s
 HealthStartPeriod=30s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

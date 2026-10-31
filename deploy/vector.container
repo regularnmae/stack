@@ -84,8 +84,10 @@ Volume=@DATA_DIR@/ids:/ids:ro
 Exec=--config /etc/vector/vector.toml
 HealthCmd=bash -c "exec 3<>/dev/tcp/127.0.0.1/8686"
 HealthInterval=60s
+HealthTimeout=10s
 HealthStartPeriod=15s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

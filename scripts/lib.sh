@@ -87,13 +87,32 @@ net_curl_host() {
     podman --events-backend=none exec -i "$NETCHECK_HOST_CONTAINER" curl "$@"
 }
 
+# "1m30s" / "2m0s" / "500ms" / "30s" -> seconds. Podman prints a healthcheck's
+# durations as Go duration strings; the only use here is a floor, so a
+# millisecond value rounds up to one second. A bare number (unset field) is
+# treated as 0.
+dur_s() {
+    local d="$1" total=0
+    if [ -z "$d" ]; then
+        printf '0'
+        return
+    fi
+    case "$d" in
+        *ms) printf '1'; return ;;
+    esac
+    [[ $d =~ ([0-9]+)h ]] && total=$(( total + 10#${BASH_REMATCH[1]} * 3600 ))
+    [[ $d =~ ([0-9]+)m ]] && total=$(( total + 10#${BASH_REMATCH[1]} * 60 ))
+    [[ $d =~ ([0-9]+)s ]] && total=$(( total + 10#${BASH_REMATCH[1]} ))
+    printf '%s' "$total"
+}
+
 # Wait for a container's own healthcheck to report healthy. Shared by deploy.sh
 # (which starts the units) and scripts/rotate.sh (which restarts the ones a
 # rotated credential touches), so both wait the same way. Honours DRY_RUN when
 # the caller sets it, and returns non-zero after the timeout rather than dying:
 # the caller decides whether that is fatal.
 wait_healthy() { # container timeout
-    local c="$1" t="${2:-180}" deadline st=""
+    local c="$1" t="${2:-180}" deadline st="" hp start_s floor
     [ "${DRY_RUN:-0}" = 1 ] && return 0
 
     # No healthcheck to wait on: victoria-logs' image is distroless (no shell,
@@ -113,6 +132,23 @@ wait_healthy() { # container timeout
             fi
             sleep 2
         done
+    fi
+
+    # A unit's own profile can make the caller's timeout unreachable: podman
+    # runs no health check during HealthStartPeriod, so the first possible
+    # "(healthy)" is at StartPeriod + Interval. A caller that waits less than
+    # that reports "not healthy" about a service that never had the chance to
+    # answer -- so the unit's numbers raise the caller's, and the log says which
+    # number won. (The caller's timeout is a give-up bound, not a promise: this
+    # only prevents a give-up that is shorter than one probe cycle.)
+    hp=$(podman inspect -f '{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartPeriod}} {{.Config.Healthcheck.Interval}}{{end}}' "$c" 2>/dev/null || true)
+    if [ -n "$hp" ]; then
+        start_s=$(dur_s "${hp%% *}")
+        floor=$(( start_s + $(dur_s "${hp##* }") ))
+        if [ "$floor" -gt "$t" ]; then
+            log "$c: first health check can arrive at ${floor}s (start period + interval), waiting that instead of ${t}s"
+            t=$floor
+        fi
     fi
 
     # Prefer podman's own health wait: it wakes the instant the state changes

@@ -28,9 +28,10 @@ Exec=arq app.worker.WorkerSettings
 # No $VARS here -- the systemd generator would expand them, not the container.
 HealthCmd=find /tmp/arq-worker-liveness -mmin -3
 HealthInterval=60s
+HealthTimeout=10s
 HealthStartPeriod=180s
 HealthRetries=3
-HealthOnFailure=restart
+HealthOnFailure=kill
 
 [Service]
 Restart=always

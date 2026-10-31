@@ -44,8 +44,10 @@ Exec=tor -f /etc/tor/torrc
 # rejected and logs a denial every interval. busybox nc -z is in the image.
 HealthCmd=nc -z 10.89.0.240 9050
 HealthInterval=30s
+HealthTimeout=10s
 HealthStartPeriod=10s
 HealthRetries=3
+HealthOnFailure=kill
 
 [Service]
 Restart=always

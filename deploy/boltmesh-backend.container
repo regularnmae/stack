@@ -32,14 +32,21 @@ EnvironmentFile=@CONFIG_DIR@/boltmesh/gateway.env
 # container name. Bind 127.0.0.1: the firewall opens nothing for it, so NPM
 # (TLS) stays the only way in for a client. The app serves /health (deep:
 # database + valkey), which is what the HealthCmd below gates on and what
-# verify.sh reads through scripts/lib.sh's net_curl.
+# The app serves /health (deep: database + valkey), which is what the HealthCmd
+# below gates on and what verify.sh reads through scripts/lib.sh's net_curl.
 PublishPort=127.0.0.1:8105:8000
 
-HealthCmd=curl -fsS http://127.0.0.1:8000/health
+# No HealthOnFailure (one of the two probed units without it), because this
+# probe is DEEP: it includes postgres and valkey, which is a readiness question,
+# not "is this process alive". Killing the app on a database blip turns one
+# outage into a restart loop that pages as an app fault; verify.sh's BoltMesh
+# section reads the same /health every monitor sweep and pages on the cause.
+# health-lint: HC008 deep health includes db+cache; verify.sh pages on it
+HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:8000/health
 HealthInterval=30s
+HealthTimeout=10s
 HealthStartPeriod=60s
 HealthRetries=3
-HealthOnFailure=restart
 
 [Service]
 Restart=always

@@ -44,6 +44,7 @@ the MCP server.
 ./deploy.sh --only crowdsec         # re-render its parser/scenarios and restart the engine
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
+./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract (the CI gate)
 ./scripts/wallets.sh --monero       # create/restore the Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / verify / inspect
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
@@ -53,7 +54,7 @@ the MCP server.
 ./scripts/rotate.sh --status        # a pending rotation journal, last 10 runs
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
 ./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh deploy/root/bouncer.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
+shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh scripts/healthcheck-lint.sh deploy/root/bouncer.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong
@@ -74,7 +75,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   changed — never ones that are inactive, since those are started later in
   order. `nginx-proxy-manager` is only flagged there: its restart is deferred to
   `sync_npm_network`, after the proxy hosts are rewritten (`deploy.sh` says why
-  the order is load-bearing).
+  the order is load-bearing). **Running `deploy/install.sh` by hand consumes
+  that signal**: it rewrites the rendered files, so the next `deploy.sh`
+  digests the already-new files either side of its own `install.sh`, finds no
+  change and restarts nothing — the unit edit then sits unapplied while every
+  health check reports `(healthy)`. After a hand render, restart the affected
+  units yourself (`systemctl --user restart <unit>`); this is also why
+  `install.sh` alone is not a deploy.
 - **CLN runes are verified, not trusted:** `createrune` can return a rune whose
   `unique_id` the node blacklisted, so `install.sh` proves each with `checkrune`
   and retries on a fresh id.
@@ -92,6 +99,35 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   waiting on lightningd, and dumps the log on any timeout. Not on
   `monero-wallet-rpc`: its healthcheck is red for as long as the wallet
   refreshes, so killing it would restart the refresh from scratch.
+- **Healthchecks follow a contract, and `HealthOnFailure=restart` hides a
+  restart from the monitor.** Every container unit that is not `Type=oneshot`
+  defines a probe with all five keys explicit (`HealthCmd`, `HealthInterval`,
+  `HealthStartPeriod`, `HealthRetries`, `HealthTimeout`). The units that cannot
+  are declared once, with a reason, in `stack.conf`'s `HEALTHLESS_UNITS`
+  (`victoria-logs` is distroless — podman runs a string health command through
+  the container's `/bin/sh` — and the two netcheck clients only sleep), which
+  `verify.sh` reads instead of keeping its own copy. `scripts/healthcheck-lint.sh`
+  is the gate: interval is 30 s (HTTP) or 60 s (daemons), retries 3 or 5 with a
+  reason, timeout explicit and 5–20 s, an HTTP probe fails on non-2xx, discards
+  the body and bounds itself, and a rule is waived only by an inline
+  `# health-lint: <code> <reason>` comment, printed on every run so exemptions
+  stay visible. Three decisions carry the reasoning:
+  **`HealthOnFailure=kill`, never `restart`** — podman's own restart leaves the
+  unit active, so `NRestarts` does not move and `monitor.sh`'s restart delta
+  cannot see a container flapping every 30 s; systemd's `Restart=always` is the
+  process that should act. The two exceptions are `monero-wallet-rpc` (red for a
+  whole refresh) and `boltmesh-backend`, whose health is **deep** (postgres +
+  valkey): a database blip must not restart-loop the app tier, and `verify.sh`
+  pages on the same endpoint. **`HealthCmd` proves the process/serving path, not
+  the data path** — a check that is legitimately red while recovering (IBD,
+  monerod sync, wallet refresh, Fulcrum's first index) belongs in `monitor.sh`,
+  never in a unit; that is why `fulcrum`'s probe is the process table and `tor`'s
+  is a port, and replacing either with a data probe is a regression, not a fix.
+  And **`wait_healthy` raises a caller's timeout to the unit's
+  `StartPeriod + Interval`**: podman runs no check during the start period, so a
+  shorter wait reports "not healthy" about a service that never had a chance to
+  answer. The five MCP servers' `healthcheck.py` (authenticated `initialize`,
+  SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
 - **CLN peers and channels come from `listpeerchannels`/`listpeers`, never
   `listchannels` or `getinfo`'s `num_peers`:** the gossmap's `active` is an
   operator setting that stays true while a peer is offline, and `num_peers`
