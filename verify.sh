@@ -279,6 +279,85 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+head2 "Agent tooling"
+# The five skills plus `agent-mcp` from the agent-skills repo: the same servers,
+# through the same tokens, for harnesses that do not speak MCP (Codex, a plain
+# shell, CI). The registry reads $DATA_DIR/config/<server>/token.env on every
+# call -- never a copy -- so a rotated token needs no second edit. A host that
+# only serves has none of it, so that is a warning, not a failure. The live call
+# is kept for --deep so the shallow sweep stays offline.
+AGENT_BIN="${AGENT_MCP_BIN:-$HOME/.local/bin/agent-mcp}"
+AGENT_DIR="$BUILD_DIR/${AGENT_SKILLS_REPO:-agent-skills}"
+if [ ! -x "$AGENT_BIN" ]; then
+    warn "agent-mcp is not installed (./deploy.sh --only agent-skills)"
+else
+    pass "agent-mcp is installed"
+    missing=()
+    for harness in "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.claude"; do
+        [ -d "$harness" ] || continue
+        for skill in bitcoin-node monero-node monero-wallet lightning searxng; do
+            [ -e "$harness/skills/$skill/SKILL.md" ] || missing+=("$harness/skills/$skill")
+        done
+    done
+    if [ "${#missing[@]}" -eq 0 ]; then
+        pass "every skill is linked into the harnesses installed here"
+    else
+        bad "${#missing[@]} skill link(s) missing (e.g. ${missing[0]}); run ./deploy.sh --only agent-skills"
+    fi
+
+    # servers.json is the skills' copy of the public surface: one URL per
+    # MCP_HOSTS prefix. A prefix that moved in stack.conf and not here means a
+    # skill calls a URL nginx-proxy-manager no longer serves, so compare the
+    # resolved registry with the declaration -- using the CLI's own resolver,
+    # never a second copy of the expansion rules. The host is compared
+    # separately and only warns: a harness deliberately pointed at another stack
+    # (AGENT_MCP_BASE_URL) is the operator's call, a missing prefix is not.
+    if [ -r "$AGENT_DIR/lib/config.py" ] && command -v python3 >/dev/null 2>&1 \
+       && [ "${MCP_HOSTS+x}" = x ] && [ "${#MCP_HOSTS[@]}" -gt 0 ]; then
+        agent_urls=()
+        while IFS= read -r url; do
+            [ -n "$url" ] && agent_urls+=("$url")
+        done < <(
+            python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from config import load_servers, resolve_url; print("\n".join(resolve_url(e) for e in load_servers().values()))' \
+                "$AGENT_DIR/lib" 2>/dev/null
+        )
+        drift=()
+        for entry in "${MCP_HOSTS[@]}"; do
+            prefix="${entry%%:*}"
+            printf '%s\n' "${agent_urls[@]}" | grep -qE "^[a-z]+://[^/]+${prefix}$" \
+                || drift+=("$prefix")
+        done
+        if [ "${#drift[@]}" -gt 0 ]; then
+            bad "servers.json does not cover ${drift[*]} (did MCP_HOSTS change?); update $AGENT_DIR/servers.json"
+        elif [ "${#agent_urls[@]}" -ne "${#MCP_HOSTS[@]}" ]; then
+            bad "servers.json declares ${#agent_urls[@]} endpoint(s) for ${#MCP_HOSTS[@]} MCP_HOSTS prefix(es)"
+        else
+            pass "servers.json matches every MCP_HOSTS prefix"
+        fi
+        elsewhere=()
+        for url in "${agent_urls[@]}"; do
+            case "$url" in
+                "https://$MCP_HOST/"*) ;;
+                *) elsewhere+=("$url") ;;
+            esac
+        done
+        if [ "${#elsewhere[@]}" -gt 0 ]; then
+            warn "the skills point at ${elsewhere[*]}, not https://$MCP_HOST (AGENT_MCP_BASE_URL in this shell?)"
+        fi
+    else
+        warn "servers.json not compared with MCP_HOSTS (no $AGENT_DIR clone, no python3, or no MCP_HOSTS)"
+    fi
+
+    if [ "$DEEP" = 1 ]; then
+        if out=$("$AGENT_BIN" bitcoin-node get_blockchain_info 2>&1); then
+            pass "agent-mcp read the bitcoin node (chain $(printf '%s' "$out" | grep -o '"chain": "[a-z]*"' | cut -d'"' -f4))"
+        else
+            bad "agent-mcp could not call bitcoin-node: $(printf '%s' "$out" | head -1)"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 head2 "Onion services (tor)"
 # The same public surface without DNS or a certificate. tor publishes one hidden
 # service per ONION_SERVICES entry (stack.conf) and forwards it; the address is

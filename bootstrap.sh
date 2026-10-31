@@ -72,6 +72,10 @@ command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y gi
 # jq parses the nginx-proxy-manager admin API responses in
 # scripts/npm-hosts.sh (the host has no curl either; netcheck carries it).
 command -v jq >/dev/null 2>&1 || { log "installing jq"; sudo dnf install -y jq; }
+# python3 runs agent-mcp, the CLI behind the agent skills (the agent-skills
+# repo, installed by deploy.sh). Stdlib only, but a minimal install has no
+# interpreter, and then every skill call fails with "bad interpreter".
+command -v python3 >/dev/null 2>&1 || { log "installing python3 (agent-mcp)"; sudo dnf install -y python3; }
 
 # audit-rules provides auditctl/augenrules, which load the stack's audit rules
 # (deploy/root/audit.rules). EL10 split them out of the `audit` package, so a

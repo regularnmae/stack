@@ -202,7 +202,9 @@ a hand rebuild (`--only` forces one anyway). Common flags:
 ./deploy.sh --only monitor            # run the health + spend checks now
 ./deploy.sh --only npm-hosts           # re-apply every proxy host in NPM
 ./deploy.sh --only tor                 # re-render the onion services and restart tor
+./deploy.sh --only agent-skills        # re-link the agent skills + agent-mcp
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
+./deploy.sh --skip-agent-skills       # leave the operator's harnesses untouched
 ./deploy.sh --no-wallets              # skip the interactive wallet prompts
 ./deploy.sh --dry-run                 # print the plan, change nothing
 ./verify.sh                           # container health, MCP handshakes, onion fetches
@@ -1331,6 +1333,36 @@ HTTP-01 challenge; set `NPM_REQUEST_CERT=0` to leave TLS to the UI instead.
 `./verify.sh` checks the MCP path a client takes — the public URL connected to
 NPM itself (`--connect-to`), following its redirect to `:443` once TLS is on, so
 it works before public DNS exists.
+
+### Agent skills (harnesses without MCP)
+
+The [`agent-skills`](https://github.com/regularnmae/agent-skills) repo wraps
+those same five endpoints as five skills plus `agent-mcp`, a small stdlib-only
+MCP client, for harnesses that do not speak MCP: Codex, a plain shell, CI, a
+script. `./deploy.sh` clones it into `$BUILD_DIR/agent-skills` and runs its
+`install.sh`, which links each skill into the harnesses this host actually has
+(`~/.config/opencode`, `~/.codex`, `~/.claude`) and puts `agent-mcp` in
+`~/.local/bin`:
+
+```sh
+agent-mcp bitcoin-node get_blockchain_info
+agent-mcp lightning decode bolt11=<invoice>
+agent-mcp bitcoin-node --list
+```
+
+It is not a service — no unit, no container, no port, nothing in the backup set,
+and `--skip-agent-skills` leaves a host that only serves untouched. It adds no
+credential either: `servers.json` expands `$AGENT_MCP_BASE_URL` (default
+`$MCP_HOST`) and reads each server's token straight from
+`$DATA_DIR/config/<server>/token.env` on every call, so `scripts/rotate.sh`
+needs no second step and no copy can go stale. The skills are read-only by
+construction, because the servers they call are.
+
+The path prefixes live in that registry rather than being derived from
+`MCP_HOSTS`, so moving one means editing both — `./verify.sh` fails on the
+drift. A harness that already has the native MCP tools (this host's OpenCode,
+via `~/.config/opencode/opencode.json`) should keep using them; each skill says
+so, and they exist for everything else.
 
 ## Tor onion services
 

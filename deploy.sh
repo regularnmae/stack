@@ -14,6 +14,8 @@
 #                                  # bitcoind/monerod/lightningd/btcpay,
 #                                  # no wallets (for testing without a chain)
 #   ./deploy.sh --no-wallets       # do not prompt for the Monero/Bitcoin wallet
+#   ./deploy.sh --skip-agent-skills # do not link the agent skills / agent-mcp
+#                                  # into the operator's harnesses ($HOME)
 #   ./deploy.sh --dry-run          # print the plan; change nothing
 #
 # Ordering is load-bearing: the daemons come up before the MCP servers that
@@ -54,6 +56,7 @@ GIT_CRED_HINT="git could not authenticate (it is not allowed to prompt). The $GI
 ONLY=""
 DO_BOOTSTRAP=0
 DO_WALLETS=1
+DO_AGENT_SKILLS=1
 SKIP_APPS=0
 SKIP_DAEMONS=0
 
@@ -84,6 +87,7 @@ while [ $# -gt 0 ]; do
         --bootstrap)   DO_BOOTSTRAP=1 ;;
         --only)        ONLY="${2:?--only needs a service name}"; shift ;;
         --no-wallets)  DO_WALLETS=0 ;;
+        --skip-agent-skills) DO_AGENT_SKILLS=0 ;;
         --skip-apps)   SKIP_APPS=1 ;;
         --skip-daemons) SKIP_DAEMONS=1; DO_WALLETS=0 ;;
         --dry-run)     DRY_RUN=1 ;;
@@ -792,6 +796,46 @@ sync_npm_network() {
 }
 
 # ---------------------------------------------------------------------------
+# 6e. agent tooling: the skills + `agent-mcp`, for harnesses without MCP
+# ---------------------------------------------------------------------------
+# Not a service: agent-skills ships no Containerfile and starts no container, so
+# it is deliberately absent from APP_REPOS (deploy_app would bail on the missing
+# Containerfile). Its install.sh links five skills into whichever harnesses exist
+# under $HOME (~/.config/opencode, ~/.codex, ~/.claude) and drops agent-mcp in
+# ~/.local/bin -- the only thing a deploy writes outside $DATA_DIR, hence
+# --skip-agent-skills for a host that only serves.
+#
+# No --from-opencode: servers.json reads each server's token straight from
+# $DATA_DIR/config/<server>/token.env, so seeding ~/.config/agent-skills/env
+# would only create a copy that goes stale on the next token rotation. The smoke
+# call is deliberately not fatal -- a skill is not infrastructure, and the deploy
+# must not fail because a client-side tool could not reach NPM.
+agent_skills_dir() { printf '%s/%s' "$BUILD_DIR" "$AGENT_SKILLS_REPO"; }
+
+fetch_agent_skills() {
+    fetch_repo "https://github.com/$GITHUB_ORG/$AGENT_SKILLS_REPO.git" \
+        "$(agent_skills_dir)" "$AGENT_SKILLS_REPO"
+}
+
+install_agent_skills() {
+    local dir; dir=$(agent_skills_dir)
+    [ -d "$dir" ] || { warn "$AGENT_SKILLS_REPO is not cloned under $BUILD_DIR"; return 1; }
+    [ -x "$dir/install.sh" ] || { warn "$AGENT_SKILLS_REPO has no install.sh"; return 1; }
+
+    log "installing the agent skills and agent-mcp"
+    run "$dir/install.sh" || { warn "$dir/install.sh failed"; return 1; }
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  [dry-run] agent-mcp bitcoin-node get_blockchain_info\n'
+        return 0
+    fi
+    if "$HOME/.local/bin/agent-mcp" bitcoin-node get_blockchain_info >/dev/null 2>&1; then
+        log "agent-mcp read the bitcoin node through $MCP_HOST"
+    else
+        warn "agent-mcp could not call bitcoin-node: check the token in $CONFIG_DIR/bitcoin-node-mcp/token.env and the $MCP_HOST proxy host (./verify.sh)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # 7. firewalld
 # ---------------------------------------------------------------------------
 # bootstrap.sh opens FIREWALL_PORTS: it owns every privileged host setting, so
@@ -874,6 +918,12 @@ if [ -n "$ONLY" ]; then
         # container, but reaches uptime-kuma by name, so the network stays up.
         install_units
         kuma_monitors
+    elif [ "$ONLY" = agent-skills ]; then
+        # Client-side tooling only: no unit, no data dir, no secret -- it reads
+        # the tokens the stack already wrote and links the skills into the
+        # harnesses installed under $HOME.
+        fetch_agent_skills
+        install_agent_skills || true
     else
         install_units
         restart_unit "$ONLY"
@@ -899,6 +949,14 @@ start_btcpay
 # monitors run after deploy_explorers so they see them up.
 configure_npm_hosts
 sync_npm_network
+# After the proxy hosts exist, because install_agent_skills proves the token path
+# with a real call through $MCP_HOST.
+if [ "$DO_AGENT_SKILLS" = 1 ]; then
+    fetch_agent_skills
+    install_agent_skills || true
+else
+    log "agent skills skipped (--skip-agent-skills)"
+fi
 deploy_explorers
 kuma_monitors
 note_firewall
@@ -913,6 +971,12 @@ verify_args=()
 if [ "$SKIP_DAEMONS" = 1 ]; then verify_args+=(--no-nodes); fi
 "$REPO_DIR/verify.sh" ${verify_args[@]+"${verify_args[@]}"} || warn "verification reported problems"
 
+if [ "$DO_AGENT_SKILLS" = 1 ]; then
+    agent_skills_summary="agent-mcp + five read-only skills in \$HOME"
+else
+    agent_skills_summary="not installed (--skip-agent-skills)"
+fi
+
 if [ "$SKIP_DAEMONS" = 1 ]; then
     cat <<EOF
 
@@ -924,6 +988,7 @@ Stack deployed (chain daemons skipped).
   BoltMesh app: postgres, boltmesh-backend, boltmesh-worker,
                 boltmesh-frontend
   Explorers:    skipped with the chain daemons (--skip-daemons)
+  Agent skills: $agent_skills_summary
 
 nginx-proxy-manager is the only HTTP service a client reaches: it runs on the
 host network, so it binds 80/443/81 itself and every request keeps the client's
@@ -956,6 +1021,7 @@ Stack deployed.
                     + Fulcrum for address history) and
                     https://$XMR_EXPLORER_HOST (MoneroBlock: monerod's
                     restricted RPC)
+  Agent skills:     $agent_skills_summary
   Exposure:         nginx-proxy-manager (80/443/81) plus Fulcrum's Electrum
                     ports 50001 (TCP) / 50002 (SSL). NPM runs on the host
                     network, so it keeps clients' real addresses; everything it

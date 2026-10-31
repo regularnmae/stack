@@ -40,6 +40,7 @@ credentials, so that image would be unreachable.
 ./deploy.sh --only vector           # after deploy/logs/vector.toml changes
 ./scripts/logs.sh --since 1h        # cross-service log search (LogsQL; UI on :9428)
 ./deploy.sh --only npm-hosts        # (re)reconcile every proxy host in nginx-proxy-manager
+./deploy.sh --only agent-skills     # re-link the skills + agent-mcp into the harnesses
 ./deploy.sh --only tor              # re-render the onion services into torrc and restart tor
 ./deploy.sh --only crowdsec         # re-render its parser/scenarios and restart the engine
 ./deploy/install.sh                 # units + secrets + data dirs only
@@ -672,6 +673,24 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   still validates. BTCPay's admin UI is gated by its own login (2FA expected),
   and its API by the store-scoped key the backend carries; no daemon RPC has a
   public NPM host any more.
+- **`agent-skills` is client tooling, not a service, and never joins
+  `APP_REPOS`:** it ships no Containerfile and starts no container, so
+  `deploy_app` would bail on it. `deploy.sh`'s `fetch_agent_skills`/
+  `install_agent_skills` clone it into `$BUILD_DIR/agent-skills` and run its
+  `install.sh`, which links five skills into the harnesses under `$HOME` and puts
+  `agent-mcp` in `~/.local/bin` — the only thing a deploy writes outside
+  `$DATA_DIR`, which is what `--skip-agent-skills` is for. Three traps: never run
+  its `install.sh --from-opencode` here, because this host's `opencode.json`
+  carries `{env:…}` references and copying the literal text writes a placeholder
+  as the bearer token (it now resolves them, but the registry makes the copy
+  unnecessary anyway); the tokens are read from
+  `$DATA_DIR/config/<server>/token.env` on every call (`token_file` in
+  `servers.json`), never seeded into `~/.config/agent-skills/env`, because a
+  copy goes stale the moment `scripts/rotate.sh` rotates a token; and the URL
+  *prefixes* are hardcoded in `servers.json` (only the host comes from
+  `$AGENT_MCP_BASE_URL`, defaulting to `MCP_HOST`), so `verify.sh` compares the
+  resolved registry with `MCP_HOSTS` and fails on the drift. `agent-mcp` is
+  python3 (stdlib only), which `bootstrap.sh` now installs for it.
 
 ## Interface contract with the app repos
 
