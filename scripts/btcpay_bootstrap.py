@@ -280,6 +280,14 @@ def ensure_webhook(
 ) -> tuple[str, bool]:
     webhooks = client.request("GET", f"/api/v1/stores/{store_id}/webhooks", token=key) or []
     existing = next((w for w in webhooks if w.get("url") == url), None)
+    if existing is None and webhooks:
+        # The stack owns this store, and a webhook URL change (local -> AWS,
+        # for example) must move the existing hook rather than create a second
+        # one that keeps delivering to the old backend. Adopt the first hook.
+        if len(webhooks) > 1:
+            log(f"warning: {len(webhooks)} webhooks exist; adopting the first")
+        existing = webhooks[0]
+        log(f"moving webhook {existing['id']} to {url}")
     payload = {
         "url": url,
         "enabled": True,
