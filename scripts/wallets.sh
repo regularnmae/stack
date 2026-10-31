@@ -66,12 +66,19 @@ btc_wallet_on_disk() {
 }
 
 # loadwallet <name> resolves against the wallet dir; an older datadir-root wallet
-# needs its path. Try both, then prove it with listwallets.
+# needs its path. Try both, then prove it with listwallets. "Already loaded" is
+# success, not failure: loadwallet answers -35 for it, and reporting that as a
+# broken wallet is what made a healthy node look unconfigured here.
 load_bitcoin_wallet() {
-    bitcoin_cli loadwallet "$BITCOIN_WALLET" >/dev/null 2>&1 || true
+    local err=""
     btc_wallet_loaded && return 0
-    bitcoin_cli loadwallet "/data/.bitcoin/$BITCOIN_WALLET" >/dev/null 2>&1 || true
-    btc_wallet_loaded
+    err=$(bitcoin_cli loadwallet "$BITCOIN_WALLET" 2>&1) || true
+    btc_wallet_loaded && return 0
+    err=$(bitcoin_cli loadwallet "/data/.bitcoin/$BITCOIN_WALLET" 2>&1) || true
+    btc_wallet_loaded && return 0
+    warn "loadwallet '$BITCOIN_WALLET': ${err:-no output}"
+    warn "loaded wallets: $(bitcoin_cli listwallets 2>/dev/null | tr -d ' \n')"
+    return 1
 }
 
 setup_bitcoin() {

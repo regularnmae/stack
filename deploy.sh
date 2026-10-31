@@ -308,6 +308,15 @@ bitcoind_syncing() {
         | grep -q '"initialblockdownload": *true'
 }
 
+# Wallet-level RPC answers *and* a wallet is loaded -- what lightningd's bcli
+# needs. Never `getwalletinfo` on its own: with two wallets loaded a node answers
+# -19 ("Wallet file not specified"), which says nothing about readiness and made
+# this wait burn its timeout on every deploy. listwallets answers either way, and
+# `[]` (nothing loaded) correctly reads as "not ready".
+bitcoind_wallet_ready() {
+    podman exec bitcoind bitcoin-cli listwallets 2>/dev/null | grep -q '"'
+}
+
 # Make sure the podman network exists before anything joins it. The quadlet
 # unit can be left "active (exited)" while the network itself is gone (e.g. the
 # network was removed by hand), and systemd will not re-run it, so a plain
@@ -455,8 +464,11 @@ start_daemons() {
     # bitcoind was observed to serve chain-level RPC while still loading its
     # wallet; lightningd's bcli timed out on exactly that window and killed
     # lightningd. Wait for wallet-level RPC before anything depends on it.
-    elif ! wait_cmd "bitcoind wallet RPC" "$BITCOIND_WALLET_WAIT" \
-            podman exec bitcoind bitcoin-cli getwalletinfo; then
+    # getwalletinfo is the wrong probe: with more than one wallet loaded it
+    # answers -19 ("Wallet file not specified"), so the wait burned its whole
+    # timeout on a healthy node and then skipped the lightningd wait. listwallets
+    # is on the wallet path and names what is loaded.
+    elif ! wait_cmd "bitcoind wallet RPC" "$BITCOIND_WALLET_WAIT" bitcoind_wallet_ready; then
         warn "bitcoind wallet RPC not up; not waiting on lightningd"
         warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
         dump_tail bitcoind 20

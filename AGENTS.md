@@ -99,8 +99,18 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   kill/stop so systemd's restart policy is the one that acts), so the failing
   healthcheck ends the container and `Restart=always` recreates it. `deploy.sh`
   still restarts a still-active but `unhealthy` lightningd, as the fallback for
-  a container older than that unit line, waits for `getwalletinfo` before
-  waiting on lightningd, and dumps the log on any timeout. Not on
+  a container older than that unit line, waits for wallet-level RPC before
+  waiting on lightningd, and dumps the log on any timeout. That wait is
+  `bitcoind_wallet_ready` (`listwallets` non-empty), **never a bare
+  `getwalletinfo`**: a node with two wallets loaded -- a legacy datadir-root
+  `mainnet` plus an unnamed `""` -- answers `-19` "Wallet file not specified",
+  which says nothing about readiness, so the wait burned its full 120 s on every
+  deploy and then skipped the lightningd wait. The same class of trap in
+  `scripts/wallets.sh`: `loadwallet` answering `-35` means the wallet is already
+  loaded, i.e. success, and reporting it as failure is how a healthy node came
+  to look unconfigured (a transient `podman exec` miss is why the first check
+  can disagree with the second, so each load attempt re-proves it with
+  `listwallets`). Not on
   `monero-wallet-btcpay`: its healthcheck is red for as long as the wallet
   refreshes, so killing it would restart the refresh from scratch.
 - **Healthchecks follow a contract, and `HealthOnFailure=restart` hides a
