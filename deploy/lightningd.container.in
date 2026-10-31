@@ -16,16 +16,11 @@ ContainerName=lightningd
 Image=docker.io/elementsproject/lightningd:v26.06.9
 Network=npm-network.network
 
-# CLNRest and Lightning P2P ports.
-# 9735 is deliberately NOT published: it would bind on 0.0.0.0 on the host,
-# advertise this host's real IP to every peer and defeat the point of Tor.
-# Peers reach us through the statictor onion service instead.
-# clnrest -- the daemon's own TLS API, proxied as clnrest.<host> in NPM_HOSTS --
-# is published on the host's loopback only, because NPM runs on the host network
-# and can no longer resolve the container name. 127.0.0.1 keeps it off the LAN:
-# the firewall opens nothing for it and the rune (getinfo/listinvoices/invoice)
-# is what gates it.
-PublishPort=127.0.0.1:3010:3010
+# Lightning P2P is deliberately NOT published: 9735 on 0.0.0.0 would advertise
+# this host's real IP to every peer and defeat Tor; peers use the statictor
+# onion service instead. clnrest binds 3010 inside the container for
+# lightning-mcp (which is the supported external surface); it is not published
+# on the host and has no NPM host.
 
 # Volume mount using @DATA_DIR@/cln. `:z` (shared), not `:Z` (private): the
 # backup container mounts the same directory read-only, and two containers may
@@ -56,8 +51,8 @@ Exec=--network=bitcoin \
 
 # The image's entrypoint.sh stays alive as PID 1 even after lightningd dies
 # (e.g. bcli timed out while bitcoind was still opening its wallet), so the
-# unit reported "active" while the daemon -- and clnrest, whose loopback publish
-# NPM fronts as clnrest.<host> -- was gone. The healthcheck makes that failure
+# unit reported "active" while the daemon -- and clnrest, which lightning-mcp
+# needs -- was gone. The healthcheck makes that failure
 # visible; HealthOnFailure=kill makes it terminal, so the container exits and
 # Restart=always below recreates it. podman's man page says the same thing:
 # inside a unit prefer kill/stop over restart, and let systemd's restart policy

@@ -1,7 +1,7 @@
 # Authentication failures against the token-gated endpoints.
 #
-# What is gated here: the MCP edge (one bearer token per server), clnrest (a CLN
-# rune) and BoltMesh's own login. All of them answer 401
+# What is gated here: the MCP edge (one bearer token per server), BTCPay (a
+# login/2FA) and BoltMesh's own login. All of them answer 401
 # on a bad credential, so the signal is identical whatever is being guessed.
 #
 # The tokens are 256-bit hex, so online guessing does not work against them --

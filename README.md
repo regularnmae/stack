@@ -23,7 +23,7 @@ stack runs and one script that fixes a deployment problem.
 | `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` (admin UI via SSH tunnel) | `$DATA_DIR/btcpay` |
 | `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.21` | — | `$DATA_DIR/nbxplorer` |
 | `monero-wallet-btcpay` | `docker.io/btcpayserver/monero:0.18.5.4` | — (BTCPay only) | `$DATA_DIR/btcpay/xmr-wallet` |
-| `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
+| `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | — (clnrest internal for the MCP) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — | — |
 | `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
@@ -1277,7 +1277,7 @@ NPM_HOSTS=(
     "${BOLTMESH_FRONTEND_HOST}|127.0.0.1:8106|ws,block"
     "${BOLTMESH_API_HOST}|127.0.0.1:8105|ws,block"
     "${SEARXNG_HOST}|127.0.0.1:8080|ws,block"
-    "${CLNREST_HOST}|https://127.0.0.1:3010|ws,block"
+    "${BTCPAY_HOST}|127.0.0.1:49392|ws,force-ssl,block"
     "${BTC_EXPLORER_HOST}|127.0.0.1:8108|force-ssl,block"
     "${XMR_EXPLORER_HOST}|127.0.0.1:8109|force-ssl,block"
     "${UPTIME_KUMA_HOST}|127.0.0.1:8107|ws,block"
@@ -1287,7 +1287,7 @@ NPM_HOSTS=(
 
 Each entry is `domain | forward | flags`, where `forward` is
 `[scheme://]host:port` (scheme defaults to `http`; `https` for an upstream that
-speaks TLS, like `clnrest`) and `flags` is a comma-separated subset of
+speaks TLS, if one is ever added) and `flags` is a comma-separated subset of
 `force-ssl` (redirect `:80` to `:443`), `http2`, `ws` (websocket upgrade),
 `block` (block common exploits) and `mcp`. The host is always `127.0.0.1`: it is
 the loopback publish of the unit the host fronts — NPM runs on the host network

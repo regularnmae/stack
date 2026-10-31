@@ -1441,6 +1441,7 @@ render_unit() {
         -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
         -e "s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g" \
+        -e "s|@BTCPAY_HOST@|$(esc "$BTCPAY_HOST")|g" \
         -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
         -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \

@@ -93,7 +93,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **lightningd dies with its container left "Up":** bcli can time out while
   bitcoind is still loading its wallet, the entrypoint then keeps PID 1 alive,
   the unit reads "active" and `Restart=always` never fires -- which is how
-  clnrest answers 502 through NPM while the unit looks fine. The unit therefore
+  lightning-mcp answers 502 while the unit looks fine. The unit therefore
   carries `HealthOnFailure=kill` (podman's own advice: inside a unit prefer
   kill/stop so systemd's restart policy is the one that acts), so the failing
   healthcheck ends the container and `Restart=always` recreates it. `deploy.sh`
@@ -667,8 +667,9 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   the streaming settings an SSE transport needs — the script's header owns that
   payload. `verify.sh` re-checks the path through NPM's `:80` (following the
   force-SSL redirect) with `--connect-to` onto `127.0.0.1`, so the certificate
-  still validates. Proxying a daemon's own API (`clnrest`) is gated only by that daemon's
-  RPC credentials, not by an MCP token.
+  still validates. BTCPay's admin UI is gated by its own login (2FA expected),
+  and its API by the store-scoped key the backend carries; no daemon RPC has a
+  public NPM host any more.
 
 ## Interface contract with the app repos
 

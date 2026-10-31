@@ -3,11 +3,10 @@
 # confirmations and refundable late funds; the backend only calls its
 # Greenfield API and receives its webhooks.
 #
-# Internal-only on purpose: the backend reaches it as btcpay:49392 on
-# npm-network, and BTCPay reaches the backend webhook as
-# boltmesh-backend:8000. The loopback publish exists only for an operator's SSH
-# tunnel (`ssh -L 49392:127.0.0.1:49392`), so no DNS record or public surface
-# is needed. Set BTCPAY_HOST later if the admin UI should go through NPM.
+# The backend reaches it as btcpay:49392 on npm-network and the webhook goes to
+# boltmesh-backend:8000, both internal. The loopback publish is what NPM fronts
+# as BTCPAY_HOST (and what an SSH tunnel can still use). BTCPAY_EXTERNALURL must
+# be the browser-facing host, or the UI redirects to the wrong origin.
 #
 # The store, webhook and API keys live in Postgres and are created by
 # btcpay-bootstrap.container, not here; this unit only needs the database and
@@ -31,7 +30,7 @@ Environment=BTCPAY_BIND=0.0.0.0:49392
 Environment=BTCPAY_CHAINS=btc
 # The tunnel's origin. The backend uses http://btcpay:49392 directly, and the
 # webhook URL is internal, so this only affects links rendered by the UI.
-Environment=BTCPAY_EXTERNALURL=http://localhost:49392/
+Environment=BTCPAY_EXTERNALURL=https://@BTCPAY_HOST@/
 Environment=BTCPAY_BTCEXPLORERURL=http://nbxplorer:32838/
 Environment="BTCPAY_POSTGRES=User ID=btcpay;Password=@BTCPAY_DB_PASSWORD@;Host=postgres;Port=5432;Database=btcpay;"
 Environment=BTCPAY_BTCEXPLORERCOOKIEFILE=/nbxplorer/Main/.cookie
