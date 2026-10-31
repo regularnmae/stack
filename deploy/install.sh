@@ -431,7 +431,16 @@ chown_image_uid() {
 backup_mounts() {
     local p
     for p in "${BACKUP_PATHS[@]}"; do
-        printf 'Volume=%s/%s:/data/%s:ro,z\n' "$DATA_DIR" "$p" "$p"
+        # audit/ is also written by the rootful IDS. podman's :z relabel fails on
+        # its root-owned auditd.fim (initrc_tmp_t), which aborted the whole
+        # backup; the directory itself already carries container_file_t, so mount
+        # it read-only without asking for another relabel. restic warns about the
+        # one unreadable root-owned file, exactly as it did before.
+        if [ "$p" = audit ]; then
+            printf 'Volume=%s/%s:/data/%s:ro\n' "$DATA_DIR" "$p" "$p"
+        else
+            printf 'Volume=%s/%s:/data/%s:ro,z\n' "$DATA_DIR" "$p" "$p"
+        fi
     done
 }
 

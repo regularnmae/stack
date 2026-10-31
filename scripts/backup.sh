@@ -136,7 +136,13 @@ data_ro=()
 data_rw=()
 backup_paths=()
 for p in "${BACKUP_PATHS[@]}"; do
-    data_ro+=(-v "$DATA_DIR/$p:/data/$p:ro,z")
+    # audit/ holds a root-owned auditd.fim that podman cannot relabel (:z fails);
+    # the directory already carries container_file_t, so leave the label alone.
+    if [ "$p" = audit ]; then
+        data_ro+=(-v "$DATA_DIR/$p:/data/$p:ro")
+    else
+        data_ro+=(-v "$DATA_DIR/$p:/data/$p:ro,z")
+    fi
     data_rw+=(-v "$DATA_DIR/$p:/data/$p:z")
     backup_paths+=("/data/$p")
 done
