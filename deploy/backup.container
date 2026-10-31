@@ -55,7 +55,11 @@ EnvironmentFile=@CONFIG_DIR@/backup/backup.env
 Volume=@BACKUP_DIR@:/repo:z
 Volume=@DATA_DIR@/backup-cache:/cache:z
 Entrypoint=/bin/sh
-Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup @BACKUP_PATHS@ --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
+# audit/auditd.fim is a root-owned FIM baseline written by the rootful IDS; the
+# container cannot read it (SELinux initrc_tmp_t), and restic exits 1 when a
+# source is unreadable, which skipped the retention pass. Exclude that one file
+# so the rest of audit/ still lands in the snapshot.
+Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup @BACKUP_PATHS@ --exclude=/data/audit/auditd.fim --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
 
 [Service]
 Type=oneshot

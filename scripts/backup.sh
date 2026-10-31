@@ -167,7 +167,7 @@ ensure_mount_dirs
 job_script=$(
     printf 'set -e\n'
     printf 'restic snapshots >/dev/null 2>&1 || restic init\n'
-    printf 'restic backup %s --host stack --tag stack\n' "${backup_paths[*]}"
+    printf 'restic backup %s --exclude=/data/audit/auditd.fim --host stack --tag stack\n' "${backup_paths[*]}"
     printf 'restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune\n'
 )
 
