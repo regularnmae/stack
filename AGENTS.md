@@ -154,12 +154,12 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   probe must follow redirects. Notifications stay UI-configured.
 - **Every pulled image carries a real tag, and two managers cover them.**
   Renovate's Quadlet manager reads `*.container`/`*.image`/`*.volume` and
-  **cannot see `deploy/*.container.in`**; those three templates, and the three
+  **cannot see `deploy/*.container.in`**; those three templates, and the two
   image defaults that live in shell (`MONERO_IMAGE` in `scripts/wallets.sh`,
-  `APPRISE_IMAGE` in `scripts/monitor.sh`, `RESTIC_IMAGE` in `scripts/backup.sh`
-  — no manager reads a shell default), are matched by `renovate.json`'s regex
-  manager. The wallet tag appears in both `wallets.sh` and
-  `monero-wallet-rpc.container.in`, and one PR moves both; it also appears in
+  `RESTIC_IMAGE` in `scripts/backup.sh` — no manager reads a shell default),
+  are matched by `renovate.json`'s regex manager. The wallet tag appears in
+  both `wallets.sh` and `monero-wallet-rpc.container.in`, and one PR moves both;
+  it also appears in
   the README's "What runs" table, which is hand-maintained. `postgres` (hand
   pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
   (`pinDigests` off): kuma's `2` and searxng's date tags move on their own, a
@@ -481,16 +481,46 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env` — the leading `-` keeps
   an unfilled file from stopping the sweep. The script reads that file through
   `env_value` (environment first, never sourcing it), so a hand run alerts on
-  exactly what the timer would. It is alert-only (never restarts a unit) and
-  silent until `monitor.env` is filled in; thresholds are `MONITOR_*` keys
-  **with defaults in the script**, so an env file written before a check existed
-  still monitors. It carries the host checks (disk, inodes, disk saturation,
+  exactly what the timer would. It is alert-only (never restarts a unit).
+  Thresholds are `MONITOR_*` keys **with defaults in the script**, so an env
+  file written before a check existed still monitors. It carries the host
+  checks (disk, inodes, disk saturation,
   backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
   hottest sensor, a stale metrics textfile) and the chain/daemon checks (a
   `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
-  peers/channels, monerod's lag, the wallet's lag). The Apprise traps
-  (`caronc/apprise` has no ENTRYPOINT, so name the CLI; a `mailto://` URL on 587
-  needs `?mode=starttls`) live in the script.
+  peers/channels, monerod's lag, the wallet's lag).
+- **Alerting is two processes because they fail differently: the monitor finds
+  faults, Alertmanager decides when to speak.** `scripts/monitor.sh` groups
+  every finding under its `head3` section, pushes one alert per section to
+  `alertmanager` (`POST /api/v2/alerts`, loopback `9093`) and resolves a section
+  explicitly with an `endsAt` in the past when it clears. Alertmanager owns
+  grouping, `repeat_interval`, inhibition, silences and delivery. Four traps
+  found by running it, all load-bearing:
+  (1) **`resolve_timeout` must be far longer than the sweep.** A pushed alert
+  carries no `endsAt`, so Alertmanager resolves it once it has not been updated
+  for `resolve_timeout` — the default 5m is exactly the timer interval, and
+  `0` does not disable it (the API sets `EndsAt = now + resolveTimeout`, so `0`
+  resolves instantly). It is **24h** here, and explicit `endsAt` is what
+  actually ends an alert, which also keeps a dead monitor from mailing
+  "recovered".
+  (2) **`email_configs` defaults `send_resolved: false`**, so recoveries are
+  silent unless it is set. The seeded example sets it.
+  (3) **The flap damper cannot live in Alertmanager.** It only sees what is
+  pushed at it, so it cannot tell a check that fails every other sweep from one
+  that has been down for an hour. The producer holds that state
+  (`$DATA_DIR/audit/alerts.state`: name, service, severity, first seen, last
+  pushed) and pushes nothing until `MONITOR_ALERT_FOR` (600s) has passed. The
+  `alerting` section bypasses it, because a broken alert path is never a flap.
+  (4) **A delivery failure cannot report itself.** `alertmanager_notifications_failed_total`
+  is read back on the next sweep and turned into a failure; the heartbeat is
+  pushed *after* the alert push and fails when the push failed, so "all checks
+  pass but you cannot be told" is a page rather than a silent host.
+  Two smaller things: a **config with no receiver integrations is valid** (that
+  is what makes a fresh host safe before SMTP is filled in), and the image runs
+  as uid **65534**, which cannot read a 0600 SMTP-bearing config — the unit sets
+  `User=0`, which under rootless podman is the login user (same as
+  `victoriametrics`), not an escalation. Proving the path end to end is
+  `scripts/monitor.sh --test`.
 - **Metrics are history, not alerting, and the two must not be coupled:**
   `victoriametrics` (loopback `8428`, 30d via `METRICS_RETENTION`) +
   `node-exporter` + `scripts/metrics.sh` on `metrics.timer` every minute.
@@ -575,8 +605,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   first in `start_infra`, after `refresh_image_unit` because install.sh rebuilds
   the image in place (a plain `start` on an active unit keeps the old bits), and
   `ensure_netcheck` covers every `--only` branch (the monitor's verify sweep,
-  npm-hosts, kuma-monitors all probe). `kuma-ctl` and the apprise probe are
-  still one-shot `podman run`s and keep `--log-driver=none`: the driver only
+  npm-hosts, kuma-monitors all probe). `kuma-ctl` is still a one-shot
+  `podman run` and keeps `--log-driver=none`: the driver only
   controls persistence, so their stdout still reaches the caller's command
   substitution while the journal stays clean. `wait_healthy` treats a container
   with no healthcheck as "up" -- `victoria-logs` is distroless and the netcheck

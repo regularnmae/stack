@@ -4,6 +4,7 @@
 #   scripts/monitor.sh              # run every check, log, heartbeat, alert
 #   scripts/monitor.sh --quiet      # no stdout (what deploy/monitor.service runs)
 #   scripts/monitor.sh --no-verify  # skip the verify.sh base sweep
+#   scripts/monitor.sh --test       # send one real alert through Alertmanager
 #
 # Driven by deploy/monitor.timer (a plain systemd user unit) every five minutes.
 # Read-only: it starts nothing, restarts nothing and rewrites no config. It
@@ -11,15 +12,26 @@
 # else does -- chain freshness, CLN peers and channels, the Monero wallet's lag,
 # and the spend tripwire in scripts/spend-audit.sh.
 #
+# This script decides WHAT is wrong; it does not decide when to say it. Each
+# check section becomes one alert, pushed to Alertmanager
+# ($MONITOR_ALERTMANAGER_URL, loopback :9093), which owns grouping, repeat
+# intervals, inhibition, silences and delivery. The one state machine that stays
+# here is the flap damper: an alert must be bad for MONITOR_ALERT_FOR seconds
+# (two sweeps) before it is pushed at all, because Alertmanager only sees what
+# is pushed at it and cannot tell a flapping check from one that never settled.
+# A recovery is pushed explicitly (endsAt in the past) as soon as a sweep sees
+# it, so it is not delayed by Alertmanager's resolve_timeout.
+#
 # Nothing here pauses a failing service; a failure fails the dead-man's-switch
-# heartbeat ($MONITOR_PING_URL) and sends one alert per state CHANGE through
-# Apprise ($MONITOR_APPRISE_URLS). A host that is down cannot report itself --
-# the missed heartbeat is the only thing that catches that, which is why the
-# heartbeat is a plain outbound ping and not an Apprise target.
+# heartbeat ($MONITOR_PING_URL). A host that is down cannot report itself, and
+# neither can a host whose mail is not leaving -- which is why the heartbeat
+# also fails when the alert push fails or Alertmanager reports failed
+# deliveries. That heartbeat is a plain outbound ping for exactly this reason.
 #
 # Config comes from $DATA_DIR/config/monitoring/monitor.env (the unit's
 # EnvironmentFile); it is read here too so the script also runs by hand. Empty
-# values mean "journal only": no heartbeat, no alerts.
+# values mean "journal only": no heartbeat. The SMTP credentials live in
+# $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, never here.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,10 +42,12 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 QUIET=0
 DO_VERIFY=1
+ALERT_TEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --quiet)     QUIET=1 ;;
         --no-verify) DO_VERIFY=0 ;;
+        --test)      ALERT_TEST=1 ;;
         -h|--help)   usage_header "$0"; exit 0 ;;
         *)           die "unknown argument: $1 (try --help)" ;;
     esac
@@ -44,18 +58,31 @@ resolve_data_dir
 AUDIT_DIR="$DATA_DIR/audit"
 mkdir -p "$AUDIT_DIR"
 MONITOR_ENV="$CONFIG_DIR/monitoring/monitor.env"
-STATE_FILE="$AUDIT_DIR/state"
 AUDIT_LOG="$AUDIT_DIR/audit.log"
-APPRISE_IMAGE="${APPRISE_IMAGE:-docker.io/caronc/apprise:2.0.2}"
 
 # The unit passes these through EnvironmentFile; reading the file here too makes
 # a hand run behave the same. env_value never sources the file.
 MONITOR_PING_URL="${MONITOR_PING_URL:-$(env_value "$MONITOR_ENV" MONITOR_PING_URL)}"
-MONITOR_APPRISE_URLS="${MONITOR_APPRISE_URLS:-$(env_value "$MONITOR_ENV" MONITOR_APPRISE_URLS)}"
+MONITOR_ALERTMANAGER_URL="${MONITOR_ALERTMANAGER_URL:-$(env_value "$MONITOR_ENV" MONITOR_ALERTMANAGER_URL)}"
+# Default on: the container is part of the stack now, so a host that upgrades
+# gets alerting without an env edit. `off` is the explicit opt-out (an empty
+# value cannot mean it: env_value returns nothing for both "absent" and
+# "empty", which is why the sentinel is a word, not a blank).
+MONITOR_ALERTMANAGER_URL="${MONITOR_ALERTMANAGER_URL:-http://127.0.0.1:9093}"
+MONITOR_ALERT_FOR="${MONITOR_ALERT_FOR:-$(env_value "$MONITOR_ENV" MONITOR_ALERT_FOR)}"
 MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-$(env_value "$MONITOR_ENV" MONITOR_GRACE_SYNC)}"
 MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-1}"
 MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:-$(env_value "$MONITOR_ENV" MONITOR_VERIFY_ARGS)}"
 MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:---deep}"
+# What every alert carries as its instance label: inhibition rules and a future
+# federated setup both key on it, and it is what makes "critical here mutes the
+# warnings here" expressible at all.
+ALERT_INSTANCE="$(hostname -s 2>/dev/null || echo stack)"
+# Where the pushed alert set and Alertmanager's delivery counter are remembered
+# between sweeps. Both are host state, not config, so they live in audit/.
+ALERT_STATE="$AUDIT_DIR/alerts.state"
+ALERT_FAILED_FILE="$AUDIT_DIR/alertmanager.failed"
+
 # The host-check thresholds follow the same order as the four above -- the unit's
 # EnvironmentFile when systemd runs it, then this file, then the default inside
 # num_or below -- so `scripts/monitor.sh` by hand alerts on exactly what the
@@ -116,6 +143,12 @@ THRESH_IDS_AGE_M=$(num_or "${MONITOR_IDS_MAX_AGE_MIN:-}" 20)
 # operator who gets paged per alert stops reading them. The rate lives in
 # VictoriaMetrics.
 THRESH_IDS_ALERTS=$(num_or "${MONITOR_IDS_ALERT_WARN:-}" 20)
+# How long a failing section must stay failing before it is pushed to
+# Alertmanager. Two sweeps: anything shorter is the flapping this exists to
+# stop, anything longer delays a real page. The `alerting` section bypasses it
+# (a broken alert path is never a flap, and waiting ten minutes to say the mail
+# is not leaving defeats the point).
+THRESH_ALERT_FOR=$(num_or "${MONITOR_ALERT_FOR:-}" 600)
 # The applier runs every minute; five missed runs is a stopped timer or a wedged
 # nft, and either one means decisions are being made but nothing is enforcing.
 THRESH_BOUNCER_AGE_M=$(num_or "${MONITOR_BOUNCER_MAX_AGE_MIN:-}" 5)
@@ -124,16 +157,151 @@ THRESH_AUDIT_AGE_M=$(num_or "${MONITOR_AUDIT_MAX_AGE_MIN:-}" 20)
 
 PROBLEMS=()
 WARNS=()
+# Which check section each entry came from. The section is the alert's stable
+# identity (its label); the text is the annotation. Without the split, "disk 9%
+# free" and "disk 8% free" would be two different alerts and every sweep would
+# look like a state change.
+PROBLEM_SECTIONS=()
+WARN_SECTIONS=()
+SECTION="other"
 verify_failures=0
 backup_age_s=""
 backup_count=""
 backup_verify_age_s=""
 backup_verify_ok=""
 say()  { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
-head3() { say ""; say "$*"; }
+slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/_/g; s/^_//; s/_$//'; }
+head3() { say ""; say "$*"; SECTION=$(slug "$*"); }
 ok()   { say "  ok    $*"; }
-soft() { WARNS+=("$*");    say "  warn  $*"; }
-fail() { PROBLEMS+=("$*"); say "  FAIL  $*"; }
+soft() { WARNS+=("$*");   WARN_SECTIONS+=("$SECTION");    say "  warn  $*"; }
+fail() { PROBLEMS+=("$*"); PROBLEM_SECTIONS+=("$SECTION"); say "  FAIL  $*"; }
+
+# ---------------------------------------------------------------------------
+# 0. the alert path: what Alertmanager is told, and what is held back
+# ---------------------------------------------------------------------------
+# One alert per section, never per line. The section is the alert's identity
+# (its label) and the lines are its annotation, so a changing number ("disk 9%
+# free" vs "disk 8% free") is the same alert instead of a new one every sweep.
+#
+# What stays here instead of moving into Alertmanager is the flap damper.
+# Alertmanager has group_wait/repeat_interval/inhibition/silences, but it only
+# sees what is pushed at it: it cannot tell a check that fails every other sweep
+# from one that has been down for an hour unless the producer holds the state.
+# The state file is that memory -- name, service, severity, first seen, last
+# pushed -- and it is also what makes explicit resolution possible.
+emit_alerts() { # push the current set; resolve the sections that cleared
+    [ "$MONITOR_ALERTMANAGER_URL" = off ] && return 0
+    local now url i s name psev psince psent body starts ends
+    local -A sev=() desc=() p_since=() p_sent=() p_svc=() p_sev=() current=()
+    local payload='[]' resolved='[]' new_state='' retry_state=''
+    now=$(date +%s)
+    url="${MONITOR_ALERTMANAGER_URL%/}"
+
+    if [ "${#PROBLEMS[@]}" -gt 0 ]; then
+        for i in "${!PROBLEMS[@]}"; do
+            s="${PROBLEM_SECTIONS[$i]}"
+            sev[$s]=critical
+            desc[$s]+="${desc[$s]:+$'\n'}- ${PROBLEMS[$i]}"
+        done
+    fi
+    if [ "${#WARNS[@]}" -gt 0 ]; then
+        for i in "${!WARNS[@]}"; do
+            s="${WARN_SECTIONS[$i]}"
+            [ "${sev[$s]:-}" = critical ] || sev[$s]=warning
+            desc[$s]+="${desc[$s]:+$'\n'}- ${WARNS[$i]}"
+        done
+    fi
+
+    if [ -f "$ALERT_STATE" ]; then
+        while IFS=$'\t' read -r name s psev psince psent; do
+            [ -n "$name" ] || continue
+            p_since[$name]="$psince"
+            p_sent[$name]="$psent"
+            p_svc[$name]="$s"
+            p_sev[$name]="$psev"
+        done < "$ALERT_STATE"
+    fi
+
+    for s in ${sev[@]+"${!sev[@]}"}; do
+        name="stack_$s"
+        current[$name]=1
+        psince="${p_since[$name]:-$now}"
+        psent="${p_sent[$name]:-0}"
+        # Hold-down: bad for THRESH_ALERT_FOR before it is ever pushed. Held
+        # alerts are remembered but not posted, so the first-seen time survives
+        # a sweep in which the check recovers and fails again.
+        if [ "$s" != alerting ] && [ "$((now - psince))" -lt "$THRESH_ALERT_FOR" ]; then
+            new_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
+            retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
+            continue
+        fi
+        starts=$(date -u -d "@$psince" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
+            || starts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+        body=$(jq -cn --arg n "$name" --arg svc "$s" --arg sev "${sev[$s]}" \
+            --arg inst "$ALERT_INSTANCE" --arg d "${desc[$s]}" --arg st "$starts" \
+            '{labels:{alertname:$n,severity:$sev,service:$svc,instance:$inst},
+              annotations:{summary:("stack: " + $svc + " is " + $sev), description:$d},
+              startsAt:$st}')
+        payload=$(jq -c --argjson a "$body" '. + [$a]' <<< "$payload")
+        new_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$now"$'\n'
+        retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
+    done
+
+    # What cleared. Resolving needs the ALERT's own labels, not the ones it
+    # would have now, so they come back out of the state file. An alert that
+    # never left (held, then cleared) is not "resolved" -- Alertmanager never
+    # heard of it, and mailing a recovery for an alert nobody saw is noise.
+    for name in ${p_since[@]+"${!p_since[@]}"}; do
+        [ -n "${current[$name]:-}" ] && continue
+        [ "${p_sent[$name]:-0}" -gt 0 ] || continue
+        ends=$(date -u -d "@$((now - 1))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
+            || ends=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+        body=$(jq -cn --arg n "$name" --arg svc "${p_svc[$name]}" --arg sev "${p_sev[$name]}" \
+            --arg inst "$ALERT_INSTANCE" --arg e "$ends" \
+            '{labels:{alertname:$n,severity:$sev,service:$svc,instance:$inst}, endsAt:$e}')
+        resolved=$(jq -c --argjson a "$body" '. + [$a]' <<< "$resolved")
+        # Kept only for the failure path: an undelivered resolution is retried.
+        retry_state+="$name"$'\t'"${p_svc[$name]}"$'\t'"${p_sev[$name]}"$'\t'"${p_since[$name]}"$'\t'"${p_sent[$name]}"$'\n'
+    done
+
+    body=$(jq -c -n --argjson f "$payload" --argjson r "$resolved" '$f + $r')
+    if [ "$(jq -r 'length' <<< "$body")" = 0 ]; then
+        printf '%s' "$new_state" > "$ALERT_STATE"
+        return 0
+    fi
+    if curl -fsS -m 10 -H 'Content-Type: application/json' \
+            --data-binary "$body" "$url/api/v2/alerts" >/dev/null 2>&1; then
+        printf '%s' "$new_state" > "$ALERT_STATE"
+        return 0
+    fi
+    # The retry state is written on purpose: the next sweep resumes with the
+    # original first-seen time, so a failed push neither loses a pending
+    # resolution nor restarts the hold-down, and nothing is marked delivered
+    # that Alertmanager never received. The caller fails the heartbeat, which is
+    # the only path that survives a broken alert channel.
+    printf '%s' "$retry_state" > "$ALERT_STATE"
+    say "  warn  could not push alerts to Alertmanager at $url (state kept for the next sweep)"
+    return 1
+}
+
+if [ "$ALERT_TEST" = 1 ]; then
+    [ "$MONITOR_ALERTMANAGER_URL" = off ] && die "alerting is off (MONITOR_ALERTMANAGER_URL=off)"
+    url="${MONITOR_ALERTMANAGER_URL%/}"
+    starts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    ends=$(date -u -d '+2 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    body=$(jq -cn --arg s "$starts" --arg e "$ends" --arg inst "$ALERT_INSTANCE" \
+        '[{labels:{alertname:"stack_test",severity:"warning",service:"alerting",instance:$inst},
+           annotations:{summary:"stack: test alert",description:"Sent by scripts/monitor.sh --test; it resolves in two minutes."},
+           startsAt:$s, endsAt:$e}]')
+    curl -fsS -m 10 -H 'Content-Type: application/json' \
+        --data-binary "$body" "$url/api/v2/alerts" >/dev/null \
+        || die "could not post a test alert to $url/api/v2/alerts"
+    printf 'test alert accepted by %s\n' "$url"
+    printf 'expect a warning mail now and a resolved mail in about two minutes.\n'
+    printf 'nothing arrived? fill in SMTP in %s/monitoring/alertmanager/alertmanager.yml,\n' "$CONFIG_DIR"
+    printf 'then: podman logs --tail 30 alertmanager\n'
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 1. the base sweep: containers, MCP health, token gate, authenticated calls
@@ -790,10 +958,86 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. the record, the heartbeat, the alert
+# 6. the alert path itself
+# ---------------------------------------------------------------------------
+# Checked before the record so a broken path shows up in the same sweep's exit
+# code and audit log. Two failures are distinguishable here and nowhere else:
+# Alertmanager not answering, and Alertmanager answering but failing to deliver.
+# The second one can never be reported through the channel it broke, which is
+# why it is remembered as a counter and turned into a page on the *next* sweep
+# -- and why the heartbeat is pushed after this block: "all checks pass but
+# nobody can be told" must fail it.
+head3 "alerting"
+am_ok=1
+if [ "$MONITOR_ALERTMANAGER_URL" = off ]; then
+    ok "alerting is off (MONITOR_ALERTMANAGER_URL=off): journal only"
+else
+    am_url="${MONITOR_ALERTMANAGER_URL%/}"
+    am_code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' "$am_url/-/healthy" 2>/dev/null) || am_code=""
+    if [ "$am_code" != 200 ]; then
+        am_ok=0
+        fail "Alertmanager does not answer at $am_url/-/healthy: alerts are going nowhere (the heartbeat carries this one)"
+    fi
+    # Cumulative since the process started, so a restart (a smaller number) is
+    # not a failure; only a growth since the last sweep is.
+    am_failed=$(curl -fsS -m 5 "$am_url/metrics" 2>/dev/null \
+        | awk '/^alertmanager_notifications_failed_total\{/ {s += $NF} END {printf "%d", s + 0}')
+    am_prev=$(cat "$ALERT_FAILED_FILE" 2>/dev/null) || am_prev=""
+    if [ -n "$am_failed" ]; then
+        if [ -n "$am_prev" ] && [ "$am_failed" -gt "$am_prev" ]; then
+            am_ok=0
+            fail "Alertmanager failed to deliver $((am_failed - am_prev)) notification(s) since the last sweep (SMTP or receiver; podman logs alertmanager)"
+        fi
+        printf '%s\n' "$am_failed" > "$ALERT_FAILED_FILE" 2>/dev/null || true
+    fi
+    [ "$am_ok" = 1 ] && ok "Alertmanager answers, and nothing failed to deliver since the last sweep"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. the record, the heartbeat, the alert
 # ---------------------------------------------------------------------------
 status=ok
 [ "${#PROBLEMS[@]}" -gt 0 ] && status=fail
+
+summary() {
+    if [ "${#PROBLEMS[@]}" -gt 0 ]; then
+        printf 'PROBLEMS:\n'
+        printf '  - %s\n' "${PROBLEMS[@]}"
+    fi
+    if [ "${#WARNS[@]}" -gt 0 ]; then
+        printf 'warnings:\n'
+        printf '  - %s\n' "${WARNS[@]}"
+    fi
+}
+
+heartbeat() { # ok|fail [body]
+    [ -n "$MONITOR_PING_URL" ] || return 0
+    local base url
+    base="${MONITOR_PING_URL%/}"
+    if [ "$1" = fail ]; then
+        url="$base/fail"
+        # The body is what a healthchecks.io check shows on its page; when the
+        # failure is not a check but the alert path, there is no summary to send.
+        curl -fsS -m 15 -X POST --data-binary "${2:-$(summary)}" "$url" >/dev/null 2>&1 \
+            || soft "heartbeat POST failed"
+    else
+        curl -fsS -m 15 -X POST "$base" >/dev/null 2>&1 || soft "heartbeat POST failed"
+    fi
+}
+
+# The push, then the heartbeat's verdict. Order is load-bearing: a host whose
+# checks all pass but whose alerts cannot leave must still fail the heartbeat,
+# because the email about that failure would take the same broken path.
+alert_push_ok=1
+emit_alerts || alert_push_ok=0
+
+if [ "${#PROBLEMS[@]}" -gt 0 ]; then
+    heartbeat fail "$(summary)"
+elif [ "$alert_push_ok" = 0 ]; then
+    heartbeat fail "monitor: every check passed, but the alert push to $MONITOR_ALERTMANAGER_URL failed -- the alert path is broken, see the journal"
+else
+    heartbeat ok
+fi
 
 # The other half of node-exporter's textfile: the numbers this sweep has to
 # compute anyway (backup age, the verifier's failures, spend trips), so they get
@@ -806,6 +1050,8 @@ status=ok
     printf 'stack_spend_trips %s\n' "${audit_trips:-0}"
     printf 'stack_monitor_problems %s\n' "${#PROBLEMS[@]}"
     printf 'stack_monitor_warnings %s\n' "${#WARNS[@]}"
+    printf 'stack_monitor_alert_push %s\n' "$alert_push_ok"
+    printf 'stack_monitor_alertmanager_up %s\n' "${am_ok:-1}"
     [ -n "$backup_age_s" ] && printf 'stack_backup_age_seconds %s\n' "$backup_age_s"
     [ -n "$backup_count" ] && printf 'stack_backup_snapshots %s\n' "$backup_count"
     [ -n "$backup_verify_age_s" ] && printf 'stack_backup_verify_age_seconds %s\n' "$backup_verify_age_s"
@@ -826,66 +1072,19 @@ status=ok
     done
 } >> "$AUDIT_LOG"
 
-summary() {
-    if [ "${#PROBLEMS[@]}" -gt 0 ]; then
-        printf 'PROBLEMS:\n'
-        printf '  - %s\n' "${PROBLEMS[@]}"
-    fi
-    if [ "${#WARNS[@]}" -gt 0 ]; then
-        printf 'warnings:\n'
-        printf '  - %s\n' "${WARNS[@]}"
-    fi
-}
-
-heartbeat() { # ok|fail
-    [ -n "$MONITOR_PING_URL" ] || return 0
-    local base url
-    base="${MONITOR_PING_URL%/}"
-    if [ "$1" = fail ]; then
-        url="$base/fail"
-        curl -fsS -m 15 -X POST --data-binary "$(summary)" "$url" >/dev/null 2>&1 \
-            || soft "heartbeat POST failed"
-    else
-        curl -fsS -m 15 -X POST "$base" >/dev/null 2>&1 || soft "heartbeat POST failed"
-    fi
-}
-
-notify() { # title body
-    [ -n "$MONITOR_APPRISE_URLS" ] || return 0
-    command -v podman >/dev/null 2>&1 || { soft "podman missing; cannot send the alert"; return 0; }
-    local -a urls=()
-    read -r -a urls <<< "$MONITOR_APPRISE_URLS"
-    [ "${#urls[@]}" -gt 0 ] || return 0
-    podman run --rm --log-driver=none "$APPRISE_IMAGE" apprise -t "$1" -b "$2" "${urls[@]}" >/dev/null 2>&1 \
-        || soft "apprise notification failed"
-}
-
-# One alert per state change: the digest of the failure set. A repeat of the
-# same failure is not mailed again, but the heartbeat keeps failing until it is
-# acknowledged (or fixed), which is the point.
-digest=$(printf '%s\n' ${PROBLEMS[@]+"${PROBLEMS[@]}"} | sha256sum | awk '{print $1}')
-prev=""
-[ -f "$STATE_FILE" ] && prev=$(cat "$STATE_FILE")
-if [ "$digest" != "$prev" ]; then
-    if [ "${#PROBLEMS[@]}" -gt 0 ]; then
-        notify "stack: ${#PROBLEMS[@]} problem(s)" "$(summary)"
-    elif [ -n "$prev" ]; then
-        # Only announce a recovery if a failure was recorded first; the very
-        # first run on a fresh host is not a recovery.
-        notify "stack: recovered" "all checks pass"
-    fi
-    printf '%s\n' "$digest" > "$STATE_FILE"
-fi
-
 if [ "${#PROBLEMS[@]}" -gt 0 ]; then
-    heartbeat fail
     say ""
     say "${#PROBLEMS[@]} problem(s):"
     printf '  - %s\n' "${PROBLEMS[@]}" | { [ "$QUIET" = 1 ] || cat; }
     exit 1
 fi
 
-heartbeat ok
+if [ "$alert_push_ok" = 0 ]; then
+    say ""
+    say "all checks passed, but the alert push failed (see above)"
+    exit 1
+fi
+
 say ""
 say "all checks passed"
 exit 0

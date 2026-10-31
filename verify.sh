@@ -57,7 +57,7 @@ if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        netcheck netcheck-host victoriametrics node-exporter victoria-logs vector crowdsec
+        netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -65,7 +65,7 @@ else
     containers=(
         bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-rpc lightningd
         tor valkey searxng uptime-kuma nginx-proxy-manager
-        netcheck netcheck-host victoriametrics node-exporter victoria-logs vector crowdsec
+        netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
@@ -631,6 +631,45 @@ if [ "$DEEP" = 1 ]; then
     else
         warn "victoriametrics has no stack_metrics_timestamp series yet (first scrape?)"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+head2 "Alerting"
+# Two failures look nothing alike here: the container can be healthy while mail
+# is not leaving it. /-/healthy answers the first; the config is inspected for
+# the second, and "no receiver configured" is a WARN, not a failure -- a fresh
+# host is not broken before its SMTP is filled in, it is just not paging yet.
+# The runtime half (did a delivery fail?) is monitor.sh's counter check, because
+# that is the sweep that can turn it into a page.
+am_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://alertmanager:9093/-/healthy 2>/dev/null) || am_code=""
+[ -n "$am_code" ] || am_code=000
+if [ "$am_code" = 200 ]; then
+    pass "alertmanager /-/healthy 200"
+else
+    bad "alertmanager /-/healthy -> $am_code"
+fi
+# The config is operator-owned and hand-edited, so a YAML slip is a real
+# possibility. Alertmanager keeps running the last good config when it refuses a
+# new one, which is silent unless someone parses it.
+AM_CFG="$CONFIG_DIR/monitoring/alertmanager/alertmanager.yml"
+if [ -f "$AM_CFG" ]; then
+    if am_chk=$(podman exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>&1); then
+        pass "alertmanager config parses"
+    else
+        bad "alertmanager config is invalid ($AM_CFG): ${am_chk##*$'\n'}"
+    fi
+    # The seeded config ships with the receiver's email block commented out: the
+    # alert path accepts alerts and delivers nothing until it is filled in.
+    if grep -qE '^[[:space:]]*email_configs:' "$AM_CFG"; then
+        pass "alertmanager has an email receiver configured"
+    else
+        warn "alerting is inert: no email_configs in $AM_CFG (fill in SMTP, then scripts/monitor.sh --test)"
+    fi
+else
+    warn "no alertmanager config at $AM_CFG (run deploy/install.sh)"
+fi
+if [ "$(env_value "$CONFIG_DIR/monitoring/monitor.env" MONITOR_ALERTMANAGER_URL)" = off ]; then
+    warn "alerting is disabled by config (MONITOR_ALERTMANAGER_URL=off in monitor.env)"
 fi
 
 # ---------------------------------------------------------------------------

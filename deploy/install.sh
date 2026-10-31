@@ -308,6 +308,7 @@ UNITS=(
     "postgres-dump.container:postgres-dump.container"
     "backup.container:backup.container"
     "victoriametrics.container:victoriametrics.container"
+    "alertmanager.container:alertmanager.container"
     "node-exporter.container:node-exporter.container"
     "victoria-logs.container:victoria-logs.container"
     "vector.container:vector.container"
@@ -663,6 +664,27 @@ chmod 0755 "$DATA_DIR/monitoring/textfile" 2>/dev/null || true
 mkdir -p "$CONFIG_DIR/monitoring/vm"
 ( umask 077; cat "$DEPLOY_DIR/monitoring/scrape.yml" > "$CONFIG_DIR/monitoring/vm/scrape.yml" )
 log "wrote $CONFIG_DIR/monitoring/vm/scrape.yml"
+
+# Alertmanager: the alert state machine scripts/monitor.sh pushes into.
+#
+# The state dir (silences, notification log) is regenerable -- losing a silence
+# un-mutes an alert for one repeat interval -- so it lives with the rest of
+# $DATA_DIR/monitoring, outside BACKUP_PATHS. The unit runs as container root ==
+# the login user under rootless podman, so a plain mkdir is enough.
+mkdir -p "$DATA_DIR/monitoring/alertmanager" "$CONFIG_DIR/monitoring/alertmanager"
+
+# The config is seeded ONCE and then belongs to the operator: it carries the
+# SMTP password, so rewriting it on every deploy would both clobber an edited
+# route tree and re-arm a placeholder credential. Written in place (`cat >`),
+# not installed/moved, because Alertmanager watches the path: a replaced inode
+# behind the directory mount would still be seen, but a move would break the
+# open file the reloader is stat-ing. The unit mounts the directory for the
+# same reason (deploy/alertmanager.container explains it).
+ALERT_CFG="$CONFIG_DIR/monitoring/alertmanager/alertmanager.yml"
+if ensure_secret "$ALERT_CFG" "alertmanager config"; then
+    write_secret "$ALERT_CFG" < "$DEPLOY_DIR/examples/monitoring/alertmanager.yml.example"
+    log "wrote $ALERT_CFG (mode 600) -- fill in SMTP before alerts are actually mailed"
+fi
 
 # Logs: the store, the shipper's checkpoint, and the shipper's config.
 #
@@ -1118,10 +1140,14 @@ fi
 MON_ENV="$CONFIG_DIR/monitoring/monitor.env"
 if ensure_secret "$MON_ENV" "monitoring env"; then
     write_secret "$MON_ENV" <<'EOF'
-# Alerts (Apprise targets, space-separated) and the dead-man's-switch
-# heartbeat, for scripts/monitor.sh via deploy/monitor.service. Empty means
-# journal-only. See deploy/examples/monitoring/monitor.env.example.
-MONITOR_APPRISE_URLS=
+# Alerts and the dead-man's-switch heartbeat, for scripts/monitor.sh via
+# deploy/monitor.service. Alertmanager (deploy/alertmanager.container) sends the
+# mail: the SMTP settings live in
+# $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, not in this file.
+# MONITOR_ALERTMANAGER_URL=off disables the push and leaves alerts in the
+# journal, which is what the stack did before Alertmanager existed.
+# See deploy/examples/monitoring/monitor.env.example.
+MONITOR_ALERTMANAGER_URL=http://127.0.0.1:9093
 MONITOR_PING_URL=
 MONITOR_GRACE_SYNC=1
 MONITOR_VERIFY_ARGS=--deep
@@ -1157,8 +1183,13 @@ MONITOR_RESTART_MAX=3
 MONITOR_METRICS_MAX_AGE_S=300
 MONITOR_LOGS_MAX_AGE_S=900
 MONITOR_FULCRUM_LAG_BLOCKS=12
+# Seconds a check must stay bad before it is mailed at all, i.e. the flap
+# damper Alertmanager cannot provide (it only sees what is pushed at it). 600 =
+# two sweeps: a check that fails once and recovers costs a journal line, not an
+# email. A recovery is announced as soon as the next sweep sees it.
+MONITOR_ALERT_FOR=600
 EOF
-    log "wrote $MON_ENV (mode 600) -- empty targets: journal-only until filled in"
+    log "wrote $MON_ENV (mode 600) -- fill in the heartbeat (and SMTP in the alertmanager config) to be paged"
 fi
 
 # nginx-proxy-manager's admin API, for scripts/npm-hosts.sh: it reconciles every
@@ -1487,8 +1518,11 @@ Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
   $CONFIG_DIR/monero-wallet-mcp/spend.env  and  $CONFIG_DIR/lightning-mcp/spend.env
 BoltMesh is wired to the stack's lightningd and monero-wallet-rpc; fill in the
   OAuth / SMTP / GitHub values in $CONFIG_DIR/boltmesh/app.env before first use.
-The monitor runs every 5 minutes (monitor.timer) and alerts only once
-  $CONFIG_DIR/monitoring/monitor.env has an Apprise target and/or a heartbeat.
+The monitor runs every 5 minutes (monitor.timer) and pushes its alert set to
+  Alertmanager (loopback :9093). Mail needs SMTP in
+  $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, and the dead-man's
+  switch (MONITOR_PING_URL) is set in $CONFIG_DIR/monitoring/monitor.env.
+  Prove the path with scripts/monitor.sh --test.
 Metrics are collected every minute (metrics.timer) and stored for
   ${METRICS_RETENTION} in $DATA_DIR/monitoring/vm; read them at
   http://127.0.0.1:8428/vmui over an SSH tunnel (no public host, on purpose).

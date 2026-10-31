@@ -1,0 +1,87 @@
+# Quadlet unit for Alertmanager, the stack's alert state machine.
+#
+# What it is: the half of alerting that scripts/monitor.sh used to hand-roll in
+# bash -- grouping, repeat intervals, inhibition, silences and routing -- plus
+# the one thing a fire-and-forget `podman run` did worst: a delivery path that
+# reports its own failures. monitor.sh still decides WHAT is wrong (it reads the
+# daemons and the host directly); Alertmanager decides WHEN to say it and over
+# which channel.
+#
+# Push-only, nothing is scraped. monitor.sh POSTs the current alert set to
+# /api/v2/alerts every five minutes and resolves an alert EXPLICITLY (an endsAt
+# in the past) when its check goes away. That is why the config's
+# resolve_timeout is 24h: with a five-minute push cycle, any value near the
+# interval would declare a healthy alert resolved between two sweeps and mail
+# "recovered" for something that never recovered. 24h only bounds the damage if
+# monitor.sh stops pushing altogether.
+#
+# Alerting still does NOT go through victoriametrics: nothing here reads the
+# metrics store, so a wedged or deleted VM cannot silence an alert. That
+# property is why the store exists separately (stack.conf).
+#
+# Not behind nginx-proxy-manager: the web UI and the API have no authentication
+# of their own, so this is loopback only, like vmui. Reach it over an SSH tunnel:
+#   ssh -L 9093:127.0.0.1:9093 thishost    # then http://127.0.0.1:9093
+# It is deliberately absent from NPM_HOSTS and from FIREWALL_PORTS.
+[Unit]
+Description=Alertmanager (alert grouping, dedupe and delivery for the stack)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=alertmanager
+Image=docker.io/prom/alertmanager:v0.34.2
+Network=npm-network.network
+
+# Loopback only: the API accepts alert pushes from the host script and has no
+# authentication. Same rule as victoriametrics: an unauthenticated surface is
+# never declared in NPM_HOSTS.
+PublishPort=127.0.0.1:9093:9093
+
+# The image's default user is uid 65534 (nobody), which cannot read the 0600
+# config that carries the SMTP password -- and making that file world-readable
+# to satisfy it would leak the credential. Under rootless podman container root
+# IS the login user, so running as 0 here is the same privilege the rest of the
+# stack runs at (victoriametrics, cln/, tor/), not an escalation.
+User=0
+
+# The config: seeded once by install.sh from
+# deploy/examples/monitoring/alertmanager.yml.example and owned by the operator
+# from then on, because it holds the SMTP credential.
+#
+# The DIRECTORY is mounted, not the file. Alertmanager watches the config path
+# and reloads on change, but a single-file bind mount keeps the inode it opened,
+# so an edited file behind a file mount would never be read (the same trap
+# victoriametrics.container documents for scrape.yml).
+Volume=@CONFIG_DIR@/monitoring/alertmanager:/etc/alertmanager:ro,z
+
+# Silences and the notification log. Regenerable (losing a silence un-mutes an
+# alert for one repeat interval; losing the log only affects dedupe across a
+# restart), so it lives with the rest of $DATA_DIR/monitoring -- outside
+# BACKUP_PATHS.
+Volume=@DATA_DIR@/monitoring/alertmanager:/alertmanager:z
+
+# One Exec= line (a Quadlet Exec= is a single command).
+#   --cluster.listen-address=   no HA gossip: there is one instance here, and an
+#                               empty value keeps :9094 closed instead of
+#                               opening a peer port nothing will ever use.
+#   --web.external-url          what the links in a notification point at. The
+#                               UI is loopback-only, so those links work through
+#                               the SSH tunnel above and nowhere else.
+Exec=--config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager --web.listen-address=:9093 --web.external-url=http://127.0.0.1:9093 --cluster.listen-address=
+
+# The image ships busybox wget (verified), and /-/healthy is Alertmanager's own
+# liveness endpoint. 30s: an HTTP service, per the healthcheck contract.
+HealthCmd=wget -q -T 4 -t 1 -O /dev/null http://127.0.0.1:9093/-/healthy
+HealthInterval=30s
+HealthTimeout=10s
+HealthStartPeriod=15s
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

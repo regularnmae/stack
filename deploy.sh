@@ -356,6 +356,11 @@ start_infra() {
     # instead of beginning mid-way through it.
     start_unit node-exporter
     start_unit victoriametrics
+    # Alertmanager: the monitor pushes into it, and the monitor's first sweep
+    # may land before this line, so starting it here (a start is a no-op when
+    # active) keeps a fresh host from logging "Alertmanager unreachable" on its
+    # very first run.
+    start_unit alertmanager
     # The log pipeline: journald -> vector -> victoria-logs. Same reasoning as
     # the metrics store -- it depends on nothing, and starting it before the
     # daemons is what captures their first minutes. vector buffers and retries
@@ -887,8 +892,10 @@ Stack deployed.
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR;
                     weekly restore drill (backup-verify.timer), verdict in
                     $DATA_DIR/audit/backup-verify.status
-  Monitoring:       every 5 min (monitor.timer) + spend tripwire; both alert
-                    only once $DATA_DIR/config/monitoring/monitor.env is filled in
+  Monitoring:       every 5 min (monitor.timer) + spend tripwire, pushed to
+                    alertmanager (loopback :9093); mail once SMTP is filled in
+                    $DATA_DIR/config/monitoring/alertmanager/alertmanager.yml
+                    (scripts/monitor.sh --test proves the path)
   Metrics:          every minute (metrics.timer) into victoriametrics, which is
                     loopback-only by design -- read it over an SSH tunnel:
                     ssh -L 8428:127.0.0.1:8428 <host>, then

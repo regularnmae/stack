@@ -6,19 +6,20 @@
 # ~/.config/systemd/user/ (it is not activated on its own -- the timer
 # activates it), so no [Install] section.
 #
-# It changes nothing: it starts no unit and rewrites no config. A failure only
-# fails the dead-man's-switch heartbeat and sends an Apprise alert.
+# It changes nothing: it starts no unit and rewrites no config. A failure pushes
+# its alert set to Alertmanager and fails the dead-man's-switch heartbeat.
 [Unit]
 Description=Stack health monitor and spend tripwire
-# The heartbeat and alerts are outbound, so wait for the network.
-After=network-online.target
+# The heartbeat and the alert push are outbound (the latter to alertmanager on
+# npm-network's loopback publish), so wait for the network.
+After=network-online.target alertmanager.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Seeded by deploy/install.sh (mode 600): the Apprise targets, the heartbeat
-# URL and the sync grace. The leading '-' makes it optional -- with the file
-# absent the monitor still runs, journal only.
+# Seeded by deploy/install.sh (mode 600): the Alertmanager URL, the heartbeat
+# URL, the flap hold-down and the sync grace. The leading '-' makes it optional
+# -- with the file absent the monitor still runs, journal only.
 EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env
 # --quiet: the journal gets the summary lines, not the whole sweep; running
 # scripts/monitor.sh by hand prints everything.

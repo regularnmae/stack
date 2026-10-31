@@ -29,6 +29,7 @@ stack runs and one script that fixes a deployment problem.
 | `netcheck`, `netcheck-host` | `localhost/netcheck:local` (built from `netcheck/Containerfile`) | — | — |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
 | `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
+| `alertmanager` | `docker.io/prom/alertmanager:v0.34.2` | `127.0.0.1:9093` | `$DATA_DIR/monitoring/alertmanager` (silences, notification log) |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network, `:9100` (wildcard bind; LAN closed by firewall) | — (serves `$DATA_DIR/monitoring/textfile`) |
 | `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.53.0` | `127.0.0.1:9428` | `$DATA_DIR/logs/vl` |
 | `vector` | `docker.io/timberio/vector:0.61.0-debian` | — | `$DATA_DIR/logs/vector` (checkpoint) |
@@ -811,27 +812,64 @@ metrics store. That is deliberate: alerting must not depend on the pipeline that
 exists to draw graphs of itself, so VictoriaMetrics can be down, wedged or
 deleted without silencing an alert.
 
-**Alerting is off until you fill in
-`$DATA_DIR/config/monitoring/monitor.env`** (mode 600, seeded empty):
+**The monitor decides *what* is wrong; Alertmanager decides *when* to say it.**
+`deploy/alertmanager.container` (`prom/alertmanager`, loopback `:9093`, no
+public host — reach it over `ssh -L 9093:127.0.0.1:9093`) is on the alert path
+for exactly the jobs bash did badly:
 
-  - `MONITOR_APPRISE_URLS` — [Apprise](https://github.com/caronc/apprise)
-    targets, space-separated (`mailto://…`, `ntfy://…`, `json://…`), sent
-    through a one-shot `caronc/apprise` container. One alert per state
-    **change**, plus a recovery notice.
+  - **grouping and repeats** — one mail per severity group, and a still-firing
+    alert is repeated every `repeat_interval` (4h) instead of being mailed once
+    and forgotten;
+  - **inhibition** — a critical on a host mutes its warnings, so a full disk
+    does not also page "every chain looks stale";
+  - **silences** — a maintenance window is a first-class object (UI or
+    `amtool`), not a commented-out check;
+  - **delivery failures are visible** — `alertmanager_notifications_failed_total`
+    is read back by the next sweep, which fails the heartbeat. A fire-and-forget
+    `podman run` could never report that its own mail did not leave.
+
+What stays in `scripts/monitor.sh` is the one thing Alertmanager cannot do,
+because it only sees what is pushed at it: the **flap damper**. Each check
+section becomes one alert (stable `alertname`/`service` labels, the changing
+numbers in the annotation), and nothing is pushed until it has been failing for
+`MONITOR_ALERT_FOR` (600s, two sweeps). A recovery is pushed explicitly (an
+`endsAt` in the past) on the next sweep that sees it, so recoveries are prompt
+and a monitor that dies cannot fake one.
+
+**Mail is off until you fill in
+`$DATA_DIR/config/monitoring/alertmanager/alertmanager.yml`** (mode 600, seeded
+from `deploy/examples/monitoring/alertmanager.yml.example`; uncomment
+`email_configs` and set `global.smtp_*`). Until then Alertmanager accepts alerts
+and delivers nothing, `verify.sh` says so ("alerting is inert"), and nothing
+fails on a fresh host. Prove the whole path with `scripts/monitor.sh --test`.
+
+The SMTP facts worth knowing: `smtp_smarthost` is the **submission** server, not
+the recipient's domain (`smtp.gmail.com:587` with an App Password works, and is
+the same server Apprise's `mailto://user:app-password@gmail.com` was built on).
+A host that is not a mail server, or one that accepts mail without
+authentication from a residential IP, is how alert mail ends up rejected or in
+spam — no SPF, no DKIM, no matching PTR. A provider relay carries all three.
+
+`$DATA_DIR/config/monitoring/monitor.env` (mode 600) still holds:
+
+  - `MONITOR_ALERTMANAGER_URL` — default `http://127.0.0.1:9093`; `off` keeps
+    alerts in the journal only.
   - `MONITOR_PING_URL` — a dead-man's-switch heartbeat (a healthchecks.io ping
     URL): a plain `curl` hits the URL on success and `<url>/fail` with the
     failure list on failure. This is the only thing that notices when the
-    **whole host** is down, which is why it is not an Apprise target. Set the
-    check's period to the timer interval (5 minutes).
+    **whole host** is down, which is why it is not an email — a host that is not
+    running cannot send one. It also fails when the alert push fails or
+    Alertmanager reports a failed delivery, so a broken mail path is never
+    silent. Set the check's period to the timer interval (5 minutes).
 
-With both empty the monitor still runs and records to
+With no heartbeat the monitor still runs and records to
 `$DATA_DIR/audit/audit.log`, and `verify.sh` reports whether the timer is
 installed and active. The host checks' thresholds are the same file
 (`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
 `MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`, `MONITOR_METRICS_MAX_AGE_S`,
 `MONITOR_FULCRUM_LAG_BLOCKS`, `MONITOR_BTC_MIN_PEERS`, `MONITOR_MEMPOOL_MB`,
 `MONITOR_XMR_LAG_BLOCKS`, `MONITOR_NET_DROP`, `MONITOR_TEMP_MAX`,
-`MONITOR_LOGS_MAX_AGE_S`, …);
+`MONITOR_LOGS_MAX_AGE_S`, `MONITOR_ALERT_FOR`, …);
 each falls back to its default in the script, so a monitor.env written before a
 check existed still monitors.
 
@@ -1188,9 +1226,11 @@ like `tor` and `netcheck`). The admin login lives in
 the setup wizard asked for and re-run `./deploy.sh --only kuma-monitors`); the
 reconciler self-skips until it is filled in. The login never reaches a command
 line: it travels to the container through the environment. The page's
-**notifications** (an Apprise or SMTP target) stay UI-configured — they are
-set once in kuma's own settings; kuma embeds Apprise, so the monitor's
-Apprise URLs are reusable there.
+**notifications** stay UI-configured — kuma embeds Apprise, so its targets are
+chosen once in its own settings. That is the *status page's* channel, not the
+alerting path: the stack's own alerts go monitor → Alertmanager → mail (above),
+and the two are independent on purpose, so a kuma that dies with the host does
+not take the pager with it.
 
 Notes:
 
@@ -1596,7 +1636,7 @@ stack/
     examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by hand
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
     examples/backup/*.example     # backup.env shape
-    examples/monitoring/*.example # monitor.env shape (Apprise targets + heartbeat)
+    examples/monitoring/*.example # monitor.env + alertmanager.yml shapes
     examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
     examples/boltmesh/*.example   # db/secrets/app/gateway env shapes
     examples/btc-explorer/*.example # btc-explorer.env shape (RPC + Fulcrum wiring)

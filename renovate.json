@@ -128,15 +128,15 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "the three rendered unit *templates* and the three image defaults that live in shell. Renovate's quadlet manager matches only *.container, so deploy/*.container.in (fulcrum, lightningd, monero-wallet-rpc -- the units install.sh renders, because they carry secrets) is invisible to it, and no manager reads a shell default (wallets.sh's MONERO_IMAGE, monitor.sh's APPRISE_IMAGE, backup.sh's RESTIC_IMAGE). These stay tag-pinned too; the packageRules entry below turns digest pinning off for them, because a regex manager can only *update* a digest, never add one.",
+      "description": "the three rendered unit *templates* and the two image defaults that live in shell. Renovate's quadlet manager matches only *.container, so deploy/*.container.in (fulcrum, lightningd, monero-wallet-rpc -- the units install.sh renders, because they carry secrets) is invisible to it, and no manager reads a shell default (wallets.sh's MONERO_IMAGE, backup.sh's RESTIC_IMAGE). These stay tag-pinned too; the packageRules entry below turns digest pinning off for them, because a regex manager can only *update* a digest, never add one.",
       "matchStrings": [
         "(?:^|\\n)Image=(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s]+):(?<currentValue>[^@\\s]+)",
-        "(?:^|\\n)(?:MONERO_IMAGE|APPRISE_IMAGE|RESTIC_IMAGE)=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
+        "(?:^|\\n)(?:MONERO_IMAGE|RESTIC_IMAGE)=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
       ],
       "datasourceTemplate": "docker",
       "managerFilePatterns": [
         "/^deploy/[^/]+\\.container\\.in$/",
-        "/^scripts/(wallets|monitor|backup)\\.sh$/"
+        "/^scripts/(wallets|backup)\\.sh$/"
       ]
     },
     {

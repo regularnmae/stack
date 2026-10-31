@@ -1,0 +1,108 @@
+# Template for $DATA_DIR/config/monitoring/alertmanager/alertmanager.yml -- the
+# file deploy/alertmanager.container actually reads. install.sh copies it there
+# once, mode 600, and never overwrites it: it carries the SMTP password.
+#
+# The split of responsibilities, because it decides where to look when a mail
+# does not arrive:
+#
+#   scripts/monitor.sh   decides WHAT is wrong (it reads the daemons and the
+#                        host directly) and holds an alert for MONITOR_ALERT_FOR
+#                        seconds so a flapping check does not mail anything.
+#                        It pushes the alert set every five minutes.
+#   this file            decides WHEN a still-firing alert is repeated, how
+#                        alerts are grouped into one mail, what inhibits what,
+#                        and where it is delivered.
+#
+# Alertmanager watches this path and reloads on change, so an edit needs no
+# restart. Validate before saving (a bad config is refused and the old one keeps
+# running, which is silent until you look):
+#
+#   podman exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+#
+# Prove the whole path once it is filled in:
+#
+#   scripts/monitor.sh --test      # one warning mail now, one resolved in ~2 min
+
+global:
+  # Explicit resolution (monitor.sh sends an endsAt in the past when a check
+  # clears) is how an alert ends. This timeout only applies to alerts that never
+  # carry an endsAt, i.e. the ones monitor.sh stopped refreshing because the
+  # monitor itself died: 24h keeps that from faking a recovery between sweeps.
+  resolve_timeout: 24h
+
+  # --- SMTP -----------------------------------------------------------------
+  # smtp_smarthost is the SUBMISSION server, not the recipient's domain. That
+  # distinction is the one people get wrong: a hostname that is not a mail
+  # server (the recipient's domain, a bare IP with nothing on :587) fails to
+  # connect, and a host that does accept mail without authentication gets the
+  # mail spam-foldered or rejected, because a residential IP has no SPF record,
+  # no DKIM signature and no matching PTR. A provider relay does all three for
+  # you.
+  #
+  #   smtp.gmail.com:587        a Google account or Workspace mailbox. Needs an
+  #                             App Password (2FA on); the normal account
+  #                             password is refused. smtp_from must be the same
+  #                             address, or a verified "send mail as" alias.
+  #   smtp-relay.gmail.com:587  Workspace SMTP relay; requires SMTP AUTH or an
+  #                             allowlisted source IP.
+  #   smtp.example.com:465      implicit TLS; 465 is auto-detected, or force it
+  #                             with smtp_force_implicit_tls: true.
+  #
+  # The same credentials in an Apprise `mailto://` URL had identical
+  # requirements -- `mailto://user:app-password@gmail.com` is built on this very
+  # server. Nothing about mail changes by moving it here.
+  #
+  # smtp_from: alerts@example.com
+  # smtp_smarthost: smtp.gmail.com:587
+  # smtp_auth_username: alerts@example.com
+  # smtp_auth_password: 'app-password-here'
+  # smtp_require_tls: true
+  # smtp_hello: example.com     # EHLO name; some relays reject a bare hostname
+
+route:
+  # One receiver for now: email is the only channel. The shape to grow into is
+  # a sub-route per severity -- critical to a phone, warning to a mailbox:
+  #
+  #   routes:
+  #     - receiver: stack-phone
+  #       matchers: [ severity = "critical" ]
+  receiver: stack-email
+  # Group by severity, not by alertname: one mail listing every critical check
+  # beats fifteen mails. monitor.sh already aggregates per check section, so
+  # each alert's description is a bullet list.
+  group_by: ['severity']
+  # An alert that resolves inside group_wait is never mailed at all. This is a
+  # second, smaller flap damper behind monitor.sh's hold-down; it only has to
+  # absorb a resolution already in flight.
+  group_wait: 30s
+  group_interval: 5m
+  # A still-firing alert is repeated this often -- the "you missed the first
+  # mail" path. Without it, one lost mail means the fault is silent until the
+  # next state change.
+  repeat_interval: 4h
+
+receivers:
+  - name: stack-email
+    # Uncomment and fill in once the SMTP settings above are set. Until then
+    # Alertmanager accepts alerts and delivers nothing, on purpose: a fresh host
+    # must not fail every sweep because a mailer is not configured yet.
+    # verify.sh reports that state as "alerting is inert" instead.
+    #
+    # email_configs:
+    #   - to: you@example.com
+    #     # Without this, recoveries are silent: Alertmanager's default is false.
+    #     send_resolved: true
+    #     # The default HTML/text templates list every alert in the group with
+    #     # its annotations. Customise with `html:` / `text:` if you want.
+
+# Inhibition: one real fault usually produces several warnings -- a full disk
+# makes every chain look stale, a dead node makes every MCP check look slow. A
+# critical on the same instance mutes the warnings. `instance` is the label
+# monitor.sh sets to this host's short hostname.
+inhibit_rules:
+  - name: critical-mutes-warnings
+    source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ['instance']
