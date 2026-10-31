@@ -15,7 +15,7 @@ Environment:
     BTCPAY_STORE_NAME                default "BoltMesh"
     BTCPAY_STORE_ID                  optional; otherwise resolved by name
     BTCPAY_API_KEY                   optional runtime key to validate/reuse
-    BTCPAY_WEBHOOK_URL               default http://backend:8000/v1/webhooks/btcpay
+    BTCPAY_WEBHOOK_URL               default http://boltmesh-backend:8000/v1/webhooks/btcpay
     BTCPAY_WEBHOOK_SECRET            optional; generated when creating
     BTCPAY_XMR_ACCOUNT_INDEX         default 0
     BTCPAY_XMR_CONFIRMATIONS         default 1
@@ -318,6 +318,28 @@ def ensure_webhook(
     return secret, False
 
 
+def runtime_key_status(client: BtcPay, api_key: str) -> tuple[bool, str, list[str]]:
+    """Return ``(complete, key_id, missing_permissions)`` for a runtime key.
+
+    ``payment-methods`` is not a sufficient probe: it is gated by
+    ``canviewstoresettings``, so a key minted before a permission was added to
+    ``RUNTIME_PERMISSIONS`` (notably ``canviewinvoices``) passes it and is then
+    reused forever, making every invoice lookup fail with a 403. BTCPay keys are
+    immutable, so the only fix is to mint a replacement.
+    """
+    try:
+        info = client.request("GET", "/api/v1/api-keys/current", token=api_key) or {}
+    except BootstrapError as exc:
+        log(f"could not read the runtime key's permissions: {exc}")
+        return False, "", ["unreadable"]
+    permissions = set(info.get("permissions") or [])
+    key_id = str(info.get("id") or "")
+    if "unrestricted" in permissions:
+        return True, key_id, []
+    missing = [permission for permission in RUNTIME_PERMISSIONS if permission not in permissions]
+    return not missing, key_id, missing
+
+
 def ensure_runtime_key(client: BtcPay, key: str, store_id: str, api_key: str) -> tuple[str, bool]:
     if api_key:
         try:
@@ -325,8 +347,16 @@ def ensure_runtime_key(client: BtcPay, key: str, store_id: str, api_key: str) ->
         except BootstrapError:
             log("the provided BTCPAY_API_KEY is not usable; minting a new one")
         else:
-            log("reusing the provided runtime API key")
-            return api_key, False
+            complete, key_id, missing = runtime_key_status(client, api_key)
+            if complete:
+                log("reusing the provided runtime API key")
+                return api_key, False
+            log(
+                "the provided BTCPAY_API_KEY is missing "
+                f"{', '.join(missing)}; minting a replacement "
+                f"(the superseded key {key_id or 'unknown'} is left active so the "
+                "backend keeps working until backend.env is rewritten)"
+            )
 
     created = client.request(
         "POST",
@@ -336,6 +366,12 @@ def ensure_runtime_key(client: BtcPay, key: str, store_id: str, api_key: str) ->
     )
     runtime_key = created["apiKey"]
     client.request("GET", f"/api/v1/stores/{store_id}/payment-methods", token=runtime_key)
+    complete, _, missing = runtime_key_status(client, runtime_key)
+    if not complete:
+        raise BootstrapError(
+            "the freshly minted runtime key is itself incomplete "
+            f"(missing {', '.join(missing)}); check RUNTIME_PERMISSIONS"
+        )
     log("minted the store-scoped runtime API key (printed on stdout)")
     return runtime_key, True
 
@@ -378,7 +414,9 @@ def main() -> int:
     store_name = env("BTCPAY_STORE_NAME", "BoltMesh")
     store_id_env = setting("BTCPAY_STORE_ID")
     api_key_env = setting("BTCPAY_API_KEY")
-    webhook_url = setting("BTCPAY_WEBHOOK_URL", "http://backend:8000/v1/webhooks/btcpay")
+    webhook_url = setting(
+        "BTCPAY_WEBHOOK_URL", "http://boltmesh-backend:8000/v1/webhooks/btcpay"
+    )
     webhook_secret_env = setting("BTCPAY_WEBHOOK_SECRET")
     account_index = int(env("BTCPAY_XMR_ACCOUNT_INDEX", "0"))
     confirmations = int(env("BTCPAY_XMR_CONFIRMATIONS", "1"))

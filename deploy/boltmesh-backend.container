@@ -21,7 +21,8 @@ IP=10.89.0.242
 #   secrets.env -- the JWT signing keys and the bootstrap pepper
 #   app.env     -- operator-editable: URLs, CORS, OAuth, SMTP, TTLs
 #   btcpay/backend.env -- the BTCPay store URL, runtime key, store id and
-#                  webhook secret, written by the bootstrap step
+#                  webhook secret, written by deploy.sh from
+#                  btcpay/bootstrap.env after the bootstrap job runs
 EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/secrets.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/app.env

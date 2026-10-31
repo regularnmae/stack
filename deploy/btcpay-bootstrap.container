@@ -3,6 +3,9 @@
 # BTCPay's database, so every fresh instance needs this before the backend can
 # create invoices. The script is idempotent and writes generated secrets back to
 # the environment file it also reads (mode 600 under $CONFIG_DIR/btcpay).
+# backend.env (what the backend consumes) is written by deploy.sh from that
+# state, so a manual bootstrap re-run must be followed by
+# `./deploy.sh --only btcpay` when a new runtime key was minted.
 #
 # No [Install]: deploy.sh starts it after BTCPay is healthy, and a re-run is how
 # the XMR method is enabled once the view-only wallet exists.
