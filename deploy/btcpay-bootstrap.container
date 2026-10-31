@@ -13,7 +13,7 @@ Requires=npm-network-network.service btcpay.service
 
 [Container]
 ContainerName=btcpay-bootstrap
-Image=docker.io/library/python:3.13-alpine
+Image=docker.io/library/python:3.15-alpine
 Network=npm-network.network
 
 # The state file is both input (admin email/password, URL, webhook) and output
