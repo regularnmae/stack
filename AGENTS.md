@@ -250,8 +250,10 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   Ask it for `blockchain.headers.subscribe`, never just `server.version`: that
   one is answered from memory and passes a wedged index.
 - **The two explorers read the daemons; neither adds an index.** `btc-explorer`
-  reads bitcoind RPC plus Fulcrum for address history (`txindex=0`, so an old
-  txid needs its block height); `xmr-explorer` (MoneroBlock) is **RPC-only**
+  reads bitcoind RPC plus Fulcrum for address history; bitcoind runs
+  `txindex=1`, so any historical txid resolves without a block height (the
+  index is bitcoind's, built in the background from `blk*.dat`); `xmr-explorer`
+  (MoneroBlock) is **RPC-only**
   against monerod's restricted RPC, with no chain copy and no LMDB reader. Both
   are loopback-published, NPM-fronted with `force-ssl`, mirrored as onions,
   declared in `KUMA_MONITORS`, and built by `deploy.sh` only when missing

@@ -1,11 +1,9 @@
 # BTC RPC Explorer: the self-hosted Bitcoin explorer the stack serves at
 # $BTC_EXPLORER_HOST. It reads the stack's own bitcoind over RPC and, for
 # address history, the existing Fulcrum over the Electrum protocol -- so it
-# adds no index of its own and no second chain scan. That is also why it fits a
-# node with txindex=0 (bitcoin.conf): a transaction can still be found by
-# address (Fulcrum) or by txid within the last few blocks, but an old txid needs
-# its block height. Turning on txindex would make it a full replacement, at the
-# cost of another index over the whole chain -- a deliberate no here.
+# adds no index of its own and no second chain scan. bitcoind runs with
+# txindex=1, so any historical txid resolves without a block height; Core
+# builds that index in the background from the existing blk*.dat files.
 #
 # Built from a pinned git commit, not the npm package: the published 3.4.0 is
 # from 2023 and pins zeromq 5.x, whose nan bindings do not compile on Node 22.

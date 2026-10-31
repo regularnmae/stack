@@ -588,10 +588,12 @@ if [ ! -s "$DATA_DIR/bitcoin/bitcoin.conf" ]; then
 server=1
 daemon=0
 
-# Full (archival) node: keep and validate the whole chain. txindex stays off;
-# the MCP server and lightningd do not need it, and it costs another index.
+# Full (archival) node: keep and validate the whole chain. txindex is on so
+# btc-explorer resolves any historical txid; on a node that already has the
+# blocks Core builds it in the background (it reads blk*.dat, never -reindex).
+# It costs another index; the MCP server and lightningd do not need it.
 prune=0
-txindex=0
+txindex=1
 
 # Validation cache, in MiB (range 4-16384; Core's default is 450). A bigger
 # cache is the one knob that materially speeds up the initial block download,
@@ -953,8 +955,8 @@ fi
 # BTC RPC Explorer's configuration. The app is configured entirely through the
 # environment (so the unit uses EnvironmentFile=, not a rendered Exec=), and it
 # needs the same bitcoind RPC credentials plus Fulcrum's Electrum endpoint. It
-# keeps no data of its own. txindex stays 0: address history comes from Fulcrum;
-# an old txid needs its block height (README: "Block explorers").
+# keeps no data of its own. Address history comes from Fulcrum; any txid
+# resolves through bitcoind's txindex (README: "Block explorers").
 BTCEXP_ENV="$CONFIG_DIR/btc-explorer"
 if ensure_secret "$BTCEXP_ENV/btc-explorer.env" "btc explorer env"; then
     write_secret "$BTCEXP_ENV/btc-explorer.env" <<EOF

@@ -9,8 +9,10 @@ daemon=0
 
 # Full (archival) node: keep and validate the whole chain. Do not set prune:
 # reverting it requires re-downloading the blockchain.
+# txindex resolves any historical txid for btc-explorer; Core builds it in the
+# background from the existing block files (no -reindex).
 prune=0
-txindex=0
+txindex=1
 
 # RPC. rpcallowip is the podman subnet only, so a re-added PublishPort would
 # still be refused.

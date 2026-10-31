@@ -274,12 +274,11 @@ Two read-only web explorers are served behind nginx-proxy-manager:
 
 - **BTC RPC Explorer** at `https://$BTC_EXPLORER_HOST` (`BTC_EXPLORER_HOST`,
   default `btc.boltmesh.net`). It reads `bitcoind` over RPC and uses the
-  existing `fulcrum` for address history, so it adds no index and no second
-  chain scan. Because `bitcoin.conf` keeps `txindex=0`, an **address** lookup
-  works through Fulcrum and a transaction in the last few blocks is found by
-  txid, but an older txid needs its block height. Enabling `txindex=1` would
-  remove that limit at the cost of another full-chain index; the stack
-  deliberately does not. Until Fulcrum's index has caught up, the explorer logs
+  existing `fulcrum` for address history. `bitcoin.conf` sets `txindex=1`, so
+  any historical txid also resolves without a block height; on a node that
+  already has the blocks, bitcoind builds that index in the background from
+  `blk*.dat` (no `-reindex`, no revalidation — hours of disk I/O, not a resync).
+  Until Fulcrum's index has caught up, the explorer logs
   `ECONNREFUSED fulcrum:50001` and its address pages fail; block/transaction
   pages (bitcoind RPC) already work.
 - **MoneroBlock** at `https://$XMR_EXPLORER_HOST` (`XMR_EXPLORER_HOST`,
