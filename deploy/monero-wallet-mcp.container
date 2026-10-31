@@ -3,7 +3,7 @@
 # monero-wallet-mcp.service.
 [Unit]
 Description=Monero Wallet MCP Server (streamable HTTP)
-After=network-online.target npm-network-network.service monero-wallet-rpc.service
+After=network-online.target npm-network-network.service monero-wallet-btcpay.service
 Requires=npm-network-network.service
 
 [Container]
@@ -14,7 +14,7 @@ Network=npm-network.network
 # Three env files, all OUTSIDE this repo under $DATA_DIR/config/monero-wallet-mcp/
 # (mode 600), written by deploy/install.sh so no secret is committed:
 #   token.env    -- MONERO_MCP_TOKEN (read) and MONERO_MCP_SPEND_TOKEN
-#   upstream.env -- the wallet's RPC login
+#   upstream.env -- the BTCPay view-only wallet's URL (no login)
 #   spend.env    -- ENABLE_SPENDING and the caps (operator-editable)
 EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/upstream.env
@@ -22,10 +22,10 @@ EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/spend.env
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
 # server on host 8103 (NPM_HOSTS in stack.conf) -- it can no longer resolve the
-# container name. This is a money-moving surface, so the loopback bind is the
-# only host-visible port there is; NPM (TLS) plus the bearer and spend tokens are
-# still the only way in. The host-side checks read the container by name on
-# npm-network, through scripts/lib.sh's net_curl.
+# container name. The wallet it reads is BTCPay's view-only plugin wallet, so
+# even the spend-token tools cannot move funds; the loopback bind, NPM (TLS) and
+# the bearer token are still the only way in. The host-side checks read the
+# container by name on npm-network, through scripts/lib.sh's net_curl.
 PublishPort=127.0.0.1:8103:8000
 
 HealthCmd=python /app/healthcheck.py

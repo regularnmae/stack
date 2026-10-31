@@ -166,7 +166,7 @@ fi
 # monerod -- height and whether its restricted RPC answers at all. The RPC *
 # *blocks for minutes while the daemon syncs**, so this is the series that
 # explains a dead Monero MCP surface, the xmr-explorer home page timing out and
-# monero-wallet-rpc's health flipping: none of those fail on their own.
+# the BTCPay wallet's health flipping: none of those fail on their own.
 #
 # Read with curl *inside* the container (the image ships one) rather than
 # through a netcheck run, so a wedged RPC costs one short exec, not a container
@@ -195,12 +195,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# the Monero wallet -- height and lag behind the node. This goes through the MCP
-# server (mcp_call, a netcheck run on npm-network) because monero-wallet-rpc
-# wants digest auth and the MCP server already holds the credential.
+# the BTCPay Monero wallet -- height and lag behind the node. This goes through
+# the MCP server (mcp_call, a netcheck run on npm-network), which reads the
+# plugin's view-only wallet; before it is imported there is nothing to report.
 # ---------------------------------------------------------------------------
 wtoken=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
-if [ -n "$wtoken" ]; then
+if [ -n "$wtoken" ] && [ -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
     wbody=$(mcp_call monero-wallet-mcp "$wtoken" get_height '{}' 8) || wbody=""
     wh=$(printf '%s' "$wbody" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' \
         | grep -oE '[0-9]+$' | head -n1)

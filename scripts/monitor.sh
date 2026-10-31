@@ -481,7 +481,9 @@ else
 fi
 
 xmrwallet_token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
-if [ -n "$xmrwallet_token" ]; then
+if [ -n "$xmrwallet_token" ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
+    soft "the BTCPay view-only XMR wallet is not imported yet (config/btcpay/xmr-wallet.env); skipped the wallet height check"
+elif [ -n "$xmrwallet_token" ]; then
     w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
     w_h=$(printf '%s' "$w_body" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
     if [ -z "$w_h" ]; then
@@ -489,7 +491,7 @@ if [ -n "$xmrwallet_token" ]; then
         # usual cause) rebuilding its cache, and nothing else notices -- the
         # container can sit "Up (unhealthy)" for hours while every sweep reports
         # the height as "?".
-        fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-rpc)"
+        fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-btcpay)"
     elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
         soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
     else

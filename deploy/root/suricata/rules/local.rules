@@ -34,19 +34,19 @@ alert tcp $EXTERNAL_NET any -> $HOME_NET 50002 (msg:"STACK Fulcrum Electrum TLS 
 # Without them the rule also fires on every plaintext HTTP request on lo (the
 # node-exporter scrape carries Host: 0.0.0.0:9100, the MCP health checks carry
 # 127.0.0.1) -- which is how a rule becomes noise within its first minute.
-alert http any any -> any 80 (msg:"STACK HTTP request to an undeclared Host"; flow:to_server,established; http.host; pcre:"/^(?!(?:boltmesh\.net|api\.boltmesh\.net|mcp\.boltmesh\.net|search\.boltmesh\.net|clnrest\.boltmesh\.net|xmr-rpc\.boltmesh\.net|btc\.boltmesh\.net|xmr\.boltmesh\.net|status\.boltmesh\.net|.*\.onion)$)/i"; classtype:policy-violation; sid:9000004; rev:2;)
+alert http any any -> any 80 (msg:"STACK HTTP request to an undeclared Host"; flow:to_server,established; http.host; pcre:"/^(?!(?:boltmesh\.net|api\.boltmesh\.net|mcp\.boltmesh\.net|search\.boltmesh\.net|clnrest\.boltmesh\.net|btc\.boltmesh\.net|xmr\.boltmesh\.net|status\.boltmesh\.net|.*\.onion)$)/i"; classtype:policy-violation; sid:9000004; rev:2;)
 
 # ---------------------------------------------------------------------------
 # 9001xxx -- daemon ports that are never public
 # ---------------------------------------------------------------------------
-# bitcoind RPC/P2P, monerod RPC/P2P, monero-wallet-rpc, lightningd's REST. None
+# bitcoind RPC/P2P, monerod RPC/P2P, the Monero wallet RPC, lightningd's REST. None
 # is published beyond the podman network; a packet from off-host means
 # something un-published itself (a stray PublishPort, a forwarding rule, a
 # container on the host network).
 alert tcp $EXTERNAL_NET any -> $HOME_NET 8332 (msg:"STACK bitcoind RPC reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001001; rev:1;)
 alert tcp $EXTERNAL_NET any -> $HOME_NET 8333 (msg:"STACK bitcoind P2P reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001002; rev:1;)
 alert tcp $EXTERNAL_NET any -> $HOME_NET 18089 (msg:"STACK monerod restricted RPC reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001003; rev:1;)
-alert tcp $EXTERNAL_NET any -> $HOME_NET 18083 (msg:"STACK monero-wallet-rpc reached from off-host"; flow:to_server,established; classtype:attempted-admin; sid:9001004; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 18083 (msg:"STACK monero wallet RPC reached from off-host"; flow:to_server,established; classtype:attempted-admin; sid:9001004; rev:1;)
 alert tcp $EXTERNAL_NET any -> $HOME_NET 3010 (msg:"STACK clnrest reached from off-host"; flow:to_server,established; classtype:policy-violation; sid:9001005; rev:1;)
 
 # tor's control port is driven by lightningd over the podman network; anything

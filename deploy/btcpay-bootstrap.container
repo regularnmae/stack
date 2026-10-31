@@ -1,0 +1,33 @@
+# Quadlet unit for the one-shot BTCPay bootstrap. Store-level configuration
+# (admin account, API keys, store, BTC-LN/XMR-CHAIN methods, webhook) lives in
+# BTCPay's database, so every fresh instance needs this before the backend can
+# create invoices. The script is idempotent and writes generated secrets back to
+# the environment file it also reads (mode 600 under $CONFIG_DIR/btcpay).
+#
+# No [Install]: deploy.sh starts it after BTCPay is healthy, and a re-run is how
+# the XMR method is enabled once the view-only wallet exists.
+[Unit]
+Description=BTCPay bootstrap (store, keys, payment methods, webhook)
+After=network-online.target npm-network-network.service btcpay.service
+Requires=npm-network-network.service btcpay.service
+
+[Container]
+ContainerName=btcpay-bootstrap
+Image=docker.io/library/python:3.13-alpine
+Network=npm-network.network
+
+# The state file is both input (admin email/password, URL, webhook) and output
+# (admin key, runtime key, store id, webhook secret). Mount the whole directory
+# so the script's atomic replace stays inside the mount.
+Volume=@CONFIG_DIR@/btcpay:/state:z
+Volume=@REPO_DIR@/scripts/btcpay_bootstrap.py:/bootstrap.py:ro,z
+EnvironmentFile=@CONFIG_DIR@/btcpay/bootstrap.env
+Environment=BTCPAY_STATE_FILE=/state/bootstrap.env
+Environment=BTCPAY_XMR_WALLET_DAEMON_URI=http://monero-wallet-btcpay:18083/json_rpc
+
+Entrypoint=python3
+Exec=/bootstrap.py
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300

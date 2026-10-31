@@ -29,7 +29,7 @@
 #   HC008  HealthOnFailure=kill, so the restart is systemd's and monitor.sh's
 #          NRestarts delta sees it. `restart` restarts the container inside
 #          podman: the unit stays active and a container flapping every 30s
-#          reports "no unit restarted". monero-wallet-rpc is the one exemption
+#          reports "no unit restarted". monero-wallet-btcpay is the one exemption
 #          (red for a whole refresh; killing it restarts the refresh).
 #
 # A rule can be waived for ONE unit with an inline comment carrying the code and

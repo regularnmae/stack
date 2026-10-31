@@ -24,6 +24,10 @@ Network=npm-network.network
 # The directory can therefore be created as $USER -- unlike
 # bitcoind, no chown dance is needed.
 Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
+# The BTCPay plugin's block callback. monerod runs it on every new block; the
+# script refreshes the plugin wallet and pokes BTCPay's Monero callback so a
+# paid invoice is rescanned without waiting for BTCPay's next poll.
+Volume=@REPO_DIR@/deploy/btcpay/monero-notify.sh:/notify-block.sh:ro,z
 
 # NOTE: Exec= replaces the image CMD, so the image's default flags
 # must be restated verbatim, with our additions appended.
@@ -42,7 +46,8 @@ Exec=--rpc-restricted-bind-ip=0.0.0.0 \
      --rpc-restricted-bind-port=18089 \
      --no-igd --no-zmq --enable-dns-blocklist \
      --ban-list=/home/monero/ban_list.txt \
-     --block-sync-size=50
+     --block-sync-size=50 \
+     --block-notify=/notify-block.sh
 
 # The image build drops the Dockerfile HEALTHCHECK (the OCI image
 # config has no healthcheck field), so define it here instead. This

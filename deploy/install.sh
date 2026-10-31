@@ -294,7 +294,10 @@ UNITS=(
     "xmr-explorer.container:xmr-explorer.container"
     "tor.container:tor.container"
     "lightningd.container.in:lightningd.container"
-    "monero-wallet-rpc.container.in:monero-wallet-rpc.container"
+    "nbxplorer.container:nbxplorer.container"
+    "btcpay.container:btcpay.container"
+    "monero-wallet-btcpay.container:monero-wallet-btcpay.container"
+    "btcpay-bootstrap.container:btcpay-bootstrap.container"
     "searxng-mcp.container:searxng-mcp.container"
     "bitcoin-node-mcp.container:bitcoin-node-mcp.container"
     "monero-node-mcp.container:monero-node-mcp.container"
@@ -345,11 +348,6 @@ USER_TIMERS=(
 # restriction JSON. SPEND is the read set plus the payment methods.
 SPEND_RESTRICTIONS=$(rune_json "${CLN_READ_METHODS[@]}" "${CLN_SPEND_METHODS[@]}")
 READ_RESTRICTIONS=$(rune_json "${CLN_READ_METHODS[@]}")
-# BoltMesh's Lightning gateway only creates invoices and reads them back (the
-# clnrest calls are /v1/invoice and /v1/listinvoices), so its rune is a subset:
-# no pay/keysend/withdraw/close. getinfo is included so `checkrune` proves it.
-BOLTMESH_RESTRICTIONS=$(rune_json "${BOLTMESH_RUNE_METHODS[@]}")
-
 # ---------------------------------------------------------------------------
 # where the data lives
 # ---------------------------------------------------------------------------
@@ -523,28 +521,30 @@ TOR_SERVICE_PASSWORD=$(first_nonempty \
     "$(read_secret TOR_SERVICE_PASSWORD)" \
     "$(flag_value "$QUADLET_DIR/lightningd.container" tor-service-password)" \
     "$(rand_hex)")
-MONERO_WALLET_PASSWORD=$(first_nonempty \
-    "$(read_secret MONERO_WALLET_PASSWORD)" \
-    "$(flag_value "$QUADLET_DIR/monero-wallet-rpc.container" password)" \
+BTCPAY_DB_PASSWORD=$(first_nonempty \
+    "$(read_secret BTCPAY_DB_PASSWORD)" \
     "$(rand_hex)")
-MONERO_RPC_LOGIN=$(first_nonempty \
-    "$(read_secret MONERO_RPC_LOGIN)" \
-    "$(flag_value "$QUADLET_DIR/monero-wallet-rpc.container" rpc-login)" \
-    "monero:$(rand_hex)")
 
 if ensure_secret "$SECRETS_FILE" "secrets"; then
     write_secret "$SECRETS_FILE" <<EOF
 # Secrets for the whole stack. Written by deploy/install.sh (mode 600), seeded
 # from the previously-installed units where possible so adopting it changes no
-# credential. Never committed. MONERO_WALLET_PASSWORD is the only key to the
-# wallet file -- keep this file with the data.
+# credential. Never committed. BTCPAY_DB_PASSWORD is the btcpay role in the
+# existing Postgres cluster -- keep this file with the data.
 BITCOIN_RPC_USER=$BITCOIN_RPC_USER
 BITCOIN_RPC_PASSWORD=$BITCOIN_RPC_PASSWORD
 TOR_SERVICE_PASSWORD=$TOR_SERVICE_PASSWORD
-MONERO_WALLET_PASSWORD=$MONERO_WALLET_PASSWORD
-MONERO_RPC_LOGIN=$MONERO_RPC_LOGIN
+BTCPAY_DB_PASSWORD=$BTCPAY_DB_PASSWORD
 EOF
     log "wrote $SECRETS_FILE (mode 600)"
+fi
+
+# Adopted hosts have a secrets.env from before BTCPay existed. ensure_secret
+# never rewrites it, so append this one key when it is missing (same pattern as
+# the bouncer key below).
+if [ -z "$(read_secret BTCPAY_DB_PASSWORD)" ]; then
+    printf 'BTCPAY_DB_PASSWORD=%s\n' "$BTCPAY_DB_PASSWORD" >> "$SECRETS_FILE"
+    log "added BTCPAY_DB_PASSWORD to $SECRETS_FILE"
 fi
 
 # The bouncer's key is the one secret NOT in that heredoc: it has to exist on a
@@ -600,19 +600,58 @@ rpcbind=0.0.0.0
 rpcallowip=127.0.0.1
 rpcallowip=10.89.0.0/24
 
-# Outbound-only: no inbound P2P peers.
-listen=0
+# NBXplorer (BTCPay) needs the P2P endpoint to follow blocks; no host port is
+# published, so this only accepts the podman subnet.
+listen=1
 EOF
     log "seeded $DATA_DIR/bitcoin/bitcoin.conf"
 fi
 [ -d "$DATA_DIR/bitcoin" ] && chown_image_uid "$DATA_DIR/bitcoin"
 
-# monero-wallet-rpc's image does not re-own its bind mount; create it for the
-# image uid so the wallet-rpc can write the wallet.
-if [ ! -d "$DATA_DIR/monero-wallet-rpc" ]; then
-    mkdir -p "$DATA_DIR/monero-wallet-rpc"
-fi
-chown_image_uid "$DATA_DIR/monero-wallet-rpc"
+# Download and extract the pinned Monero plugin once. A failure is a warning,
+# not a fatal error: BTC-LN still works and the bootstrap re-runs the XMR
+# method on the next deploy. Renovate cannot track plugin-builder URLs, so the
+# version and hash in stack.conf are edited together.
+stage_btcpay_plugin() {
+    local dir="$DATA_DIR/btcpay/Plugins/$BTCPAY_PLUGIN_ID"
+    local marker="$dir/.artifact-sha256" tmp
+    [ -f "$dir/$BTCPAY_PLUGIN_ID.dll" ] && return 0
+    if ! command -v curl >/dev/null 2>&1; then
+        warn "curl is missing; cannot download the BTCPay Monero plugin"
+        return 0
+    fi
+    tmp=$(mktemp)
+    if ! curl -fsSL --max-time 120 "$BTCPAY_PLUGIN_URL" -o "$tmp"; then
+        warn "could not download the BTCPay Monero plugin; XMR will stay disabled"
+        rm -f "$tmp"
+        return 0
+    fi
+    if [ "$(sha256sum "$tmp" | awk '{print $1}')" != "$BTCPAY_PLUGIN_SHA256" ]; then
+        warn "BTCPay Monero plugin hash mismatch; refusing to install it"
+        rm -f "$tmp"
+        return 0
+    fi
+    mkdir -p "$dir"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q -o "$tmp" -d "$dir" || { warn "could not extract the BTCPay Monero plugin"; rm -f "$tmp"; return 0; }
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$tmp" "$dir" \
+            || { warn "could not extract the BTCPay Monero plugin"; rm -f "$tmp"; return 0; }
+    else
+        warn "neither unzip nor python3 is available to extract the BTCPay Monero plugin"
+        rm -f "$tmp"
+        return 0
+    fi
+    printf '%s\n' "$BTCPAY_PLUGIN_SHA256" > "$marker"
+    rm -f "$tmp"
+    log "installed the BTCPay Monero plugin into $dir"
+}
+
+# BTCPay's datadir (data-protection keys), its plugin dir, the view-only Monero
+# wallet and NBXplorer's cookie. All are written by container root == the host
+# user under rootless podman, so a plain mkdir is enough.
+mkdir -p "$DATA_DIR/btcpay/Plugins" "$DATA_DIR/btcpay/xmr-wallet" "$DATA_DIR/nbxplorer"
+stage_btcpay_plugin
 
 mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 
@@ -690,7 +729,7 @@ fi
 #
 # victoria-logs and vector both run as container root == the login user under
 # rootless podman (like victoriametrics), so a plain mkdir is enough -- no
-# podman-unshare chown, unlike bitcoind and monero-wallet-rpc.
+# podman-unshare chown, unlike bitcoind.
 #
 # The config is rendered on every run from deploy/logs/vector.toml, in place and
 # through the directory mount, for the same two reasons as scrape.yml above: a
@@ -965,14 +1004,16 @@ MONERO_MCP_SPEND_TOKEN=$(rand_hex)
 EOF
     log "wrote $XMRW_ENV/token.env (mode 600) with a read and a spend token"
 fi
-if ensure_secret "$XMRW_ENV/upstream.env" "monero-wallet-mcp upstream env"; then
-    write_secret "$XMRW_ENV/upstream.env" <<EOF
-# Upstream credentials for monero-wallet-rpc (--rpc-login).
-MONERO_WALLET_RPC_USER=${MONERO_RPC_LOGIN%%:*}
-MONERO_WALLET_RPC_PASSWORD=${MONERO_RPC_LOGIN#*:}
+# Derived every run (machine-owned): the MCP now reads BTCPay's view-only
+# plugin wallet. The wallet RPC has no login by design (the plugin hardcodes
+# empty credentials) and holds no spend key, so the MCP's spend tools cannot
+# move funds.
+write_secret "$XMRW_ENV/upstream.env" <<EOF
+MONERO_WALLET_RPC_URL=http://monero-wallet-btcpay:18083/json_rpc
+MONERO_WALLET_RPC_USER=
+MONERO_WALLET_RPC_PASSWORD=
 EOF
-    log "wrote $XMRW_ENV/upstream.env (mode 600)"
-fi
+log "wrote $XMRW_ENV/upstream.env (mode 600)"
 if ensure_secret "$XMRW_ENV/spend.env" "monero-wallet-mcp spend env"; then
     write_secret "$XMRW_ENV/spend.env" <<EOF
 # Spending is OFF until you set ENABLE_SPENDING=1. With it on, both caps below
@@ -1013,8 +1054,8 @@ fi
 # ---------------------------------------------------------------------------
 # The app reads one flat environment, so the split here is by who owns each
 # value: install.sh generates the database and the signing keys, the operator
-# fills in the third-party credentials, and gateway.env is derived from the
-# running daemons (written further down, once lightningd can be reached).
+# fills in the third-party credentials, and btcpay/backend.env is written by
+# deploy.sh after the bootstrap has provisioned the store.
 BOLT_DB="$CONFIG_DIR/boltmesh"
 
 if ensure_secret "$BOLT_DB/db.env" "boltmesh db env"; then
@@ -1062,7 +1103,7 @@ if ensure_secret "$BOLT_DB/app.env" "boltmesh app env"; then
 # BoltMesh API + worker configuration. Operator-editable: the app reads one flat
 # environment, so the credentials YOU supply (OAuth, SMTP, the agent deploy
 # token) live here beside the URLs. The stack-owned values (database, JWT keys,
-# payment gateways) are in db.env/secrets.env/gateway.env -- do not duplicate
+# payment gateways) are in db.env/secrets.env/btcpay/backend.env -- do not duplicate
 # them here.
 #
 # APP_ENV=prod: the app derives Secure + SameSite=None cookies from it (the SPA
@@ -1327,35 +1368,54 @@ EOF
     log "wrote $LN_ENV/node.env (mode 600)"
 fi
 
-# BoltMesh's payment gateway wiring, derived from the running daemons: the CLN
-# rune (created here, so it lands on the run that sees a live lightningd) and
-# the Monero wallet's RPC login from secrets.env. Rewritten every run -- the
-# file is machine-owned, never hand-edited.
-BOLT_GATEWAY="$BOLT_DB/gateway.env"
-bolt_rune=$(env_value "$BOLT_GATEWAY" LIGHTNING_API_KEY)
-if command -v podman >/dev/null 2>&1 && ! rune_usable "$bolt_rune"; then
-    if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
-        new_bolt_rune=$(create_rune "$BOLTMESH_RESTRICTIONS")
-        if [ -n "$new_bolt_rune" ]; then
-            bolt_rune="$new_bolt_rune"
-            log "created a usable BoltMesh rune"
-        fi
-    else
-        log "lightningd not reachable yet; the BoltMesh rune is created by a later install.sh run"
-    fi
-fi
-write_secret "$BOLT_GATEWAY" <<EOF
-# Derived by deploy/install.sh; do not hand-edit. The URL is clnrest over the
-# podman network and the rune permits only invoice + listinvoices (+ getinfo for
-# the reachability probe), so BoltMesh cannot move funds through CLN.
-LIGHTNING_GATEWAY_URL=https://lightningd:3010
-LIGHTNING_API_KEY=$bolt_rune
-LIGHTNING_TLS_INSECURE=1
-MONERO_RPC_URL=http://monero-wallet-rpc:18083/json_rpc
-MONERO_RPC_USER=${MONERO_RPC_LOGIN%%:*}
-MONERO_RPC_PASSWORD=${MONERO_RPC_LOGIN#*:}
+# BoltMesh's payment wiring is BTCPay now. The store URL/key/id/webhook secret
+# are written after the bootstrap has provisioned them (see the
+# btcpay/backend.env contract in the backend unit); nothing here talks to CLN or
+# a wallet-rpc directly.
+
+# ---------------------------------------------------------------------------
+# BTCPay config. The bootstrap owns the store/keys/webhook and writes them back
+# into bootstrap.env; backend.env is the four-value contract the backend reads
+# and is written after a successful bootstrap (deploy.sh), not here.
+# ---------------------------------------------------------------------------
+BTC_CONFIG="$CONFIG_DIR/btcpay"
+mkdir -p "$BTC_CONFIG"
+if ensure_secret "$BTC_CONFIG/bootstrap.env" "btcpay bootstrap env"; then
+    write_secret "$BTC_CONFIG/bootstrap.env" <<EOF
+# Input for scripts/btcpay_bootstrap.py and, after the first run, the state
+# file it writes back (admin key, runtime key, store id, webhook secret).
+BTCPAY_URL=http://btcpay:49392
+BTCPAY_ADMIN_EMAIL=admin@boltmesh.local
+BTCPAY_ADMIN_PASSWORD=$(rand_hex)
+BTCPAY_STORE_NAME=BoltMesh
+BTCPAY_WEBHOOK_URL=http://boltmesh-backend:8000/v1/webhooks/btcpay
+BTCPAY_XMR_ACCOUNT_INDEX=0
+BTCPAY_XMR_CONFIRMATIONS=1
+BTCPAY_MONITORING_MINUTES=10080
+BTCPAY_WAIT_SECONDS=120
 EOF
-log "wrote $BOLT_GATEWAY (mode 600)"
+    log "wrote $BTC_CONFIG/bootstrap.env (mode 600) -- change the admin email/password before first use"
+fi
+if [ ! -s "$BTC_CONFIG/backend.env" ]; then
+    write_secret "$BTC_CONFIG/backend.env" <<EOF
+# Written by deploy.sh from $BTC_CONFIG/bootstrap.env after the bootstrap has
+# run. The backend/worker units read exactly these four values.
+EOF
+    log "seeded $BTC_CONFIG/backend.env (filled in after the bootstrap)"
+fi
+if ensure_secret "$BTC_CONFIG/xmr-wallet.env" "btcpay xmr wallet env"; then
+    write_secret "$BTC_CONFIG/xmr-wallet.env" <<EOF
+# The BTCPay plugin's VIEW-ONLY Monero wallet. Fill in the primary address and
+# private view key of the wallet whose spend key you keep offline, plus its
+# restore height; scripts/btcpay-wallet.sh imports it and the bootstrap enables
+# XMR-CHAIN. Leaving these empty keeps XMR disabled (the BTC-LN rail is
+# unaffected).
+XMR_WALLET_ADDRESS=
+XMR_VIEW_KEY=
+XMR_RESTORE_HEIGHT=0
+EOF
+    log "wrote $BTC_CONFIG/xmr-wallet.env (mode 600) -- fill it in to enable XMR"
+fi
 
 # ---------------------------------------------------------------------------
 # 7. units: render every one (they all reference the data or config dir)
@@ -1371,8 +1431,7 @@ render_unit() {
         -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
         -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
-        -e "s|@MONERO_WALLET_PASSWORD@|$(esc "$MONERO_WALLET_PASSWORD")|g" \
-        -e "s|@MONERO_RPC_LOGIN@|$(esc "$MONERO_RPC_LOGIN")|g" \
+        -e "s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g" \
         -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
         -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
@@ -1496,7 +1555,7 @@ cat <<EOF
 
 Done. Everything the stack owns lives under:
   $DATA_DIR
-    bitcoin/ monero/ fulcrum/ monero-wallet-rpc/ cln/ tor/ searxng/ npm/
+    bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ searxng/ npm/
     postgres/       <- the BoltMesh cluster (dumped, not backed up raw)
     postgres-dump/  <- the pre-backup pg_dumpall
     config/         <- all bearer tokens and secrets (mode 600)
@@ -1516,8 +1575,9 @@ The two explorers are built by ./deploy.sh from btc-explorer/ and xmr-explorer/
   https://$XMR_EXPLORER_HOST once the NPM admin login is in place.
 Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
   $CONFIG_DIR/monero-wallet-mcp/spend.env  and  $CONFIG_DIR/lightning-mcp/spend.env
-BoltMesh is wired to the stack's lightningd and monero-wallet-rpc; fill in the
-  OAuth / SMTP / GitHub values in $CONFIG_DIR/boltmesh/app.env before first use.
+BoltMesh is wired to BTCPay; fill in the OAuth / SMTP / GitHub values in
+  $CONFIG_DIR/boltmesh/app.env before first use, and put the XMR address / view
+  key / restore height in $CONFIG_DIR/btcpay/xmr-wallet.env to enable XMR-CHAIN.
 The monitor runs every 5 minutes (monitor.timer) and pushes its alert set to
   Alertmanager (loopback :9093). Mail needs SMTP in
   $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, and the dead-man's

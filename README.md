@@ -20,7 +20,9 @@ stack runs and one script that fixes a deployment problem.
 | `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
 | `btc-explorer` | `localhost/btc-explorer:local` (built from `btc-explorer/Containerfile`) | `127.0.0.1:8108` | — |
 | `xmr-explorer` | `localhost/xmr-explorer:local` (MoneroBlock, built from `xmr-explorer/Containerfile`) | `127.0.0.1:8109` | — |
-| `monero-wallet-rpc` | `ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.4` | `127.0.0.1:18083` | `$DATA_DIR/monero-wallet-rpc` |
+| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` (admin UI via SSH tunnel) | `$DATA_DIR/btcpay` |
+| `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.21` | — | `$DATA_DIR/nbxplorer` |
+| `monero-wallet-btcpay` | `docker.io/btcpayserver/monero:0.18.5.4` | — (BTCPay only) | `$DATA_DIR/btcpay/xmr-wallet` |
 | `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | `127.0.0.1:3010` (clnrest) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — | — |
@@ -48,7 +50,10 @@ stack runs and one script that fixes a deployment problem.
 
 `bitcoind` and `monerod` are **full (archival) nodes**, storing and validating
 the whole chain; `fulcrum` indexes that chain for Bitcoin wallets over the
-Electrum protocol. See [Full nodes and disk](#full-nodes-and-disk) before sizing
+Electrum protocol. `btcpay` (with `nbxplorer`) is the settlement engine: it
+creates invoices, watches the store's addresses, and receives the Lightning and
+Monero rails. NBXplorer needs bitcoind's P2P port, which is why `bitcoin.conf`
+must run with `listen=1` (still unpublished). See [Full nodes and disk](#full-nodes-and-disk) before sizing
 the data disk. The two explorers read those services rather than keeping a
 chain of their own — see [Block explorers](#block-explorers).
 
@@ -60,7 +65,7 @@ running its old image until it is restarted, and
 *missing* image, so nothing upgrades on its own; the backup job, which runs on a
 timer rather than a restart, picks up a merged restic bump by itself). Back up
 before `lightningd` (CLN's wallet migrations are forward-only), move `monerod`
-and `monero-wallet-rpc` together (an upgrade is driven by a hardfork height, and a
+and `btcpayserver/monero` together (an upgrade is driven by a hardfork height, and a
 wallet older than its daemon is unsupported), then run `./verify.sh`.
 
 **Only `nginx-proxy-manager` is reachable from the LAN over HTTP.** It runs on
@@ -131,7 +136,7 @@ container, no DNS and no certificate needed. See
 everything else runs rootless. See [Intrusion detection](#intrusion-detection).
 
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
-`monero-wallet-rpc/`, `tor/`, `config/`, `npm/`, `audit/`, and the BoltMesh
+`btcpay/` (plugin + the view-only wallet), `tor/`, `config/`, `npm/`, `audit/`, and the BoltMesh
 database as a `pg_dumpall`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`, and `backup-verify.timer` restores one snapshot a week to
 prove it works. It is the one thing that recovers you if the data disk
@@ -221,14 +226,23 @@ completes.
 
 ### Wallets
 
-A bare host has no wallets. `deploy.sh` prompts:
+A bare host has a Bitcoin Core wallet, created by `scripts/wallets.sh --bitcoin`
+(prompted by `deploy.sh` when a TTY is present; skipped without one).
 
-- **Monero** — create a new wallet (and print its 25-word seed once) or restore
-  an existing one from its seed. This must exist before `monero-wallet-rpc`
-  starts, so it happens between `monerod` and the wallet RPC.
-- **Bitcoin** — create a new descriptor wallet or restore from a `.dat` backup.
+The BTCPay Monero wallet is different and is never generated on the payment
+server: `scripts/btcpay-wallet.sh` imports a **view-only** wallet into the
+dedicated plugin wallet-rpc from `$DATA_DIR/config/btcpay/xmr-wallet.env`:
 
-Both are skipped when there is no TTY. See `scripts/wallets.sh`.
+```sh
+XMR_WALLET_ADDRESS=<primary address>
+XMR_VIEW_KEY=<private view key>
+XMR_RESTORE_HEIGHT=<height>
+```
+
+Keep the spend key offline (a hardware/offline wallet). Until these are filled
+in, XMR-CHAIN stays disabled and `btcpay-bootstrap` re-enables it on the next
+`./deploy.sh --only btcpay`. The plugin wallet is internal-only and holds no
+spend key, so `monero-wallet-mcp` can read it but cannot move funds.
 
 ### Electrum (Bitcoin wallet)
 
@@ -303,7 +317,7 @@ Everything the stack must not lose sits under **one directory**, `$DATA_DIR`
 (`STACK_DATA_DIR`, default `$HOME/data`). `deploy.sh` asks for it once and
 remembers the answer in `~/.config/stack/data-dir.env`:
 
-  - `bitcoin/ monero/ fulcrum/ monero-wallet-rpc/ cln/ tor/ searxng/` — daemon state
+  - `bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ searxng/` — daemon state
     (`tor/onion/` holds the onion services' keys, `tor/torrc` the config; `fulcrum/`
     is the Electrum index and its self-signed certificate, regenerable and excluded
     from backups)
@@ -385,7 +399,7 @@ every token:
    ```
 
 `deploy.sh` finds the existing
-`bitcoin/ monero/ fulcrum/ monero-wallet-rpc/ cln/ tor/ npm/ config/` there
+`bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ npm/ config/` there
 (labelling the path for containers if it has to) — so nothing re-syncs, the
 wallet still opens (its password is in `config/stack/secrets.env`), and the
 client tokens are
@@ -402,7 +416,7 @@ rebuilt and the state comes out of the backup repository: see
 the things in `$DATA_DIR` that cannot be re-downloaded:
 
 - `cln/` — the CLN node identity, channel state and onion keys
-- `monero-wallet-rpc/` — the Monero wallet (funds)
+- `btcpay/` — BTCPay's datadir, the pinned Monero plugin and the view-only wallet
 - `tor/` — `torrc` and the onion services' keys, which are what make every
   `.onion` address stable (see [Tor onion services](#tor-onion-services))
 - `config/` — every token, rune and secret
@@ -493,7 +507,7 @@ being replaced, so stop the daemons that own them — they are the ones whose
 data is in the backup set:
 
 ```sh
-systemctl --user stop lightningd monero-wallet-rpc tor nginx-proxy-manager uptime-kuma
+systemctl --user stop lightningd btcpay nbxplorer monero-wallet-btcpay tor nginx-proxy-manager uptime-kuma
 ./scripts/backup.sh ls latest      # what the snapshot holds, before overwriting anything
 ./scripts/backup.sh restore latest # in place; add -y when there is no TTY
 ./deploy.sh                        # adopts, re-renders, restarts, reconciles, verifies
@@ -553,14 +567,14 @@ first means every seed-once file is derived from the snapshot.
    STACK_DATA_DIR=/data/stack ./scripts/backup.sh restore latest -y
    ```
 
-   It writes `cln/`, `monero-wallet-rpc/`, `tor/`, `config/`, `npm/`, `audit/`,
-   `uptime-kuma/` and `postgres-dump/`, and hands the wallet directory back to
-   the image uid, so `monero-wallet-rpc` opens it directly.
+   It writes `cln/`, `btcpay/`, `tor/`, `config/`, `npm/`, `audit/`,
+   `uptime-kuma/` and `postgres-dump/`, and hands bitcoind's directory back to
+   the image uid, so bitcoind opens it directly.
 
 4. Deploy. This adopts the restored secrets (never overwriting an existing
    file), seeds `bitcoin.conf`/`torrc` from them, builds the images, proves the
    restored CLN runes with `checkrune` (minting new ones if the node does not
-   know them), re-derives `config/boltmesh/gateway.env`, and reconciles the
+   know them), writes `config/btcpay/backend.env` from the bootstrap state, and reconciles the
    proxy hosts and the status page:
 
    ```sh
@@ -646,9 +660,10 @@ What rotation cannot fix, and what to do instead:
   `checkrune` and mints new ones, and the MCP servers restart with the new
   values. The channels are gone with the `hsm_secret` — CLN has no seed phrase,
   which is why `cln/` is the most valuable directory in the set.
-- **`monero-wallet-rpc/` is gone**, `config/` restored: the password is there
-  but the wallet is not. Run `scripts/wallets.sh --monero` and choose restore;
-  it rescans from the restore height you give it.
+- **`btcpay/` is gone**, `config/` restored: re-run `./deploy.sh --only btcpay`.
+  The datadir's protection keys and the plugin are recreated, the store is in
+  Postgres, and `scripts/btcpay-wallet.sh` re-imports the view-only wallet from
+  the address/view key in `config/btcpay/xmr-wallet.env`.
 
 #### What comes back, what re-downloads
 
@@ -656,7 +671,7 @@ What rotation cannot fix, and what to do instead:
 | --- | --- | --- |
 | `config/`, `tor/`, `npm/`, `audit/`, `uptime-kuma/` | yes | exactly as snapshotted |
 | `cln/` | yes | channels as of the snapshot; an older state can force-close |
-| `monero-wallet-rpc/` | yes | opens directly; may rescan against `monerod` |
+| `btcpay/` | yes | the plugin and view-only wallet reopen; may rescan against `monerod` |
 | `postgres-dump/all.sql` | yes | a file — replay it (step 5) |
 | `bitcoin/` | no | re-download; `bitcoin.conf` is seeded from the restored secret |
 | `monero/` | no | re-download |
@@ -1263,7 +1278,6 @@ NPM_HOSTS=(
     "${BOLTMESH_API_HOST}|127.0.0.1:8105|ws,block"
     "${SEARXNG_HOST}|127.0.0.1:8080|ws,block"
     "${CLNREST_HOST}|https://127.0.0.1:3010|ws,block"
-    "${XMR_RPC_HOST}|127.0.0.1:18083|ws,block"
     "${BTC_EXPLORER_HOST}|127.0.0.1:8108|force-ssl,block"
     "${XMR_EXPLORER_HOST}|127.0.0.1:8109|force-ssl,block"
     "${UPTIME_KUMA_HOST}|127.0.0.1:8107|ws,block"
@@ -1416,15 +1430,14 @@ Set `GITHUB_SSH_HOST` to an `~/.ssh/config` alias if `git@github.com` is not the
 key's host. An existing HTTPS checkout is re-pointed at the SSH URL on the next
 run.
 
-It does not bring its own chains. The backend is pointed at the stack's own
-`lightningd` (clnrest) and `monero-wallet-rpc`:
+It does not bring its own chains. The backend is pointed at BTCPay, which
+fronts the stack's own `lightningd` (CLN) and the view-only Monero wallet:
 
 | Value | Source |
 | --- | --- |
 | `DATABASE_URL`, `POSTGRES_*` | `$DATA_DIR/config/boltmesh/db.env` (generated) |
 | `SECRET_KEY`, `REFRESH_SECRET_KEY`, `NODE_SECRET_KEY`, `BOOTSTRAP_SECRET_PEPPER` | `$DATA_DIR/config/boltmesh/secrets.env` (generated) |
-| `LIGHTNING_GATEWAY_URL`, `LIGHTNING_API_KEY` | `$DATA_DIR/config/boltmesh/gateway.env` — a rune `install.sh` creates on `lightningd` that permits only `getinfo`, `listinvoices`, `invoice`, so BoltMesh can bill but never move funds |
-| `MONERO_RPC_URL`, `MONERO_RPC_USER`, `MONERO_RPC_PASSWORD` | the same `gateway.env`, from the wallet's `--rpc-login` |
+| `BTCPAY_URL`, `BTCPAY_API_KEY`, `BTCPAY_STORE_ID`, `BTCPAY_WEBHOOK_SECRET` | `$DATA_DIR/config/btcpay/backend.env` — written by `deploy.sh` from the bootstrap state; the runtime key is store-scoped (invoice create/read/modify, store settings) |
 | URLs, CORS, OAuth, SMTP, `GITHUB_REPO`/`GITHUB_TOKEN` | `$DATA_DIR/config/boltmesh/app.env` — **operator-editable**, fill it in before first use |
 
 ### Before it works
@@ -1477,13 +1490,14 @@ under `$DATA_DIR/config/`, mode 600.
   password in a curl config on stdin, so it never reaches the host's argv.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
-`lightningd`, `monero-wallet-rpc` and `fulcrum` are *rendered* from
+`lightningd`, `fulcrum` and `crowdsec` are *rendered* from
 `deploy/*.container.in` by `install.sh` (substituting `@PLACEHOLDERS@`). Every
 unit is rendered the same way — the secret-free ones only substitute
 `@DATA_DIR@`/`@CONFIG_DIR@` — so no unit is a symlink. The rendered units are
-mode 600 and never enter git. Do not "simplify" `monero-wallet-rpc` to a config
-file: its entrypoint binds `0.0.0.0` only when `--rpc-login` is on the command
-line.
+mode 600 and never enter git. The BTCPay wallet deliberately uses the
+`btcpayserver/monero` image: the `simple-monero-wallet-rpc` image forces
+`127.0.0.1` unless `--rpc-login` is on the command line, and the plugin hardcodes
+empty credentials.
 
 `bitcoind` keeps its RPC credentials in its own `bitcoin.conf`, which
 `install.sh` seeds on a fresh host and hands to the image uid. It is edited
@@ -1508,12 +1522,10 @@ in dependency order:
 | Target | Rotates | Restarts |
 | --- | --- | --- |
 | `bitcoin-rpc` | `bitcoind`'s RPC password (and `--user`) | bitcoind, then fulcrum, lightningd, bitcoin-node-mcp, btc-explorer |
-| `monero-rpc` | `monero-wallet-rpc`'s `--rpc-login` | monero-wallet-rpc, then monero-wallet-mcp, BoltMesh |
 | `tor-control` | Tor's control password (lightningd's statictor) | tor, then lightningd |
-| `runes` | the CLN runes: lightning-mcp's read/spend pair and BoltMesh's gateway | lightning-mcp and/or BoltMesh |
+| `runes` | the CLN runes: lightning-mcp's read/spend pair | lightning-mcp |
 | `token:<server>` | one MCP server's bearer token (`--spend` rotates a money server's spend token instead) | that server |
 | `searxng-secret` | SearXNG's `settings.yml` `secret_key` | searxng |
-| `monero-wallet` | the wallet file's password (`--yes`, and a snapshot younger than 24h) | monero-wallet-rpc → wallet-mcp, BoltMesh |
 | `postgres` | the `vpnuser` role's password (`ALTER ROLE`) | postgres → BoltMesh |
 | `boltmesh-keys` | the four signing keys/node pepper (`--yes`: ends every session and node token) | BoltMesh |
 | `restic` | the backup repository's key (`key add` → verify → `key remove`, `--yes`) | nothing |
@@ -1536,8 +1548,8 @@ them:
   own dependents in order and waits for podman's health, so a credential the
   daemon has not picked up cannot look rotated.
 - **Revocation is last.** The CLN runes are minted, proved with `checkrune`, put in
-  `lightning-mcp/node.env`/`boltmesh/gateway.env`, proven again through the server
-  with `getinfo`, and only then blacklisted with `destroyrune` — a failed swap
+  `lightning-mcp/node.env`, proven again through the server with `getinfo`, and only
+  then blacklisted with `destroyrune` — a failed swap
   leaves the old rune working instead of leaving the server unable to read the
   node. `runes` rehashes only `node.env` in the spend baseline, so the tripwire
   does not report a rotation as policy drift.
@@ -1618,7 +1630,7 @@ stack/
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
-    *.container.in        # lightningd, monero-wallet-rpc, fulcrum, rendered (secrets)
+    *.container.in        # lightningd, fulcrum, crowdsec, rendered (secrets)
     *.timer               # backup.timer, monitor.timer (plain user units;
                           #   Quadlet has no .timer type)
     monitor.service       # the monitor script as a plain user unit
@@ -1638,7 +1650,8 @@ stack/
     examples/backup/*.example     # backup.env shape
     examples/monitoring/*.example # monitor.env + alertmanager.yml shapes
     examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
-    examples/boltmesh/*.example   # db/secrets/app/gateway env shapes
+    examples/boltmesh/*.example   # db/secrets/app env shapes
+    examples/btcpay/*.example     # backend.env shape
     examples/btc-explorer/*.example # btc-explorer.env shape (RPC + Fulcrum wiring)
   tor/Containerfile       # built by install.sh: the Tor proxy + onion services
   netcheck/Containerfile  # built by install.sh: the curl client the host checks run

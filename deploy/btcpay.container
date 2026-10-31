@@ -1,0 +1,76 @@
+# Quadlet unit for BTCPay Server: the settlement engine for Lightning (BTC-LN)
+# and Monero (XMR-CHAIN). It owns invoice amounts, destinations, expiry,
+# confirmations and refundable late funds; the backend only calls its
+# Greenfield API and receives its webhooks.
+#
+# Internal-only on purpose: the backend reaches it as btcpay:49392 on
+# npm-network, and BTCPay reaches the backend webhook as
+# boltmesh-backend:8000. The loopback publish exists only for an operator's SSH
+# tunnel (`ssh -L 49392:127.0.0.1:49392`), so no DNS record or public surface
+# is needed. Set BTCPAY_HOST later if the admin UI should go through NPM.
+#
+# The store, webhook and API keys live in Postgres and are created by
+# btcpay-bootstrap.container, not here; this unit only needs the database and
+# the node connections.
+[Unit]
+Description=BTCPay Server (Lightning + Monero settlement)
+After=network-online.target npm-network-network.service postgres.service nbxplorer.service lightningd.service
+Requires=npm-network-network.service postgres.service nbxplorer.service
+
+[Container]
+ContainerName=btcpay
+Image=docker.io/btcpayserver/btcpayserver:2.4.5
+Network=npm-network.network
+
+# Admin UI through an SSH tunnel only. 127.0.0.1 keeps it off the LAN and the
+# firewall opens nothing for it.
+PublishPort=127.0.0.1:49392:49392
+
+Environment=BTCPAY_NETWORK=mainnet
+Environment=BTCPAY_BIND=0.0.0.0:49392
+Environment=BTCPAY_CHAINS=btc
+# The tunnel's origin. The backend uses http://btcpay:49392 directly, and the
+# webhook URL is internal, so this only affects links rendered by the UI.
+Environment=BTCPAY_EXTERNALURL=http://localhost:49392/
+Environment=BTCPAY_BTCEXPLORERURL=http://nbxplorer:32838/
+Environment=BTCPAY_POSTGRES=User ID=btcpay;Password=@BTCPAY_DB_PASSWORD@;Host=postgres;Port=5432;Database=btcpay;
+Environment=BTCPAY_BTCEXPLORERCOOKIEFILE=/nbxplorer/Main/.cookie
+# The existing CLN node over its unix socket. BTCPay treats it as the server's
+# internal node, which is what btcpay-bootstrap selects for BTC-LN.
+Environment=BTCPAY_BTCLIGHTNING=type=clightning;server=unix:///clightning/bitcoin/lightning-rpc
+Environment=BTCPAY_DATADIR=/datadir
+# BTCPay refuses private webhook destinations unless allow-listed.
+Environment=BTCPAY_SSRFEXCEPTIONS=boltmesh-backend:8000
+# Monero plugin wiring. The wallet is the dedicated plugin wallet, never the
+# backend/MCP wallet that used to live here; it is view-only once created.
+Environment=BTCPAY_XMR_DAEMON_URI=http://monerod:18089
+Environment=BTCPAY_XMR_WALLET_DAEMON_URI=http://monero-wallet-btcpay:18083
+Environment=BTCPAY_XMR_WALLET_DAEMON_WALLETDIR=/xmr-wallet
+
+# The datadir holds the data-protection keys and the rates cache; Plugins is
+# bind-mounted separately because BTCPay always loads from
+# ~/.btcpayserver/Plugins, not from DATADIR. nbxplorer is read-only: BTCPay
+# only reads the cookie file. cln is shared (:z, not :Z) because lightningd
+# writes the same socket, and the wallet is shared with the wallet-rpc.
+Volume=@DATA_DIR@/btcpay:/datadir:z
+Volume=@DATA_DIR@/btcpay/Plugins:/root/.btcpayserver/Plugins:z
+Volume=@DATA_DIR@/nbxplorer:/nbxplorer:ro,z
+Volume=@DATA_DIR@/cln:/clightning:z
+Volume=@DATA_DIR@/btcpay/xmr-wallet:/xmr-wallet:z
+
+# The image ships no curl/wget; bash's /dev/tcp is the only bounded probe
+# available. It proves the HTTP listener is accepting connections; the deep
+# check is the backend's /health, which calls the Greenfield API.
+HealthCmd=/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/49392'
+HealthInterval=60s
+HealthTimeout=10s
+HealthStartPeriod=2m
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

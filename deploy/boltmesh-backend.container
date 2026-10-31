@@ -20,12 +20,12 @@ IP=10.89.0.242
 #   db.env      -- POSTGRES_* and DATABASE_URL
 #   secrets.env -- the JWT signing keys and the bootstrap pepper
 #   app.env     -- operator-editable: URLs, CORS, OAuth, SMTP, TTLs
-#   gateway.env -- the CLN rune and the Monero RPC login, derived from the
-#                  running lightningd/monero-wallet-rpc
+#   btcpay/backend.env -- the BTCPay store URL, runtime key, store id and
+#                  webhook secret, written by the bootstrap step
 EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/secrets.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/app.env
-EnvironmentFile=@CONFIG_DIR@/boltmesh/gateway.env
+EnvironmentFile=@CONFIG_DIR@/btcpay/backend.env
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
 # API on host 8105 (NPM_HOSTS in stack.conf) -- it can no longer resolve the

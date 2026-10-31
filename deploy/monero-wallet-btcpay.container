@@ -1,0 +1,46 @@
+# Quadlet unit for the dedicated Monero wallet-rpc used by the BTCPay Monero
+# plugin. It is deliberately separate from the backend/MCP wallet:
+#
+#   * the plugin connects with EMPTY credentials (hardcoded in the plugin), so
+#     this RPC runs with --disable-rpc-login and must never be published;
+#   * the plugin opens a wallet literally named `wallet` with an empty password;
+#   * the plugin calls open_wallet/close_wallet, which would swap the wallet out
+#     from under any other consumer.
+#
+# The wallet is imported view-only (address + private view key + restore height)
+# by scripts/btcpay-wallet.sh, so the settlement server cannot spend. The
+# monero-wallet-mcp server may point here for read-only balance/history, but its
+# spend tools cannot work by design.
+[Unit]
+Description=Monero wallet RPC for BTCPay (view-only plugin wallet)
+After=network-online.target npm-network-network.service monerod.service
+Requires=npm-network-network.service monerod.service
+
+[Container]
+ContainerName=monero-wallet-btcpay
+# Same daemon/wallet family as the rest of the stack, but this is the BTCPay
+# image because its entrypoint binds 0.0.0.0 with --disable-rpc-login. The
+# simple-monero-wallet-rpc image would force 127.0.0.1 without --rpc-login and
+# BTCPay could never reach it.
+Image=docker.io/btcpayserver/monero:0.18.5.4
+Network=npm-network.network
+
+Volume=@DATA_DIR@/btcpay/xmr-wallet:/wallet:z
+
+Exec=monero-wallet-rpc --non-interactive --rpc-bind-ip=0.0.0.0 --confirm-external-bind --rpc-bind-port=18083 --disable-rpc-login --trusted-daemon --daemon-address=monerod:18089 --wallet-dir=/wallet
+
+# A wallet RPC is red for as long as the wallet refreshes, so killing it would
+# restart the refresh from scratch (same rule as the retired backend wallet).
+# health-lint: HC008 wallet RPC is red during a refresh; killing it restarts the refresh
+HealthCmd=curl -fsS -o /dev/null --max-time 4 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":"0","method":"get_version"}' http://127.0.0.1:18083/json_rpc
+HealthInterval=60s
+HealthTimeout=10s
+HealthStartPeriod=2m
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

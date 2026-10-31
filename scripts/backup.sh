@@ -579,15 +579,15 @@ case "$cmd" in
         cat "$rlog"
         # The /data label is the one error restic reports that is not a failure;
         # without tolerating it this command would exit before the chown below,
-        # leaving the wallet unreadable to monero-wallet-rpc.
+        # leaving bitcoind's image-uid data dir unreadable.
         if ! restore_acceptable "$rlog" "$rrc"; then
             rm -f "$rlog"
             die "restore failed (see above)"
         fi
         rm -f "$rlog"
-        # Belt and braces: install.sh hands this dir to the image uid too.
-        podman unshare chown -R 1000:1000 "$DATA_DIR/monero-wallet-rpc" 2>/dev/null \
-            || warn "could not chown $DATA_DIR/monero-wallet-rpc to the image uid"
+        # Belt and braces: install.sh hands bitcoind's dir to the image uid too.
+        podman unshare chown -R 1000:1000 "$DATA_DIR/bitcoin" 2>/dev/null \
+            || warn "could not chown $DATA_DIR/bitcoin to the image uid"
         log "restore complete; start the stack with ./deploy.sh"
         ;;
 esac

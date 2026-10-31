@@ -54,7 +54,7 @@ head2() { printf '\n%s\n' "$*"; }
 # ---------------------------------------------------------------------------
 head2 "Containers"
 if [ "$NO_NODES" = 1 ]; then
-    warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/monero-wallet-rpc"
+    warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/btcpay/nbxplorer/monero-wallet-btcpay"
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
         netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
@@ -63,7 +63,7 @@ if [ "$NO_NODES" = 1 ]; then
     )
 else
     containers=(
-        bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-rpc lightningd
+        bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-btcpay lightningd btcpay nbxplorer
         tor valkey searxng uptime-kuma nginx-proxy-manager
         netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
         searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp
@@ -137,6 +137,29 @@ done
 
 
 # ---------------------------------------------------------------------------
+head2 "BTCPay settlement"
+if [ "$NO_NODES" = 1 ]; then
+    warn "chain daemons skipped by request; not checking BTCPay/NBXplorer"
+else
+    for c in btcpay nbxplorer monero-wallet-btcpay; do
+        status=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
+        case "$status" in
+            *"(healthy)"*) pass "$c: $status" ;;
+            "") bad "$c is not running" ;;
+            *) warn "$c: $status" ;;
+        esac
+    done
+    # The same endpoint the backend's /health uses: a 200 means BTCPay and its
+    # database are serving, not merely that the container is up.
+    btcpay_health=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://btcpay:49392/api/v1/health 2>/dev/null || echo 000)
+    if [ "$btcpay_health" = "200" ]; then
+        pass "BTCPay /api/v1/health 200"
+    else
+        bad "BTCPay /api/v1/health -> $btcpay_health"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 head2 "MCP endpoints"
 # name|env-file|token-var|deep-tool|deep-args|needs-nodes
 # The name is the container name; it is read by name on npm-network, and it
@@ -182,7 +205,9 @@ for e in "${endpoints[@]}"; do
     fi
 
     if [ "$DEEP" = 1 ]; then
-        if [ "$NO_NODES" = 1 ] && [ "$needs_nodes" = 1 ]; then
+        if [ "$name" = monero-wallet-mcp ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
+            warn "$name deep check skipped (fill in config/btcpay/xmr-wallet.env to import the view-only wallet)"
+        elif [ "$NO_NODES" = 1 ] && [ "$needs_nodes" = 1 ]; then
             warn "$name deep check skipped (needs a chain node)"
         else
             # mcp_tool_call reuses the session mcp_initialize just opened.

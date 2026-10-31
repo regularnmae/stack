@@ -11,7 +11,7 @@
 #                                  # --only xmr-explorer just one (and restarts it)
 #   ./deploy.sh --skip-apps        # infrastructure only (daemons, searxng, NPM)
 #   ./deploy.sh --skip-daemons     # everything except the chain nodes: no
-#                                  # bitcoind/monerod/lightningd/monero-wallet-rpc,
+#                                  # bitcoind/monerod/lightningd/btcpay,
 #                                  # no wallets (for testing without a chain)
 #   ./deploy.sh --no-wallets       # do not prompt for the Monero/Bitcoin wallet
 #   ./deploy.sh --dry-run          # print the plan; change nothing
@@ -405,17 +405,16 @@ start_infra() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. wallets (Monero must exist before monero-wallet-rpc can start)
+# 4. wallets (the Bitcoin Core wallet; the BTCPay Monero wallet is view-only
+#    and is imported by start_btcpay once its address/view key are configured)
 # ---------------------------------------------------------------------------
 setup_wallets() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping wallet setup (--skip-daemons)"; return 0; fi
     [ "$DO_WALLETS" = 1 ] || { log "skipping wallet setup (--no-wallets)"; return 0; }
     if [ "$DRY_RUN" = 1 ]; then
-        printf '  [dry-run] %s --monero\n' "$REPO_DIR/scripts/wallets.sh"
         printf '  [dry-run] %s --bitcoin\n' "$REPO_DIR/scripts/wallets.sh"
         return 0
     fi
-    "$REPO_DIR/scripts/wallets.sh" --monero || warn "Monero wallet setup did not complete"
     "$REPO_DIR/scripts/wallets.sh" --bitcoin || warn "Bitcoin wallet setup did not complete"
 }
 
@@ -463,15 +462,97 @@ start_daemons() {
                  dump_tail lightningd 40; }
     fi
 
-    # monero-wallet-rpc opens the wallet at startup, so it only starts once the
-    # wallet file exists (scripts/wallets.sh ensures that).
-    start_unit monero-wallet-rpc
-    wait_healthy monero-wallet-rpc "${MONERO_WALLET_WAIT:-300}" || warn "monero-wallet-rpc not healthy"
-
     # Re-run the installer now that lightningd may answer, to mint the runes.
     # install.sh checks the node is reachable, so this is safe either way.
     log "re-running installer to create CLN runes"
     run "$REPO_DIR/deploy/install.sh"
+}
+
+# ---------------------------------------------------------------------------
+# 5b. BTCPay: the settlement tier the BoltMesh backend talks to
+# ---------------------------------------------------------------------------
+# The BTCPay/NBXplorer/Monero-wallet units are rendered by install.sh; this
+# function owns the parts that must happen in order: the btcpay role in the
+# existing Postgres cluster, the plugin wallet, the bootstrap (store/keys/
+# webhook) and the four-value env file the backend reads.
+ensure_btcpay_db() {
+    local pw
+    pw=$(env_value "$CONFIG_DIR/stack/secrets.env" BTCPAY_DB_PASSWORD)
+    [ -n "$pw" ] || { warn "no BTCPAY_DB_PASSWORD in $CONFIG_DIR/stack/secrets.env; run deploy/install.sh first"; return 1; }
+    # Roles and databases are idempotent. The password is hex from install.sh,
+    # so embedding it in the SQL is safe.
+    if ! podman exec postgres psql -U vpnuser -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='btcpay'" | grep -q 1; then
+        podman exec postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1             -c "CREATE ROLE btcpay LOGIN PASSWORD '$pw' CREATEDB" >/dev/null || return 1
+        log "created the btcpay Postgres role"
+    fi
+    local db
+    for db in btcpay nbxplorer; do
+        if ! podman exec postgres psql -U vpnuser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1; then
+            podman exec postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1                 -c "CREATE DATABASE $db OWNER btcpay" >/dev/null || return 1
+            log "created the $db database"
+        fi
+    done
+}
+
+write_btcpay_backend_env() {
+    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store secret
+    [ -s "$state" ] || { warn "no $state; the BTCPay bootstrap has not completed"; return 1; }
+    key=$(env_value "$state" BTCPAY_API_KEY)
+    store=$(env_value "$state" BTCPAY_STORE_ID)
+    secret=$(env_value "$state" BTCPAY_WEBHOOK_SECRET)
+    if [ -z "$key" ] || [ -z "$store" ] || [ -z "$secret" ]; then
+        warn "the BTCPay bootstrap state is incomplete; not writing the backend env"
+        return 1
+    fi
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    cat > "$CONFIG_DIR/btcpay/backend.env" <<EOF
+# Written by deploy.sh from btcpay/bootstrap.env. Do not hand-edit.
+BTCPAY_URL=http://btcpay:49392
+BTCPAY_API_KEY=$key
+BTCPAY_STORE_ID=$store
+BTCPAY_WEBHOOK_SECRET=$secret
+EOF
+    umask "$old_umask"
+    chmod 600 "$CONFIG_DIR/btcpay/backend.env"
+    log "wrote $CONFIG_DIR/btcpay/backend.env (mode 600)"
+}
+
+start_btcpay() {
+    if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping BTCPay (--skip-daemons)"; return 0; fi
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  [dry-run] systemctl --user start postgres nbxplorer monero-wallet-btcpay btcpay\n'
+        printf '  [dry-run] %s/scripts/btcpay-wallet.sh && systemctl --user start btcpay-bootstrap\n' "$REPO_DIR"
+        return 0
+    fi
+
+    # BTCPay uses the existing Postgres cluster (separate databases), so the
+    # role/database step must follow postgres and precede NBXplorer.
+    start_unit postgres
+    wait_healthy postgres "${POSTGRES_WAIT:-180}" || { warn "postgres not healthy"; dump_tail postgres 20; return 1; }
+    ensure_btcpay_db || { warn "could not prepare the BTCPay databases"; return 1; }
+
+    start_unit nbxplorer || { warn "nbxplorer did not start"; dump_tail nbxplorer 30; return 1; }
+    wait_healthy nbxplorer 300 || { warn "nbxplorer did not become healthy"; dump_tail nbxplorer 30; return 1; }
+
+    start_unit monero-wallet-btcpay || warn "monero-wallet-btcpay did not start"
+    wait_healthy monero-wallet-btcpay "${MONERO_WALLET_WAIT:-300}" || warn "monero-wallet-btcpay not healthy"
+
+    start_unit btcpay || { warn "btcpay did not start"; dump_tail btcpay 40; return 1; }
+    wait_healthy btcpay 300 || { warn "btcpay did not become healthy"; dump_tail btcpay 40; return 1; }
+
+    # Import the view-only plugin wallet once the operator has supplied the
+    # address/view key; the script is a no-op otherwise (and restarts BTCPay
+    # itself when it does import, so wait again before the bootstrap).
+    if "$REPO_DIR/scripts/btcpay-wallet.sh"; then
+        wait_healthy btcpay 300 || true
+    else
+        warn "the BTCPay Monero wallet was not imported; XMR-CHAIN will stay disabled"
+    fi
+
+    start_unit btcpay-bootstrap || warn "the BTCPay bootstrap did not complete; check: podman logs btcpay-bootstrap"
+    write_btcpay_backend_env || warn "BTCPay is up but the backend env was not written"
 }
 
 # ---------------------------------------------------------------------------
@@ -556,7 +637,7 @@ boltmesh_env_args() {
         "--env-file" "$CONFIG_DIR/boltmesh/db.env" \
         "--env-file" "$CONFIG_DIR/boltmesh/secrets.env" \
         "--env-file" "$CONFIG_DIR/boltmesh/app.env" \
-        "--env-file" "$CONFIG_DIR/boltmesh/gateway.env"
+        "--env-file" "$CONFIG_DIR/btcpay/backend.env"
 }
 
 run_boltmesh_migrations() {
@@ -757,6 +838,9 @@ if [ -n "$ONLY" ]; then
         # once now. monitor.service is oneshot and takes no arguments.
         install_units
         start_unit monitor
+    elif [ "$ONLY" = btcpay ]; then
+        install_units
+        start_btcpay
     elif [ "$ONLY" = boltmesh ]; then
         # The whole app tier: fetch, build, migrate, start. Individual members
         # (postgres, boltmesh-backend/-worker/-frontend) fall through to the
@@ -806,6 +890,7 @@ restart_changed_units "$units_before" "$(unit_digest)"
 start_infra
 setup_wallets
 start_daemons
+start_btcpay
 [ "$SKIP_APPS" = 1 ] || deploy_apps
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
 # Configure the proxy hosts before the explorers: their images are local builds,
@@ -854,14 +939,14 @@ The status page's monitors are reconciled once
   $DATA_DIR/config/uptime-kuma/api.env has the Uptime-Kuma admin login
   (scripts/kuma-monitors.sh applies every monitor in KUMA_MONITORS).
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
-bitcoind, monerod, fulcrum, lightningd and monero-wallet-rpc.
+bitcoind, monerod, fulcrum, lightningd, btcpay, nbxplorer and the BTCPay wallet.
 EOF
 else
     cat <<EOF
 
 Stack deployed.
 
-  Daemons and web:  bitcoind, monerod, fulcrum, monero-wallet-rpc, lightningd,
+  Daemons and web:  bitcoind, monerod, fulcrum, lightningd, btcpay, nbxplorer,
                     tor, valkey, searxng, nginx-proxy-manager
   MCP servers:      searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
                     monero-wallet-mcp, lightning-mcp

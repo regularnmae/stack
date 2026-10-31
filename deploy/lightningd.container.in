@@ -30,7 +30,7 @@ PublishPort=127.0.0.1:3010:3010
 # Volume mount using @DATA_DIR@/cln. `:z` (shared), not `:Z` (private): the
 # backup container mounts the same directory read-only, and two containers may
 # not share a path one labels private -- whichever starts last would relabel it
-# and lock the other out. bitcoind and monero-wallet-rpc already use `:z`.
+# and lock the other out. bitcoind and BTCPay's datadir already use `:z`.
 Volume=@DATA_DIR@/cln:/root/.lightning:z
 
 # Map host bitcoind directory into CLN
@@ -63,7 +63,7 @@ Exec=--network=bitcoin \
 # inside a unit prefer kill/stop over restart, and let systemd's restart policy
 # be the one that acts.
 #
-# Deliberately NOT on monero-wallet-rpc: its healthcheck is red by design for as
+# Deliberately NOT on the BTCPay wallet: its healthcheck is red by design for as
 # long as the wallet is refreshing, and killing it would restart that refresh.
 HealthCmd=lightning-cli getinfo
 HealthInterval=60s

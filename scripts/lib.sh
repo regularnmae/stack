@@ -431,7 +431,7 @@ ensure_data_dir_selinux() {
         *container_file_t*|*svirt_sandbox_file_t*) return 0 ;;
     esac
 
-    # Not recursive on purpose: the image-uid subdirs (bitcoin, monero-wallet-rpc)
+    # Not recursive on purpose: the image-uid subdirs (bitcoin)
     # are not ours to relabel, and podman's `:z` covers the mounted subdirs.
     log "SELinux: $DATA_DIR is '$ctx'; labelling it for containers"
     chcon -t container_file_t "$DATA_DIR" 2>/dev/null || true

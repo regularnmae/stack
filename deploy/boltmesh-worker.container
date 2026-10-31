@@ -16,7 +16,7 @@ Network=npm-network.network
 EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/secrets.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/app.env
-EnvironmentFile=@CONFIG_DIR@/boltmesh/gateway.env
+EnvironmentFile=@CONFIG_DIR@/btcpay/backend.env
 
 # The worker serves no HTTP port. The app image's CMD is gunicorn, so the
 # command is replaced rather than appended.

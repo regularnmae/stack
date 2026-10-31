@@ -1,0 +1,46 @@
+# Quadlet unit for NBXplorer, BTCPay's chain indexer. It watches the store's
+# derivation scheme and reports payments to BTCPay; it is not optional and it
+# is not exposed to anything but BTCPay.
+#
+# It needs BOTH bitcoind endpoints: RPC (wallet and raw tx) and P2P (blocks).
+# The stack's bitcoind runs with listen=0 by default for an outbound-only node;
+# NBXplorer requires that line to be listen=1 (no host port is published, so
+# this stays inside the podman subnet).
+[Unit]
+Description=NBXplorer (BTCPay Bitcoin chain indexer)
+After=network-online.target npm-network-network.service postgres.service bitcoind.service
+Requires=npm-network-network.service postgres.service bitcoind.service
+
+[Container]
+ContainerName=nbxplorer
+Image=docker.io/nicolasdorier/nbxplorer:2.6.21
+Network=npm-network.network
+
+Environment=NBXPLORER_NETWORK=mainnet
+Environment=NBXPLORER_BIND=0.0.0.0:32838
+Environment=NBXPLORER_CHAINS=btc
+Environment=NBXPLORER_BTCRPCURL=http://bitcoind:8332/
+Environment=NBXPLORER_BTCNODEENDPOINT=bitcoind:8333
+Environment=NBXPLORER_BTCRPCUSER=@BITCOIN_RPC_USER@
+Environment=NBXPLORER_BTCRPCPASSWORD=@BITCOIN_RPC_PASSWORD@
+# The BTCPay database cluster already exists; NBXplorer creates its own database
+# and runs its migrations on first start (the btcpay role has CREATEDB).
+Environment=NBXPLORER_POSTGRES=User ID=btcpay;Password=@BTCPAY_DB_PASSWORD@;Host=postgres;Port=5432;Database=nbxplorer;
+Environment=NBXPLORER_SIGNALFILESDIR=/datadir
+Environment=NBXPLORER_COOKIEFILE=/datadir/.cookie
+
+Volume=@DATA_DIR@/nbxplorer:/datadir:z
+
+HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:32838/health
+HealthInterval=60s
+HealthTimeout=10s
+HealthStartPeriod=2m
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

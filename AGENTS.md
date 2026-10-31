@@ -19,13 +19,13 @@ of restating it — read that file before changing the behaviour.
 secret cannot reach `--bitcoin-rpcpassword` etc. from an env file. So **every
 unit is rendered** by `install.sh` from `deploy/*.container[.in]`, substituting
 `@DATA_DIR@`/`@CONFIG_DIR@` (the plain user units also use `@REPO_DIR@`); the
-three secret-bearing units, `lightningd`, `monero-wallet-rpc` and `fulcrum`,
+three secret-bearing units, `lightningd`, `fulcrum` and `crowdsec`,
 additionally substitute `@PLACEHOLDERS@` from `config/stack/secrets.env`. Rendered
 units are mode 600 and never committed; none is a symlink. Never move a secret
-onto a committed `.container`, and never "simplify" `monero-wallet-rpc` to a
-config file: its entrypoint binds `0.0.0.0` only when `--rpc-login` is on the
-command line, otherwise it forces `127.0.0.1` and the wallet is unreachable from
-the MCP server.
+onto a committed `.container`. The BTCPay wallet uses the `btcpayserver/monero`
+image on purpose: the `simple-monero-wallet-rpc` entrypoint binds `0.0.0.0` only
+when `--rpc-login` is on the command line, and the plugin hardcodes empty
+credentials, so that image would be unreachable.
 
 ## Commands
 
@@ -45,7 +45,7 @@ the MCP server.
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract (the CI gate)
-./scripts/wallets.sh --monero       # create/restore the Monero wallet
+./scripts/btcpay-wallet.sh          # import the view-only BTCPay Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / verify / inspect
 ./scripts/monitor.sh                # the monitor.timer sweep, by hand
 ./scripts/ids.sh -v                 # the IDS roll-up, by hand (ids.timer runs it every 5 min)
@@ -85,8 +85,11 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
 - **CLN runes are verified, not trusted:** `createrune` can return a rune whose
   `unique_id` the node blacklisted, so `install.sh` proves each with `checkrune`
   and retries on a fresh id.
-- **`monero-wallet-rpc` cannot start before the wallet exists**, so `deploy.sh`
-  runs the wallet step between `monerod` and the wallet RPC.
+- **The BTCPay Monero wallet is view-only and optional at first.** `deploy.sh`
+  starts `monero-wallet-btcpay` (no wallet file yet), then
+  `scripts/btcpay-wallet.sh` imports it only when
+  `config/btcpay/xmr-wallet.env` has an address and view key. The bootstrap
+  leaves XMR-CHAIN disabled while the wallet RPC has no wallet open.
 - **lightningd dies with its container left "Up":** bcli can time out while
   bitcoind is still loading its wallet, the entrypoint then keeps PID 1 alive,
   the unit reads "active" and `Restart=always` never fires -- which is how
@@ -97,7 +100,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   still restarts a still-active but `unhealthy` lightningd, as the fallback for
   a container older than that unit line, waits for `getwalletinfo` before
   waiting on lightningd, and dumps the log on any timeout. Not on
-  `monero-wallet-rpc`: its healthcheck is red for as long as the wallet
+  `monero-wallet-btcpay`: its healthcheck is red for as long as the wallet
   refreshes, so killing it would restart the refresh from scratch.
 - **Healthchecks follow a contract, and `HealthOnFailure=restart` hides a
   restart from the monitor.** Every container unit that is not `Type=oneshot`
@@ -115,7 +118,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   **`HealthOnFailure=kill`, never `restart`** — podman's own restart leaves the
   unit active, so `NRestarts` does not move and `monitor.sh`'s restart delta
   cannot see a container flapping every 30 s; systemd's `Restart=always` is the
-  process that should act. The two exceptions are `monero-wallet-rpc` (red for a
+  process that should act. The two exceptions are `monero-wallet-btcpay` (red for a
   whole refresh) and `boltmesh-backend`, whose health is **deep** (postgres +
   valkey): a database blip must not restart-loop the app tier, and `verify.sh`
   pages on the same endpoint. **`HealthCmd` proves the process/serving path, not
@@ -136,7 +139,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `scripts/metrics.sh` emits `stack_cln_peers`/`stack_cln_channels_offline`.
   `lightning-cli` through `podman exec` is not gated by the clnrest rune — the
   MCP needs the method added to `READ_METHODS` in `deploy/install.sh`.
-- **Data-dir ownership:** `bitcoind`/`monero-wallet-rpc` run as the image uid
+- **Data-dir ownership:** `bitcoind` runs as the image uid
   (host 525287 = in-container 1000) and do **not** re-own their bind mounts, so
   `install.sh` `podman unshare chown -R 1000:1000`s them; `monerod` re-owns its
   own directory. `cln/`, `tor/`, `uptime-kuma/` and `fulcrum/` are written by
@@ -158,8 +161,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   image defaults that live in shell (`MONERO_IMAGE` in `scripts/wallets.sh`,
   `RESTIC_IMAGE` in `scripts/backup.sh` — no manager reads a shell default),
   are matched by `renovate.json`'s regex manager. The wallet tag appears in
-  both `wallets.sh` and `monero-wallet-rpc.container.in`, and one PR moves both;
-  it also appears in
+  the `btcpayserver/monero` unit, and one PR moves both; it also appears in
   the README's "What runs" table, which is hand-maintained. `postgres` (hand
   pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
   (`pinDigests` off): kuma's `2` and searxng's date tags move on their own, a
@@ -258,7 +260,7 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   RPC/Fulcrum wiring. `xmr-explorer` probes its static `/style.css`, not `/`,
   which can time out during monerod's initial sync.
 - **The backup set is declared once, as `BACKUP_PATHS` in `stack.conf`**
-  (`cln monero-wallet-rpc tor config npm audit uptime-kuma postgres-dump`).
+  (`cln btcpay tor config npm audit uptime-kuma postgres-dump`).
   `install.sh` renders it into `backup.container` (one read-only `Volume=` per
   entry plus the path list in `Exec=`), and `scripts/backup.sh` derives its own
   mounts, restic arguments, restore directories and confirmation prompt from the
@@ -450,13 +452,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   (the onion block is `install.sh`'s), and `btc-explorer.env`/
   `bitcoin-node-mcp/upstream.env` are rewritten because install.sh never
   refreshes them. The CLN method allowlists live in `stack.conf`
-  (`CLN_READ_METHODS`/`CLN_SPEND_METHODS`/`BOLTMESH_RUNE_METHODS`, rendered by
+  (`CLN_READ_METHODS`/`CLN_SPEND_METHODS`, rendered by
   `rune_json`) precisely so the installer and the rotator mint the same runes.
   New values are journaled under `$DATA_DIR/config/rotation/` before they are
   applied (`--status`/`--resume`, never a second mint), the spend baseline is
   rehashed per file rather than `--rebaseline`d, and `rotation.log` records the
   act without the value. No timer: these tokens have clients outside the stack.
-  Phase 1 is the four in-stack credentials (`bitcoin-rpc`, `monero-rpc`,
+  Phase 1 is the in-stack credentials (`bitcoin-rpc`,
   `tor-control`, `runes`), plus `token:<server>` (proves the new bearer TOKEN and
   the old one's 401; `--spend` only proves the reload, since the spend token is
   exercised by a spend call), `searxng-secret` and `monero-wallet`
@@ -665,8 +667,8 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   the streaming settings an SSE transport needs — the script's header owns that
   payload. `verify.sh` re-checks the path through NPM's `:80` (following the
   force-SSL redirect) with `--connect-to` onto `127.0.0.1`, so the certificate
-  still validates. Proxying a daemon's own API (`clnrest`, `xmr-rpc`) is gated
-  only by that daemon's RPC credentials, not by an MCP token.
+  still validates. Proxying a daemon's own API (`clnrest`) is gated only by that daemon's
+  RPC credentials, not by an MCP token.
 
 ## Interface contract with the app repos
 
@@ -681,7 +683,7 @@ variable name changes, it changes on both sides at once.
 | `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `searxng-mcp:8000` | `127.0.0.1:8100` | `0.0.0.0:8000`, `/health` |
 | `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `bitcoin-node-mcp:8000` | `127.0.0.1:8101` | `0.0.0.0:8000`, `/health` |
 | `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `monero-node-mcp:8000` | `127.0.0.1:8102` | `0.0.0.0:8000`, `/health` |
-| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-rpc:18083/json_rpc` | `monero-wallet-mcp:8000` | `127.0.0.1:8103` | `0.0.0.0:8000`, `/health` |
+| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-btcpay:18083/json_rpc` | `monero-wallet-mcp:8000` | `127.0.0.1:8103` | `0.0.0.0:8000`, `/health` |
 | `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `127.0.0.1:8104` | `0.0.0.0:8000`, `/health` |
 
 None of them is reachable from the LAN. NPM terminates TLS on :80/:443 (its own
@@ -720,17 +722,16 @@ the `boltmesh-labs` repos.
 | Unit | Image | Env files (`$DATA_DIR/config/boltmesh/`) | Upstream it reaches | On npm-network | NPM target | Health |
 | --- | --- | --- | --- | --- | --- | --- |
 | `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` (`POSTGRES_*`) | — | — | — | `pg_isready -h 127.0.0.1` |
-| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `gateway.env` | `postgres:5432`, `valkey:6379`, `lightningd:3010`, `monero-wallet-rpc:18083` | `boltmesh-backend:8000` | `127.0.0.1:8105` | `0.0.0.0:8000`, `/health` (deep) |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `config/btcpay/backend.env` | `postgres:5432`, `valkey:6379`, `btcpay:49392` | `boltmesh-backend:8000` | `127.0.0.1:8105` | `0.0.0.0:8000`, `/health` (deep) |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | the same four | the same | — | — | liveness file `/tmp/arq-worker-liveness` |
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `boltmesh-frontend:80` | `127.0.0.1:8106` | `0.0.0.0:80`, `/` |
 
 The four env files are `db.env`/`secrets.env` (generated), `app.env`
-(operator-editable, seeded from `BOLTMESH_*` in `stack.conf`) and `gateway.env`
-(machine-written from the running daemons). The backend reads the app repos'
+(operator-editable, seeded from `BOLTMESH_*` in `stack.conf`) and
+`btcpay/backend.env` (written by `deploy.sh` from the bootstrap state). The backend reads the app repos'
 variables (`DATABASE_URL`, `CACHE_URL`,
 `SECRET_KEY`/`REFRESH_SECRET_KEY`/`NODE_SECRET_KEY`/`BOOTSTRAP_SECRET_PEPPER`,
-`LIGHTNING_GATEWAY_URL`/`LIGHTNING_API_KEY`/`LIGHTNING_TLS_INSECURE`,
-`MONERO_RPC_URL`/`MONERO_RPC_USER`/`MONERO_RPC_PASSWORD`, `APP_ENV`,
+`BTCPAY_URL`/`BTCPAY_API_KEY`/`BTCPAY_STORE_ID`/`BTCPAY_WEBHOOK_SECRET`, `APP_ENV`,
 `API_BASE_URL`/`FRONTEND_URL`/`CORS_ALLOW_ORIGINS`, `GOOGLE_*`/`GITHUB_*`,
 `MAIL_*`, `GITHUB_REPO`/`GITHUB_TOKEN`). `APP_ENV=prod` is what makes the
 refresh cookie `Secure` + `SameSite=None`, which the split
