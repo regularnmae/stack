@@ -1,0 +1,10 @@
+# The LAPI logs one line per client request (the stack-bouncer polls it every
+# minute, the agent pushes alerts), so its default info level is pure chatter.
+# Upstream: api.server.log_level is a separate setting from common.log_level
+# and clobbers the level the entrypoint sets (crowdsecurity/crowdsec#3265),
+# hence both keys here rather than an environment override.
+common:
+  log_level: warning
+api:
+  server:
+    log_level: warning

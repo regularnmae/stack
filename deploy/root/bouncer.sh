@@ -48,7 +48,7 @@ say() { [ "$DRY_RUN" = 1 ] && printf '%s\n' "$*"; return 0; }
 lapi_get() { # host port path key -> body on stdout, non-zero on a non-200
     local host="$1" port="$2" path="$3" key="$4" raw status
     exec 3<>"/dev/tcp/$host/$port" || return 1
-    printf 'GET %s HTTP/1.0\r\nHost: %s\r\nX-Api-Key: %s\r\nAccept: application/json\r\nConnection: close\r\n\r\n' \
+    printf 'GET %s HTTP/1.0\r\nHost: %s\r\nX-Api-Key: %s\r\nUser-Agent: stack-bouncer\r\nAccept: application/json\r\nConnection: close\r\n\r\n' \
         "$path" "$host" "$key" >&3
     raw=$(cat <&3)
     exec 3<&- 3>&-

@@ -17,6 +17,10 @@ Network=npm-network.network
 EnvironmentFile=@CONFIG_DIR@/monero-node-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/monero-node-mcp/upstream.env
 
+# SDK chatter (transport/session lifecycle) is per-client noise; keep only
+# WARNING and up so the log stays error- and warning-shaped.
+Environment=LOG_LEVEL=WARNING
+
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
 # server on host 8102 (NPM_HOSTS in stack.conf) -- it can no longer resolve the
 # container name. The app itself still listens on 8000 inside its own namespace.

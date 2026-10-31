@@ -20,6 +20,10 @@ EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/upstream.env
 EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/spend.env
 
+# SDK chatter (transport/session lifecycle) is per-client noise; keep only
+# WARNING and up so the log stays error- and warning-shaped.
+Environment=LOG_LEVEL=WARNING
+
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
 # server on host 8103 (NPM_HOSTS in stack.conf) -- it can no longer resolve the
 # container name. The wallet it reads is BTCPay's view-only plugin wallet, so
