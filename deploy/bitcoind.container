@@ -39,7 +39,11 @@ Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 HealthCmd=bitcoin-cli getblockchaininfo
 HealthInterval=60s
 HealthTimeout=15s
-HealthStartPeriod=2m
+# Bitcoind's restart re-verifies the block index, which on the rotational
+# data disk can outlast the default 2m -- measured at 40+ kill-restart
+# cycles one busy morning because every cycle began the verify over. The
+# probe itself is right; only the start budget was wrong.
+HealthStartPeriod=15m
 HealthRetries=3
 HealthOnFailure=kill
 
