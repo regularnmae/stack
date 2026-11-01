@@ -54,6 +54,20 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# The alert path is host `curl` + `jq`: Alertmanager is a loopback bind and the
+# heartbeat is an outbound POST, so both are made from here, never from a
+# container (a container cannot be what reports a broken container runtime).
+# Without them every check can pass and nothing is delivered -- and with no
+# channel left, nothing can say so -- so refuse to run rather than write a
+# half-sweep over the flap-damper state. bootstrap.sh installs both; jq is
+# checked for the same reason, since the alert bodies are built with it.
+missing=""
+command -v curl >/dev/null 2>&1 || missing="$missing curl"
+command -v jq   >/dev/null 2>&1 || missing="$missing jq"
+if [ -n "$missing" ]; then
+    die "monitor needs${missing} on the host: the alert push, the Alertmanager check and the heartbeat all use them. Install: sudo dnf install -y${missing} (./bootstrap.sh does this) -- until then this host cannot be alerted on"
+fi
+
 resolve_data_dir
 AUDIT_DIR="$DATA_DIR/audit"
 mkdir -p "$AUDIT_DIR"

@@ -96,7 +96,11 @@ the one way in for a client. The host-side checks (`verify.sh`, the monitor) rea
 the services by container name on `npm-network`, through `net_curl` in
 `scripts/lib.sh`, which execs into the long-lived **`netcheck`** container
 (`netcheck/Containerfile`); `net_curl_host` uses **`netcheck-host`**, the same
-image on the host network, for NPM's own admin API on `127.0.0.1:81`. The proxy
+image on the host network, for NPM's own admin API on `127.0.0.1:81`. One path
+is deliberately the exception: the monitor's alerts go to Alertmanager on
+`127.0.0.1:9093` and its dead-man's-switch heartbeat out to the internet with
+the **host's own curl** (`bootstrap.sh` installs it), because a container
+cannot be what reports a broken container runtime. The proxy
 hosts are declared in `NPM_HOSTS`
 (`stack.conf`) and reconciled from this repo by `scripts/npm-hosts.sh` — see
 [Proxy hosts (nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager). The hosts
@@ -157,7 +161,8 @@ curl -fsSL https://raw.githubusercontent.com/regularnmae/stack/main/bootstrap.sh
 ~/build/stack/deploy.sh
 ```
 
-`bootstrap.sh` installs podman/firewalld/git/jq, enables user linger, sets
+`bootstrap.sh` installs podman/firewalld/git/jq/curl/openssl, enables user
+linger, sets
 `net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
 80/443/81 rootless), opens the stack's ports (`FIREWALL_PORTS`) in firewalld,
 makes journald persistent and bounded (so the container logs survive a reboot
@@ -228,7 +233,7 @@ completes.
 
 ### Wallets
 
-A bare host has a Bitcoin Core wallet, created by `scripts/wallets.sh --bitcoin`
+A bare host has a Bitcoin Core wallet, created by `scripts/wallets.sh`
 (prompted by `deploy.sh` when a TTY is present; skipped without one).
 
 The BTCPay Monero wallet is different and is never generated on the payment
@@ -1659,7 +1664,7 @@ stack/
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
   scripts/lib.sh          # data-dir resolution + SELinux labelling + the
                           #   net_curl / mcp_* helpers every check goes through
-  scripts/wallets.sh      # Monero + Bitcoin create/restore
+  scripts/wallets.sh      # the Bitcoin Core wallet (create/restore/load)
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
   scripts/logs.sh         # cross-service log search over victoria-logs (LogsQL)

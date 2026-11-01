@@ -137,6 +137,31 @@ done
 
 
 # ---------------------------------------------------------------------------
+head2 "Host tools"
+# The monitor's alert path is the host's own curl + jq (Alertmanager is a
+# loopback bind and the heartbeat an outbound POST), and openssl reads
+# certificate expiry and runs Fulcrum's TLS probe. They are requirements, not
+# conveniences: a missing one turns a check off silently, which is how a stack
+# can look healthy while nothing can page. bootstrap.sh installs all three --
+# including on a host that already had podman, where the package bundle above
+# never runs -- so this names the gap on a host provisioned before that.
+for t in curl openssl jq; do
+    if command -v "$t" >/dev/null 2>&1; then
+        pass "$t is installed"
+    else
+        bad "$t is missing: alerting, the certificate check or the alert payload will not work (sudo dnf install -y $t)"
+    fi
+done
+for t in git python3; do
+    if command -v "$t" >/dev/null 2>&1; then
+        pass "$t is installed"
+    else
+        warn "$t is missing: the repo fetch or agent-mcp needs it (./bootstrap.sh installs it)"
+    fi
+done
+
+
+# ---------------------------------------------------------------------------
 head2 "BTCPay settlement"
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking BTCPay/NBXplorer"

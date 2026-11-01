@@ -112,8 +112,34 @@ dur_s() {
 # the caller sets it, and returns non-zero after the timeout rather than dying:
 # the caller decides whether that is fatal.
 wait_healthy() { # container timeout
-    local c="$1" t="${2:-180}" deadline st="" hp start_s floor
+    local c="$1" t="${2:-180}" deadline st="" hp start_s floor st_result
     [ "${DRY_RUN:-0}" = 1 ] && return 0
+
+    # A one-shot job (Type=oneshot) never reports "(healthy)" and never shows up
+    # in `podman ps`: it *exits*. Waiting for "Up" burns the caller's whole
+    # timeout and then warns about a job that did its work -- which is what
+    # `./deploy.sh --only postgres-dump|btcpay-bootstrap` used to do (180 s of
+    # spin, then "container missing"). `systemctl restart` already blocked on
+    # the job and failed loudly, so the only thing left to read is its result;
+    # this also catches a job that systemd accepted and that exceeded
+    # TimeoutStartSec, which is a failure however the unit reports it.
+    if [ "$(systemctl --user show -p Type --value "$c.service" 2>/dev/null)" = oneshot ]; then
+        st=$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$c" 2>/dev/null || true)
+        case "$st" in
+            "exited 0") log "$c is a one-shot job and completed"; return 0 ;;
+        esac
+        # Quadlet passes --rm for a oneshot unit, so by the time the job returns
+        # the container is usually gone and the unit's own result is the only
+        # evidence left. `podman inspect` above still matters for a unit without
+        # --rm, where the terminal state names the failure.
+        st_result=$(systemctl --user show -p Result --value "$c.service" 2>/dev/null || true)
+        if [ "$st_result" = success ]; then
+            log "$c is a one-shot job and completed"
+            return 0
+        fi
+        warn "$c is a one-shot job and did not complete (result: ${st_result:-unit not found}${st:+, container: $st})"
+        return 1
+    fi
 
     # No healthcheck to wait on: victoria-logs' image is distroless (no shell,
     # so podman cannot run a health command), and a unit like that would wait

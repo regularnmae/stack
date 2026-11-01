@@ -19,9 +19,11 @@
 # `--since` takes VictoriaLogs durations: 15m, 2h, 7d. Times are printed in UTC,
 # which is what the store keeps; the journal on the host shows local time.
 #
-# Queries go through net_curl (scripts/lib.sh), i.e. a throwaway curl container
-# on npm-network: the host has no curl, and victoria-logs is addressed by its
-# container name. Read-only and safe to run at any time.
+# Queries go through net_curl (scripts/lib.sh), i.e. curl inside the long-lived
+# netcheck container on npm-network: victoria-logs is addressed by its container
+# name, and that keeps this CLI independent of the host's own package set (the
+# monitor needs a host curl; nothing else does). Read-only and safe to run at
+# any time.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

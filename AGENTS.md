@@ -82,7 +82,13 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   change and restarts nothing — the unit edit then sits unapplied while every
   health check reports `(healthy)`. After a hand render, restart the affected
   units yourself (`systemctl --user restart <unit>`); this is also why
-  `install.sh` alone is not a deploy.
+  `install.sh` alone is not a deploy. Every `--only` branch goes through
+  `sync_units` (the same digest pair) for exactly this reason — an `--only` run
+  must not consume the signal for the units it was not asked about. The one
+  exception is `nginx-proxy-manager`, which `--only` only warns about: its
+  restart belongs after the host rewrite, so `--only npm-hosts` rewrites and
+  then calls `sync_npm_network`, and every other branch tells the operator to
+  finish with a full deploy.
 - **CLN runes are verified, not trusted:** `createrune` can return a rune whose
   `unique_id` the node blacklisted, so `install.sh` proves each with `checkrune`
   and retries on a fresh id.
@@ -151,7 +157,12 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   And **`wait_healthy` raises a caller's timeout to the unit's
   `StartPeriod + Interval`**: podman runs no check during the start period, so a
   shorter wait reports "not healthy" about a service that never had a chance to
-  answer. The five MCP servers' `healthcheck.py` (authenticated `initialize`,
+  answer. A **one-shot unit (`Type=oneshot`) is the other way a wait lies**:
+  the job *exits* instead of reporting `(healthy)` and never appears in
+  `podman ps`, so `wait_healthy` reads its terminal state instead
+  (`exited 0` = done) — before that, `./deploy.sh --only postgres-dump` spun
+  its whole 180 s and warned "container missing" about a job that had
+  succeeded. The five MCP servers' `healthcheck.py` (authenticated `initialize`,
   SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
 - **CLN peers and channels come from `listpeerchannels`/`listpeers`, never
   `listchannels` or `getinfo`'s `num_peers`:** the gossmap's `active` is an
@@ -578,6 +589,17 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   is read back on the next sweep and turned into a failure; the heartbeat is
   pushed *after* the alert push and fails when the push failed, so "all checks
   pass but you cannot be told" is a page rather than a silent host.
+  (5) **The alert path is the host's own `curl` (and `jq`), not
+  `net_curl`.** Alertmanager is a `127.0.0.1` bind and the heartbeat an
+  outbound POST, so making them from a container would put the host's only
+  paging path behind the thing that is most likely to be broken — which is
+  exactly what an unmounted host `curl` was: the package was only in the
+  bundle that runs when podman is *missing*, so a host provisioned earlier
+  could pass every check and deliver nothing. `bootstrap.sh` now checks `curl`
+  and `openssl` individually, `verify.sh`'s "Host tools" section names a gap,
+  and `scripts/monitor.sh` refuses to run without `curl`/`jq` (one journal
+  line, `alerts.state` untouched) rather than burn the sweep into a
+  half-written flap-damper state.
   Two smaller things: a **config with no receiver integrations is valid** (that
   is what makes a fresh host safe before SMTP is filled in), and the image runs
   as uid **65534**, which cannot read a 0600 SMTP-bearing config — the unit sets

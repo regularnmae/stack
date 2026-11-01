@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Create or restore the Bitcoin Core wallet this stack needs.
 #
-#   scripts/wallets.sh [--bitcoin]
+#   scripts/wallets.sh
 #
 # Uses bitcoin-cli in the running bitcoind container. The BTCPay Monero wallet
 # is a different thing: it is view-only and imported by scripts/btcpay-wallet.sh
@@ -25,17 +25,15 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BITCOIN_WALLET="mainnet"
 
-DO_BITCOIN=0
-
-while [ $# -gt 0 ]; do
+# No options: the script does its one job. --help and an unknown argument are the
+# only branches (a stray argument must not be silently ignored, which is what
+# `--bitcoin` used to be).
+if [ $# -gt 0 ]; then
     case "$1" in
-        --bitcoin) DO_BITCOIN=1 ;;
         -h|--help) usage_header "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
-    shift
-done
-[ "$DO_BITCOIN" = 1 ] || DO_BITCOIN=1
+fi
 
 if [ ! -t 0 ]; then
     log "no TTY; skipping interactive wallet setup"
@@ -84,7 +82,7 @@ load_bitcoin_wallet() {
 setup_bitcoin() {
     command -v podman >/dev/null 2>&1 || die "podman is required"
     if ! podman ps --filter 'name=^bitcoind$' --format '{{.Status}}' 2>/dev/null | grep -q '^Up'; then
-        warn "bitcoind is not running; start it first (./deploy.sh) and re-run --bitcoin"
+        warn "bitcoind is not running; start it first (./deploy.sh) and re-run this script"
         return 1
     fi
 
@@ -97,7 +95,7 @@ setup_bitcoin() {
     deadline=$(( $(date +%s) + ${BITCOIND_WALLET_WAIT:-120} ))
     until bitcoin_cli listwallets >/dev/null 2>&1; do
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            warn "bitcoind wallet RPC did not answer; start it first (./deploy.sh) and re-run --bitcoin"
+            warn "bitcoind wallet RPC did not answer; start it first (./deploy.sh) and re-run this script"
             return 1
         fi
         sleep 2
@@ -156,5 +154,5 @@ setup_bitcoin() {
     log "Bitcoin wallet '$BITCOIN_WALLET' ready"
 }
 
-[ "$DO_BITCOIN" = 1 ] && setup_bitcoin
+setup_bitcoin
 exit 0

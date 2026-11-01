@@ -69,9 +69,23 @@ else
     log "podman already installed ($(podman --version))"
 fi
 command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y git; }
-# jq parses the nginx-proxy-manager admin API responses in
-# scripts/npm-hosts.sh (the host has no curl either; netcheck carries it).
+# jq parses the nginx-proxy-manager admin API responses in scripts/npm-hosts.sh
+# and builds the monitor's alert payload. (net_curl exists so a host-side check
+# can address a container by name and reach NPM's 127.0.0.1 admin bind, not
+# because the host has no curl.)
 command -v jq >/dev/null 2>&1 || { log "installing jq"; sudo dnf install -y jq; }
+# curl is the monitor's alert path, and it must be the host's own: monitor.sh
+# pushes alerts to Alertmanager on 127.0.0.1:9093 and pings the dead-man's-switch
+# heartbeat. A container cannot be what reports a broken container runtime, so
+# this is a requirement rather than a convenience -- and without it every alert
+# is lost with nothing able to say so (monitor.sh refuses to run at all).
+# Checked individually, not only in the podman bundle above: a host that
+# already had podman would otherwise never get it.
+command -v curl >/dev/null 2>&1 || { log "installing curl (monitor alert path)"; sudo dnf install -y curl; }
+# openssl reads certificate expiry for the monitor, runs the Electrum TLS probe
+# in scripts/lib.sh (verify.sh --deep), and generates the stack's secrets
+# (rand_hex in scripts/lib.sh). Same reason for the separate check.
+command -v openssl >/dev/null 2>&1 || { log "installing openssl"; sudo dnf install -y openssl; }
 # python3 runs agent-mcp, the CLI behind the agent skills (the agent-skills
 # repo, installed by deploy.sh). Stdlib only, but a minimal install has no
 # interpreter, and then every skill call fails with "bad interpreter".

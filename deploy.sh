@@ -33,6 +33,10 @@ DRY_RUN=0
 QUADLET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
 # Set by restart_changed_units when nginx-proxy-manager's unit changed.
 NPM_UNIT_CHANGED=0
+# The units restart_changed_units actually restarted, space-delimited with a
+# leading space (" bitcoind tor "). A --only branch reads it so a unit whose
+# rendered definition changed is restarted once, not twice.
+RESTARTED_UNITS=" "
 # shellcheck source=stack.conf
 . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
@@ -182,6 +186,30 @@ install_units() {
     run "$REPO_DIR/deploy/install.sh"
 }
 
+# install.sh + the digest comparison, for every `--only` branch. A re-render is
+# not an application -- a running container keeps the definition it started with
+# -- so a branch that calls install.sh alone applies the edit it was asked for
+# while rewriting every other rendered unit and consuming the signal for them:
+# the next full deploy then digests the already-new files either side of its own
+# install.sh, finds nothing changed and restarts nothing. That is the trap
+# AGENTS.md documents for a hand `deploy/install.sh`, and `--only` must not have
+# it. Defined before unit_digest/restart_changed_units (which it calls) on
+# purpose: bash resolves those at call time.
+sync_units() {
+    local before
+    before=$(unit_digest)
+    install_units
+    restart_changed_units "$before" "$(unit_digest)"
+    # restart_changed_units only flags nginx-proxy-manager: its restart has to
+    # follow the proxy-host rewrite (sync_npm_network says why). A --only branch
+    # does not rewrite the hosts, so restarting it here could leave NPM unable to
+    # resolve the hosts it saved -- say so instead, and let `--only npm-hosts`
+    # or a full deploy do it in the right order.
+    if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ]; then
+        warn "nginx-proxy-manager's unit changed; its restart is deferred -- run ./deploy.sh (or ./deploy.sh --only npm-hosts) to apply it"
+    fi
+}
+
 # A *running* container keeps the definition it started with: re-rendering a unit
 # changes nothing until that unit restarts. Digest the rendered files either side
 # of install.sh so deploy.sh can restart exactly the units whose definition
@@ -245,6 +273,9 @@ restart_changed_units() { # before-digest after-digest
     done < <(awk 'NR==FNR { old[$2] = $1; next }
                   ($2 in old) && old[$2] != $1 { print $2 }' \
                  <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+    # For the --only branches: they restart their own unit next, and doing it
+    # twice is two outages and two health waits for one change.
+    RESTARTED_UNITS="$restarted"
 }
 
 # ---------------------------------------------------------------------------
@@ -446,10 +477,10 @@ setup_wallets() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping wallet setup (--skip-daemons)"; return 0; fi
     [ "$DO_WALLETS" = 1 ] || { log "skipping wallet setup (--no-wallets)"; return 0; }
     if [ "$DRY_RUN" = 1 ]; then
-        printf '  [dry-run] %s --bitcoin\n' "$REPO_DIR/scripts/wallets.sh"
+        printf '  [dry-run] %s\n' "$REPO_DIR/scripts/wallets.sh"
         return 0
     fi
-    "$REPO_DIR/scripts/wallets.sh" --bitcoin || warn "Bitcoin wallet setup did not complete"
+    "$REPO_DIR/scripts/wallets.sh" || warn "Bitcoin wallet setup did not complete"
 }
 
 # ---------------------------------------------------------------------------
@@ -904,38 +935,38 @@ if [ -n "$ONLY" ]; then
     ensure_netcheck
     if in_list "$ONLY" "${APP_REPOS[@]}"; then
         fetch_repos "$ONLY"
-        install_units
+        sync_units
         deploy_app "$ONLY"
     elif [ "$ONLY" = backup ]; then
         # A one-shot job: install.sh has just (re)enabled the timer; this also
         # runs it once now instead of waiting for the schedule.
-        install_units
+        sync_units
         start_unit backup
     elif [ "$ONLY" = backup-verify ]; then
         # The weekly restore drill (scripts/backup.sh verify): run one now rather
         # than waiting for Sunday. It reads only the repository, so it is safe on
         # a host whose stack is serving; the verdict lands in
         # $DATA_DIR/audit/backup-verify.status.
-        install_units
+        sync_units
         start_unit backup-verify
     elif [ "$ONLY" = monitor ]; then
         # Like backup: install.sh has (re)enabled monitor.timer; run the sweep
         # once now. monitor.service is oneshot and takes no arguments.
-        install_units
+        sync_units
         start_unit monitor
     elif [ "$ONLY" = btcpay ]; then
-        install_units
+        sync_units
         start_btcpay
     elif [ "$ONLY" = boltmesh ]; then
         # The whole app tier: fetch, build, migrate, start. Individual members
         # (postgres, boltmesh-backend/-worker/-frontend) fall through to the
         # generic branch below, which restarts the one unit and waits.
-        install_units
+        sync_units
         deploy_boltmesh
     elif [ "$ONLY" = explorers ]; then
         # Both explorer images, rebuilt even if they exist (their Containerfiles
         # are the only place their versions live).
-        install_units
+        sync_units
         for name in "${EXPLORER_UNITS[@]}"; do
             build_explorer "$name" 1 || continue
             restart_unit "$name"
@@ -944,20 +975,24 @@ if [ -n "$ONLY" ]; then
     elif [ "$ONLY" = btc-explorer ] || [ "$ONLY" = xmr-explorer ]; then
         # One explorer: rebuild its image and restart only that unit. The
         # generic branch below would skip the build and keep the old image.
-        install_units
+        sync_units
         build_explorer "$ONLY" 1
         restart_unit "$ONLY"
         wait_healthy "$ONLY" "$EXPLORER_WAIT" || true
     elif [ "$ONLY" = npm-hosts ]; then
         # Re-apply the proxy hosts after a stack.conf change, or after filling
-        # in $DATA_DIR/config/npm/api.env. Touches no container.
-        install_units
+        # in $DATA_DIR/config/npm/api.env. Touches no container of its own, but
+        # this is the one branch that owns nginx-proxy-manager's deferred
+        # restart -- rewrite the hosts first, then let sync_npm_network apply a
+        # changed unit (it says why the order is load-bearing).
+        sync_units
         configure_npm_hosts
+        sync_npm_network
     elif [ "$ONLY" = kuma-monitors ]; then
         # Reconcile the status page's monitors after a KUMA_MONITORS change, or
         # after filling in $DATA_DIR/config/uptime-kuma/api.env. Touches no
         # container, but reaches uptime-kuma by name, so the network stays up.
-        install_units
+        sync_units
         kuma_monitors
     elif [ "$ONLY" = agent-skills ]; then
         # Client-side tooling only: no unit, no data dir, no secret -- it reads
@@ -966,9 +1001,17 @@ if [ -n "$ONLY" ]; then
         fetch_agent_skills
         install_agent_skills || true
     else
-        install_units
-        restart_unit "$ONLY"
-        wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
+        sync_units
+        # sync_units may already have restarted it because its rendered
+        # definition changed; a second restart is a second outage and a second
+        # health wait for one edit, so only restart when it did not.
+        case "$RESTARTED_UNITS" in
+            *" $ONLY "*)
+                log "$ONLY.service was restarted to pick up its new unit; not restarting it again" ;;
+            *)
+                restart_unit "$ONLY"
+                wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true ;;
+        esac
     fi
     log "done (--only $ONLY)"
     exit 0
