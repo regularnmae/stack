@@ -707,8 +707,11 @@ fi
 # /metrics is what the scrape reads, and it carries the textfile collector --
 # asking for the stack's own series proves the whole path (writer, permissions,
 # exporter), not just that the exporter is listening. node-exporter runs on the
-# host network and is bound to npm-network's gateway IP, so this side reaches it
-# as host.containers.internal -- never by the (no longer a peer) container name.
+# host network and listens on the wildcard: rootless podman keeps npm-network's
+# gateway inside its userns, so there is no gateway address here to bind (see
+# deploy/node-exporter.container for the measurement), and only a wildcard bind
+# catches a dial from a container. This side therefore reaches it as
+# host.containers.internal -- never by the (no longer a peer) container name.
 ne_metrics=$(net_curl -s -m 10 http://host.containers.internal:9100/metrics 2>/dev/null) || ne_metrics=""
 if [ -n "$ne_metrics" ]; then
     pass "node-exporter /metrics answers"

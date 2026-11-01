@@ -750,9 +750,10 @@ second timer opens one:
   read every four weeks), restores the snapshot into `$DATA_DIR/backup-verify`
   with `restic restore --verify`, and asserts that every directory in
   `BACKUP_PATHS` came back non-empty along with the markers in
-  `BACKUP_VERIFY_PATHS` (`cln/bitcoin/hsm_secret`, the wallet's `.keys`,
-  `tor/onion`, `config/stack/secrets.env`, NPM's sqlite database,
-  uptime-kuma's embedded mariadb). The database dump must also carry its
+  `BACKUP_VERIFY_PATHS` (`cln/bitcoin/hsm_secret`, the BTCPay Monero plugin's
+  DLL, `tor/onion`, `config/stack/secrets.env`, NPM's sqlite database,
+  uptime-kuma's embedded mariadb — the wallet itself only becomes a marker once
+  the operator's view key has imported it). The database dump must also carry its
   `pg_dumpall` completion trailer, which is what catches a dump killed
   mid-write.
 - It never touches the live data dirs: only the repository, restic's cache and
@@ -1278,7 +1279,7 @@ nginx-proxy-manager is the stack's only LAN-facing HTTP unit, so every public
 hostname is a proxy host in NPM. (Fulcrum's raw Electrum ports `50001`/`50002`
 are the deliberate non-HTTP exception; see [What runs](#what-runs).) They are
 declared in `NPM_HOSTS` in
-`stack.conf` — `domain | forward_host:port | flags` — and reconciled from this
+`stack.conf` — `domain | forward | flags` — and reconciled from this
 repo by `scripts/npm-hosts.sh` through the NPM admin API on `127.0.0.1:81` (NPM
 binds it on the host network): a host already serving the domain is updated in
 place, otherwise it is created, and a Let's Encrypt certificate is requested for
@@ -1296,6 +1297,11 @@ NPM_HOSTS=(
     "${XMR_EXPLORER_HOST}|127.0.0.1:8109|force-ssl,block"
     "${UPTIME_KUMA_HOST}|127.0.0.1:8107|ws,block"
     "${MCP_HOST}|127.0.0.1:8100|mcp,force-ssl,http2"
+    # The onion side of the MCP surface. tor's mcp hidden service reaches NPM
+    # with the client's Host header, which nobody knows at install time, so the
+    # wildcard is the only possible domain -- and the only onion host that needs
+    # NPM at all. No force-ssl, no certificate: tor already encrypts.
+    "*.onion|127.0.0.1:8100|mcp"
 )
 ```
 
@@ -1394,7 +1400,7 @@ ONION_SERVICES=(
     "boltmesh|10.89.0.241:80|${BOLTMESH_FRONTEND_HOST}|/|200"
     "api|10.89.0.242:8000|${BOLTMESH_API_HOST}|/health|200"
     "btc-explorer|10.89.0.243:3002|${BTC_EXPLORER_HOST}|/|200,401"
-    "xmr-explorer|10.89.0.244:31312|${XMR_EXPLORER_HOST}|/|200"
+    "xmr-explorer|10.89.0.244:31312|${XMR_EXPLORER_HOST}|/style.css|200"
     "mcp|${ONION_NPM_TARGET}|${MCP_HOST}|/searxng|401"
 )
 ```

@@ -52,8 +52,9 @@ Volume=/:/host:ro
 # SELinux is enforcing on this host and the host mounts above carry the host's
 # own labels, which a container domain may not read -- and relabelling / is not
 # an option. This is the one unit with SELinux separation off, which is why its
-# mounts are all :ro and it is reachable only on a loopback port. The textfile
-# dir below keeps its :z label so it still works if the label is ever re-enabled.
+# mounts are all :ro and its listener is closed to the LAN by the firewall (9100
+# is not in FIREWALL_PORTS). The textfile dir below keeps its :z label so it
+# still works if the label is ever re-enabled.
 SecurityLabelDisable=true
 
 # Where scripts/metrics.sh (every minute) and scripts/monitor.sh (every five)

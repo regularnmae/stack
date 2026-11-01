@@ -24,9 +24,13 @@ Log notice stdout
 # mounted from $DATA_DIR/tor/onion and are part of the backup set.
 # >>> onion services (rendered by deploy/install.sh from ONION_SERVICES)
 HiddenServiceDir /var/lib/tor/onion/boltmesh
-HiddenServicePort 80 boltmesh-frontend:80
+HiddenServicePort 80 10.89.0.241:80
 HiddenServiceDir /var/lib/tor/onion/api
-HiddenServicePort 80 boltmesh-backend:8000
+HiddenServicePort 80 10.89.0.242:8000
+HiddenServiceDir /var/lib/tor/onion/btc-explorer
+HiddenServicePort 80 10.89.0.243:3002
+HiddenServiceDir /var/lib/tor/onion/xmr-explorer
+HiddenServicePort 80 10.89.0.244:31312
 HiddenServiceDir /var/lib/tor/onion/mcp
 HiddenServicePort 80 host.containers.internal:80
 # <<< onion services

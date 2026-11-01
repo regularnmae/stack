@@ -11,8 +11,8 @@
 #   domain | forward | flags
 #
 # where `forward` is `[scheme://]host:port` (scheme defaults to http; use https
-# for an upstream that speaks TLS, e.g. clnrest), and `flags` is a comma-
-# separated subset of
+# for an upstream that speaks TLS, if one is ever added), and `flags` is a
+# comma-separated subset of
 #
 #   force-ssl  redirect :80 to :443 (needs a certificate)
 #   http2      negotiate HTTP/2
@@ -226,8 +226,8 @@ for entry in "${NPM_HOSTS[@]}"; do
     if [ -z "$domain" ] || [ -z "$forward" ]; then
         die "bad NPM_HOSTS entry: $entry (want \"domain|[scheme://]forward_host:port|flags\")"
     fi
-    # `forward` may carry a scheme; the upstream of a TLS-speaking daemon
-    # (clnrest) needs https. Everything else is plain http inside npm-network.
+    # `forward` may carry a scheme; a TLS-speaking upstream would need https.
+    # Everything declared today is plain http inside npm-network.
     scheme="http"
     case "$forward" in
         *://*) scheme="${forward%%://*}"; forward="${forward#*://}" ;;

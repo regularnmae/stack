@@ -14,6 +14,11 @@ daemon=0
 prune=0
 txindex=1
 
+# Validation cache, in MiB (Core's default is 450). The one knob that materially
+# speeds up the initial block download, because it cuts chainstate writes to
+# disk; drop it back to 450 once the chain is synced.
+dbcache=3072
+
 # RPC. rpcallowip is the podman subnet only, so a re-added PublishPort would
 # still be refused.
 rpcuser=btcuser
@@ -22,5 +27,6 @@ rpcbind=0.0.0.0
 rpcallowip=127.0.0.1
 rpcallowip=10.89.0.0/24
 
-# Outbound-only: no inbound P2P peers.
-listen=0
+# NBXplorer (BTCPay) follows blocks over P2P, so this is on; no host port is
+# published, so it only accepts the podman subnet.
+listen=1

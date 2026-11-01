@@ -33,8 +33,7 @@ EnvironmentFile=@CONFIG_DIR@/btcpay/backend.env
 # container name. Bind 127.0.0.1: the firewall opens nothing for it, so NPM
 # (TLS) stays the only way in for a client. The app serves /health (deep:
 # database + valkey), which is what the HealthCmd below gates on and what
-# The app serves /health (deep: database + valkey), which is what the HealthCmd
-# below gates on and what verify.sh reads through scripts/lib.sh's net_curl.
+# verify.sh reads through scripts/lib.sh's net_curl.
 PublishPort=127.0.0.1:8105:8000
 
 # No HealthOnFailure (one of the two probed units without it), because this

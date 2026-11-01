@@ -2,10 +2,10 @@
 # derivation scheme and reports payments to BTCPay; it is not optional and it
 # is not exposed to anything but BTCPay.
 #
-# It needs BOTH bitcoind endpoints: RPC (wallet and raw tx) and P2P (blocks).
-# The stack's bitcoind runs with listen=0 by default for an outbound-only node;
-# NBXplorer requires that line to be listen=1 (no host port is published, so
-# this stays inside the podman subnet).
+# It needs BOTH bitcoind endpoints: RPC (wallet and raw tx) and P2P (blocks),
+# which is why install.sh seeds listen=1 in bitcoin.conf: NBXplorer follows
+# blocks over P2P, and no host port is published, so this stays inside the
+# podman subnet.
 [Unit]
 Description=NBXplorer (BTCPay Bitcoin chain indexer)
 After=network-online.target npm-network-network.service postgres.service bitcoind.service
