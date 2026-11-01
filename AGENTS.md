@@ -190,10 +190,11 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   probe must follow redirects. Notifications stay UI-configured.
 - **Every pulled image carries a real tag, and two managers cover them.**
   Renovate's Quadlet manager reads `*.container`/`*.image`/`*.volume` and
-  **cannot see `deploy/*.container.in`**; those three templates, and the two
-  image defaults that live in shell (`MONERO_IMAGE` in `scripts/wallets.sh`,
-  `RESTIC_IMAGE` in `scripts/backup.sh` — no manager reads a shell default),
-  are matched by `renovate.json`'s regex manager. The wallet tag appears in
+  **cannot see `deploy/*.container.in`**; those three templates, and the one
+  image default that lives in shell (`RESTIC_IMAGE`, which both
+  `scripts/backup.sh` and `scripts/rotate.sh` define — no manager reads a shell
+  default), are matched by `renovate.json`'s regex manager. Both files are
+  matched so a restic bump moves them together. The wallet tag appears in
   the `btcpayserver/monero` unit, and one PR moves both; it also appears in
   the README's "What runs" table, which is hand-maintained. `postgres` (hand
   pinned) and `localhost/*` are disabled. Units stay **tag**-pinned

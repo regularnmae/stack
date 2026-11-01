@@ -25,7 +25,7 @@
       "pinDigests": false
     },
     {
-      "description": "same for the three rendered templates and the two script defaults: their deps come from the regex manager, which can only rewrite an existing digest, so inheriting docker:pinDigests made Renovate try to *add* one and fail the branch with 'Digest is not updated' / 'update failure' -- aborting that branch's real upgrades with it",
+      "description": "same for the three rendered templates and the script default: their deps come from the regex manager, which can only rewrite an existing digest, so inheriting docker:pinDigests made Renovate try to *add* one and fail the branch with 'Digest is not updated' / 'update failure' -- aborting that branch's real upgrades with it",
       "matchManagers": [
         "custom.regex"
       ],
@@ -128,15 +128,15 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "the three rendered unit *templates* and the two image defaults that live in shell. Renovate's quadlet manager matches only *.container, so deploy/*.container.in (fulcrum, lightningd, crowdsec -- the units install.sh renders, because they carry secrets) is invisible to it, and no manager reads a shell default (backup.sh's RESTIC_IMAGE). These stay tag-pinned too; the packageRules entry below turns digest pinning off for them, because a regex manager can only *update* a digest, never add one.",
+      "description": "the three rendered unit *templates* and the one image default that lives in shell. Renovate's quadlet manager matches only *.container, so deploy/*.container.in (fulcrum, lightningd, crowdsec -- the units install.sh renders, because they carry secrets) is invisible to it, and no manager reads a shell default (RESTIC_IMAGE). That default is defined twice -- in scripts/backup.sh and scripts/rotate.sh (the pre-rotation snapshot) -- so both are matched and one PR moves them together. These stay tag-pinned too; the packageRules entry below turns digest pinning off for them, because a regex manager can only *update* a digest, never add one.",
       "matchStrings": [
         "(?:^|\\n)Image=(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s]+):(?<currentValue>[^@\\s]+)",
-        "(?:^|\\n)(?:RESTIC_IMAGE)=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
+        "(?:^|\\n)RESTIC_IMAGE=\"?(?:\\$\\{[A-Z_]+:-)?(?<depName>(?:docker\\.io|ghcr\\.io)/[^:\\s\"}]+):(?<currentValue>[^@\\s\"}]+)"
       ],
       "datasourceTemplate": "docker",
       "managerFilePatterns": [
         "/^deploy/[^/]+\\.container\\.in$/",
-        "/^scripts/(wallets|backup)\\.sh$/"
+        "/^scripts/(backup|rotate)\\.sh$/"
       ]
     },
     {

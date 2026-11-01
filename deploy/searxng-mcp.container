@@ -13,8 +13,8 @@ Network=npm-network.network
 
 # Bearer token clients must present as `Authorization: Bearer <token>`.
 # The token lives OUTSIDE this repo in $DATA_DIR/config/searxng-mcp/token.env
-# (mode 600), written by deploy/install.sh, so no secret is ever
-# committed -- only deploy/token.env.example is. The same value sits in
+# (mode 600), written by deploy/install.sh, so no secret is ever committed --
+# only deploy/examples/searxng-mcp/token.env.example is. The same value sits in
 # the Authorization header of ~/.config/opencode/opencode.json.
 EnvironmentFile=@CONFIG_DIR@/searxng-mcp/token.env
 

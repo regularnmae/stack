@@ -23,9 +23,8 @@ CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 QUADLET_DIR="$CONFIG_HOME/containers/systemd"
 # Plain systemd user units live here, not in the quadlet dir: Quadlet generates
 # .service files from .container/.volume/.network/... but has no .timer type,
-# and the health monitor is a host script rather than a container. backup.timer,
-# backup-verify.service, backup-verify.timer, monitor.timer and monitor.service
-# are installed as ordinary user units.
+# and the monitors and jobs are host scripts rather than containers. USER_UNITS
+# below is the whole list.
 USER_UNIT_DIR="$CONFIG_HOME/systemd/user"
 
 # shellcheck source=../scripts/lib.sh
@@ -343,7 +342,7 @@ USER_TIMERS=(
 
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
 # The prefixes themselves are declared in stack.conf (CLN_READ_METHODS,
-# CLN_SPEND_METHODS, BOLTMESH_RUNE_METHODS) because scripts/rotate.sh mints the
+# CLN_SPEND_METHODS) because scripts/rotate.sh mints the
 # same runes on a rotation; rune_json (scripts/lib.sh) turns each array into the
 # restriction JSON. SPEND is the read set plus the payment methods.
 SPEND_RESTRICTIONS=$(rune_json "${CLN_READ_METHODS[@]}" "${CLN_SPEND_METHODS[@]}")
@@ -1270,8 +1269,7 @@ EOF
 fi
 
 # nginx-proxy-manager's admin API, for scripts/npm-hosts.sh: it reconciles every
-# proxy host the stack serves (NPM_HOSTS in stack.conf) -- the BoltMesh,
-# SearXNG and explorer web hosts and the MCP path-prefix host. The admin login
+# proxy host the stack serves (NPM_HOSTS in stack.conf). The admin login
 # (or a pre-created API token) is a secret, so the file is mode 600; empty means
 # the script logs a one-line skip rather than failing a deploy.
 NPM_ENV="$CONFIG_DIR/npm/api.env"

@@ -164,10 +164,6 @@ runtime_args=(
 )
 [ -n "$status_json" ] && runtime_args+=(-e "KUMA_STATUS_JSON=$status_json")
 
-# --- reconcile inside the kuma-ctl container --------------------------------
-# The script is bind-mounted so the repo owns the runtime code; the login is
-# delivered through the environment -- podman run -e is not a command line ps
-# can read, holding the same rule scripts/npm-hosts.sh's curl config holds.
 if [ -n "$status_json" ]; then
     log "reconciling ${#KUMA_MONITORS[@]} monitor(s) + status page '$KUMA_STATUS_SLUG'"
 else

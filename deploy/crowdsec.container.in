@@ -59,11 +59,12 @@ Volume=@DATA_DIR@/ids/crowdsec/data:/var/lib/crowdsec/data:z
 Volume=@DATA_DIR@/npm/data/logs:/var/log/npm:ro
 
 # This repo's parser and scenarios, rendered by deploy/install.sh into
-# $CONFIG_DIR/ids/crowdsec/ so @LAN@-style placeholders resolve. Individual file
-# binds, not a directory mount: /etc/crowdsec belongs to the image's entrypoint,
-# which seeds it and installs hub items into the same tree, and it only skips
-# its seeding when config.yaml/local_api_credentials.yaml are absent -- which
-# stays true because nothing below touches those two files.
+# $CONFIG_DIR/ids/crowdsec/ so the install-path tokens (@CONFIG_DIR@ and
+# friends) resolve. Individual file binds, not a directory mount: /etc/crowdsec
+# belongs to the image's entrypoint, which seeds it and installs hub items into
+# the same tree, and it only skips its seeding when
+# config.yaml/local_api_credentials.yaml are absent -- which stays true because
+# nothing below touches those two files.
 Volume=@CONFIG_DIR@/ids/crowdsec/acquis.d/stack.yaml:/etc/crowdsec/acquis.d/stack.yaml:ro,z
 # config.yaml.local lowers the log level of the LAPI and the agent; upstream
 # reads it merged on top of config.yaml. It is not config.yaml, so the
