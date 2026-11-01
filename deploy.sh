@@ -208,6 +208,15 @@ sync_units() {
     if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ]; then
         warn "nginx-proxy-manager's unit changed; its restart is deferred -- run ./deploy.sh (or ./deploy.sh --only npm-hosts) to apply it"
     fi
+    # Last, and here rather than in the --only prologue: install.sh runs inside
+    # install_units above and *rebuilds* the netcheck image when its Containerfile
+    # changed, so a refresh before it compares the container with the old image,
+    # finds them equal and does nothing -- the new bits then waited a whole
+    # deploy. It also keeps `--only monitor` on a fresh host from starting
+    # netcheck before its image exists. Every branch that probes calls this
+    # function first; agent-skills is the one that does not need it (agent-mcp
+    # is a host binary).
+    ensure_netcheck
 }
 
 # A *running* container keeps the definition it started with: re-rendering a unit
@@ -249,7 +258,8 @@ unit_digest() {
 # is-active check; a unit that is not running yet is started later, in order, by
 # start_infra/start_daemons -- restarting it here would jump that order (e.g.
 # lightningd before bitcoind). nginx-proxy-manager is only flagged: its restart
-# has to follow the proxy-host rewrite (sync_npm_network).
+# has to follow the proxy-host rewrite (sync_npm_network). A unit in DEFER_UNITS
+# is skipped entirely: the branch that rebuilt its image restarts it.
 restart_changed_units() { # before-digest after-digest
     local before="$1" after="$2" file unit restarted=" "
     [ -n "$before" ] && [ -n "$after" ] || return 0
@@ -260,6 +270,11 @@ restart_changed_units() { # before-digest after-digest
             NPM_UNIT_CHANGED=1
             continue
         fi
+        # DEFER_UNITS is set by a branch that rebuilds the unit's image and
+        # restarts it itself (the `--only <app>` path, see deploy_app): a
+        # restart here would be an outage with the old bits and a second one
+        # seconds later. Empty everywhere else.
+        case " ${DEFER_UNITS:-} " in *" $unit "*) continue ;; esac
         # A unit can be named by two rendered files (tor.container and the torrc
         # digest above, which both mean tor): restart it once.
         case "$restarted" in *" $unit "*) continue ;; esac
@@ -390,9 +405,9 @@ ensure_network() {
 
 # The `--only` branches run their checks (verify.sh inside the monitor sweep,
 # npm-hosts, kuma-monitors, the app health handshakes) through the two curl
-# clients, and never reach start_infra. Start them here -- a start is a no-op
-# when they are already up -- so `./deploy.sh --only monitor` on a freshly
-# booted host does not fail with "netcheck is not running".
+# clients, and never reach start_infra. Called at the end of sync_units -- after
+# install.sh has had its chance to rebuild the image, and before the branch's own
+# work -- so `./deploy.sh --only monitor` on a freshly booted host finds them up.
 ensure_netcheck() {
     [ "$DRY_RUN" = 1 ] && return 0
     # A rebuilt image would otherwise never reach the running container (start
@@ -930,10 +945,15 @@ preflight
 
 if [ -n "$ONLY" ]; then
     # A hand-removed network would make every restart below fail; recreate it
-    # from the unit exactly as the full deploy does.
+    # from the unit exactly as the full deploy does. The curl clients are started
+    # by sync_units, not here: install.sh rebuilds their image, so starting them
+    # before it would compare against the old one.
     ensure_network
-    ensure_netcheck
     if in_list "$ONLY" "${APP_REPOS[@]}"; then
+        # deploy_app rebuilds the image and restarts the unit itself, so let
+        # restart_changed_units leave this one alone rather than restart it
+        # twice -- once with the old bits, once with the new.
+        DEFER_UNITS=" $ONLY "
         fetch_repos "$ONLY"
         sync_units
         deploy_app "$ONLY"

@@ -13,8 +13,9 @@
 #
 # Idempotent and non-destructive: an existing secret/env file is never
 # overwritten, secret resolution order is secrets.env -> the installed unit ->
-# the daemon's own config -> generate, and a pre-existing real unit is backed
-# up to <unit>.bak. Nothing here prints a secret.
+# the daemon's own config -> generate, and the unit a render replaces is kept as
+# <unit>.bak (one generation: what the last deploy changed, which is what the
+# README's rollback section promises). Nothing here prints a secret.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -60,11 +61,9 @@ export STACK_BACKUP_DIR
 # creates), while everything a rootful container *reads* lives root-owned under
 # /etc/stack-ids. A user-writable config consumed by a root container would be a
 # privilege boundary.
-# Escape a value for sed's replacement side (&, \, |). Defined here, above the
-# root-tier block, because that block renders files too -- defining it later (as
-# it once was) silently substituted an empty string into every @DATA_DIR@, since
-# a failed command substitution in an argument does not trip `set -e`.
-esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
+# Values substituted into a unit go through esc() (scripts/lib.sh) on both the
+# render side and verify.sh's comparison side; the comment there says what an
+# unescaped `|` or `&` does to a data dir.
 
 # ---------------------------------------------------------------------------
 # podman's own event log
@@ -1600,6 +1599,50 @@ sync_tree() { # src-dir dest-dir
     done
 }
 
+# ---------------------------------------------------------------------------
+# runtime files a container runs, but that the checkout owns
+# ---------------------------------------------------------------------------
+# Two units run a file that belongs to this checkout rather than to $DATA_DIR:
+# monerod's --block-notify helper and the BTCPay bootstrap script. Mounting them
+# straight out of the repo made the checkout a *runtime* dependency of a
+# container's start: moving or deleting it broke monerod's next start (podman
+# fails on a missing bind source, naming a path nobody edited). The host scripts
+# in deploy/*.service still run from the checkout -- they are the tooling itself
+# -- but a container that a daemon starts must not. So stage both under
+# $DATA_DIR/bin on every run (small, secret-free, regenerable) and let the units
+# reference only the data dir. CI fails if a container template mentions
+# @REPO_DIR@ again, because this is the rule and not an accident of these two.
+mkdir -p "$DATA_DIR/bin"
+install -m 755 "$DEPLOY_DIR/btcpay/monero-notify.sh" "$DATA_DIR/bin/monero-notify.sh"
+install -m 755 "$REPO_DIR/scripts/btcpay_bootstrap.py" "$DATA_DIR/bin/btcpay_bootstrap.py"
+
+# Render a unit over the one already installed, keeping the render it replaces
+# as <target>.bak. Three things here are load-bearing:
+#   - the backup is the *previous* render, not the first one the host ever had:
+#     that copy was written once and then frozen, so "roll back to the .bak"
+#     reverted every unit edit since the first install;
+#   - cp -p keeps mode 600 -- several rendered units carry @PLACEHOLDER@ secrets;
+#   - it backs up only when this render actually changes the file, because
+#     deploy.sh runs install.sh twice per deploy (the CLN runes need a running
+#     node). An unconditional backup would have the second run record the file
+#     the first run just wrote, i.e. destroy the rollback it exists for.
+render_unit_backedup() { # src target
+    local prev="" label
+    if [ -e "$2" ] && [ ! -L "$2" ]; then
+        prev=$(mktemp)
+        cp -p "$2" "$prev"
+    fi
+    render_unit "$1" "$2"
+    [ -n "$prev" ] || return 0
+    if cmp -s "$prev" "$2"; then
+        rm -f "$prev"
+        return 0
+    fi
+    label=$(basename "$2")
+    mv -f "$prev" "$2.bak"
+    log "backed up previous $label -> $label.bak"
+}
+
 mkdir -p "$QUADLET_DIR"
 # Before the units: podman's event log is a host config, rendered once here
 # rather than flagged at every exec call site (see podman_events_conf).
@@ -1607,12 +1650,7 @@ podman_events_conf
 for pair in "${UNITS[@]}"; do
     src="$DEPLOY_DIR/${pair%%:*}"
     unit="${pair##*:}"
-    target="$QUADLET_DIR/$unit"
-    if [ -e "$target" ] && [ ! -L "$target" ] && [ ! -e "$target.bak" ]; then
-        mv -f "$target" "$target.bak"
-        log "backed up existing $unit -> $unit.bak"
-    fi
-    render_unit "$src" "$target"
+    render_unit_backedup "$src" "$QUADLET_DIR/$unit"
 done
 log "rendered ${#UNITS[@]} units (mode 600)"
 
@@ -1622,12 +1660,7 @@ log "rendered ${#UNITS[@]} units (mode 600)"
 # monitor.service (a plain host-script unit).
 mkdir -p "$USER_UNIT_DIR"
 for u in "${USER_UNITS[@]}"; do
-    target="$USER_UNIT_DIR/$u"
-    if [ -e "$target" ] && [ ! -L "$target" ] && [ ! -e "$target.bak" ]; then
-        mv -f "$target" "$target.bak"
-        log "backed up existing $u -> $u.bak"
-    fi
-    render_unit "$DEPLOY_DIR/$u" "$target"
+    render_unit_backedup "$DEPLOY_DIR/$u" "$USER_UNIT_DIR/$u"
 done
 log "installed ${#USER_UNITS[@]} user unit(s) into $USER_UNIT_DIR"
 

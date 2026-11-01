@@ -21,9 +21,11 @@ Network=npm-network.network
 
 # The state file is both input (admin email/password, URL, webhook) and output
 # (admin key, runtime key, store id, webhook secret). Mount the whole directory
-# so the script's atomic replace stays inside the mount.
+# so the script's atomic replace stays inside the mount. The script itself is
+# staged under $DATA_DIR/bin by install.sh rather than read from the checkout
+# (see monerod.container): edit scripts/btcpay_bootstrap.py and deploy.
 Volume=@CONFIG_DIR@/btcpay:/state:z
-Volume=@REPO_DIR@/scripts/btcpay_bootstrap.py:/bootstrap.py:ro,z
+Volume=@DATA_DIR@/bin/btcpay_bootstrap.py:/bootstrap.py:ro,z
 EnvironmentFile=@CONFIG_DIR@/btcpay/bootstrap.env
 Environment=BTCPAY_STATE_FILE=/state/bootstrap.env
 Environment=BTCPAY_XMR_WALLET_DAEMON_URI=http://monero-wallet-btcpay:18083/json_rpc

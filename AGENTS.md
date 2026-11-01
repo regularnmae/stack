@@ -88,7 +88,33 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   exception is `nginx-proxy-manager`, which `--only` only warns about: its
   restart belongs after the host rewrite, so `--only npm-hosts` rewrites and
   then calls `sync_npm_network`, and every other branch tells the operator to
-  finish with a full deploy.
+  finish with a full deploy. Two ordering facts inside `sync_units`:
+  **`ensure_netcheck` is its last step, not part of the `--only` prologue**,
+  because `install.sh` rebuilds the `netcheck` image in `install_units` and a
+  refresh before that compared the container with the old image and did nothing
+  (the new client reached the containers one deploy later); and an app branch
+  sets `DEFER_UNITS` so `restart_changed_units` leaves that unit alone —
+  `deploy_app` restarts it after the build, and restarting it twice is two
+  outages for one edit.
+- **`<unit>.bak` is the *previous* render, and only when the render changes
+  something.** It used to be written only if it did not already exist, so it
+  was frozen at the host's first install while README's Rollback section
+  presents it as the rollback path. The fix cannot be "always overwrite it":
+  `deploy.sh` runs `install.sh` twice per deploy (the CLN runes need a running
+  node), so the second run would back up the file the first run just wrote and
+  destroy the rollback. Hence the `cmp`: back up the old bytes only when the new
+  ones differ, always as one generation, always mode 600 (`cp -p` — several
+  rendered units carry `@PLACEHOLDER@` secrets).
+- **A container unit mounts only from `$DATA_DIR` (or a podman volume), never
+  from the checkout.** The host scripts in `deploy/*.service` do run from the
+  checkout — they *are* the tooling — but a container that a daemon starts is
+  different: `monerod`'s `--block-notify` helper and the BTCPay bootstrap script
+  were the last two exceptions, and moving or deleting the repo broke them at
+  their *next* start, with podman naming a missing bind source nobody had
+  edited. `install.sh` stages both into `$DATA_DIR/bin` on every run (small,
+  secret-free, regenerable, so not in `BACKUP_PATHS`); edit the repo copy and
+  deploy. CI fails if any `deploy/*.container*` mentions `@REPO_DIR@`, which is
+  what keeps the next one from creeping back.
 - **CLN runes are verified, not trusted:** `createrune` can return a rune whose
   `unique_id` the node blacklisted, so `install.sh` proves each with `checkrune`
   and retries on a fresh id.

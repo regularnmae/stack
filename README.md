@@ -336,6 +336,9 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
   - `postgres-dump/` — the pre-backup `pg_dumpall`
   - `config/` — every bearer token and secret
+  - `bin/` — the two scripts `install.sh` stages for the containers that run them
+    (`monerod`'s block-notify helper, the BTCPay bootstrap); rewritten on every
+    deploy, so edit the copy in the repo, not this one
   - `audit/` — the monitor's log and the spend tripwire baselines
   - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
     (both regenerable, both excluded from backups)
@@ -409,7 +412,7 @@ every token:
    ```
 
 `deploy.sh` finds the existing
-`bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ npm/ config/` there
+`bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ npm/ config/ bin/` there
 (labelling the path for containers if it has to) — so nothing re-syncs, the
 wallet still opens (its password is in `config/stack/secrets.env`), and the
 client tokens are
@@ -441,9 +444,9 @@ the things in `$DATA_DIR` that cannot be re-downloaded:
   only crash-recoverable)
 
 The chains (`bitcoin/`, `monero/`), the Electrum index (`fulcrum/`), `searxng/`,
-the two explorers (stateless, RPC-only) and the raw `postgres/` cluster are
-deliberately **excluded**: they are large and regenerable, so restic never walks
-them.
+`bin/` (rewritten by every deploy), the two explorers (stateless, RPC-only) and
+the raw `postgres/` cluster are deliberately **excluded**: they are large and
+regenerable, so restic never walks them.
 
 That set is declared **once**, as `BACKUP_PATHS` in `stack.conf`. `install.sh`
 renders it into the job's mounts and its `Exec=`, and `scripts/backup.sh` derives
@@ -1777,7 +1780,10 @@ stack/
 
 ## Rollback
 
-Everything is idempotent and every replaced real unit is backed up to
-`~/.config/containers/systemd/<unit>.bak`. Restore the `.bak` beside its unit
-and `systemctl --user daemon-reload`. To roll back an application, check out an
+Everything is idempotent and the unit each deploy replaces is kept as
+`~/.config/containers/systemd/<unit>.bak` — one generation, the one before the
+last deploy, and only rewritten when that deploy actually changed the file. (It
+is not a history: for anything older, check the unit template out of an older
+commit.) Restore the `.bak` beside its unit and
+`systemctl --user daemon-reload`. To roll back an application, check out an
 older commit in its repo and `./deploy.sh --only <app>`.

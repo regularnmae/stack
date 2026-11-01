@@ -950,10 +950,14 @@ fi
 # only consequence is a false drift warning (a placeholder left literal in the
 # comparison), never a false "matches".
 root_want() { # src
-    sed -e "s|@DATA_DIR@|$DATA_DIR|g" \
-        -e "s|@CONFIG_DIR@|$DATA_DIR/config|g" \
-        -e "s|@REPO_DIR@|$REPO_DIR|g" \
-        -e "s|@IDS_RETENTION_DAYS@|${IDS_RETENTION_DAYS:-14}|g" "$1"
+    # The same substitutions deploy/install.sh --root makes, through the same
+    # esc() (scripts/lib.sh): unescaped, a data dir containing `|` makes sed
+    # fail and this function print nothing, which the caller reads as permanent
+    # root-tier drift -- and `&` silently mangles the path instead.
+    sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
+        -e "s|@CONFIG_DIR@|$(esc "$DATA_DIR/config")|g" \
+        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
+        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" "$1"
 }
 
 # Everything install.sh --root renders from deploy/root/, as source:target[:opt].

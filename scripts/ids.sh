@@ -112,12 +112,18 @@ if [ -s "$EVE" ]; then
         # every sweep, which is the load the cursor exists to avoid. pipefail
         # makes a failing tail/jq skip the advance instead, so an unreadable
         # window is re-examined rather than silently stepped over.
+        #
+        # Only the signature is printed, not signature_id: the id was in the
+        # stream as a second tab-separated field once, and `read -a` splits on
+        # tabs as well as spaces, so LAST_ALERT came back as "2010936" while the
+        # message claimed it was the signature. Two fields, count and signature,
+        # and `read` with two names keeps the rest of the line (spaces and all).
         if raw=$(tail -c +$((off + 1)) "$EVE" 2>/dev/null \
-            | jq -Rr 'fromjson? | select(.event_type == "alert") | "\(.alert.signature_id)\t\(.alert.signature)"' 2>/dev/null \
-            | awk -F'\t' '{n++; last=$0} END {print n+0 "\t" last}'); then
-            read -r -a found <<< "$raw"
-            ALERTS="${found[0]:-0}"
-            LAST_ALERT="${found[1]:-}"
+            | jq -Rr 'fromjson? | select(.event_type == "alert") | .alert.signature' 2>/dev/null \
+            | awk '{n++; last=$0} END {print n+0 "\t" last}'); then
+            read -r ALERTS LAST_ALERT <<< "$raw"
+            ALERTS="${ALERTS:-0}"
+            LAST_ALERT="${LAST_ALERT:-}"
             case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
             printf '%s\n' "$size" > "$CURSOR_FILE"
         fi

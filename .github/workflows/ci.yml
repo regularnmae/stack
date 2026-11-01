@@ -37,6 +37,23 @@ jobs:
       # systemd owning the restart. Reads deploy/ templates, so it needs no host.
       - name: healthcheck contract
         run: ./scripts/healthcheck-lint.sh
+      # A container unit may mount only from $DATA_DIR (or a podman volume), never
+      # from the checkout. Host scripts still run from the checkout (deploy/*.service
+      # is the tooling), but a container a daemon starts fails at its *next* start
+      # on a moved or deleted repo, with podman naming a missing bind source nobody
+      # edited -- which is what monerod's --block-notify helper and the BTCPay
+      # bootstrap script used to do. install.sh stages those two into $DATA_DIR/bin;
+      # this keeps the next one from sneaking in.
+      - name: container units never mount the checkout
+        run: |
+          mapfile -t files < <(git ls-files 'deploy/*.container' 'deploy/*.container.in' 'deploy/root/*.container')
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no container templates found"; exit 1; }
+          if hits=$(grep -n '@REPO_DIR@' "${files[@]}"); then
+            echo "::error::a container unit references @REPO_DIR@ -- install.sh must stage it under \$DATA_DIR:"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          printf 'no container template references @REPO_DIR@\n'
       # deploy/install.sh seeds monitor.env from the example, so the file a fresh
       # host gets and the documentation cannot drift. This catches the other
       # direction: a key scripts/monitor.sh starts reading that the example never

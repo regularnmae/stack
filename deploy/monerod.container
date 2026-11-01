@@ -27,7 +27,12 @@ Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
 # The BTCPay plugin's block callback. monerod runs it on every new block; the
 # script refreshes the plugin wallet and pokes BTCPay's Monero callback so a
 # paid invoice is rescanned without waiting for BTCPay's next poll.
-Volume=@REPO_DIR@/deploy/btcpay/monero-notify.sh:/notify-block.sh:ro,z
+#
+# install.sh stages it under the data dir on every run: this unit must not
+# depend on the checkout being at the same path, because monerod only fails at
+# its *next start*, on a missing bind source. Edit the repo copy
+# (deploy/btcpay/monero-notify.sh) and deploy.
+Volume=@DATA_DIR@/bin/monero-notify.sh:/notify-block.sh:ro,z
 
 # NOTE: Exec= replaces the image CMD, so the image's default flags
 # must be restated verbatim, with our additions appended.

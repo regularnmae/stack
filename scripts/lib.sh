@@ -8,6 +8,15 @@ log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Escape a value for sed's replacement side (&, \, |). Every @PLACEHOLDER@ whose
+# value can be a path or a secret goes through this: an unescaped `|` in a data
+# dir turns `sed -e "s|@DATA_DIR@|/a|b|g"` into "unknown option to `s'" (so the
+# substitution silently produces nothing and the diff reports permanent drift),
+# and `&` re-inserts the matched text. Shared because deploy/install.sh renders
+# units and verify.sh renders the same files to compare them; one copy is what
+# keeps the comparison honest.
+esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
+
 # Echo the value of KEY from a KEY=VALUE env/secrets file (first match). Reads
 # the file line by line and never sources it, and strips a trailing CR so a
 # CRLF file still parses. Prints nothing when the file or the key is absent.
