@@ -18,9 +18,21 @@
 #     every 60 s per vhost, including a steady 401 on the token-gated ones. No
 #     rule may ever ban the operator's own monitoring.
 #
-# This is a whitelist, not a suppression of detection: the events still appear in
-# `cscli decisions list --all` and in ids.sh's counters, they just never become a
-# ban. Add the WAN address itself only if the operator's own monitoring is ever
+# What this costs, exactly: the whitelist runs in s02-enrich, *before* the
+# scenarios, so the event is dropped there -- it never becomes a decision, and
+# `cscli decisions list --all` cannot show it. The only observability is
+# `cscli metrics` ("whitelisted" lines per log) and the log store, which means an
+# entry that is too broad looks exactly like a quiet internet. Assert both
+# directions, not just that the file loads.
+#
+# These are plain string matches, so an entry is per octet and a short prefix is
+# a silent widening: this file once carried `startsWith '172.2'` for the LAN's
+# middle span, which also covered 172.2.0.0/16 and 172.200.0.0/14 -- ~4.4M public
+# addresses reported as whitelisted rather than detected. The /12 is an IpInRange
+# now, and scripts/verify.sh replays a public 172.220.10.5 (must NOT be
+# whitelisted) next to a private 172.18.0.5 (must be).
+#
+# Add the WAN address itself only if the operator's own monitoring is ever
 # replaced by something without a recognisable user agent.
 name: stack/whitelists
 description: "stack internals, LAN, onion proxy path and the host's own monitoring"
@@ -31,11 +43,5 @@ whitelist:
     - "evt.Meta.source_ip == '::1'"
     - "evt.Meta.source_ip startsWith '10.89.'"
     - "evt.Meta.source_ip startsWith '192.168.'"
-    - "evt.Meta.source_ip startsWith '172.16.'"
-    - "evt.Meta.source_ip startsWith '172.17.'"
-    - "evt.Meta.source_ip startsWith '172.18.'"
-    - "evt.Meta.source_ip startsWith '172.19.'"
-    - "evt.Meta.source_ip startsWith '172.2'"
-    - "evt.Meta.source_ip startsWith '172.30.'"
-    - "evt.Meta.source_ip startsWith '172.31.'"
+    - "IpInRange(evt.Meta.source_ip, '172.16.0.0/12')"
     - "evt.Meta.http_user_agent startsWith 'Uptime-Kuma/'"

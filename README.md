@@ -1164,6 +1164,16 @@ Read that file before tightening a scenario. `scripts/verify.sh` replays a sampl
 access-log line through `cscli explain` on every sweep, because a change to NPM's
 `log_format` would otherwise disable detection silently.
 
+Every entry in that file is a *plain string match*, so it is written per octet —
+and an entry one octet too short is a silent widening, not a syntax error. The
+LAN's `172.16.0.0/12` was once `startsWith '172.2'`, which also covers
+`172.2.0.0/16` and `172.200.0.0/14`: ~4.4M public addresses reported as
+`whitelisted`. Worse, a whitelisted event is dropped in `s02-enrich` *before* the
+scenarios, so it never becomes a decision — `cscli decisions list --all` will not
+show it, and `cscli metrics`' whitelisted count is the only trace. That is why
+the sweep now asserts both directions: a public `172.220.10.5` must not be
+whitelisted, while `172.18.0.5` and Uptime-Kuma's user agent must be.
+
 Two survivors of a real scan are worth knowing about: `93.123.109.247`
 (`tlm-scanner/2.0`, ~7,500 requests, 100% 404, `/.git/…` and traversal probes)
 was probing this host before the sensor existed, and the `default-host` vhost

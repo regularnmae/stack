@@ -418,7 +418,19 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `verify.sh` replays a sample line through `cscli explain` on every sweep,
   because a silent log-format change turns detection off; and the whitelist in
   `s02-enrich/` protects the host's **own** address, which is what onion traffic
-  and Uptime-Kuma's self-checks look like in the log.
+  and Uptime-Kuma's self-checks look like in the log. A whitelist expression is a
+  **plain string prefix, not a network**: `startsWith '172.2'` covered
+  172.2.0.0/16 and 172.200.0.0/14 as well as the intended 172.20.0.0/14, so
+  ~4.4M public addresses were reported as `whitelisted` -- and because the
+  whitelist runs in `s02-enrich`, *before* the scenarios, a whitelisted event
+  never becomes a decision and `cscli decisions list --all` cannot show it
+  (`cscli metrics`' whitelisted count is the only trace, so an over-broad entry
+  looks exactly like a quiet internet). The /12 is an `IpInRange` now, and
+  `verify.sh` asserts both directions with `cscli explain`: a public
+  `172.220.10.5` must **not** be whitelisted, `172.18.0.5` must be, and a
+  Uptime-Kuma user agent must be -- that last one is the only probe the stock
+  `crowdsecurity/whitelists` cannot answer for us, so it is what proves this file
+  is loaded at all.
 - **Rate limiting is per ingress, and the onion case is the awkward one:**
   every `.onion` visitor reaches NPM as the host's own address (tor forwards to
   `host.containers.internal`), so the onion zone is keyed on `$server_name` and is

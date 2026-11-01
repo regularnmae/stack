@@ -878,6 +878,43 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
     else
         warn "could not ask crowdsec to explain a sample line"
     fi
+    # The whitelist is the other half of detection, and it fails QUIETLY: its
+    # expressions are plain string matches and the parser runs in s02-enrich,
+    # before any scenario, so a prefix one octet too short reports the traffic as
+    # `whitelisted` and it can never become a decision. This file once carried
+    # `startsWith '172.2'` for the LAN's middle span and so swallowed 172.2.0.0/16
+    # and 172.200.0.0/14 with it (~4.4M public addresses reported as whitelisted).
+    # Probe both directions: over-matching hides detections, while under-matching
+    # -- a file that stopped loading, or a range that lost its entry -- bans the
+    # onion path and the status page. The Uptime-Kuma probe is the only one the
+    # stock crowdsecurity/whitelists cannot answer for us, so it is what proves
+    # this file is actually loaded.
+    for wl_probe in \
+        '172.220.10.5|verify/1.0|no' \
+        '172.18.0.5|verify/1.0|yes' \
+        '203.0.113.9|Uptime-Kuma/1.23.13|yes'
+    do
+        wl_ip=${wl_probe%%|*}
+        wl_rest=${wl_probe#*|}
+        wl_ua=${wl_rest%%|*}
+        wl_want=${wl_rest##*|}
+        wl_line=${sample/203.0.113.9/"$wl_ip"}
+        wl_line=${wl_line/verify\/1.0/"$wl_ua"}
+        if ! explain=$(podman exec crowdsec cscli explain --type npm --log "$wl_line" 2>/dev/null); then
+            warn "could not ask crowdsec to explain a whitelist probe ($wl_ip)"
+            continue
+        fi
+        wl_hit=no
+        printf '%s' "$explain" | grep -q 'stack/whitelists.*whitelisted' && wl_hit=yes
+        if [ "$wl_want" = yes ]; then wl_text='is whitelisted'; else wl_text='is not whitelisted'; fi
+        if [ "$wl_hit" = "$wl_want" ]; then
+            pass "crowdsec whitelist: $wl_ip $wl_text"
+        elif [ "$wl_want" = yes ]; then
+            bad "crowdsec does not whitelist $wl_ip (stack/whitelists is not loading, or lost that range)"
+        else
+            bad "crowdsec whitelists public $wl_ip (stack-whitelists.yaml over-matches)"
+        fi
+    done
 else
     warn "crowdsec unit is not installed (run deploy/install.sh)"
 fi
