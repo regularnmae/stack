@@ -40,6 +40,12 @@ case "$since_epoch" in ''|*[!0-9]*) since_epoch=$(( $(date +%s) - 600 )) ;; esac
 now=$(date +%s)
 since=$(date -d "@$since_epoch" '+%m/%d/%Y %H:%M:%S' 2>/dev/null) \
     || since=$(date -d "-10 minutes" '+%m/%d/%Y %H:%M:%S')
+# ... but aureport and ausearch take the window as TWO arguments, a date and a
+# time: `--start "11/01/2026 17:38:06"` is refused with "Invalid start time ...
+# Hour, Minute, and Second are required", and `2>/dev/null || true` is why that
+# went unnoticed -- every count below came back empty.
+since_date=$(date -d "@$since_epoch" '+%m/%d/%Y' 2>/dev/null) || since_date=""
+since_time=$(date -d "@$since_epoch" '+%H:%M:%S' 2>/dev/null) || since_time=""
 
 # `aureport --key --summary` is a count per key over a window -- exactly the
 # shape needed, and it does not require parsing event records ourselves. Its
@@ -47,7 +53,7 @@ since=$(date -d "@$since_epoch" '+%m/%d/%Y %H:%M:%S' 2>/dev/null) \
 # from a live-looking log is a quiet window, not a failure.
 summary=""
 read_state=ok
-if ! summary=$(aureport --key --summary --start "$since" 2>/dev/null); then
+if ! summary=$(aureport --key --summary --start "$since_date" "$since_time" 2>/dev/null); then
     summary=""
     # A missing or empty log is not a failed read. aureport exits 1 when there is
     # no /var/log/audit/audit.log at all, which on this class of host is the
@@ -73,7 +79,7 @@ detail=""
 if [ "$hard" -gt 0 ]; then
     # The one-line evidence: which file, and what kind of operation. Enough to
     # decide whether to look, without pasting the whole event into an alert.
-    detail=$(ausearch --start "$since" -k stack_hard -i 2>/dev/null \
+    detail=$(ausearch --start "$since_date" "$since_time" -k stack_hard -i 2>/dev/null \
         | grep -E '^(type=PROCTITLE|.*name=)' \
         | tail -3 | tr '\n' ' ')
 fi
