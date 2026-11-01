@@ -329,6 +329,9 @@ remembers the answer in `~/.config/stack/data-dir.env`:
     from backups)
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
   - `uptime-kuma/` — the status page's state (sqlite, history; configured in its UI)
+  - `ids/` — the two IDS engines' state: suricata's `eve.json` and rules
+    (root-owned) and crowdsec's database beside them (see
+    [Intrusion detection](#intrusion-detection))
   - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
   - `postgres-dump/` — the pre-backup `pg_dumpall`
   - `config/` — every bearer token and secret

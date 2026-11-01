@@ -1591,13 +1591,17 @@ cat <<EOF
 Done. Everything the stack owns lives under:
   $DATA_DIR
     bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ searxng/ npm/
+    uptime-kuma/    <- the status page's sqlite, history and login (its own UI)
+    ids/            <- suricata's eve.json (root-owned) and crowdsec's state
     postgres/       <- the BoltMesh cluster (dumped, not backed up raw)
     postgres-dump/  <- the pre-backup pg_dumpall
     config/         <- all bearer tokens and secrets (mode 600)
     audit/          <- the monitor's log and the spend tripwire baselines
     monitoring/     <- the metrics store and node-exporter's textfile (regenerable)
     logs/           <- the log store and vector's checkpoint (regenerable)
-    backup-verify/  <- the restore drill's scratch target (regenerable, wiped each run)
+    backup-cache/   <- restic's cache (regenerable)
+    backup-verify/  <- the restore drill's scratch target: created by its first
+                       run, wiped before and after each one (regenerable)
   $STACK_BACKUP_DIR
     the restic repository the nightly backup writes (backup.timer);
     backup-verify.timer restores it to a scratch dir every week and records the
