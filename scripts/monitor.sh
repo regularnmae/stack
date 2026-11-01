@@ -365,9 +365,9 @@ else
     fi
     # Peers: the freshness check above has a blind spot -- a connected node
     # whose only peers vanished keeps its height while its sync stalls. The
-    # floor defaults to 1, so any 0-peer read fails ("$THRESH" wording below);
-    # this deliberately looks past IBD, where a stalled download is the same
-    # fault as a stalled tip.
+    # floor defaults to 1, so any 0-peer read fails (the message below names the
+    # floor); this deliberately looks past IBD, where a stalled download is the
+    # same fault as a stalled tip.
     json_peers=$(podman exec bitcoind bitcoin-cli getpeerinfo 2>/dev/null) || json_peers=""
     n_peers=$(printf '%s' "$json_peers" | jq -r 'if type == "array" then length else empty end' 2>/dev/null) || n_peers=""
     if [ -z "$n_peers" ]; then
