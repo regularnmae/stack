@@ -406,20 +406,38 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   our rules one at a time (`auditctl -W <rule>`), anything else is left alone.
   `augenrules` exits non-zero on "Rule exists" even when the ruleset is already
   right, so `install.sh` judges the result by `auditctl -l`, not the exit code.
-  **And on this host the kernel audit subsystem is inert**: it initializes
-  disabled (`audit_enabled=0` in dmesg, journald "Collecting audit messages is
-  disabled"), `auditctl -s` nevertheless reports `enabled 1`, and no kernel record
-  is ever written -- not even the CONFIG_CHANGE for loading the rules at boot, and
-  it survived a reboot. The watches stay loaded (they are right if auditing is
-  ever on) but the report marks itself `audit=inert` and the sweep says so, so
-  nobody reads "no host-level changes" as coverage. The hash diff is the half
-  that actually works. The report advances its `auditd.cursor` only when
-  `aureport` exits 0 (`read=ok|failed` in the status file, reported by the sweep
-  as a soft line), so a failed read re-examines the same window instead of
-  stepping over it. A missing (or empty) `/var/log/audit/audit.log` is not a
-  failed read — `aureport` exits 1 when there is no log at all, which on this
-  host is the inert subsystem, so that case still advances and the window stays
-  bounded.
+  **Whether the kernel audit subsystem records anything is a measurement, not an
+  assumption.** This host once initialized disabled (`audit_enabled=0` in dmesg,
+  journald "Collecting audit messages is disabled") while `auditctl -s` still
+  reported `enabled 1` and no kernel record was ever written, not even the
+  CONFIG_CHANGE for loading the rules; it survived a reboot. The report marks
+  itself `audit=inert` in that state (watches loaded in `auditctl -l`, no
+  `CONFIG_CHANGE` from `ausearch`) and the sweep says so, so nobody reads "no
+  host-level changes" as coverage. The hash diff over the persistence
+  directories is the half that works regardless. **Re-measured 2026-11-01 it is
+  live** — `enabled 1`, the nine watches loaded, records being written — which
+  surfaced three things worth keeping: (1) `aureport`/`ausearch` take the window
+  as **two** arguments, a date and a time; passing one string like
+  `--start "11/01/2026 17:38:06"` is refused with "Hour, Minute, and Second are
+  required", and the `2>/dev/null || true` around both calls is why every count
+  came back empty and the sweep reported "no host-level changes" from a read that
+  never happened — `read=ok|failed` in the status file is the guard against that
+  recurring. (2) The summary is read with `--no-config`, because loading the rule
+  set makes the kernel emit a keyed CONFIG_CHANGE per rule added (three per
+  reload from `auditctl -R`), and counting those pages on every deploy; a rule
+  *removed* (`op=del_rule`) is counted instead, since that is how somebody blinds
+  the host. (3) Volume is whatever rules are actually in the kernel, not what is
+  in `rules.d`: this host carries a runtime-only `-a always,exit -F arch=b64 -S
+  execve -F key=ALLEXEC` that no file in `/etc/audit/` mentions (`auditctl -l` is
+  the only place to see it), so every exec on the host is logged — ~16/s here,
+  which rotates `/var/log/audit` every ~5 minutes. The repo's own nine watches
+  produce a handful of events at steady state. The report advances its
+  `auditd.cursor` only when `aureport` exits 0 (`read=ok|failed` in the status
+  file, reported by the sweep as a soft line), so a failed read re-examines the
+  same window instead of stepping over it. A missing (or empty)
+  `/var/log/audit/audit.log` is not a failed read — `aureport` exits 1 when there
+  is no log at all, which is what an inert subsystem looks like, so that case
+  still advances and the window stays bounded.
 - **A Quadlet unit without `[Install]` never starts at boot.** `crowdsec` was
   written without it, so after the first reboot it was simply absent, and the
   only visible symptom was `stack-bouncer` failing every minute with "LAPI
