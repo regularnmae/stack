@@ -725,6 +725,15 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   whole remainder of the flood (~120 lines an hour). `verify.sh` checks both: the
   user side through `podman info`, the root side by reading the merged file,
   since asking root's podman would need sudo.
+  **`podman logs -f` stops working, by podman's own rule** (`using --follow with
+  the journald --log-driver but without the journald --events-backend (file) is
+  not supported`): follow reads the events stream to learn the container died,
+  and that stream is now a file. Do not revert the setting for it -- `podman
+  logs` without `-f` is unaffected, and the follow is `journalctl -f
+  CONTAINER_NAME=<name>` (podman's journald driver sets that field, priority
+  included, so it is a superset of the container's stdout) or `scripts/logs.sh
+  --follow --container <name>` over the store. Both are named in README's "Logs
+  and history".
 - **Reading the host journal from a rootless container is two settings, and
   both were measured.** `GroupAdd=keep-groups` (the journal files carry an ACL
   for the login user's groups, and supplementary groups are dropped by default

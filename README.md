@@ -976,6 +976,17 @@ root's own podman, which is what the sensor's healthchecks use. `podman events`
 still reads it, and `scripts/logs.sh` never has to be searched past it.
 `verify.sh` checks both files and fails if the user-side one is lost.
 
+One consequence for an operator: **`podman logs -f` no longer works.** Follow
+uses podman's *events* stream to learn that a container died, so with events in a
+file podman refuses rather than hang (`using --follow with the journald
+--log-driver but without the journald --events-backend (file) is not supported`).
+`podman logs` without `-f` is unaffected, and there are two follows that work:
+
+```sh
+journalctl -f CONTAINER_NAME=bitcoind          # the journal itself; priority included
+./scripts/logs.sh --follow --container bitcoind   # the store, labelled, searchable
+```
+
 Search it from the CLI — this is the cross-service timeline that used to mean
 five `podman logs -f` windows:
 

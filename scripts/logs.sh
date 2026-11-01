@@ -8,6 +8,9 @@
 #   scripts/logs.sh --unit monitor.service --since 24h
 #   scripts/logs.sh --stats --since 24h        # entries per container: who is spamming
 #   scripts/logs.sh --follow --container boltmesh-backend
+#                                      (the follow to use: `podman logs -f`
+#                                       refuses while podman's events go to a
+#                                       file -- see README's "Logs and history")
 #   scripts/logs.sh --health                   # is the pipeline still shipping?
 #
 # This is the CLI over the same store the LogsQL UI reads: journald -> vector ->
