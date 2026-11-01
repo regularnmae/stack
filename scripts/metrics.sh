@@ -171,6 +171,10 @@ fi
 # Read with curl *inside* the container (the image ships one) rather than
 # through a netcheck run, so a wedged RPC costs one short exec, not a container
 # start, every minute.
+#
+# This series is also why the unit's own probe is the process
+# (deploy/monerod.container) and not this RPC: it is the history half, and
+# scripts/monitor.sh is the one that says whether the RPC answers at all.
 # ---------------------------------------------------------------------------
 xnode=""
 if xnode=$(podman exec monerod curl -s -m 5 http://127.0.0.1:18089/get_height 2>/dev/null) \

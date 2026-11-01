@@ -135,8 +135,19 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   pages on the same endpoint. **`HealthCmd` proves the process/serving path, not
   the data path** — a check that is legitimately red while recovering (IBD,
   monerod sync, wallet refresh, Fulcrum's first index) belongs in `monitor.sh`,
-  never in a unit; that is why `fulcrum`'s probe is the process table and `tor`'s
-  is a port, and replacing either with a data probe is a regression, not a fix.
+  never in a unit; that is why `fulcrum`'s and `monerod`'s probes are the
+  process table and `tor`'s is a port, and replacing any of them with a data
+  probe is a regression, not a fix. `monerod` is the worked example: its
+  restricted-RPC handler blocks for 60 s or more while the chain lock is held
+  across a `--block-sync-size` batch, so the image's own `/healthcheck.sh` (an
+  unbounded curl of `/get_height`) went stall → stall → stall → a killed full
+  node roughly once an hour, mid-sync (6 `unhealthy` transitions and 8
+  container instances in six hours here). A socket check does not fix it
+  either: after such a kill the daemon refuses connections until LMDB reopens
+  (134 s measured, 0.5 s after a clean stop), which puts the same kill switch
+  on a different trigger with only `StartPeriod` in the way. So `monitor.sh`
+  owns "alive but not answering" — a warning under `MONITOR_GRACE_SYNC`, a
+  failure without it — and `metrics.sh`'s `stack_xmr_rpc_up` is the history.
   And **`wait_healthy` raises a caller's timeout to the unit's
   `StartPeriod + Interval`**: podman runs no check during the start period, so a
   shorter wait reports "not healthy" about a service that never had a chance to

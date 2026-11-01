@@ -915,11 +915,19 @@ the host's **loopback only** and adds nothing to the firewall. If you want it on
 the LAN, put it behind `nginx-proxy-manager` with basic auth *and* declare it in
 `NPM_HOSTS`; don't publish it directly.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - **`$DATA_DIR/monitoring` is not in the backup set.** It is history, not state:
   losing it costs you the graphs, and nothing else. Same reasoning as
   `fulcrum/` and `searxng/`.
+- **`monerod`'s health is its process, not its RPC.** The unit probes
+  `/proc/1/comm`, like Fulcrum's, because the restricted-RPC handler blocks for
+  a minute or more while a `--block-sync-size` batch holds the chain lock — a
+  probe that curled `/get_height` failed three times in a row about once an
+  hour and had a syncing full node restarted mid-batch each time.
+  `stack_xmr_rpc_up` is the series that says whether the RPC actually answers,
+  and `scripts/monitor.sh` names it when it does not (a warning during the sync
+  grace, a failure without `MONITOR_GRACE_SYNC=1`).
 - **The textfile is a permissions trap.** `node-exporter` runs as uid 65534 (a
   subuid under rootless podman), so it owns neither the directory nor the files.
   Both writers chmod the directory `0755` and the files `0644`; if you ever see

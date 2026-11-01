@@ -451,6 +451,15 @@ fi
 # carry no curl/wget of their own, so this goes through the MCP servers, which
 # mcp_call reaches as containers on npm-network). Missing/unparseable
 # output is a warning only -- verify.sh already fails if the endpoint is down.
+#
+# The node's own probe is the process, not its RPC (deploy/monerod.container:
+# the handler blocks while a --block-sync-size batch holds the chain lock), so
+# "alive but not answering" is owned HERE, and only here: an RPC that returns
+# nothing is either that documented stall or a wedged daemon, and the two are
+# told apart by the grace flag, not by a probe in the unit. Under grace it is a
+# warning; with MONITOR_GRACE_SYNC=0 the node is expected to be current, so it
+# fails (the flap damper still holds it for MONITOR_ALERT_FOR first). The
+# history is scripts/metrics.sh's stack_xmr_rpc_up.
 node_h=""
 sync=""
 xmrnode_token=$(env_value "$CONFIG_DIR/monero-node-mcp/token.env" MONERO_MCP_TOKEN)
@@ -458,7 +467,13 @@ if [ -n "$xmrnode_token" ]; then
     node_body=$(mcp_call monero-node-mcp "$xmrnode_token" get_info '{}') || node_body=""
     node_h=$(printf '%s' "$node_body" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
     sync=$(printf '%s' "$node_body" | grep -oE '\\?"synchronized\\?":[[:space:]]*(true|false)' | grep -oE '(true|false)' | head -n1)
-    if [ "$sync" = false ] && [ "$MONITOR_GRACE_SYNC" != 1 ]; then
+    if [ -z "$node_h" ] && [ -z "$sync" ]; then
+        if [ "$MONITOR_GRACE_SYNC" != 1 ]; then
+            fail "monerod restricted RPC did not answer get_info (wedged handler, or the chain lock held; stack_xmr_rpc_up carries the history)"
+        else
+            soft "monerod restricted RPC did not answer get_info (normal while a sync batch holds the chain lock; raise MONITOR_GRACE_SYNC=0 to page on it)"
+        fi
+    elif [ "$sync" = false ] && [ "$MONITOR_GRACE_SYNC" != 1 ]; then
         fail "monerod is not synchronized (height ${node_h:-?})"
     else
         ok "monerod height ${node_h:-?} (synchronized=${sync:-?})"
