@@ -22,6 +22,10 @@ ENV_FILE=/etc/stack-ids/audit.env
 
 STATUS="$DATA_DIR/audit/auditd.status"
 CURSOR="$DATA_DIR/audit/auditd.cursor"
+# What ausearch/aureport read. Its absence is the ordinary state on a host whose
+# kernel audit subsystem is inert (see the verdict at the end of this file): there
+# is nothing recorded, so there is no window to lose.
+AUDIT_LOG=/var/log/audit/audit.log
 SHOW=0
 [ "${1:-}" = "--show" ] && SHOW=1
 
@@ -45,7 +49,13 @@ summary=""
 read_state=ok
 if ! summary=$(aureport --key --summary --start "$since" 2>/dev/null); then
     summary=""
-    read_state=failed
+    # A missing or empty log is not a failed read. aureport exits 1 when there is
+    # no /var/log/audit/audit.log at all, which on this class of host is the
+    # inert subsystem rather than an error -- pinning the cursor there would make
+    # the window grow for events that do not exist.
+    if [ -s "$AUDIT_LOG" ]; then
+        read_state=failed
+    fi
 fi
 
 count_key() { # key
@@ -158,9 +168,8 @@ tmp=$(mktemp "$DATA_DIR/audit/.auditd.XXXXXX") || exit 1
 # Only advance the cursor on a clean read: a failed ausearch must re-examine the
 # same window next time rather than skip it. The evidence read (`ausearch`, only
 # when stack_hard fired) is not part of the gate -- the counts above are what
-# decide whether a window may be skipped. An inert audit subsystem answers with
-# an empty summary and status 0, so it keeps advancing and the window stays
-# bounded; `read=failed` is in the status file, and the sweep reports it.
+# decide whether a window may be skipped. `read=failed` is in the status file,
+# and the sweep reports it.
 if [ "$read_state" = ok ]; then
     printf '%s\n' "$now" > "$CURSOR"
 fi

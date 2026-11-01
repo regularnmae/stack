@@ -416,8 +416,10 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   that actually works. The report advances its `auditd.cursor` only when
   `aureport` exits 0 (`read=ok|failed` in the status file, reported by the sweep
   as a soft line), so a failed read re-examines the same window instead of
-  stepping over it; an inert subsystem answers empty with status 0, so the
-  window stays bounded rather than growing forever.
+  stepping over it. A missing (or empty) `/var/log/audit/audit.log` is not a
+  failed read — `aureport` exits 1 when there is no log at all, which on this
+  host is the inert subsystem, so that case still advances and the window stays
+  bounded.
 - **A Quadlet unit without `[Install]` never starts at boot.** `crowdsec` was
   written without it, so after the first reboot it was simply absent, and the
   only visible symptom was `stack-bouncer` failing every minute with "LAPI
