@@ -124,6 +124,10 @@ SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 BACKUP_ENV="$CONFIG_DIR/backup/backup.env"
 ROT_DIR="$CONFIG_DIR/rotation"
+# The BoltMesh env directory: deploy/install.sh calls it BOLT_DB, and it holds
+# the three files the postgres and boltmesh-keys targets rewrite (db.env,
+# dump.env, secrets.env).
+BOLT_DIR="$CONFIG_DIR/boltmesh"
 
 # The rune restriction JSON, built from the allowlists stack.conf declares --
 # the same source deploy/install.sh mints from, so a rotation cannot hand out a
