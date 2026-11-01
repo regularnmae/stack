@@ -222,6 +222,72 @@ rune_json() { # prefix...
     printf '[[%s]]' "$out"
 }
 
+# --- the live rune set ------------------------------------------------------
+# A rune carries no label -- this CLN's `createrune` takes no comment -- so the
+# only identity a rune has is its method set. These read the live set off the
+# node and compare it with the prefixes stack.conf declares, which makes "a rune
+# this stack minted" a reproducible fact instead of a remembered id (that is the
+# lesson from a host whose rune table had collected five live leftovers no
+# bookkeeping had ever seen).
+#
+# scripts/rotate.sh blacklists the ones lightning-mcp/node.env does not carry,
+# and scripts/monitor.sh pages on them; both go through here so the pruner and
+# the alarm cannot disagree about what a stack rune is.
+cln_live_runes() { # -> unique_id<TAB>rune<TAB>methodset, per non-blacklisted rune
+    local out
+    out=$(podman exec lightningd lightning-cli showrunes 2>/dev/null) || return 1
+    printf '%s' "$out" | jq -r '
+        .runes[]
+        | select(.blacklisted|not)
+        | [ (.unique_id|tostring), .rune,
+            ([.restrictions[].alternatives[]
+              | select(.fieldname == "method")
+              | .value | sub("\\$"; "")]
+             | sort | join(",")) ]
+        | @tsv' 2>/dev/null
+}
+
+cln_method_set() { # method... -> comma-joined, sorted (the comparison form)
+    printf '%s\n' "$@" | sort | paste -sd, -
+}
+
+# Live runes whose method set is EXACTLY one of stack.conf's and that are not one
+# of the runes passed as arguments: the leftovers a rotation blacklists and the
+# monitor pages on. An exact match is deliberate -- a rune minted for something
+# else keeps its methods and must never be touched. Empty output plus exit 0 is
+# the clean case; a non-zero exit means the node could not be read (showrunes or
+# jq failed), which the caller must not mistake for "nothing to do".
+cln_orphan_runes() { # keep-rune...
+    local keep live id rune methods rset sset
+    if [ "${CLN_READ_METHODS+x}" != x ] || [ "${#CLN_READ_METHODS[@]}" -eq 0 ]; then
+        return 0
+    fi
+    rset=$(cln_method_set "${CLN_READ_METHODS[@]}")
+    sset=$(cln_method_set "${CLN_READ_METHODS[@]}" "${CLN_SPEND_METHODS[@]}")
+    keep=$(printf '%s\n' "$@")
+    live=$(cln_live_runes) || return 1
+    [ -n "$live" ] || return 0
+    while IFS=$'\t' read -r id rune methods; do
+        [ -n "$id" ] || continue
+        if printf '%s\n' "$keep" | grep -qxF -- "$rune"; then
+            continue
+        fi
+        if [ "$methods" = "$rset" ] || [ "$methods" = "$sset" ]; then
+            printf '%s\t%s\n' "$id" "$methods"
+        fi
+    done <<< "$live"
+}
+
+# The RPC password bitcoind's OWN bitcoin.conf carries (empty when the container
+# or the file cannot be read). Compared with secrets.env by scripts/rotate.sh
+# --status and scripts/monitor.sh: the two copies are the ones a half-applied
+# bitcoin-rpc rotation pulls apart, and nothing else would notice before the next
+# restart. Never printed by either caller -- only compared.
+bitcoind_conf_password() {
+    podman exec bitcoind sh -c 'sed -n "s/^rpcpassword=//p" /data/.bitcoin/bitcoin.conf' 2>/dev/null \
+        | head -n1 || true
+}
+
 # --- the Electrum protocol (Fulcrum) ----------------------------------------
 # Electrum is newline-delimited JSON-RPC over raw TCP, not HTTP: 50001 plaintext
 # and 50002 TLS with a certificate the image self-signs. net_curl cannot read it

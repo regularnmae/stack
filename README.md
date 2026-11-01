@@ -633,8 +633,10 @@ behaviours matter on a host that was just restored:
 
 - `boltmesh-keys` requires `--yes`: it ends every BoltMesh session and
   invalidates every node token and outstanding bootstrap secret.
-- `restic` adds the new key, proves it, and only then removes the old one, so a
-  run that dies in between leaves two working keys, not none.
+- `restic` writes the new password to `backup.env` before adding the key, proves
+  it, promotes it, and only then removes the superseded one, so a run that dies
+  in between leaves two working keys, not none — and the repository never needs
+  a password that exists only in memory.
 
 What rotation cannot fix, and what to do instead:
 
@@ -738,8 +740,10 @@ Then look at the things a sweep cannot judge:
   scheduled; `./scripts/backup.sh list` shows the nightly job writing again.
 - the `.onion` addresses match what clients hold (`./deploy.sh` and
   `scripts/npm-hosts.sh` print them).
-- `config/rotation/*.pending` — a snapshot can carry an unfinished rotation;
-  `scripts/rotate.sh --status` explains it and `--resume` finishes it.
+- the credential invariants — `scripts/rotate.sh --status` shows whether only
+  the rune pair in `lightning-mcp/node.env` is live and whether bitcoind's
+  `rpcpassword` matches `secrets.env`. A rotation is reconciled rather than
+  journaled, so the remedy for a mismatch is re-running that target.
 - the spend baseline: `audit/` came back from the snapshot, so if anything
   happened after it, `scripts/spend-audit.sh --rebaseline` is the deliberate
   "this is known-good now" act.
@@ -829,8 +833,8 @@ check the data path are in `AGENTS.md`, "Healthchecks follow a contract".
   Monero wallet's lag behind `monerod`, the host itself (disk and inode space,
   disk saturation, backup age, certificate expiry, units that crash-looped
   since the last sweep, the metrics collector going quiet, the log pipeline
-  going quiet, and a credential rotation left half-finished) — then the spend
-  tripwire.
+  going quiet, a live CLN rune the stack does not reference, and bitcoind's
+  RPC password disagreeing with `secrets.env`) — then the spend tripwire.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
   `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
@@ -1575,7 +1579,7 @@ in dependency order:
 
 ```sh
 ./scripts/rotate.sh --list                  # the targets and what each one touches
-./scripts/rotate.sh --status                # a pending journal + the last 10 runs
+./scripts/rotate.sh --status                # the credential invariants + the last 10 runs
 ./scripts/rotate.sh bitcoin-rpc --dry-run   # the plan, no values, no writes
 ./scripts/rotate.sh bitcoin-rpc             # rotate, re-render, restart, verify
 ./scripts/rotate.sh runes --scope spend     # read | spend | all
@@ -1612,15 +1616,21 @@ them:
 - **A re-render does not change a running container.** Every target restarts its
   own dependents in order and waits for podman's health, so a credential the
   daemon has not picked up cannot look rotated.
-- **Revocation is last.** The CLN runes are minted, proved with `checkrune`, put in
-  `lightning-mcp/node.env`, proven again through the server with `getinfo`, and only
-  then blacklisted with `destroyrune` — a failed swap
-  leaves the old rune working instead of leaving the server unable to read the
-  node. `runes` rehashes only `node.env` in the spend baseline, so the tripwire
-  does not report a rotation as policy drift.
-- **A token rotation proves both halves.** The new bearer token has to answer a
-  real tool call, and the old one has to be refused with 401; the old value is
-  kept in the journal just long enough to test it. Nothing prints a token: the
+- **Revocation is last, and it is a set comparison rather than a remembered
+  id.** The CLN runes are minted, proved with `checkrune`, put in
+  `lightning-mcp/node.env`, proven again through the server with `getinfo`, and
+  only then is *every other live rune whose method set is exactly one of
+  `stack.conf`'s* blacklisted with `destroyrune`. A failed swap therefore leaves
+  the old rune working instead of leaving the server unable to read the node,
+  and a successful one cannot leave a forgotten key behind — which is what a
+  remembered id can do, and did (five live leftovers, two of them spend-capable,
+  on the host this was written for). A rune minted for something else keeps its
+  methods and is never touched. `runes` rehashes only `node.env` in the spend
+  baseline, so the tripwire does not report a rotation as policy drift.
+- **A token rotation proves the new half.** The new bearer token has to answer a
+  real tool call. The "and the old one is refused" probe is deliberately gone:
+  the server holds exactly one token, and by the time the file is rewritten the
+  old value exists nowhere on the host to test. Nothing prints a token: the
   clients that hold one read it from `$DATA_DIR/config/<server>/token.env`
   (`~/.config/opencode/mcp.env` does exactly that at shell start), so a new
   shell is all a client needs. A *spend* token is only exercised by a spend
@@ -1634,11 +1644,14 @@ them:
   trusts `127.0.0.1`, so a loopback probe succeeds with any password. The
   nightly `pg_dumpall` carries the role's new hash; a dump taken before the
   rotation would restore the old one.
-- **`restic` adds before it removes.** The new key is created with
-  `key add --new-password-file`, proven with `restic snapshots`, and only then is
-  the old key removed — a run that dies in between leaves two working keys, not
-  zero. Both passwords reach the container as 0600 files in the rotation dir
-  (mounted at `/rot`), never on a command line. Note that
+- **`restic` writes the new password down before the repository learns it.**
+  `RESTIC_PASSWORD_NEXT` goes into `backup.env` first, then `key add` (skipped
+  when that password already opens the repo), then `restic snapshots` as the
+  proof, then promotion to `RESTIC_PASSWORD`, then removal of every superseded
+  key. Add-before-remove means a crash leaves two working keys, not zero; the
+  write-ahead file means it never leaves the repository openable only by a
+  password nobody holds. Both passwords reach the container as 0600 files in the
+  rotation dir (mounted at `/rot`), never on a command line. Note that
   `scripts/backup.sh` reads `RESTIC_PASSWORD` from the **environment first**, so
   a shell that exports the old value keeps using it until you update it.
 - **`boltmesh-keys` is a logout button wearing a rotation's clothes.** It rewrites
@@ -1646,19 +1659,27 @@ them:
   `BOOTSTRAP_SECRET_PEPPER` (every registered server and outstanding bootstrap
   secret stops verifying), and requires `--yes`.
 
-**If a run dies half-way** the new values are already journaled (mode 600,
-`$DATA_DIR/config/rotation/<target>.pending`) with the stage it reached, and no
-daemon is left holding a credential that nobody recorded:
+**If a run dies half-way, run the same target again.** Nothing is journaled and
+there is no `--resume`: every target either rewrites every copy of its credential
+(`bitcoin.conf` and `secrets.env`, `torrc` and its hash, `token.env`, `db.env`,
+the BoltMesh keys) or reconciles a declared end state against the authority that
+holds it (the rune set, the repository's keys), so a second run converges from
+whatever state the first one left:
 
 ```sh
-./scripts/rotate.sh --status        # what is pending, and which step it stopped at
-./scripts/rotate.sh --resume        # finish it with the SAME values (never re-mints)
-./scripts/rotate.sh --resume --yes  # when the target demands --yes (boltmesh-keys, restic)
+./scripts/rotate.sh --status        # rune set, bitcoin.conf vs secrets.env, last 10 runs
+./scripts/rotate.sh <target>        # finish a half-applied rotation
+./scripts/rotate.sh <target> --yes  # when the target demands --yes (boltmesh-keys, restic)
 ```
 
-`--resume` also refuses to restart a daemon that is already running the journaled
-value — it checks the container's own command line — so finishing a rotation that
-was interrupted after the restart costs a verification, not a second outage.
+A re-run also refuses to restart a daemon that already carries the new value — it
+reads the container's own command line or environment — so finishing a rotation
+that was interrupted after the restart costs a verification, not a second outage.
+That check only covers what a process exposes: bitcoind, tor and searxng read a
+config file, and postgres consumes its password only at `initdb`, so those are
+always restarted. The window a crash can leave behind (bitcoind's file on the new
+password, its clients on the old one) is what `--status` and the monitor's
+`bitcoin.conf` check look for.
 
 `--force` skips the preflight (an unhealthy daemon, or a nightly backup in
 flight, which would otherwise snapshot one side of a credential pair).

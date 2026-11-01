@@ -622,26 +622,62 @@ else
     soft "could not identify the block device holding $DATA_DIR"
 fi
 
-# A credential rotation that died half-way leaves a journal behind, and nothing
-# else notices: the daemons still hold the old value while the configs hold the
-# new one, so the next restart is the surprise. The journal is the only state
-# scripts/rotate.sh keeps, and `--resume` is the safe way out of it.
-if compgen -G "$CONFIG_DIR/rotation/*.pending" >/dev/null; then
-    for jf in "$CONFIG_DIR"/rotation/*.pending; do
-        jt=$(basename "$jf" .pending)
-        js=$(sed -n 's/^started=//p' "$jf" 2>/dev/null | head -n1)
-        jstep=$(sed -n 's/^step=//p' "$jf" 2>/dev/null | head -n1)
-        jage=""
-        if [ -n "$js" ] && js_epoch=$(date -d "$js" +%s 2>/dev/null); then
-            jsecs=$(( $(date +%s) - js_epoch ))
-            if [ "$jsecs" -ge 3600 ]; then jage="$(( jsecs / 3600 ))h old"
-            else jage="$(( jsecs / 60 ))m old"
+# A credential rotation is reconciled, not journaled (scripts/rotate.sh): the
+# dangerous residue is not a bookkeeping file but a live credential nothing
+# references. Two of them are checkable from here.
+#
+# 1. The runes. Exactly the pair lightning-mcp/node.env carries may be live on
+#    the node; anything else this stack minted is a key that survived a run and
+#    is still valid -- two of the five found on this host could also spend. The
+#    comparison (method sets against stack.conf, not remembered ids) lives in
+#    scripts/lib.sh so scripts/rotate.sh's pruner and this check agree.
+if podman container exists lightningd 2>/dev/null; then
+    if command -v jq >/dev/null 2>&1; then
+        keep_runes=(
+            "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_RUNE)"
+            "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_SPEND_RUNE)"
+        )
+        if [ -z "${keep_runes[0]}" ] || [ -z "${keep_runes[1]}" ]; then
+            # Without the pair there is no declared end state to compare against,
+            # and every live rune would read as an orphan. verify.sh already
+            # fails on the MCP server this would break.
+            soft "lightning-mcp/node.env carries no rune pair; skipped the rune check"
+        elif orphan_runes=$(cln_orphan_runes "${keep_runes[@]}" 2>/dev/null); then
+            if [ -z "$orphan_runes" ]; then
+                ok "only the rune pair in lightning-mcp/node.env is live"
+            else
+                fail "$(printf '%s\n' "$orphan_runes" | wc -l) live CLN rune(s) the stack does not reference (id $(printf '%s\n' "$orphan_runes" | cut -f1 | paste -sd, -)); a runes rotation blacklists them"
             fi
+        else
+            soft "could not read lightningd showrunes; skipped the rune check"
         fi
-        fail "credential rotation of $jt unfinished (step ${jstep:-?}${jage:+, started $jage}); finish it with scripts/rotate.sh --resume"
-    done
+    else
+        soft "jq missing; skipped the rune check"
+    fi
 else
-    ok "no pending credential rotation"
+    soft "lightningd is not running; skipped the rune check"
+fi
+
+# 2. The bitcoin RPC password: bitcoind's own file and the copy every client
+#    reads must agree. A half-applied bitcoin-rpc rotation leaves them
+#    different, and nothing else notices until bitcoind is restarted into a
+#    config its clients no longer match. Unlike the rune set this is a plain
+#    string comparison -- no credentials change hands.
+btc_conf_pw=$(bitcoind_conf_password)
+btc_env_pw=$(env_value "$CONFIG_DIR/stack/secrets.env" BITCOIN_RPC_PASSWORD)
+if [ -z "$btc_conf_pw" ] || [ -z "$btc_env_pw" ]; then
+    soft "could not compare bitcoind's rpcpassword with secrets.env; skipped the check"
+elif [ "$btc_conf_pw" = "$btc_env_pw" ]; then
+    ok "bitcoind's rpcpassword matches secrets.env"
+else
+    fail "bitcoind's bitcoin.conf and config/stack/secrets.env disagree on the RPC password (a bitcoin-rpc rotation half-applied?); re-run: scripts/rotate.sh bitcoin-rpc"
+fi
+
+# A journal from the version that had one is inert now, but it is also the only
+# trace of a rotation that was interrupted before the reconciling design: worth
+# a soft line so an operator can delete it or re-run the target it names.
+if compgen -G "$CONFIG_DIR/rotation/*.pending" >/dev/null; then
+    soft "stale rotation journal(s) from an older version: $(cd "$CONFIG_DIR/rotation" && printf '%s ' *.pending) -- delete them (nothing reads them)"
 fi
 
 # backup age: a timer that fires is not a repository that has a snapshot, and a

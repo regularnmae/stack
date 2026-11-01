@@ -2,10 +2,9 @@
 # Rotate one credential and update every service that depends on it.
 #
 #   scripts/rotate.sh --list                     # targets, what each one touches
-#   scripts/rotate.sh --status                   # pending journal + recent runs
+#   scripts/rotate.sh --status                   # credential invariants + recent runs
 #   scripts/rotate.sh <target> --dry-run         # the plan, no values, no writes
 #   scripts/rotate.sh <target>                   # rotate, re-render, restart, verify
-#   scripts/rotate.sh --resume                   # finish an interrupted rotation
 #
 # Targets (one credential each; every run writes its source of truth, re-renders
 # the units through deploy/install.sh, restarts the dependents and verifies):
@@ -18,7 +17,7 @@
 #                  statictor onion service. Touches torrc's hash and the
 #                  rendered lightningd unit. The onion address does not change.
 #   runes          Core Lightning runes (lightning-mcp's read/spend pair):
-#                  mint, swap, verify, THEN blacklist the old ones.
+#                  mint, swap, verify, THEN blacklist every other stack rune.
 #                  --scope read|spend|all (default all).
 #   token:<server> one MCP server's bearer token (token.env) -- the credential
 #                  with the most copies outside the stack. --spend rotates the
@@ -32,14 +31,30 @@
 # is actually using have to be moved together, in an order that leaves a re-run
 # able to finish. Hence: write the files, re-render through deploy/install.sh
 # (the only installer), restart the dependents in dependency order, verify, and
-# only then revoke anything (destroyrune, the old password in bitcoin.conf).
+# only then revoke anything (a rune, a restic key).
 #
-# Crash safety: every new value is journaled under $DATA_DIR/config/rotation/
-# (mode 600) BEFORE it is applied, and the stage is rewritten as the run
-# advances. A run that dies half-way leaves that file behind -- `--status` says
-# where it stopped, `--resume` finishes with the SAME values instead of minting
-# new ones. That matters most for a credential that only exists inside a run:
-# a fresh run would otherwise leave nobody knowing which password is live.
+# There is no --resume and nothing is journaled: a run that dies half-way is
+# finished by running the same target again. Every target either rewrites every
+# copy of its credential (bitcoin.conf and secrets.env, torrc and its hash,
+# token.env, db.env, the BoltMesh keys) or reconciles a DECLARED end state
+# against the authority that holds it:
+#
+#   runes   once the new pair is proven in node.env, every other live rune whose
+#           method set is exactly one of stack.conf's is blacklisted. That is a
+#           set comparison, not a remembered id, so it also collects leftovers
+#           from crashes that happened before this script existed.
+#   restic  RESTIC_PASSWORD_NEXT is written to backup.env BEFORE the repository
+#           learns the password, then promoted to RESTIC_PASSWORD and the
+#           superseded key removed, so no crash can strand the repository on a
+#           password nobody holds.
+#
+# A journal was the earlier design, and it could only describe the state one run
+# expected: the rune table on this host carried five live leftovers no journal
+# had ever seen. Converging from whatever is actually there is the same job with
+# less to get wrong. The one thing a re-run cannot reproduce is the proof that
+# the *previous* value is dead (a bearer token, a role password); those two
+# negative checks are implied by the positive one -- the server and the role
+# each hold exactly one credential -- and are deliberately gone.
 #
 # Nothing here is scheduled. These tokens have consumers outside the stack
 # (opencode's MCP config, a wallet, nginx-proxy-manager), and rotating one on a
@@ -50,15 +65,13 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY_RUN=0
 FORCE=0
-RESUME=0
 ROTATE_USER=0
 ASSUME_YES=0
 SPEND_ONLY=0
 RUNE_SCOPE="all"
 TARGET=""
-JOURNAL=""
-# 1 once this run has actually created (or adopted) a journal: the EXIT trap
-# must not report a refusal-to-start as a failed rotation.
+# 1 once preflight has passed and the target is about to run: the EXIT trap must
+# not report a refusal-to-start as a failed rotation.
 STARTED=0
 
 # shellcheck source=../stack.conf
@@ -78,7 +91,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --list)     LIST=1; shift ;;
         --status)   STATUS=1; shift ;;
-        --resume)   RESUME=1; shift ;;
+        --resume)   die "--resume is gone: re-run the target instead (./scripts/rotate.sh <target>); every target converges from a half-applied run" ;;
         --dry-run)  DRY_RUN=1; shift ;;
         --force)    FORCE=1; shift ;;
         --user)     ROTATE_USER=1; shift ;;
@@ -100,22 +113,24 @@ targets (each one writes its source of truth, re-renders, restarts, verifies):
   tor-control    Tor control password -> torrc hash, secrets.env, lightningd
                  (the onion address is unchanged)
   runes          CLN runes -> lightning-mcp/node.env;
-                 the old runes are blacklisted only after the new ones work
+                 every other stack rune is blacklisted once the new pair works
                  (--scope read|spend|all, default all)
   token:<server> one MCP bearer token (token.env), then prove the new one works
-                 and the old one is refused; --spend rotates the spend token of
-                 monero-wallet-mcp/lightning-mcp instead of the read token
+                 --spend rotates the spend token of monero-wallet-mcp or
+                 lightning-mcp instead of the read token
                  servers: searxng-mcp bitcoin-node-mcp monero-node-mcp
                           monero-wallet-mcp lightning-mcp
   searxng-secret SearXNG's settings.yml secret_key
   postgres       the vpnuser role's password -> db.env, dump.env, BoltMesh
   boltmesh-keys  SECRET_KEY/REFRESH_SECRET_KEY/NODE_SECRET_KEY/BOOTSTRAP_SECRET_PEPPER
                  (--yes: every session and node token ends)
-  restic         the backup repository's key: add, prove, then remove the old
-                 one (--yes)
+  restic         the backup repository's key: add, prove, promote, then remove
+                 the superseded one (--yes)
 
 flags: --dry-run (print the plan)  --force (ignore preflight, e.g. a running
-backup)  --resume (finish a pending journal)  --yes  --spend  --status  --list
+backup)  --yes  --spend  --status  --list
+
+a run that dies half-way is finished by running the same target again
 EOF
     exit 0
 fi
@@ -124,7 +139,11 @@ resolve_data_dir
 SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 BACKUP_ENV="$CONFIG_DIR/backup/backup.env"
+# Scratch for the restic password files and the searxng rewrite: a place with
+# mode 0700 that a container can be handed (restic) and that no daemon owns.
+# Nothing durable lives here -- there is no journal any more.
 ROT_DIR="$CONFIG_DIR/rotation"
+
 # The BoltMesh env directory: deploy/install.sh calls it BOLT_DB, and it holds
 # the three files the postgres and boltmesh-keys targets rewrite (db.env,
 # dump.env, secrets.env).
@@ -160,64 +179,9 @@ run_step() { # description command...
 # lightning-cli print JSON nobody needs in the middle of a rotation log).
 quiet() { "$@" >/dev/null 2>&1; }
 
-# --- the journal -----------------------------------------------------------
-journal_path() { printf '%s/%s.pending' "$ROT_DIR" "$1"; }
-
-journal_get() { env_value "$JOURNAL" "$1"; }
-
-# Rewrite one key of the journal atomically (the file is the only record of a
-# value that may already be live in a daemon, so it is never truncated in place).
-journal_put() { # key value
-    local key="$1" val="$2" tmp
-    [ -n "$JOURNAL" ] || return 0
-    [ "$DRY_RUN" = 0 ] || return 0
-    mkdir -p "$ROT_DIR"
-    chmod 700 "$ROT_DIR"
-    tmp=$(mktemp "${JOURNAL}.XXXXXX")
-    if [ -f "$JOURNAL" ]; then
-        grep -v "^${key}=" "$JOURNAL" > "$tmp" || true
-    fi
-    printf '%s=%s\n' "$key" "$val" >> "$tmp"
-    chmod 600 "$tmp"
-    mv -f "$tmp" "$JOURNAL"
-}
-
-journal_begin() { # target
-    JOURNAL=$(journal_path "$1")
-    printf '==> rotating %s\n' "$1"
-    if [ "$DRY_RUN" = 1 ]; then
-        say "(dry run: nothing is written and no secret is generated for real)"
-        return 0
-    fi
-    mkdir -p "$ROT_DIR"
-    chmod 700 "$ROT_DIR"
-    if [ -s "$JOURNAL" ]; then
-        die "a rotation of $1 is already pending (step: $(journal_get step)); finish it with ./scripts/rotate.sh --resume"
-    fi
-    printf 'target=%s\nstarted=%s\nstep=begin\n' "$1" "$(date -Is)" > "$JOURNAL"
-    chmod 600 "$JOURNAL"
-    STARTED=1
-}
-
-journal_clear() {
-    if [ "$DRY_RUN" = 0 ] && [ -n "$JOURNAL" ]; then
-        rm -f "$JOURNAL"
-    fi
-    return 0
-}
-
-# The value for a journal key: reuse the pending one (a --resume must not mint
-# anything new), else generate. Hex only -- these values end up in a systemd
-# Exec= line, which is split on whitespace and never shell-quoted.
-gen() { # journal-key [prefix]
-    local key="$1" prefix="${2:-}" v
-    v=$(journal_get "$key")
-    if [ -z "$v" ]; then
-        v="${prefix}$(rand_hex)"
-        journal_put "$key" "$v"
-    fi
-    printf '%s' "$v"
-}
+# A fresh secret. Hex only -- these values end up in a systemd Exec= line, which
+# is split on whitespace and never shell-quoted, and in a container's argv.
+gen() { rand_hex; }
 
 # --- file writers (atomic, keep mode, never print a value) ------------------
 # Set KEY=value in an env file in place (keeps comments, order and mode; appends
@@ -242,6 +206,21 @@ set_env_key() { # file key value
 set_env_key_if_file() { # file key value
     [ -f "$1" ] || { say "no $1; not deployed, skipping $2"; return 0; }
     set_env_key "$@"
+}
+
+# Drop KEY from an env file (keeps comments, order and mode). Used for the one
+# key that is deliberately transient: RESTIC_PASSWORD_NEXT, the write-ahead
+# copy of a restic password the repository has not accepted yet.
+unset_env_key() { # file key
+    local f="$1" k="$2" tmp mode
+    [ -f "$f" ] || return 0
+    grep -q "^$k=" "$f" || return 0
+    if [ "$DRY_RUN" = 1 ]; then say "would remove $k from $f"; return 0; fi
+    mode=$(stat -c %a "$f")
+    tmp=$(mktemp "$(dirname "$f")/.rot.XXXXXX")
+    grep -v "^$k=" "$f" > "$tmp" || true
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$f"
 }
 
 # bitcoind owns its data dir and install.sh hands bitcoin.conf to the image uid,
@@ -316,17 +295,23 @@ restart_unit_and_wait() { # container [timeout]
     local c="$1" t="${2:-$APP_HEALTH_WAIT}"
     run_step "restart $c" systemctl --user restart "$c.service"
     if ! wait_healthy "$c" "$t"; then
-        die "$c did not report healthy; finish the rotation with ./scripts/rotate.sh --resume"
+        die "$c did not report healthy; re-run the same target once it does (./scripts/rotate.sh $TARGET)"
     fi
 }
 
 # True when the RUNNING container's PID 1 already carries the value the unit was
-# rendered with (checked on its own command line, not on the file). A resumed
-# rotation must not bounce a daemon that is already running the new secret: for
-# wallet RPC that restart costs another cache refresh, and for any daemon
-# it is a second outage for no reason.
+# rendered with (checked on its own command line, not on the file). A re-run
+# after a half-applied rotation must not bounce a daemon that is already running
+# the new secret: it is a second outage for no reason.
 container_runs_secret() { # container value
     podman exec "$1" sh -c 'tr "\0" "\n" < /proc/1/cmdline' 2>/dev/null \
+        | grep -qxF -- "$2"
+}
+
+# The env-file twin: what Quadlet's EnvironmentFile= delivers to PID 1. Only the
+# process's own copy counts -- the file is what a half-applied run rewrites.
+container_env_is() { # container KEY=value
+    podman exec "$1" sh -c 'tr "\0" "\n" < /proc/1/environ' 2>/dev/null \
         | grep -qxF -- "$2"
 }
 
@@ -341,6 +326,32 @@ restart_if_deployed() { # container...
     done
 }
 
+# Restart a container unless its PID 1 already carries the new value, proven the
+# way that value reaches the process: argv for an Exec= argument, env for an
+# EnvironmentFile= key. It is only ever an optimisation -- anything that cannot
+# be proven from the running process (a secret a daemon reads out of a config
+# file, or one it consumed at initdb) is restarted.
+restart_if_stale() { # container argv|env value
+    local c="$1" via="$2" val="$3"
+    if ! podman container exists "$c" 2>/dev/null; then
+        say "$c is not deployed; skipping"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 0 ]; then
+        case "$via" in
+            argv) if container_runs_secret "$c" "$val"; then
+                      log "$c already runs the new value; not restarting it"
+                      return 0
+                  fi ;;
+            env)  if container_env_is "$c" "$val"; then
+                      log "$c already carries the new value; not restarting it"
+                      return 0
+                  fi ;;
+        esac
+    fi
+    restart_unit_and_wait "$c"
+}
+
 # --- audit trail ------------------------------------------------------------
 record_rotation() { # target status [detail]
     local f="$DATA_DIR/audit/rotation.log"
@@ -352,10 +363,9 @@ record_rotation() { # target status [detail]
 
 on_exit() {
     local rc=$?
-    if [ "$rc" -ne 0 ] && [ "$STARTED" = 1 ] && [ -n "$JOURNAL" ] && [ -s "$JOURNAL" ]; then
-        record_rotation "$TARGET" failed "step=$(journal_get step)"
-        warn "the rotation of $TARGET did not finish (journal: $JOURNAL)"
-        warn "finish it with the same values: ./scripts/rotate.sh --resume"
+    if [ "$rc" -ne 0 ] && [ "$STARTED" = 1 ] && [ -n "$TARGET" ]; then
+        record_rotation "$TARGET" failed
+        warn "the rotation of $TARGET did not finish; re-run it to converge: ./scripts/rotate.sh $TARGET"
     fi
 }
 trap on_exit EXIT
@@ -423,8 +433,8 @@ mcp_ok() { # container token tool args
 }
 
 # What must be healthy before a target runs. Kept out of the apply functions so
-# a refusal happens BEFORE the journal exists: "bitcoind is unhealthy" must not
-# leave a pending rotation that the next run has to --resume.
+# a refusal happens before anything is written: "bitcoind is unhealthy" must not
+# leave a half-applied credential behind.
 preflight_target() { # target
     case "$1" in
         bitcoin-rpc) require_healthy bitcoind ;;
@@ -474,13 +484,9 @@ verify_bitcoin_rpc() {
 
 apply_bitcoin_rpc() {
     local pass user rpcuser_old=""
-    pass=$(gen NEW_BITCOIN_RPC_PASSWORD)
+    pass=$(gen)
     if [ "$ROTATE_USER" = 1 ]; then
-        user=$(journal_get NEW_BITCOIN_RPC_USER)
-        if [ -z "$user" ]; then
-            user="u$(rand_hex | cut -c1-12)"
-            journal_put NEW_BITCOIN_RPC_USER "$user"
-        fi
+        user="u$(rand_hex | cut -c1-12)"
     else
         user=$(env_value "$SECRETS_FILE" BITCOIN_RPC_USER)
         [ -n "$user" ] || die "no BITCOIN_RPC_USER in $SECRETS_FILE; run deploy/install.sh first"
@@ -492,10 +498,8 @@ apply_bitcoin_rpc() {
         edit_bitcoin_conf rpcuser "$user"
     fi
 
-    journal_put step "bitcoin.conf"
     edit_bitcoin_conf rpcpassword "$pass"
 
-    journal_put step "config files"
     set_env_key "$SECRETS_FILE" BITCOIN_RPC_USER "$user"
     set_env_key "$SECRETS_FILE" BITCOIN_RPC_PASSWORD "$pass"
     set_env_key "$CONFIG_DIR/bitcoin-node-mcp/upstream.env" BITCOIN_RPC_USER "$user"
@@ -503,16 +507,17 @@ apply_bitcoin_rpc() {
     set_env_key_if_file "$CONFIG_DIR/btc-explorer/btc-explorer.env" BTCEXP_BITCOIND_USER "$user"
     set_env_key_if_file "$CONFIG_DIR/btc-explorer/btc-explorer.env" BTCEXP_BITCOIND_PASS "$pass"
 
-    journal_put step "re-render"
     install_rerender
 
-    journal_put step "restart:bitcoind"
+    # bitcoind reads bitcoin.conf at start, so it always goes first and always
+    # restarts: no probe can prove what the running process will read next.
     restart_unit_and_wait bitcoind "$BITCOIND_WAIT"
 
-    journal_put step "restart:dependents"
-    restart_if_deployed fulcrum lightningd bitcoin-node-mcp btc-explorer
+    restart_if_stale lightningd argv "--bitcoin-rpcpassword=$pass"
+    restart_if_stale fulcrum argv "$pass"
+    restart_if_stale bitcoin-node-mcp env "BITCOIN_RPC_PASSWORD=$pass"
+    restart_if_stale btc-explorer env "BTCEXP_BITCOIND_PASS=$pass"
 
-    journal_put step "verify"
     verify_bitcoin_rpc
     complete
 }
@@ -531,31 +536,23 @@ verify_tor_control() {
 
 apply_tor_control() {
     local pw hash
-    pw=$(gen NEW_TOR_SERVICE_PASSWORD)
-    hash=$(journal_get NEW_TOR_SERVICE_HASH)
-    if [ -z "$hash" ]; then
-        hash=$(tor_hash "$pw" || true)
-        [ -n "$hash" ] || die "could not hash the password: is $TOR_IMAGE built? (deploy/install.sh builds it)"
-        journal_put NEW_TOR_SERVICE_HASH "$hash"
-    fi
+    pw=$(gen)
+    hash=$(tor_hash "$pw" || true)
+    [ -n "$hash" ] || die "could not hash the password: is $TOR_IMAGE built? (deploy/install.sh builds it)"
 
-    journal_put step "torrc"
     set_torrc_hash "$hash"
 
-    journal_put step "config files"
     set_env_key "$SECRETS_FILE" TOR_SERVICE_PASSWORD "$pw"
 
-    journal_put step "re-render"
     install_rerender
 
     # tor owns the control port, so it goes first: lightningd cannot register
-    # its statictor service while the old hash is live.
-    journal_put step "restart:tor"
+    # its statictor service while the old hash is live. tor reads torrc (a file,
+    # not its argv or environment), so there is nothing to prove about the
+    # running process -- it restarts.
     restart_unit_and_wait tor
-    journal_put step "restart:lightningd"
-    restart_unit_and_wait lightningd "$LN_WAIT"
+    restart_if_stale lightningd argv "--tor-service-password=$pw"
 
-    journal_put step "verify"
     verify_tor_control
     complete
 }
@@ -564,8 +561,9 @@ apply_tor_control() {
 # target: runes
 # ---------------------------------------------------------------------------
 # A rune is a bearer token: mint it, prove it, swap it in, prove the consumer
-# works, and only then blacklist the old one -- a failed swap that had already
-# destroyed the old rune would leave lightning-mcp unable to read the node.
+# works, and only then blacklist everything that is not the pair -- a failed
+# swap that had already destroyed the live rune would leave lightning-mcp unable
+# to read the node.
 mint_rune() { # restriction-json -> "rune unique_id"
     local restrictions="$1" out rune id tries
     if [ "$DRY_RUN" = 1 ]; then
@@ -588,34 +586,9 @@ mint_rune() { # restriction-json -> "rune unique_id"
     return 1
 }
 
-blacklist_rune() { # unique_id description
-    local id="$1" what="$2"
-    if [ "$DRY_RUN" = 1 ]; then
-        say "would blacklist the old $what rune"
-        return 0
-    fi
-    case "$id" in
-        ''|*[!0-9]*)
-            warn "could not resolve the old $what rune's unique_id; revoke it by hand:"
-            warn "  podman exec lightningd lightning-cli destroyrune <id> <id>"
-            return 0
-            ;;
-    esac
-    run_step "blacklist the old $what rune (id $id)" \
-        quiet podman exec lightningd lightning-cli destroyrune "$id" "$id"
-}
-
-# showrunes is the only place the unique_id of an EXISTING rune can be read --
-# `destroyrune` takes ids, not runes, and node.env stores only the runes.
-rune_id() { # rune -> unique_id (empty when unknown)
-    [ -n "$1" ] || return 0
-    podman exec lightningd lightning-cli -k showrunes rune="$1" 2>/dev/null \
-        | grep -o '"unique_id": *"[0-9]*"' | head -n1 | grep -o '[0-9]*' || true
-}
-
 want_scope() { [ "$RUNE_SCOPE" = all ] || [ "$RUNE_SCOPE" = "$1" ]; }
 
-verify_runes() { # scopes that changed
+verify_runes() {
     local token
     [ "$DRY_RUN" = 0 ] || return 0
     token=$(env_value "$CONFIG_DIR/lightning-mcp/token.env" LIGHTNING_MCP_TOKEN)
@@ -626,81 +599,87 @@ verify_runes() { # scopes that changed
     fi
 }
 
+# Revocation is a SET reconciliation, not a remembered id: every live rune whose
+# method set is exactly one of stack.conf's must be the pair node.env carries,
+# and anything else is a leftover (this run's predecessor, or an older crash).
+# scripts/lib.sh owns the comparison -- scripts/monitor.sh checks the same
+# invariant -- and it is deliberately restricted to exact method-set matches so
+# a rune minted for something else is never touched.
+prune_orphan_runes() {
+    local node_env="$CONFIG_DIR/lightning-mcp/node.env" keep_read keep_spend orphans id
+
+    keep_read=$(env_value "$node_env" LIGHTNING_RUNE)
+    keep_spend=$(env_value "$node_env" LIGHTNING_SPEND_RUNE)
+
+    if [ -z "$keep_read" ] || [ -z "$keep_spend" ]; then
+        warn "$node_env does not carry both runes; not blacklisting anything"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" = 1 ]; then
+        # the pair in node.env now is itself about to be superseded, so this is
+        # only the backlog the run already has to clean up.
+        orphans=$(cln_orphan_runes "$keep_read" "$keep_spend" 2>/dev/null | cut -f1 | paste -sd, - || true)
+        say "would blacklist every other stack rune (orphaned already: ${orphans:-none})"
+        return 0
+    fi
+
+    if ! orphans=$(cln_orphan_runes "$keep_read" "$keep_spend"); then
+        warn "could not read the node's rune list; leaving any superseded rune alone"
+        return 0
+    fi
+    if [ -z "$orphans" ]; then
+        say "no other stack rune is live"
+        return 0
+    fi
+    say "blacklisting $(printf '%s\n' "$orphans" | wc -l) superseded stack rune(s): $(printf '%s\n' "$orphans" | cut -f1 | paste -sd, -)"
+    while read -r id; do
+        [ -n "$id" ] || continue
+        if quiet podman exec lightningd lightning-cli destroyrune "$id" "$id"; then
+            say "blacklisted rune id $id"
+        else
+            warn "could not blacklist rune id $id; do it by hand: podman exec lightningd lightning-cli destroyrune $id $id"
+        fi
+    done <<< "$(printf '%s\n' "$orphans" | cut -f1)"
+}
+
 apply_runes() {
     local node_env="$CONFIG_DIR/lightning-mcp/node.env"
-    local old_read old_spend
-    local old_read_id="" old_spend_id=""
-    local new_read="" id_read="" new_spend="" id_spend=""
-    local do_read=0 do_spend=0 changed="" minted
-
-    old_read=$(env_value "$node_env" LIGHTNING_RUNE)
-    old_spend=$(env_value "$node_env" LIGHTNING_SPEND_RUNE)
+    local new_read="" new_spend="" minted=""
+    local do_read=0 do_spend=0
 
     if want_scope read; then do_read=1; fi
     if want_scope spend; then do_spend=1; fi
-
-    if [ "$do_read" = 1 ] || [ "$do_spend" = 1 ]; then
-        [ -f "$node_env" ] || die "missing $node_env; run deploy/install.sh first"
-    fi
     [ "$do_read" = 1 ] || [ "$do_spend" = 1 ] || die "nothing to rotate"
+    [ -f "$node_env" ] || die "missing $node_env; run deploy/install.sh first"
 
-    journal_put step "mint read"
     if [ "$do_read" = 1 ]; then
-        new_read=$(journal_get NEW_READ_RUNE)
-        id_read=$(journal_get NEW_READ_RUNE_ID)
-        if [ -z "$new_read" ]; then
-            minted=$(mint_rune "$READ_RESTRICTIONS" || true)
-            read -r new_read id_read <<< "$minted"
-            [ -n "$new_read" ] && [ -n "$id_read" ] || die "could not mint a usable read rune"
-            journal_put NEW_READ_RUNE "$new_read"
-            journal_put NEW_READ_RUNE_ID "$id_read"
-        fi
-        changed+="read "
-    fi
-    journal_put step "mint spend"
-    if [ "$do_spend" = 1 ]; then
-        new_spend=$(journal_get NEW_SPEND_RUNE)
-        id_spend=$(journal_get NEW_SPEND_RUNE_ID)
-        if [ -z "$new_spend" ]; then
-            minted=$(mint_rune "$SPEND_RESTRICTIONS" || true)
-            read -r new_spend id_spend <<< "$minted"
-            [ -n "$new_spend" ] && [ -n "$id_spend" ] || die "could not mint a usable spend rune"
-            journal_put NEW_SPEND_RUNE "$new_spend"
-            journal_put NEW_SPEND_RUNE_ID "$id_spend"
-        fi
-        changed+="spend "
-    fi
-
-    journal_put step "write runes"
-    if [ "$do_read" = 1 ]; then
+        minted=$(mint_rune "$READ_RESTRICTIONS" || true)
+        read -r new_read _ <<< "$minted"
+        [ -n "$new_read" ] || die "could not mint a usable read rune"
         set_env_key "$node_env" LIGHTNING_RUNE "$new_read"
     fi
     if [ "$do_spend" = 1 ]; then
+        minted=$(mint_rune "$SPEND_RESTRICTIONS" || true)
+        read -r new_spend _ <<< "$minted"
+        [ -n "$new_spend" ] || die "could not mint a usable spend rune"
         set_env_key "$node_env" LIGHTNING_SPEND_RUNE "$new_spend"
     fi
 
-    journal_put step "restart:consumers"
-    if [ "$do_read" = 1 ] || [ "$do_spend" = 1 ]; then
+    # A re-run after a crash finds the runes it is about to write already in the
+    # container's environment; restarting for that is a second outage for no
+    # reason. Anything unprovable restarts.
+    if [ "$DRY_RUN" = 0 ] && podman container exists lightning-mcp 2>/dev/null \
+       && container_env_is lightning-mcp "LIGHTNING_RUNE=$(env_value "$node_env" LIGHTNING_RUNE)" \
+       && container_env_is lightning-mcp "LIGHTNING_SPEND_RUNE=$(env_value "$node_env" LIGHTNING_SPEND_RUNE)"; then
+        log "lightning-mcp already carries these runes; not restarting it"
+    else
         restart_if_deployed lightning-mcp
     fi
 
-    journal_put step "verify"
-    verify_runes "$changed"
-
-    # Revocation last, and only now that the replacements are proven in use.
-    journal_put step "revoke"
-    if [ "$do_read" = 1 ] && [ -n "$old_read" ]; then
-        [ "$DRY_RUN" = 1 ] || old_read_id=$(rune_id "$old_read")
-        blacklist_rune "$old_read_id" read
-    fi
-    if [ "$do_spend" = 1 ] && [ -n "$old_spend" ]; then
-        [ "$DRY_RUN" = 1 ] || old_spend_id=$(rune_id "$old_spend")
-        blacklist_rune "$old_spend_id" spend
-    fi
-
-    if [ "$do_read" = 1 ] || [ "$do_spend" = 1 ]; then
-        rehash_audit "$node_env"
-    fi
+    verify_runes
+    prune_orphan_runes
+    rehash_audit "$node_env"
     complete
 }
 
@@ -736,18 +715,14 @@ token_spec() { # server
     esac
 }
 
-# The endpoint's own gate, the same probe verify.sh runs every sweep: an
-# unauthenticated -- or revoked -- token gets 401 on /mcp. The token goes in a
-# curl config on stdin, so it never reaches a podman argv.
-http_code_token() { # container token
-    printf 'header = "Authorization: Bearer %s"\n' "$2" | \
-        net_curl -s -o /dev/null -w '%{http_code}' -m 10 -K - \
-            -X POST "http://$1:8000/mcp" -H 'Content-Type: application/json' -d '{}' 2>/dev/null
-}
-
-verify_token() { # server envfile readvar tool args old-read-token [spend]
-    local server="$1" envf="$2" readvar="$3" tool="$4" args="$5" old="$6" spend="${7:-0}"
-    local token code
+# A bearer token is the endpoint's own credential, and the server holds exactly
+# one: proving the NEW token answers is therefore the whole rotation. There is
+# no "the old one is refused" probe, because by the time the file is rewritten
+# the old value is gone from the host -- and a server with one token cannot
+# accept it (see the header).
+verify_token() { # server envfile readvar tool args [spend]
+    local server="$1" envf="$2" readvar="$3" tool="$4" args="$5" spend="${6:-0}"
+    local token
     [ "$DRY_RUN" = 0 ] || return 0
     token=$(env_value "$envf" "$readvar")
     if mcp_ok "$server" "$token" "$tool" "$args"; then
@@ -761,45 +736,27 @@ verify_token() { # server envfile readvar tool args old-read-token [spend]
         # server reloaded its env and still serves. Prove the token itself on a
         # host that deliberately turns ENABLE_SPENDING on.
         say "the spend token itself is only exercised by a spend call; not attempted"
-        return 0
-    fi
-    [ -n "$old" ] || return 0
-    code=$(http_code_token "$server" "$old")
-    if [ "$code" = 401 ]; then
-        log "the old token is refused (401)"
-    else
-        warn "the old token still answers ($code); check: podman logs $server"
     fi
 }
 
 apply_token() {
-    local server="$1" spec envf readvar tool args spendvar var key old new
+    local server="$1" spec envf readvar tool args spendvar var new
     spec=$(token_spec "$server") || die "no bearer token for '$server' (servers: ${TOKEN_SERVERS[*]})"
     IFS='|' read -r envf readvar tool args spendvar <<< "$spec"
     [ -f "$envf" ] || die "missing $envf; run deploy/install.sh first"
 
     var="$readvar"
-    key="NEW_TOKEN"
     if [ "$SPEND_ONLY" = 1 ]; then
         [ -n "$spendvar" ] || die "$server has no spend token (only monero-wallet-mcp and lightning-mcp do)"
         var="$spendvar"
-        key="NEW_SPEND_TOKEN"
     fi
 
-    # The old value has to survive into the journal: proving it is now refused
-    # is half the rotation, and a resume wants to know what it replaced.
-    old=$(env_value "$envf" "$var")
-    new=$(gen "$key")
-    journal_put OLD_TOKEN "$old"
-
-    journal_put step "token.env"
+    new=$(gen)
     set_env_key "$envf" "$var" "$new"
 
-    journal_put step "restart"
-    restart_if_deployed "$server"
+    restart_if_stale "$server" env "$var=$new"
 
-    journal_put step "verify"
-    verify_token "$server" "$envf" "$readvar" "$tool" "$args" "$old" "$SPEND_ONLY"
+    verify_token "$server" "$envf" "$readvar" "$tool" "$args" "$SPEND_ONLY"
 
     # token.env of the two money servers is hash-baselined by spend-audit.
     rehash_audit "$envf"
@@ -837,15 +794,12 @@ set_searxng_secret() { # value
 
 apply_searxng_secret() {
     local new code
-    new=$(gen NEW_SEARXNG_SECRET)
+    new=$(gen)
 
-    journal_put step "settings.yml"
     set_searxng_secret "$new"
 
-    journal_put step "restart:searxng"
     restart_unit_and_wait searxng
 
-    journal_put step "verify"
     if [ "$DRY_RUN" = 0 ]; then
         code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://searxng:8080/ 2>/dev/null || true)
         if [ "$code" = 200 ]; then
@@ -864,7 +818,7 @@ apply_searxng_secret() {
 # carry the client's copy of it. So the ALTER comes first and the files follow --
 # a crash in between leaves the running backend working (it already
 # authenticated) and the next ./deploy.sh restarting it into a failure, which
-# --resume fixes with the journaled value.
+# re-running this target fixes: it ALTERs again and rewrites every copy.
 pg_sql() { # sql on stdin, against the stack's own database
     podman exec -i postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1 -q
 }
@@ -881,21 +835,13 @@ pg_tcp_login() { # password -> 0 when it authenticates
 }
 
 verify_postgres() {
-    local new old
-    new=$(journal_get NEW_POSTGRES_PASSWORD)
-    old=$(journal_get OLD_POSTGRES_PASSWORD)
+    local new
+    new=$(env_value "$BOLT_DIR/db.env" POSTGRES_PASSWORD)
     [ "$DRY_RUN" = 0 ] || return 0
     if pg_tcp_login "$new"; then
         log "vpnuser authenticates over the podman network with the new password"
     else
-        die "vpnuser did not authenticate with the new password; the journal holds it"
-    fi
-    if [ -n "$old" ] && [ "$old" != "$new" ]; then
-        if pg_tcp_login "$old"; then
-            warn "the OLD password still authenticates; check: podman exec postgres psql -U vpnuser -c '\\du'"
-        else
-            log "the old password is refused"
-        fi
+        die "vpnuser did not authenticate with the password in $BOLT_DIR/db.env; re-run this target"
     fi
     if podman container exists boltmesh-backend 2>/dev/null; then
         if net_curl -fsS http://boltmesh-backend:8000/health >/dev/null 2>&1; then
@@ -907,13 +853,11 @@ verify_postgres() {
 }
 
 apply_postgres() {
-    local new old
-    old=$(env_value "$BOLT_DIR/db.env" POSTGRES_PASSWORD)
-    [ -n "$old" ] || die "no POSTGRES_PASSWORD in $BOLT_DIR/db.env; run deploy/install.sh first"
-    new=$(gen NEW_POSTGRES_PASSWORD)
-    journal_put OLD_POSTGRES_PASSWORD "$old"
+    local new
+    new=$(gen)
+    [ -n "$(env_value "$BOLT_DIR/db.env" POSTGRES_PASSWORD)" ] \
+        || die "no POSTGRES_PASSWORD in $BOLT_DIR/db.env; run deploy/install.sh first"
 
-    journal_put step "ALTER ROLE"
     if [ "$DRY_RUN" = 1 ]; then
         say "would set vpnuser's password at postgres (ALTER ROLE ... PASSWORD)"
     else
@@ -923,20 +867,19 @@ apply_postgres() {
         log "the vpnuser role carries the new password"
     fi
 
-    journal_put step "config files"
+    # The role is authoritative, so the files only ever have to catch up with it;
+    # a re-run rewrites all three and ALTERs again.
     set_env_key "$BOLT_DIR/db.env" POSTGRES_PASSWORD "$new"
     set_env_key "$BOLT_DIR/db.env" DATABASE_URL "postgresql+asyncpg://vpnuser:$new@postgres:5432/vpndb"
     set_env_key_if_file "$BOLT_DIR/dump.env" PGPASSWORD "$new"
 
     # postgres itself only uses POSTGRES_PASSWORD on an empty cluster, but the
     # restart keeps podman inspect agreeing with the role it serves.
-    journal_put step "restart:postgres"
     restart_unit_and_wait postgres "${POSTGRES_WAIT:-180}"
 
-    journal_put step "restart:dependents"
-    restart_if_deployed boltmesh-backend boltmesh-worker
+    restart_if_stale boltmesh-backend env "DATABASE_URL=postgresql+asyncpg://vpnuser:$new@postgres:5432/vpndb"
+    restart_if_deployed boltmesh-worker
 
-    journal_put step "verify"
     verify_postgres
     say "the next backup's pg_dumpall carries the new hash; a dump taken before this rotation would restore the old one"
     complete
@@ -949,18 +892,17 @@ apply_postgres() {
 # deliberate, user-visible act: every session ends and every node token minted
 # from NODE_SECRET_KEY/BOOTSTRAP_SECRET_PEPPER stops verifying.
 apply_boltmesh_keys() {
-    local f="$BOLT_DIR/secrets.env" k v
+    local f="$BOLT_DIR/secrets.env" k v secret_key=""
     [ -f "$f" ] || die "missing $f; run deploy/install.sh first"
     for k in SECRET_KEY REFRESH_SECRET_KEY NODE_SECRET_KEY BOOTSTRAP_SECRET_PEPPER; do
-        v=$(gen "NEW_$k")
-        journal_put step "$k"
+        v=$(gen)
+        [ "$k" = SECRET_KEY ] && secret_key="$v"
         set_env_key "$f" "$k" "$v"
     done
 
-    journal_put step "restart"
-    restart_if_deployed boltmesh-backend boltmesh-worker
+    restart_if_stale boltmesh-backend env "SECRET_KEY=$secret_key"
+    restart_if_deployed boltmesh-worker
 
-    journal_put step "verify"
     if [ "$DRY_RUN" = 0 ]; then
         if net_curl -fsS http://boltmesh-backend:8000/health >/dev/null 2>&1; then
             log "boltmesh-backend is healthy with the new keys"
@@ -974,9 +916,20 @@ apply_boltmesh_keys() {
 # ---------------------------------------------------------------------------
 # target: restic
 # ---------------------------------------------------------------------------
-# The one secret whose loss loses the backups, so the new key is ADDED and
-# proven before the old one is removed, and the add is idempotent-safe: a run
-# that dies after it leaves two working keys.
+# The one secret whose loss loses the backups. The order is what makes a re-run
+# safe, and it is a write-ahead, not a journal:
+#
+#   1. RESTIC_PASSWORD_NEXT goes into backup.env BEFORE the repository learns
+#      the password, so the value is durable on disk first;
+#   2. the key is added only if that password does not already open the repo
+#      (a re-run after 'key add' must not add a second one);
+#   3. the new key must read the repository;
+#   4. it is promoted to RESTIC_PASSWORD and the transient key removed;
+#   5. every superseded key is removed, so the repo ends with exactly one.
+#
+# A crash between any two steps is finished by running the target again: either
+# the old password still works and the new one is on disk waiting, or the new
+# one already works and is promoted.
 restic_run() { # restic args...
     local repo cache
     repo=$(env_value "$BACKUP_ENV" RESTIC_REPOSITORY)
@@ -1003,48 +956,79 @@ restic_cleanup() {
     rm -f "$ROT_DIR/.current.pw" "$ROT_DIR/.new.pw"
 }
 
+# Drop every key the repository still holds that is not the one this run proved,
+# so "the credential is dead" is true of the old key rather than aspirational.
+prune_restic_keys() {
+    local list ids id total removed=0
+    command -v jq >/dev/null 2>&1 || { warn "jq missing; skipped removing the superseded restic key"; return 0; }
+    if ! list=$(restic_run key list --json --password-file /rot/.new.pw 2>/dev/null); then
+        warn "could not list the repository's keys; check: restic key list"
+        return 0
+    fi
+    total=$(printf '%s' "$list" | jq 'length' 2>/dev/null || echo "")
+    ids=$(printf '%s' "$list" | jq -r '.[] | select(.current|not) | .id' 2>/dev/null || true)
+    for id in $ids; do
+        if restic_run key remove "$id" --password-file /rot/.new.pw >/dev/null 2>&1; then
+            removed=$(( removed + 1 ))
+            say "removed the superseded restic key $id"
+        else
+            warn "could not remove the superseded restic key $id; remove it by hand: restic key remove $id"
+        fi
+    done
+    if [ -n "$total" ]; then
+        total=$(( total - removed ))
+        [ "$total" = 1 ] || warn "the repository reports $total key(s) left; check: restic key list"
+    fi
+}
+
 apply_restic() {
-    local cur new old_id count
+    local cur new
     cur=$(env_value "$BACKUP_ENV" RESTIC_PASSWORD)
     [ -n "$cur" ] || die "no RESTIC_PASSWORD in $BACKUP_ENV; run deploy/install.sh first"
 
     if [ "$DRY_RUN" = 1 ]; then
-        say "would add a restic key with a new password (key add --new-password-file)"
-        say "would prove it reads the repository (restic snapshots), then remove the current key"
-        say "would rewrite RESTIC_PASSWORD in $BACKUP_ENV"
+        say "would write RESTIC_PASSWORD_NEXT to $BACKUP_ENV (durable before the repo learns it)"
+        say "would add a restic key unless that password already opens the repository"
+        say "would prove it reads the repository (restic snapshots), promote it to RESTIC_PASSWORD"
+        say "and remove every superseded key"
         complete
         return 0
     fi
 
-    new=$(gen NEW_RESTIC_PASSWORD)
+    # A value left behind by an interrupted run is reused, not replaced: it may
+    # already be a key in the repository.
+    new=$(env_value "$BACKUP_ENV" RESTIC_PASSWORD_NEXT)
+    if [ -z "$new" ]; then
+        new=$(gen)
+        set_env_key "$BACKUP_ENV" RESTIC_PASSWORD_NEXT "$new"
+    fi
     restic_write_passwords "$cur" "$new"
 
-    journal_put step "key list"
-    old_id=$(restic_run key list --json --password-file /rot/.current.pw \
-        | jq -r '[.[] | select(.current)][0].id // empty' 2>/dev/null || true)
-    [ -n "$old_id" ] || die "could not read the current restic key id; nothing was changed"
+    if restic_run key list --json --password-file /rot/.new.pw >/dev/null 2>&1; then
+        log "the pending restic key already opens the repository; not adding another"
+    else
+        if ! restic_run key list --json --password-file /rot/.current.pw >/dev/null 2>&1; then
+            restic_cleanup
+            # Neither password opens the repository, so the NEXT written above
+            # can never have become a key: drop it rather than leave the file
+            # pointing at two dead values.
+            unset_env_key "$BACKUP_ENV" RESTIC_PASSWORD_NEXT
+            die "neither RESTIC_PASSWORD nor RESTIC_PASSWORD_NEXT in $BACKUP_ENV opens the repository; fix it by hand (restic key list)"
+        fi
+        restic_run key add --password-file /rot/.current.pw --new-password-file /rot/.new.pw >/dev/null \
+            || { restic_cleanup; die "restic refused the new key; the repository is unchanged"; }
+    fi
 
-    journal_put step "key add"
-    restic_run key add --password-file /rot/.current.pw --new-password-file /rot/.new.pw >/dev/null \
-        || die "restic refused the new key; the repository is unchanged"
-
-    journal_put step "verify"
     if ! restic_run snapshots --latest 1 --password-file /rot/.new.pw >/dev/null 2>&1; then
-        # Two keys are alive here, so this is recoverable: rerun the target.
+        # Two keys are alive here, so this is recoverable: re-run the target.
         restic_cleanup
         die "the new key cannot read the repository; the old key is still valid -- re-run the target"
     fi
     log "the new restic key opens the repository"
 
-    journal_put step "key remove"
-    restic_run key remove "$old_id" --password-file /rot/.new.pw >/dev/null \
-        || die "restic refused to remove the old key (both keys still work); re-run the target"
-
-    count=$(restic_run key list --json --password-file /rot/.new.pw | jq 'length' 2>/dev/null || echo "")
-    [ "$count" = 1 ] || warn "the repository reports ${count:-?} keys; check: restic key list"
-
-    journal_put step "backup.env"
     set_env_key "$BACKUP_ENV" RESTIC_PASSWORD "$new"
+    prune_restic_keys
+    unset_env_key "$BACKUP_ENV" RESTIC_PASSWORD_NEXT
     restic_cleanup
 
     say "if RESTIC_PASSWORD is exported in your shell, update it: the environment wins over backup.env"
@@ -1070,9 +1054,7 @@ complete() {
         log "dry run complete for $TARGET; nothing was written and nothing was restarted"
         return 0
     fi
-    journal_put step "done"
     record_rotation "$TARGET" ok
-    journal_clear
     log "$TARGET rotated"
     if [ "$TARGET" = runes ]; then
         say "lightning-mcp reads its rune from node.env; nothing else to update"
@@ -1080,19 +1062,60 @@ complete() {
 }
 
 cmd_status() {
-    local f
-    printf '==> pending rotations (%s)\n' "$ROT_DIR"
+    local leftover orphans keep_read keep_spend btc_conf_pw btc_env_pw
+    printf '==> credential invariants\n'
+
+    # A journal from an older version of this script is inert -- nothing reads
+    # it -- but it is also the only hint that a rotation was interrupted before
+    # this version existed, so it is named rather than ignored.
     if compgen -G "$ROT_DIR/*.pending" >/dev/null; then
-        for f in "$ROT_DIR"/*.pending; do
-            JOURNAL="$f"
-            printf '  %-14s started=%s step=%s\n' \
-                "$(basename "$f" .pending)" "$(journal_get started)" "$(journal_get step)"
+        printf '  stale journal(s) from an older version (nothing reads them):\n'
+        for leftover in "$ROT_DIR"/*.pending; do
+            printf '    %s\n' "$(basename "$leftover")"
         done
-        JOURNAL=""
-        printf '  finish one with: %s --resume\n' "$0"
+        printf '  delete them once you have re-run the target they name.\n'
     else
-        printf '  none\n'
+        printf '  no stale journal\n'
     fi
+
+    # The runes: exactly the pair node.env carries may be live. This is the same
+    # check scripts/monitor.sh pages on, including its refusal to judge a host
+    # whose node.env has no pair to compare against.
+    if podman container exists lightningd 2>/dev/null; then
+        keep_read=$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_RUNE)
+        keep_spend=$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_SPEND_RUNE)
+        if [ -z "$keep_read" ] || [ -z "$keep_spend" ]; then
+            printf '  runes: node.env carries no rune pair; skipped the check\n'
+        elif cln_live_runes >/dev/null; then
+            orphans=$(cln_orphan_runes "$keep_read" "$keep_spend" 2>/dev/null || true)
+            if [ -z "$orphans" ]; then
+                printf '  runes: only the pair in node.env is live\n'
+            else
+                printf '  runes: %s live rune(s) the stack does not reference: %s\n' \
+                    "$(printf '%s\n' "$orphans" | wc -l)" \
+                    "$(printf '%s\n' "$orphans" | cut -f1 | paste -sd, -)"
+                printf '  a runes rotation blacklists them; or: podman exec lightningd lightning-cli destroyrune <id> <id>\n'
+            fi
+        else
+            printf '  runes: could not read showrunes (is lightningd healthy?)\n'
+        fi
+    else
+        printf '  runes: lightningd is not deployed\n'
+    fi
+
+    # bitcoind's own file and the copy every client reads: the two the
+    # bitcoin-rpc target moves together, compared the way the monitor compares
+    # them.
+    btc_conf_pw=$(bitcoind_conf_password)
+    btc_env_pw=$(env_value "$SECRETS_FILE" BITCOIN_RPC_PASSWORD)
+    if [ -z "$btc_conf_pw" ] || [ -z "$btc_env_pw" ]; then
+        printf '  bitcoin RPC password: could not read both copies; skipped the check\n'
+    elif [ "$btc_conf_pw" = "$btc_env_pw" ]; then
+        printf '  bitcoin RPC password: bitcoin.conf and secrets.env agree\n'
+    else
+        printf '  bitcoin RPC password: bitcoin.conf and secrets.env DISAGREE; re-run: ./scripts/rotate.sh bitcoin-rpc\n'
+    fi
+
     printf '==> recent rotations (%s)\n' "$DATA_DIR/audit/rotation.log"
     if [ -s "$DATA_DIR/audit/rotation.log" ]; then
         tail -n 10 "$DATA_DIR/audit/rotation.log" | sed 's/^/  /'
@@ -1104,19 +1127,6 @@ cmd_status() {
 if [ "${STATUS:-0}" = 1 ]; then
     cmd_status
     exit 0
-fi
-
-if [ "$RESUME" = 1 ]; then
-    [ -z "$TARGET" ] || die "--resume reads the target from the journal; do not pass one"
-    pending=()
-    while IFS= read -r f; do pending+=("$f"); done \
-        < <(find "$ROT_DIR" -maxdepth 1 -name '*.pending' -type f 2>/dev/null | sort)
-    [ "${#pending[@]}" -gt 0 ] || die "no pending rotation to resume"
-    [ "${#pending[@]}" -eq 1 ] || die "more than one pending rotation (${pending[*]}); resume needs a single one"
-    TARGET=$(basename "${pending[0]}" .pending)
-    JOURNAL="${pending[0]}"
-    STARTED=1
-    log "resuming $TARGET from step: $(journal_get step)"
 fi
 
 [ -n "$TARGET" ] || die "no target; try --list"
@@ -1135,10 +1145,17 @@ if [ "$SPEND_ONLY" = 1 ]; then
     esac
 fi
 preflight_target "$TARGET"
-if [ "$RESUME" = 0 ]; then
-    journal_begin "$TARGET"
+printf '==> rotating %s\n' "$TARGET"
+if [ "$DRY_RUN" = 1 ]; then
+    say "(dry run: nothing is written and no secret is generated for real)"
+else
+    # The scratch dir held the journal in the version that had one; nothing else
+    # creates it now, and the restic password files and the searxng rewrite both
+    # need a 0700 directory a container can be handed.
+    mkdir -p "$ROT_DIR"
+    chmod 700 "$ROT_DIR"
 fi
-[ -n "$JOURNAL" ] || JOURNAL=$(journal_path "$TARGET")
+STARTED=1
 
 case "$TARGET" in
     bitcoin-rpc) apply_bitcoin_rpc ;;
