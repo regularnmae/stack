@@ -55,7 +55,7 @@ credentials, so that image would be unreachable.
 ./scripts/rotate.sh --status        # credential invariants (runes, RPC password), last 10 runs
 ./scripts/npm-hosts.sh              # reconcile every proxy host, via the NPM admin API
 ./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
-shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh scripts/monitor.sh scripts/metrics.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh scripts/healthcheck-lint.sh deploy/root/bouncer.sh  # the CI lint; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
+shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every tracked shell script, enumerated from git so a new one cannot be skipped; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
 
 ## Facts that are easy to get wrong
@@ -612,8 +612,14 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `env_value` (environment first, never sourcing it), so a hand run alerts on
   exactly what the timer would. It is alert-only (never restarts a unit).
   Thresholds are `MONITOR_*` keys **with defaults in the script**, so an env
-  file written before a check existed still monitors. It carries the host
-  checks (disk, inodes, disk saturation,
+  file written before a check existed still monitors. The file itself is
+  `deploy/examples/monitoring/monitor.env.example` **copied verbatim** by
+  `install.sh` (the alertmanager config's pattern), because the two used to be
+  hand-kept and drifted: the seeded copy was missing keys the example documented
+  and `monitor.sh` read five keys no file mentioned. `ci.yml` therefore fails
+  when `monitor.sh` resolves a `MONITOR_*` key the example does not declare —
+  that check is the only thing keeping a new threshold discoverable. It carries
+  the host checks (disk, inodes, disk saturation,
   backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
   hottest sensor, a stale metrics textfile) and the chain/daemon checks (a
   `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN

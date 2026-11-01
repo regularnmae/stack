@@ -17,29 +17,46 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # -P SCRIPTDIR makes the `# shellcheck source=…` directives resolve
-      # relative to each script, and -S info gates on every finding.
+      # relative to each script, and -S info gates on every finding. The file
+      # list is enumerated from git rather than written out: a hardcoded list
+      # silently skipped four scripts (deploy/btcpay/monero-notify.sh,
+      # deploy/root/{audit-report.sh,suricata/start.sh}, scripts/btcpay-wallet.sh)
+      # and both scripts/logs.sh and scripts/metrics.sh were missing from one
+      # step or the other.
       - name: shellcheck
         run: |
           curl -fsSL -o /tmp/shellcheck.tar.xz \
             "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
           tar -xJf /tmp/shellcheck.tar.xz -C /tmp
           "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" --version
+          mapfile -t files < <(git ls-files '*.sh')
+          printf 'shellcheck: %d scripts\n' "${#files[@]}"
           "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x -P SCRIPTDIR -S info \
-            bootstrap.sh deploy.sh verify.sh \
-            deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
-            scripts/monitor.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh \
-            scripts/kuma-monitors.sh scripts/ids.sh scripts/logs.sh scripts/healthcheck-lint.sh \
-            deploy/root/bouncer.sh
+            "${files[@]}"
       # The healthcheck contract (AGENTS.md): explicit keys, a bounded probe,
       # systemd owning the restart. Reads deploy/ templates, so it needs no host.
       - name: healthcheck contract
         run: ./scripts/healthcheck-lint.sh
+      # deploy/install.sh seeds monitor.env from the example, so the file a fresh
+      # host gets and the documentation cannot drift. This catches the other
+      # direction: a key scripts/monitor.sh starts reading that the example never
+      # documents (five of them were in that state), which leaves a fresh host
+      # unable to discover or tune it from the file its own installer wrote.
+      - name: monitor.env documents every key the sweep reads
+        run: |
+          read_keys=$(grep -oE 'env_value "\$MONITOR_ENV" MONITOR_[A-Z_]+' scripts/monitor.sh \
+            | awk '{print $NF}' | sort -u)
+          declared=$(grep -oE '^MONITOR_[A-Z_]+=' deploy/examples/monitoring/monitor.env.example \
+            | tr -d '=' | sort -u)
+          missing=$(comm -23 <(printf '%s\n' "$read_keys") <(printf '%s\n' "$declared"))
+          if [ -n "$missing" ]; then
+            echo "::error::deploy/examples/monitoring/monitor.env.example does not document: $(echo "$missing")"
+            exit 1
+          fi
+          printf 'all %s monitor.env keys documented\n' "$(printf '%s\n' "$read_keys" | wc -l)"
       - name: syntax check
         run: |
-          for f in bootstrap.sh deploy.sh verify.sh \
-                   deploy/install.sh scripts/lib.sh scripts/wallets.sh scripts/backup.sh \
-                   scripts/monitor.sh scripts/spend-audit.sh scripts/rotate.sh scripts/npm-hosts.sh \
-                   scripts/kuma-monitors.sh scripts/ids.sh scripts/healthcheck-lint.sh \
-                   deploy/root/bouncer.sh; do
+          mapfile -t files < <(git ls-files '*.sh')
+          for f in "${files[@]}"; do
             bash -n "$f"
           done

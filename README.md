@@ -140,7 +140,8 @@ container, no DNS and no certificate needed. See
 everything else runs rootless. See [Intrusion detection](#intrusion-detection).
 
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
-`btcpay/` (plugin + the view-only wallet), `tor/`, `config/`, `npm/`, `audit/`, and the BoltMesh
+`btcpay/` (plugin + the view-only wallet), `tor/`, `config/`, `npm/`, `audit/`,
+`uptime-kuma/`, and the BoltMesh
 database as a `pg_dumpall`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`, and `backup-verify.timer` restores one snapshot a week to
 prove it works. It is the one thing that recovers you if the data disk
@@ -1177,11 +1178,11 @@ threshold is a self-inflicted outage on this host, not a false positive:
 * the onion proxies and Uptime-Kuma's self-checks are logged as the host's **own**
   address (`192.168.1.112` / the WAN IP), so banning it would take every onion
   service and the status page down at once;
-* Uptime-Kuma probes nine vhosts a minute, including a permanent 401 on the
-  token-gated ones;
+* Uptime-Kuma probes every monitor in `KUMA_MONITORS` once a minute, including a
+  permanent 401 on the token-gated ones;
 * the podman network (`10.89.0.0/24`) and the LAN are internal by definition.
 
-Read that file before tightening a scenario. `scripts/verify.sh` replays a sample
+Read that file before tightening a scenario. `./verify.sh` replays a sample
 access-log line through `cscli explain` on every sweep, because a change to NPM's
 `log_format` would otherwise disable detection silently.
 
@@ -1235,7 +1236,7 @@ while a normal page load was unaffected.
 watching nothing. `deploy/root/audit.rules` now watches the files this repo never
 writes: the account databases, `sudoers`, `sshd_config`, `auditd.conf`, and the
 stack's own `secrets.env` and `hsm_secret`. `stack-audit.timer` turns the
-root-only log into `audit/$DATA_DIR/auditd.status`, which the monitor pages on.
+root-only log into `$DATA_DIR/audit/auditd.status`, which the monitor pages on.
 
 Two things about it are worth knowing:
 
@@ -1728,24 +1729,28 @@ stack/
   scripts/lib.sh          # data-dir resolution + SELinux labelling + the
                           #   net_curl / mcp_* helpers every check goes through
   scripts/wallets.sh      # the Bitcoin Core wallet (create/restore/load)
+  scripts/btcpay-wallet.sh # import BTCPay's view-only Monero wallet
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
+  scripts/metrics.sh      # one metrics scrape into the textfile collector (metrics.timer)
   scripts/logs.sh         # cross-service log search over victoria-logs (LogsQL)
   scripts/ids.sh          # scheduled IDS roll-up (ids.timer): suricata + crowdsec
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   scripts/rotate.sh       # rotate one credential + every dependent service
   scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
   scripts/kuma-monitors.sh # the status page's monitors (KUMA_MONITORS) + page, via socket.io
+  scripts/healthcheck-lint.sh # the healthcheck contract every unit is checked against
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
     *.container.in        # lightningd, fulcrum, crowdsec, rendered (secrets)
-    *.timer               # backup.timer, monitor.timer (plain user units;
-                          #   Quadlet has no .timer type)
-    monitor.service       # the monitor script as a plain user unit
+    *.timer               # every schedule: backup, backup-verify, monitor,
+                          #   metrics, ids (plain user units; Quadlet has no
+                          #   .timer type)
+    *.service             # their one-shot hosts: backup-verify, monitor,
+                          #   metrics, ids
     npm-network.network
     crowdsec.container    # rootless: NPM access log -> decisions (local only)
-    ids.service ids.timer # the IDS roll-up (plain user units)
     root/                 # the ONE rootful tier: suricata.container + its config,
                           #   rendered by install.sh --root (bootstrap.sh only)
     crowdsec/             # this repo's parser, scenarios, whitelists, acquisition;
@@ -1754,10 +1759,12 @@ stack/
                           #   rendered into $CONFIG_DIR/logs/vector
     monitoring/scrape.yml # what victoriametrics scrapes, rendered into place
     searxng/{settings.yml,limiter.toml}
-    examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by hand
+    examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by
+                                  #   hand -- except monitor.env and alertmanager.yml,
+                                  #   which install.sh copies verbatim
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
     examples/backup/*.example     # backup.env shape
-    examples/monitoring/*.example # monitor.env + alertmanager.yml shapes
+    examples/monitoring/*.example # the monitor env (seeded verbatim) + alertmanager.yml
     examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
     examples/boltmesh/*.example   # db/secrets/app env shapes
     examples/btcpay/*.example     # backend.env shape

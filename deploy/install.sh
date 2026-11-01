@@ -1351,58 +1351,15 @@ fi
 # thresholds for deploy/monitor.service (scripts/monitor.sh). Empty values mean
 # journal-only / the built-in default, so a fresh host is safe before this file
 # is filled in.
+#
+# The example IS the seeded file, copied verbatim like the alertmanager config
+# above -- the two used to be maintained by hand and drifted (the seeded copy
+# was missing keys the example documented, and scripts/monitor.sh read five keys
+# no file mentioned), so the file a fresh host gets is now always the one that
+# documents every key. install.sh still never overwrites an existing one.
 MON_ENV="$CONFIG_DIR/monitoring/monitor.env"
 if ensure_secret "$MON_ENV" "monitoring env"; then
-    write_secret "$MON_ENV" <<'EOF'
-# Alerts and the dead-man's-switch heartbeat, for scripts/monitor.sh via
-# deploy/monitor.service. Alertmanager (deploy/alertmanager.container) sends the
-# mail: the SMTP settings live in
-# $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, not in this file.
-# MONITOR_ALERTMANAGER_URL=off disables the push and leaves alerts in the
-# journal, which is what the stack did before Alertmanager existed.
-# See deploy/examples/monitoring/monitor.env.example.
-MONITOR_ALERTMANAGER_URL=http://127.0.0.1:9093
-MONITOR_PING_URL=
-MONITOR_GRACE_SYNC=1
-MONITOR_VERIFY_ARGS=--deep
-
-# Thresholds for the host checks. Each is a number the script compares against;
-# leaving it empty keeps the default shown here, and they are read at run time,
-# so editing this file needs no reload.
-#   disk/inodes: per cent still free. This is the number node_exporter graphs,
-#                read here directly with df so alerting needs no query engine.
-#   io:          % of wall time the data dir's disk is busy, sampled over 3s;
-#                sustained contention is what makes every chain crawl.
-#   backup:      hours since the last successful restic snapshot (a timer that
-#                fires is not the same as a repository that has a snapshot).
-#   drill:       hours since the last successful restore drill (scripts/backup.sh
-#                verify). Keyed on the last SUCCESS, so a drill that skips for
-#                lack of disk space cannot look healthy just because it ran.
-#   cert:        days of remaining validity on the shortest-lived certificate
-#                nginx-proxy-manager holds (a failed renewal is otherwise silent).
-#   restarts:    systemd restarts of any stack unit between two sweeps.
-#   metrics:     seconds before stack.prom counts as stale (the collector is a
-#                60s timer; five missed ticks is a real failure).
-#   logs:        seconds before the newest log entry counts as stale (vector
-#                ships continuously; 15 minutes is a stopped pipeline, not lag).
-#   fulcrum:     blocks Fulcrum's Electrum index may lag bitcoind (it polls every
-#                5s when healthy, so the default 12 means "stopped following").
-MONITOR_DISK_FREE_PCT=10
-MONITOR_INODES_FREE_PCT=5
-MONITOR_IO_UTIL_PCT=90
-MONITOR_BACKUP_MAX_AGE_H=36
-MONITOR_BACKUP_VERIFY_MAX_AGE_H=192
-MONITOR_CERT_MIN_DAYS=14
-MONITOR_RESTART_MAX=3
-MONITOR_METRICS_MAX_AGE_S=300
-MONITOR_LOGS_MAX_AGE_S=900
-MONITOR_FULCRUM_LAG_BLOCKS=12
-# Seconds a check must stay bad before it is mailed at all, i.e. the flap
-# damper Alertmanager cannot provide (it only sees what is pushed at it). 600 =
-# two sweeps: a check that fails once and recovers costs a journal line, not an
-# email. A recovery is announced as soon as the next sweep sees it.
-MONITOR_ALERT_FOR=600
-EOF
+    write_secret "$MON_ENV" < "$DEPLOY_DIR/examples/monitoring/monitor.env.example"
     log "wrote $MON_ENV (mode 600) -- fill in the heartbeat (and SMTP in the alertmanager config) to be paged"
 fi
 

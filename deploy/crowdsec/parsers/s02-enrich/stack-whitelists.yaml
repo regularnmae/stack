@@ -29,7 +29,7 @@
 # a silent widening: this file once carried `startsWith '172.2'` for the LAN's
 # middle span, which also covered 172.2.0.0/16 and 172.200.0.0/14 -- ~4.4M public
 # addresses reported as whitelisted rather than detected. The /12 is an IpInRange
-# now, and scripts/verify.sh replays a public 172.220.10.5 (must NOT be
+# now, and ./verify.sh replays a public 172.220.10.5 (must NOT be
 # whitelisted) next to a private 172.18.0.5 (must be).
 #
 # Add the WAN address itself only if the operator's own monitoring is ever
