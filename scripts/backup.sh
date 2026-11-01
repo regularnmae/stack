@@ -138,12 +138,15 @@ backup_paths=()
 for p in "${BACKUP_PATHS[@]}"; do
     # audit/ holds a root-owned auditd.fim that podman cannot relabel (:z fails);
     # the directory already carries container_file_t, so leave the label alone.
+    # Both arrays: `backup` reads through data_ro, `restore` writes through
+    # data_rw, and a relabel on the write path fails for the same reason.
     if [ "$p" = audit ]; then
         data_ro+=(-v "$DATA_DIR/$p:/data/$p:ro")
+        data_rw+=(-v "$DATA_DIR/$p:/data/$p")
     else
         data_ro+=(-v "$DATA_DIR/$p:/data/$p:ro,z")
+        data_rw+=(-v "$DATA_DIR/$p:/data/$p:z")
     fi
-    data_rw+=(-v "$DATA_DIR/$p:/data/$p:z")
     backup_paths+=("/data/$p")
 done
 
