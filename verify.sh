@@ -882,6 +882,18 @@ else
     warn "crowdsec unit is not installed (run deploy/install.sh)"
 fi
 
+# Render a deploy/root/ file the way install.sh does, so a drift check compares
+# what bootstrap would write, not the literal template. Keep the substitution
+# list in step with root_render() in deploy/install.sh: if it falls behind, the
+# only consequence is a false drift warning (a placeholder left literal in the
+# comparison), never a false "matches".
+root_want() { # src
+    sed -e "s|@DATA_DIR@|$DATA_DIR|g" \
+        -e "s|@CONFIG_DIR@|$DATA_DIR/config|g" \
+        -e "s|@REPO_DIR@|$REPO_DIR|g" \
+        -e "s|@IDS_RETENTION_DAYS@|${IDS_RETENTION_DAYS:-14}|g" "$1"
+}
+
 if [ -f /etc/containers/systemd/suricata.container ]; then
     if systemctl is-active --quiet suricata 2>/dev/null; then
         pass "suricata is active"
@@ -892,14 +904,27 @@ if [ -f /etc/containers/systemd/suricata.container ]; then
     # deploy/root/ without re-running bootstrap -- the running sensor is then not
     # the one in git, which is exactly the drift the digest check exists for.
     if [ -f "$REPO_DIR/deploy/root/suricata.container" ]; then
-        want=$(mktemp)
-        sed -e "s|@DATA_DIR@|$DATA_DIR|g" "$REPO_DIR/deploy/root/suricata.container" > "$want"
-        if diff -q "$want" /etc/containers/systemd/suricata.container >/dev/null 2>&1; then
+        if root_want "$REPO_DIR/deploy/root/suricata.container" \
+            | diff -q - /etc/containers/systemd/suricata.container >/dev/null 2>&1; then
             pass "rendered suricata unit matches deploy/root/"
         else
             warn "rendered suricata unit differs from deploy/root/ (sudo ./bootstrap.sh re-renders it)"
         fi
-        rm -f "$want"
+    fi
+    # The engine reads the rendered config, not the one in the repo, so the unit
+    # alone is a check that can report a clean sweep while suricata runs a config
+    # nobody committed -- which is how the committed HTTP_SERVERS address sat
+    # unapplied. Same verdict, same one-line fix.
+    if [ -f "$REPO_DIR/deploy/root/suricata/suricata.yaml" ] \
+        && [ -f /etc/stack-ids/suricata/suricata.yaml ]; then
+        if root_want "$REPO_DIR/deploy/root/suricata/suricata.yaml" \
+            | diff -q - /etc/stack-ids/suricata/suricata.yaml >/dev/null 2>&1; then
+            pass "rendered suricata.yaml matches deploy/root/"
+        else
+            warn "rendered suricata.yaml differs from deploy/root/ (sudo ./bootstrap.sh re-renders it)"
+        fi
+    elif [ -f "$REPO_DIR/deploy/root/suricata/suricata.yaml" ]; then
+        warn "the rendered suricata.yaml is missing (sudo ./bootstrap.sh installs it)"
     fi
 else
     warn "the root tier is not installed (run: sudo ./bootstrap.sh) -- no network IDS"
