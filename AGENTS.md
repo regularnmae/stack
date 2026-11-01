@@ -200,6 +200,19 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   upstream `ARG` pins, and deliberately no `COPY` out of the build context
   (`kuma-ctl/monitors.mjs` is bind-mounted at run time), which is why the hash is
   the Containerfile's and not the directory's.
+- **The BTCPay Monero plugin is a file, so nothing else notices a bump.**
+  `install.sh` writes `.artifact-sha256` into the plugin directory and skips the
+  download only while that marker still matches `BTCPAY_PLUGIN_SHA256`; the
+  extraction goes into a staging sibling and is swapped in whole, so a new
+  version never inherits the old one's leftover files and a failed download or
+  extract leaves the working plugin alone. But a unit digest cannot see a file in
+  `$DATA_DIR`, `start` is a no-op on an active container, and `--only btcpay`
+  never runs `unit_digest` at all — so `start_btcpay` calls
+  `btcpay_plugin_newer` (the DLL's mtime against podman's `StartedAt`, i.e.
+  `refresh_image_unit` answered for a file) and restarts before its single health
+  wait. BTCPay loads plugin assemblies at start and keeps the mapped copy, which
+  is why the restart is required, not tidy: `btcpay-bootstrap` enables XMR-CHAIN
+  through BTCPay's API and needs the new assembly loaded.
 - **Backup is a oneshot Quadlet job plus a plain user timer.** `backup.container`
   is `Type=oneshot` with **no `[Install]` and no `RemainAfterExit`** (either would
   stop the timer ever firing); `backup.timer` is not Quadlet (it has no `.timer`

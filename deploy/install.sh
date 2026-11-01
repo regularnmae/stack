@@ -619,21 +619,27 @@ EOF
 fi
 [ -d "$DATA_DIR/bitcoin" ] && chown_image_uid "$DATA_DIR/bitcoin"
 
-# Download and extract the pinned Monero plugin once. A failure is a warning,
-# not a fatal error: BTC-LN still works and the bootstrap re-runs the XMR
-# method on the next deploy. Renovate cannot track plugin-builder URLs, so the
-# version and hash in stack.conf are edited together.
+# Download and extract the pinned Monero plugin when the pinned artifact is not
+# the one on disk. A failure is a warning, not a fatal error: BTC-LN still works
+# and the bootstrap re-runs the XMR method on the next deploy. Renovate cannot
+# track plugin-builder URLs, so the version and hash in stack.conf are edited
+# together -- and the marker is what makes that edit land, since the DLL's own
+# name does not change between versions.
 stage_btcpay_plugin() {
     local dir="$DATA_DIR/btcpay/Plugins/$BTCPAY_PLUGIN_ID"
-    local marker="$dir/.artifact-sha256" tmp
-    [ -f "$dir/$BTCPAY_PLUGIN_ID.dll" ] && return 0
+    local marker="$dir/.artifact-sha256" tmp stage
+    local installed=""
+    [ -f "$marker" ] && installed=$(cat "$marker" 2>/dev/null)
+    if [ -f "$dir/$BTCPAY_PLUGIN_ID.dll" ] && [ "$installed" = "$BTCPAY_PLUGIN_SHA256" ]; then
+        return 0
+    fi
     if ! command -v curl >/dev/null 2>&1; then
         warn "curl is missing; cannot download the BTCPay Monero plugin"
         return 0
     fi
     tmp=$(mktemp)
     if ! curl -fsSL --max-time 120 "$BTCPAY_PLUGIN_URL" -o "$tmp"; then
-        warn "could not download the BTCPay Monero plugin; XMR will stay disabled"
+        warn "could not download the BTCPay Monero plugin; the installed one stays, XMR will stay disabled if there is none"
         rm -f "$tmp"
         return 0
     fi
@@ -642,19 +648,38 @@ stage_btcpay_plugin() {
         rm -f "$tmp"
         return 0
     fi
-    mkdir -p "$dir"
+    # Extract into a sibling directory and swap it in whole: extracting over the
+    # previous version would leave its extra files behind, and a failed extract
+    # must not destroy a plugin that works.
+    stage=$(mktemp -d "$DATA_DIR/btcpay/Plugins/.stage.XXXXXX") || {
+        warn "could not create a staging directory for the BTCPay Monero plugin"
+        rm -f "$tmp"
+        return 0
+    }
     if command -v unzip >/dev/null 2>&1; then
-        unzip -q -o "$tmp" -d "$dir" || { warn "could not extract the BTCPay Monero plugin"; rm -f "$tmp"; return 0; }
+        unzip -q -o "$tmp" -d "$stage" || { warn "could not extract the BTCPay Monero plugin"; rm -rf "$stage" "$tmp"; return 0; }
     elif command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$tmp" "$dir" \
-            || { warn "could not extract the BTCPay Monero plugin"; rm -f "$tmp"; return 0; }
+        python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$tmp" "$stage" \
+            || { warn "could not extract the BTCPay Monero plugin"; rm -rf "$stage" "$tmp"; return 0; }
     else
         warn "neither unzip nor python3 is available to extract the BTCPay Monero plugin"
+        rm -rf "$stage"
         rm -f "$tmp"
         return 0
     fi
-    printf '%s\n' "$BTCPAY_PLUGIN_SHA256" > "$marker"
     rm -f "$tmp"
+    if [ ! -s "$stage/$BTCPAY_PLUGIN_ID.dll" ]; then
+        warn "the BTCPay Monero plugin artifact has no $BTCPAY_PLUGIN_ID.dll; keeping the installed one"
+        rm -rf "$stage"
+        return 0
+    fi
+    # The container keeps its already-loaded assemblies mapped, so replacing the
+    # directory under a running BTCPay is safe; deploy.sh restarts it when the
+    # DLL is newer than the container (btcpay_plugin_newer).
+    rm -rf "$dir"
+    chmod 755 "$stage"
+    mv "$stage" "$dir" || { warn "could not move the BTCPay Monero plugin into $dir"; rm -rf "$stage"; return 0; }
+    printf '%s\n' "$BTCPAY_PLUGIN_SHA256" > "$marker"
     log "installed the BTCPay Monero plugin into $dir"
 }
 

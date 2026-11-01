@@ -276,6 +276,27 @@ refresh_image_unit() { # container image -> restart when the container is older
     wait_healthy "$name" "$APP_HEALTH_WAIT" || true
 }
 
+# BTCPay loads the Monero plugin assemblies at start and keeps the copy it
+# mapped, so replacing the DLL on disk does nothing until the container is
+# recreated -- and its unit is unchanged by a plugin bump. Same question as
+# refresh_image_unit, answered against a file: is what the process loaded older
+# than what install.sh staged?
+btcpay_plugin_newer() {
+    local dll="$DATA_DIR/btcpay/Plugins/$BTCPAY_PLUGIN_ID/$BTCPAY_PLUGIN_ID.dll"
+    local started mtime
+    [ -f "$dll" ] || return 1
+    podman container exists btcpay 2>/dev/null || return 1
+    started=$(podman inspect btcpay --format '{{.State.StartedAt}}' 2>/dev/null || true)
+    [ -n "$started" ] || return 1
+    started=$(date -d "$started" +%s 2>/dev/null || true)
+    [ -n "$started" ] || return 1
+    mtime=$(stat -c %Y "$dll" 2>/dev/null || true)
+    [ -n "$mtime" ] || return 1
+    # Whole-second mtimes against a start time that carries fractions: an equal
+    # second is "the process loaded it".
+    [ "$mtime" -gt "$started" ]
+}
+
 wait_cmd() { # description timeout cmd...
     local desc="$1" t="$2"; shift 2
     local deadline
@@ -556,6 +577,14 @@ start_btcpay() {
     wait_healthy monero-wallet-btcpay "${MONERO_WALLET_WAIT:-300}" || warn "monero-wallet-btcpay not healthy"
 
     start_unit btcpay || { warn "btcpay did not start"; dump_tail btcpay 40; return 1; }
+    # A plugin bump is a file in the plugin directory, so no unit digest notices
+    # it and `start` is a no-op on an already-active container: compare what is
+    # loaded with what is on disk, the same call refresh_image_unit makes for an
+    # image. This covers `--only btcpay` too, which never reaches unit_digest.
+    if btcpay_plugin_newer; then
+        log "the BTCPay Monero plugin on disk is newer than the running container; restarting btcpay"
+        restart_unit btcpay || { warn "btcpay did not restart"; dump_tail btcpay 40; return 1; }
+    fi
     wait_healthy btcpay 300 || { warn "btcpay did not become healthy"; dump_tail btcpay 40; return 1; }
 
     # Import the view-only plugin wallet once the operator has supplied the
