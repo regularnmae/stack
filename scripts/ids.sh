@@ -106,15 +106,22 @@ if [ -s "$EVE" ]; then
     [ "$size" -ge "$off" ] || off=0
     if [ "$size" -gt "$off" ]; then
         # -R + fromjson? so a torn final line (an unfinished write) is skipped
-        # instead of failing the whole stream.
-        read -r -a found <<< "$(tail -c +$((off + 1)) "$EVE" 2>/dev/null \
+        # instead of failing the whole stream. The cursor advances whenever the
+        # read *completed*, not only when it found an alert -- zero alerts is the
+        # normal state, and leaving the cursor behind re-reads the whole file
+        # every sweep, which is the load the cursor exists to avoid. pipefail
+        # makes a failing tail/jq skip the advance instead, so an unreadable
+        # window is re-examined rather than silently stepped over.
+        if raw=$(tail -c +$((off + 1)) "$EVE" 2>/dev/null \
             | jq -Rr 'fromjson? | select(.event_type == "alert") | "\(.alert.signature_id)\t\(.alert.signature)"' 2>/dev/null \
-            | awk -F'\t' '{n++; last=$0} END {print n+0 "\t" last}')"
-        ALERTS="${found[0]:-0}"
-        LAST_ALERT="${found[1]:-}"
-        case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
+            | awk -F'\t' '{n++; last=$0} END {print n+0 "\t" last}'); then
+            read -r -a found <<< "$raw"
+            ALERTS="${found[0]:-0}"
+            LAST_ALERT="${found[1]:-}"
+            case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
+            printf '%s\n' "$size" > "$CURSOR_FILE"
+        fi
     fi
-    [ "$ALERTS" -gt 0 ] && printf '%s\n' "$size" > "$CURSOR_FILE"
 fi
 say "suricata alerts since the last run: $ALERTS${LAST_ALERT:+ (last: $LAST_ALERT)}"
 
