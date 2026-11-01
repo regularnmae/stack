@@ -10,8 +10,8 @@
 #   /etc/stack-ids/audit-report.sh --show     ... and print what it found
 #
 # The verdict is about stack_hard (account databases, sudoers, sshd, cron, audit
-# config) -- host-level changes that no script in this repo makes. stack_tier and
-# stack_data events are counted and shown but never fail the run: bootstrap and
+# config) -- host-level changes that no script in this repo makes. stack_data
+# events are counted and shown but never fail the run: bootstrap and
 # `scripts/rotate.sh` write them on purpose, and a monitor that pages on its own
 # deploy is a monitor nobody reads.
 set -uo pipefail
@@ -70,10 +70,8 @@ count_key() { # key
 
 hard=$(count_key stack_hard)
 data=$(count_key stack_data)
-tier=$(count_key stack_tier)
 case "$hard" in ''|*[!0-9]*) hard=0 ;; esac
 case "$data" in ''|*[!0-9]*) data=0 ;; esac
-case "$tier" in ''|*[!0-9]*) tier=0 ;; esac
 
 # The summary above is read with --no-config, because loading the rule set makes
 # the kernel emit a keyed CONFIG_CHANGE per rule added: counting those would fail
@@ -174,7 +172,6 @@ tmp=$(mktemp "$DATA_DIR/audit/.auditd.XXXXXX") || exit 1
     printf 'result=%s\n' "$result"
     printf 'ok_epoch=%s\n' "$ok_epoch"
     printf 'hard=%s\n' "$hard"
-    printf 'tier=%s\n' "$tier"
     printf 'data=%s\n' "$data"
     printf 'fim=%s\n' "$fim_changes"
     printf 'audit=%s\n' "$audit_state"
@@ -192,7 +189,7 @@ if [ "$read_state" = ok ]; then
 fi
 
 if [ "$SHOW" = 1 ]; then
-    printf 'since %s: hard=%s tier=%s data=%s fim=%s audit=%s\n' "$since" "$hard" "$tier" "$data" "$fim_changes" "$audit_state"
+    printf 'since %s: hard=%s data=%s fim=%s audit=%s\n' "$since" "$hard" "$data" "$fim_changes" "$audit_state"
     [ -n "$detail" ] && printf 'hard detail: %s\n' "$detail"
 fi
 
