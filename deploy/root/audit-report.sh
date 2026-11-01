@@ -53,7 +53,7 @@ since_time=$(date -d "@$since_epoch" '+%H:%M:%S' 2>/dev/null) || since_time=""
 # from a live-looking log is a quiet window, not a failure.
 summary=""
 read_state=ok
-if ! summary=$(aureport --key --summary --start "$since_date" "$since_time" 2>/dev/null); then
+if ! summary=$(aureport --key --summary --no-config --start "$since_date" "$since_time" 2>/dev/null); then
     summary=""
     # A missing or empty log is not a failed read. aureport exits 1 when there is
     # no /var/log/audit/audit.log at all, which on this class of host is the
@@ -75,6 +75,16 @@ case "$hard" in ''|*[!0-9]*) hard=0 ;; esac
 case "$data" in ''|*[!0-9]*) data=0 ;; esac
 case "$tier" in ''|*[!0-9]*) tier=0 ;; esac
 
+# The summary above is read with --no-config, because loading the rule set makes
+# the kernel emit a keyed CONFIG_CHANGE per rule added: counting those would fail
+# the sweep on every bootstrap (measured here: three per reload, from
+# `auditctl -R`). A rule being *removed* is the opposite kind of event -- that is
+# how someone else blinds the host -- so it is counted here instead.
+removed=$(ausearch --start "$since_date" "$since_time" -m CONFIG_CHANGE 2>/dev/null \
+    | grep -c 'op=del_rule' || true)
+case "$removed" in ''|*[!0-9]*) removed=0 ;; esac
+[ "$removed" -gt 0 ] && hard=$((hard + removed))
+
 detail=""
 if [ "$hard" -gt 0 ]; then
     # The one-line evidence: which file, and what kind of operation. Enough to
@@ -83,6 +93,7 @@ if [ "$hard" -gt 0 ]; then
         | grep -E '^(type=PROCTITLE|.*name=)' \
         | tail -3 | tr '\n' ' ')
 fi
+[ "$removed" -gt 0 ] && detail="${detail:+$detail }$removed audit rule(s) removed"
 
 # ---------------------------------------------------------------------------
 # the hash diff: entry creation in the directories audit will not watch
