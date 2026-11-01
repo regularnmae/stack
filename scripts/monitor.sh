@@ -926,6 +926,12 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
                 else
                     ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported"
                 fi
+                # `aureport` failing means the window is re-read rather than
+                # skipped (audit-report.sh pins its cursor), so this is a report,
+                # not a page: nothing was lost, but the counters are stale.
+                if [ "$(env_value "$AUDIT_STATUS_FILE" read)" = failed ]; then
+                    soft "the audit report could not read the audit log; it is re-examining the same window"
+                fi
             fi
         fi
     fi

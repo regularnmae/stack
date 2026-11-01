@@ -38,8 +38,15 @@ since=$(date -d "@$since_epoch" '+%m/%d/%Y %H:%M:%S' 2>/dev/null) \
     || since=$(date -d "-10 minutes" '+%m/%d/%Y %H:%M:%S')
 
 # `aureport --key --summary` is a count per key over a window -- exactly the
-# shape needed, and it does not require parsing event records ourselves.
-summary=$(aureport --key --summary --start "$since" 2>/dev/null || true)
+# shape needed, and it does not require parsing event records ourselves. Its
+# exit status is the only signal that the read happened at all: an empty summary
+# from a live-looking log is a quiet window, not a failure.
+summary=""
+read_state=ok
+if ! summary=$(aureport --key --summary --start "$since" 2>/dev/null); then
+    summary=""
+    read_state=failed
+fi
 
 count_key() { # key
     printf '%s\n' "$summary" | awk -v k="$1" '$2 == k { print $1 }' | tail -1
@@ -144,12 +151,19 @@ tmp=$(mktemp "$DATA_DIR/audit/.auditd.XXXXXX") || exit 1
     printf 'data=%s\n' "$data"
     printf 'fim=%s\n' "$fim_changes"
     printf 'audit=%s\n' "$audit_state"
+    printf 'read=%s\n' "$read_state"
     printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
 } > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$STATUS"
 
 # Only advance the cursor on a clean read: a failed ausearch must re-examine the
-# same window next time rather than skip it.
-printf '%s\n' "$now" > "$CURSOR"
+# same window next time rather than skip it. The evidence read (`ausearch`, only
+# when stack_hard fired) is not part of the gate -- the counts above are what
+# decide whether a window may be skipped. An inert audit subsystem answers with
+# an empty summary and status 0, so it keeps advancing and the window stays
+# bounded; `read=failed` is in the status file, and the sweep reports it.
+if [ "$read_state" = ok ]; then
+    printf '%s\n' "$now" > "$CURSOR"
+fi
 
 if [ "$SHOW" = 1 ]; then
     printf 'since %s: hard=%s tier=%s data=%s fim=%s audit=%s\n' "$since" "$hard" "$tier" "$data" "$fim_changes" "$audit_state"

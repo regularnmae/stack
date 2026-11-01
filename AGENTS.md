@@ -413,7 +413,11 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   it survived a reboot. The watches stay loaded (they are right if auditing is
   ever on) but the report marks itself `audit=inert` and the sweep says so, so
   nobody reads "no host-level changes" as coverage. The hash diff is the half
-  that actually works.
+  that actually works. The report advances its `auditd.cursor` only when
+  `aureport` exits 0 (`read=ok|failed` in the status file, reported by the sweep
+  as a soft line), so a failed read re-examines the same window instead of
+  stepping over it; an inert subsystem answers empty with status 0, so the
+  window stays bounded rather than growing forever.
 - **A Quadlet unit without `[Install]` never starts at boot.** `crowdsec` was
   written without it, so after the first reboot it was simply absent, and the
   only visible symptom was `stack-bouncer` failing every minute with "LAPI
