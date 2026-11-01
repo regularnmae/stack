@@ -1053,7 +1053,8 @@ why `bootstrap.sh` is a **two-pass** install: the sensor's config references the
 data dir, which does not exist until `./deploy.sh` has run. The first bootstrap
 prints a notice; re-running it after the first deploy installs the sensor. The
 rendered unit lives in `/etc/containers/systemd/`, its config in
-`/etc/stack-ids/`, and `./verify.sh` warns when the two have drifted apart.
+`/etc/stack-ids/`, and `./verify.sh` compares every file the root tier renders
+against `deploy/root/`, warning per file when one has drifted.
 
 ### What each can and cannot see
 

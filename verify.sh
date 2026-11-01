@@ -894,37 +894,70 @@ root_want() { # src
         -e "s|@IDS_RETENTION_DAYS@|${IDS_RETENTION_DAYS:-14}|g" "$1"
 }
 
+# Everything install.sh --root renders from deploy/root/, as source:target[:opt].
+# Content only -- bootstrap owns the modes. Three kinds of file are absent on
+# purpose: the 0600 env files it writes from heredocs (audit.env, bouncer.env),
+# the tmpfiles rule it does the same way, and /etc/audit/rules.d/60-stack.rules,
+# which it writes 0640 into a 0750 directory -- an unprivileged sweep cannot read
+# it at all, and `auditctl -l` needs CAP_AUDIT_CONTROL, so the audit section
+# reads the report's verdict instead.
+# `opt` marks a target that is legitimately absent until there is a bouncer key
+# in secrets.env (the second bootstrap pass installs it): skip those silently
+# when missing, since the bouncer block above already reports its own state.
+ROOT_FILES=(
+    "deploy/root/suricata.container:/etc/containers/systemd/suricata.container"
+    "deploy/root/suricata/suricata.yaml:/etc/stack-ids/suricata/suricata.yaml"
+    "deploy/root/suricata/threshold.conf:/etc/stack-ids/suricata/threshold.conf"
+    "deploy/root/suricata/disable.conf:/etc/stack-ids/suricata/disable.conf"
+    "deploy/root/suricata/start.sh:/etc/stack-ids/suricata/start.sh"
+    "deploy/root/suricata/rules/local.rules:/etc/stack-ids/suricata/rules/local.rules"
+    "deploy/root/audit-report.sh:/etc/stack-ids/audit-report.sh"
+    "deploy/root/stack-audit.service:/etc/systemd/system/stack-audit.service"
+    "deploy/root/stack-audit.timer:/etc/systemd/system/stack-audit.timer"
+    "deploy/root/bouncer.sh:/etc/stack-ids/bouncer.sh:opt"
+    "deploy/root/stack-bouncer.service:/etc/systemd/system/stack-bouncer.service:opt"
+    "deploy/root/stack-bouncer.timer:/etc/systemd/system/stack-bouncer.timer:opt"
+)
+
 if [ -f /etc/containers/systemd/suricata.container ]; then
     if systemctl is-active --quiet suricata 2>/dev/null; then
         pass "suricata is active"
     else
         bad "suricata is not active (sudo systemctl status suricata)"
     fi
-    # A rendered unit that no longer matches the repo means someone edited
-    # deploy/root/ without re-running bootstrap -- the running sensor is then not
-    # the one in git, which is exactly the drift the digest check exists for.
-    if [ -f "$REPO_DIR/deploy/root/suricata.container" ]; then
-        if root_want "$REPO_DIR/deploy/root/suricata.container" \
-            | diff -q - /etc/containers/systemd/suricata.container >/dev/null 2>&1; then
-            pass "rendered suricata unit matches deploy/root/"
-        else
-            warn "rendered suricata unit differs from deploy/root/ (sudo ./bootstrap.sh re-renders it)"
+    # A rendered file that no longer matches the repo means someone edited
+    # deploy/root/ without re-running bootstrap -- the root tier is then not the
+    # one in git, which is exactly the drift the digest check exists for. It is
+    # checked over every rendered file because the config matters as much as the
+    # unit: suricata reads /etc/stack-ids/suricata/suricata.yaml, so a unit-only
+    # check reported a clean sweep while the engine ran a config nobody had
+    # committed.
+    root_checked=0 root_faults=0
+    for row in "${ROOT_FILES[@]}"; do
+        src=${row%%:*}
+        rest=${row#*:}
+        opt=""
+        case "$rest" in
+            *:*) dst=${rest%%:*}; opt=${rest#*:} ;;
+            *)   dst=$rest ;;
+        esac
+        [ -f "$REPO_DIR/$src" ] || continue
+        if [ ! -f "$dst" ]; then
+            [ "$opt" = opt ] && continue
+            warn "rendered $dst is missing (sudo ./bootstrap.sh installs it)"
+            root_faults=$((root_faults + 1))
+            continue
         fi
-    fi
-    # The engine reads the rendered config, not the one in the repo, so the unit
-    # alone is a check that can report a clean sweep while suricata runs a config
-    # nobody committed -- which is how the committed HTTP_SERVERS address sat
-    # unapplied. Same verdict, same one-line fix.
-    if [ -f "$REPO_DIR/deploy/root/suricata/suricata.yaml" ] \
-        && [ -f /etc/stack-ids/suricata/suricata.yaml ]; then
-        if root_want "$REPO_DIR/deploy/root/suricata/suricata.yaml" \
-            | diff -q - /etc/stack-ids/suricata/suricata.yaml >/dev/null 2>&1; then
-            pass "rendered suricata.yaml matches deploy/root/"
-        else
-            warn "rendered suricata.yaml differs from deploy/root/ (sudo ./bootstrap.sh re-renders it)"
+        root_checked=$((root_checked + 1))
+        if ! root_want "$REPO_DIR/$src" | diff -q - "$dst" >/dev/null 2>&1; then
+            warn "rendered $dst differs from $src (sudo ./bootstrap.sh re-renders it)"
+            root_faults=$((root_faults + 1))
         fi
-    elif [ -f "$REPO_DIR/deploy/root/suricata/suricata.yaml" ]; then
-        warn "the rendered suricata.yaml is missing (sudo ./bootstrap.sh installs it)"
+    done
+    if [ "$root_faults" -eq 0 ]; then
+        pass "rendered root-tier files match deploy/root/ ($root_checked files)"
+    else
+        warn "$root_faults rendered root-tier file(s) are stale -- the root tier is not what is in git"
     fi
 else
     warn "the root tier is not installed (run: sudo ./bootstrap.sh) -- no network IDS"

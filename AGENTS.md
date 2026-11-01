@@ -356,7 +356,15 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   (root-owned, 0644, so the unprivileged `scripts/ids.sh` can read them), and a
   user-writable config consumed by a root container would be a privilege
   boundary. A change to `deploy/root/` therefore needs `sudo ./bootstrap.sh`
-  again; `verify.sh` warns when the rendered unit has drifted from the repo.
+  again; `verify.sh` walks a declared table (`ROOT_FILES`) of every file
+  `install.sh --root` renders and warns per file when one has drifted or is
+  missing. Content only -- bootstrap owns the modes -- and three kinds are
+  excluded on purpose: the 0600 env files and the tmpfiles rule (written from
+  heredocs, no repo counterpart) and `60-stack.rules` (0640 in a 0750 directory,
+  unreadable to an unprivileged sweep; the audit section reads the report's
+  verdict instead). The bouncer's three are marked `opt`, absent until the
+  second bootstrap pass has a key, so they are skipped rather than warned about
+  on a host that has not got one yet.
 - **Intrusion detection is two engines and two privilege domains:**
   `suricata` (rootful, `deploy/root/`, enp8s0 + lo) sees packets and no TLS
   content; `crowdsec` (rootless) sees NPM's access log and nothing on the wire.
