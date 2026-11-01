@@ -42,8 +42,9 @@ mkdir -p "$DATA_DIR/audit"
 say() { [ "$DRY_RUN" = 1 ] && printf '%s\n' "$*"; return 0; }
 
 # ---------------------------------------------------------------------------
-# LAPI fetch: /dev/tcp, because this host has no curl and the point is to avoid
-# a dependency on an image or a package just to read one JSON document.
+# LAPI fetch: /dev/tcp, because the point is to avoid a dependency on an image
+# or a package just to read one JSON document. The host's own curl is the
+# monitor's alert path; this root oneshot must not care whether it exists.
 # ---------------------------------------------------------------------------
 lapi_get() { # host port path key -> body on stdout, non-zero on a non-200
     local host="$1" port="$2" path="$3" key="$4" raw status

@@ -331,9 +331,10 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   over SSH (`GITHUB_SSH_HOST`), and `deploy.sh` sets `GIT_TERMINAL_PROMPT=0`/
   `GIT_SSH_COMMAND=ssh -o BatchMode=yes` so a missing key is a clear error, not a
   prompt. The frontend needs `--target prod` plus the `VITE_*` build args (baked
-  into the bundle, so a hostname change is a rebuild). Its rune is deliberately
-  minimal (`getinfo`/`listinvoices`/`invoice`), so BoltMesh can bill but never
-  move funds.
+  into the bundle, so a hostname change is a rebuild). **BoltMesh holds no CLN
+  rune:** BTCPay is its settlement engine and reaches CLN itself over the unix
+  socket (`BTCPAY_BTCLIGHTNING`), so the only runes are `lightning-mcp`'s
+  read/spend pair -- `stack.conf` says why there is no boltmesh rune to mint.
 - **Shared bind mounts use `:z`, not `:Z`** — the backup container mounts `cln/`
   and `npm/` read-only alongside `lightningd` and NPM, and two containers cannot
   share a path one labels private.
@@ -531,17 +532,19 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   applied (`--status`/`--resume`, never a second mint), the spend baseline is
   rehashed per file rather than `--rebaseline`d, and `rotation.log` records the
   act without the value. No timer: these tokens have clients outside the stack.
-  Phase 1 is the in-stack credentials (`bitcoin-rpc`,
-  `tor-control`, `runes`), plus `token:<server>` (proves the new bearer TOKEN and
-  the old one's 401; `--spend` only proves the reload, since the spend token is
-  exercised by a spend call), `searxng-secret` and `monero-wallet`
-  (`change_wallet_password` at the daemon, `--yes` + a <24h snapshot, and the
-  journal records that the daemon call landed so `--resume` never sends it
-  twice). **Any daemon-side mutation must be guarded for `--dry-run` inside the
-  function that performs it, not only at the call site** -- an unguarded
-  `change_wallet_password` during a dry run once changed a live wallet's
-  password to a value nothing had recorded, which cost a restore from backup
-  and a cache rebuild. `scripts/monitor.sh` alerts on any leftover
+  The in-stack credentials are `bitcoin-rpc`, `tor-control` and `runes`, plus
+  `token:<server>` (proves the new bearer TOKEN and the old one's 401; `--spend`
+  only proves the reload, since the spend token is exercised by a spend call)
+  and `searxng-secret`. There is **no `monero-wallet` target** any more: BTCPay's
+  wallet is imported view-only (address + view key only), opens with an empty
+  password and runs with `--disable-rpc-login`, so the file holds nothing to
+  rotate -- `--list` is the authority on the set.
+  **Any daemon-side mutation must be guarded for `--dry-run` inside the
+  function that performs it, not only at the call site** -- the rule outlives
+  the target that taught it: an unguarded `change_wallet_password` during a dry
+  run, back when `monero-wallet` was a target, changed a live wallet's password
+  to a value nothing had recorded, which cost a restore from backup and a cache
+  rebuild. `scripts/monitor.sh` alerts on any leftover
   `config/rotation/*.pending` for the same reason.
   The rest (`postgres`, `boltmesh-keys`, `restic`) follow the same rule: change
   the daemon/authority first (ALTER ROLE, key add), keep the client copy in its

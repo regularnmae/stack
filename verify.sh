@@ -14,10 +14,11 @@
 #                               # --skip-daemons); don't call them missing
 #
 # Run it on the host: it reads the containers with podman and reaches each MCP
-# server on npm-network as <container>:8000, from a throwaway netcheck container
-# (the app images carry no curl). The one exception is nginx-proxy-manager,
-# which is on the host network -- it is read on 127.0.0.1, the same place it
-# listens.
+# server on npm-network as <container>:8000, through the long-lived `netcheck`
+# container (the app images vary and several carry no curl; scripts/lib.sh says
+# why it is not a throwaway `podman run` per probe). The one exception is
+# nginx-proxy-manager, which is on the host network -- it is read on 127.0.0.1,
+# the same place it listens.
 #
 # Read-only. Exits non-zero if anything is wrong.
 set -uo pipefail
@@ -206,8 +207,8 @@ for e in "${endpoints[@]}"; do
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"
 
-    # Read from a throwaway curl container on npm-network (net_curl and the
-    # mcp_* helpers live in scripts/lib.sh). This is the container's own
+    # Read through net_curl (the long-lived netcheck container on npm-network;
+    # the mcp_* helpers live in scripts/lib.sh). This is the container's own
     # address; nginx-proxy-manager, on the host network, reaches the same
     # server through the loopback publish the unit declares.
     health=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 "http://$name:8000/health" 2>/dev/null || echo 000)
@@ -387,7 +388,7 @@ head2 "Onion services (tor)"
 # The same public surface without DNS or a certificate. tor publishes one hidden
 # service per ONION_SERVICES entry (stack.conf) and forwards it; the address is
 # read from tor's own data dir, because it is key material and not declared.
-# The probe goes through tor's SOCKS port from a throwaway container on
+# The probe goes through tor's SOCKS port from the netcheck container on
 # npm-network (torrc's SocksPolicy allows nothing else) and asks tor to resolve
 # the .onion name itself (--socks5-hostname), exactly as a client does. A fresh
 # service takes a minute to become reachable, so "no answer" is a warning.

@@ -20,7 +20,7 @@ stack runs and one script that fixes a deployment problem.
 | `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
 | `btc-explorer` | `localhost/btc-explorer:local` (built from `btc-explorer/Containerfile`) | `127.0.0.1:8108` | — |
 | `xmr-explorer` | `localhost/xmr-explorer:local` (MoneroBlock, built from `xmr-explorer/Containerfile`) | `127.0.0.1:8109` | — |
-| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` (admin UI via SSH tunnel) | `$DATA_DIR/btcpay` |
+| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` (NPM: `btcpay.boltmesh.net`; an SSH tunnel to the same port still works) | `$DATA_DIR/btcpay` |
 | `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.21` | — | `$DATA_DIR/nbxplorer` |
 | `monero-wallet-btcpay` | `docker.io/btcpayserver/monero:0.18.5.4` | — (BTCPay only) | `$DATA_DIR/btcpay/xmr-wallet` |
 | `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | — (clnrest internal for the MCP) | `$DATA_DIR/cln` |
@@ -622,21 +622,25 @@ every credential as burned:
 ```
 
 That covers every target `--list` shows: the RPC passwords, the CLN runes, the
-MCP tokens, SearXNG's key, the postgres role, BoltMesh's keys, the restic key
-and the wallet password. Two preflights will stop you on a host that was just
-restored, on purpose:
+MCP tokens, SearXNG's key, the postgres role, BoltMesh's keys and the restic
+key. There is no wallet target any more: BTCPay's Monero wallet is imported
+view-only from an address and a view key, has no password, and its wallet RPC
+runs with `--disable-rpc-login`, so the file holds nothing to rotate. Two
+behaviours matter on a host that was just restored:
 
-- `monero-wallet` refuses without a snapshot younger than 24 h (and `--yes`).
-  Take one first (`./deploy.sh --only backup`) rather than reaching for
-  `--force`: the new password is the one value nobody can recover.
+- `boltmesh-keys` requires `--yes`: it ends every BoltMesh session and
+  invalidates every node token and outstanding bootstrap secret.
 - `restic` adds the new key, proves it, and only then removes the old one, so a
   run that dies in between leaves two working keys, not none.
 
 What rotation cannot fix, and what to do instead:
 
-- **The wallet's keys**, not just its password. A fresh password does not
-  un-share the file. Create a new wallet from a new seed and sweep the funds
-  into it; the restored file is burned.
+- **The view-only wallet's history.** `btcpay/xmr-wallet` can leak the view key
+  and the address — no spend key was ever on this host, so the funds are not at
+  risk — but every transaction the wallet can see is then public, and so is the
+  fact that this host holds it. A new seed is the only way out: move the funds
+  to it, then re-import the view-only wallet from the new address/view key
+  (`scripts/btcpay-wallet.sh`). The restored file is burned.
 - **CLN's `hsm_secret`**, which is the node's signing key. Treat the channels as
   lost: force-close them yourself so the funds land in a wallet you control, and
   open new channels from a fresh node.
@@ -1523,11 +1527,16 @@ No secret is committed. Everything real is generated or adopted on the host,
 under `$DATA_DIR/config/`, mode 600.
 
 - **`$DATA_DIR/config/stack/secrets.env`** holds the node secrets (bitcoind RPC
-  user and password, Tor service password, Monero wallet password and RPC
-  login). It is resolved in the order **`secrets.env` → the currently-installed
-  unit → the daemon's own config → generate**, so adopting the deploy on a
-  running host changes no credential. `MONERO_WALLET_PASSWORD` is the **only**
-  key to the wallet file — keep it with the data.
+  user and password, Tor service password), `BTCPAY_DB_PASSWORD` (the `btcpay`
+  role in the Postgres cluster) and `CROWDSEC_BOUNCER_KEY`, which is append-only
+  and must never be regenerated — the crowdsec container registers that exact
+  key in its LAPI at start, so a new value silently leaves enforcement dead. It
+  is resolved in the order **`secrets.env` → the currently-installed unit → the
+  daemon's own config → generate**, so adopting the deploy on a running host
+  changes no credential. Keep it with the data: it is what opens Postgres, the
+  nodes and the bouncer's LAPI. There is no wallet password — BTCPay's plugin
+  wallet is imported view-only and its wallet RPC runs with
+  `--disable-rpc-login`.
 - **Per-app env files**
   (`$DATA_DIR/config/<name>/{token,upstream,spend,node}.env`) hold the bearer
   tokens, upstream credentials, spend policy and CLN runes. The unit reads them
@@ -1565,7 +1574,7 @@ in dependency order:
 ./scripts/rotate.sh --status                # a pending journal + the last 10 runs
 ./scripts/rotate.sh bitcoin-rpc --dry-run   # the plan, no values, no writes
 ./scripts/rotate.sh bitcoin-rpc             # rotate, re-render, restart, verify
-./scripts/rotate.sh runes --scope spend     # read | spend | boltmesh | all
+./scripts/rotate.sh runes --scope spend     # read | spend | all
 ./scripts/rotate.sh token:lightning-mcp     # one server's bearer token
 ./scripts/rotate.sh token:lightning-mcp --spend
 ./scripts/rotate.sh postgres
@@ -1632,14 +1641,6 @@ them:
   `SECRET_KEY`/`REFRESH_SECRET_KEY` (every session ends), `NODE_SECRET_KEY` and
   `BOOTSTRAP_SECRET_PEPPER` (every registered server and outstanding bootstrap
   secret stops verifying), and requires `--yes`.
-- **`monero-wallet` is the careful one.** The wallet file's password exists in
-  exactly two places — the file, and the rendered unit — so the change is made
-  at the daemon (`change_wallet_password` over the wallet RPC), and both sides
-  of that call are journaled *before* it is sent, because after it lands the old
-  password may already be dead. It demands `--yes` and a snapshot younger than
-  24 hours, and `--resume` knows from the journal whether the daemon call
-  already happened (it must not be sent twice). Losses are not on the table: a
-  Monero wallet is deterministic, so the worst case is a rescan from a snapshot.
 
 **If a run dies half-way** the new values are already journaled (mode 600,
 `$DATA_DIR/config/rotation/<target>.pending`) with the stage it reached, and no
@@ -1648,7 +1649,7 @@ daemon is left holding a credential that nobody recorded:
 ```sh
 ./scripts/rotate.sh --status        # what is pending, and which step it stopped at
 ./scripts/rotate.sh --resume        # finish it with the SAME values (never re-mints)
-./scripts/rotate.sh --resume --yes  # when the target demands --yes (wallet, restic)
+./scripts/rotate.sh --resume --yes  # when the target demands --yes (boltmesh-keys, restic)
 ```
 
 `--resume` also refuses to restart a daemon that is already running the journaled

@@ -10,10 +10,11 @@
 # started as a rootful Quadlet by `sudo ./bootstrap.sh` (deploy/install.sh
 # --root). Everything else in the stack stays rootless.
 #
-# It is IDS-ONLY. Nothing in this stack drops packets in the packet path: the
-# enforcement lives in the crowdsec unit's bouncer in phase 3, at the nftables
-# level, with TTLs. That keeps a sensor crash or a bad rules reload from being
-# an outage.
+# It is IDS-ONLY. Nothing in this unit drops packets: enforcement is the
+# crowdsec unit's bouncer (deploy/root/bouncer.sh, a root oneshot on a
+# one-minute timer), which applies the LAPI's decisions to the `inet stack_bans`
+# nftables set with each element carrying its own timeout. That keeps a sensor
+# crash or a bad rules reload from being an outage.
 #
 # What it can and cannot see is documented in deploy/root/suricata/suricata.yaml
 # (short version: the LAN NIC and lo; not the rootless container bridge, and not

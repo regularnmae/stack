@@ -21,14 +21,15 @@ ContainerName=btcpay
 Image=docker.io/btcpayserver/btcpayserver:2.4.5
 Network=npm-network.network
 
-# Admin UI through an SSH tunnel only. 127.0.0.1 keeps it off the LAN and the
-# firewall opens nothing for it.
+# The loopback publish: off the LAN, with nothing opened for it in the firewall.
+# nginx-proxy-manager fronts it as BTCPAY_HOST (stack.conf's NPM_HOSTS), and an
+# SSH tunnel to the same port still works for an operator who wants neither.
 PublishPort=127.0.0.1:49392:49392
 
 Environment=BTCPAY_NETWORK=mainnet
 Environment=BTCPAY_BIND=0.0.0.0:49392
 Environment=BTCPAY_CHAINS=btc
-# The tunnel's origin. The backend uses http://btcpay:49392 directly, and the
+# The public origin. The backend uses http://btcpay:49392 directly, and the
 # webhook URL is internal, so this only affects links rendered by the UI.
 Environment=BTCPAY_EXTERNALURL=https://@BTCPAY_HOST@/
 Environment=BTCPAY_BTCEXPLORERURL=http://nbxplorer:32838/

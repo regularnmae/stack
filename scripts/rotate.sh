@@ -7,7 +7,8 @@
 #   scripts/rotate.sh <target>                   # rotate, re-render, restart, verify
 #   scripts/rotate.sh --resume                   # finish an interrupted rotation
 #
-# Targets (phase 1: the credentials whose consumers are all inside the stack):
+# Targets (one credential each; every run writes its source of truth, re-renders
+# the units through deploy/install.sh, restarts the dependents and verifies):
 #
 #   bitcoin-rpc    bitcoind's RPC password (and --user, its RPC user). Touches
 #                  bitcoin.conf, stack/secrets.env, the rendered lightningd and
@@ -16,9 +17,9 @@
 #   tor-control    Tor's control password, which lightningd uses for its
 #                  statictor onion service. Touches torrc's hash and the
 #                  rendered lightningd unit. The onion address does not change.
-#   runes          Core Lightning runes (lightning-mcp's read/spend pair and
-#                  BoltMesh's gateway rune): mint, swap, verify, THEN blacklist
-#                  the old ones. --scope read|spend|all (default all).
+#   runes          Core Lightning runes (lightning-mcp's read/spend pair):
+#                  mint, swap, verify, THEN blacklist the old ones.
+#                  --scope read|spend|all (default all).
 #   token:<server> one MCP server's bearer token (token.env) -- the credential
 #                  with the most copies outside the stack. --spend rotates the
 #                  additional spend token of a money server instead.
@@ -1074,7 +1075,7 @@ complete() {
     journal_clear
     log "$TARGET rotated"
     if [ "$TARGET" = runes ]; then
-        say "lightning-mcp and BoltMesh read their rune from the env files; nothing else to update"
+        say "lightning-mcp reads its rune from node.env; nothing else to update"
     fi
 }
 
