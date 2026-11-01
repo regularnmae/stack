@@ -5,7 +5,7 @@
 # this file exists:
 #
 #   [30/Oct/2026:13:31:19 +0000] - 200 200 - GET https btc.boltmesh.net "/" \
-#     [Client 93.177.140.197] [Length 59776] [Gzip -] [Sent-to 127.0.0.1] \
+#     [Client 203.0.113.7] [Length 59776] [Gzip -] [Sent-to 127.0.0.1] \
 #     "Uptime-Kuma/2.5.7" "-"
 #
 # Two shapes are accepted: the proxy-host format above, and the plain combined

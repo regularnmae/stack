@@ -30,7 +30,15 @@ vars:
     # 10.89.0.0/24 is the pinned podman network, 192.168.1.0/24 the LAN.
     HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.0/8]"
     EXTERNAL_NET: "!$HOME_NET"
-    HTTP_SERVERS: "[$HOME_NET,93.177.140.197]"
+    # HTTP_SERVERS is an alias of HOME_NET on purpose. The host's own address
+    # (192.168.1.112 here) is inside HOME_NET already, and the router DNATs
+    # inbound 80/443 onto it, so the public address is never a destination on
+    # this wire. Measured in eve.json: the only events naming it are hairpin
+    # self-traffic -- the host dialling its own vhost, whose inbound leg is
+    # classified by HOME_NET anyway and whose outbound leg is the host talking
+    # to itself (nginx-proxy-manager logs that request, and crowdsec reads it).
+    # No host-specific address belongs in a committed file.
+    HTTP_SERVERS: "$HOME_NET"
     SMTP_SERVERS: "$HOME_NET"
     SQL_SERVERS: "$HOME_NET"
     DNS_SERVERS: "[$HOME_NET,1.1.1.1,8.8.8.8]"
