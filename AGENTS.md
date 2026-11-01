@@ -258,7 +258,19 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   manual on purpose, because the weekly run must not depend on pulling an image.
   The drill proves restore *mechanics* only: not that an offsite repo is
   reachable, and not that the wallet or the daemons come up on the restored
-  state.
+  state. **The one restic error a restore tolerates is an unapplied SELinux
+  label** — rootless podman cannot set `security.selinux`, so both `restore`
+  calls pass `--exclude-xattr security.selinux` (the file keeps the label it
+  already has, which is what the failed `setxattr` left anyway) and
+  `restore_acceptable` is only the net for that class. It must count those
+  errors, never pin them: which files mismatch depends on what a host script
+  rewrote since the snapshot (`unconfined_u` vs `system_u`), so the rule was
+  written against one error and the 2026-11-01 drill produced two — `/data` and
+  `/data/audit/ids.status` — and failing on that marked a good restore
+  `result=fail`, which `monitor.sh` then paged on. Do not anchor the pattern to
+  `/data` either: a subfolder restore reports `/restore/<file>`. In the in-place
+  path this matters more than noise, since the `die` would fire before the
+  `chown` that makes bitcoind's datadir readable.
 - **Restore before deploy, replay the dump after, migrate last.** The order is
   load-bearing, not stylistic: `install.sh` seeds `bitcoin.conf` and `torrc` once
   and never overwrites them, so a `./deploy.sh` that runs first writes a *fresh*

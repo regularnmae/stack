@@ -294,23 +294,39 @@ tree_size() { # path -> bytes
     printf '%s' "${n:-0}"
 }
 
-# restic restore exits 1 when it cannot apply the SELinux label of the snapshot's
-# synthetic /data parent: in the backup container /data is not a bind mount, so
-# it carries that container's MCS label, and rootless podman cannot set
-# security.selinux. That one error is benign -- the directory exists and
-# everything under it is restored -- but restic still exits non-zero, which would
-# abort an in-place restore before the wallet's chown. Tolerate exactly that line
-# and nothing else.
+# restic restore exits 1 when it cannot apply a SELinux label recorded in the
+# snapshot. In the backup container /data is not a bind mount, so the tree
+# carries that container's label, and the host-run scripts that write into
+# $DATA_DIR/audit give their files a different one (unconfined_u vs system_u);
+# rootless podman cannot set security.selinux at all. The file itself restores
+# fine -- only the label is left alone -- but restic still exits non-zero, which
+# would abort an in-place restore before the wallet's chown. Both restore calls
+# therefore pass --exclude-xattr security.selinux, which removes the error at its
+# source: the same files keep the label they already have, which is what happens
+# when the setxattr fails anyway.
+#
+# What follows is the safety net for that class, not the primary fix. It counts
+# the label errors instead of assuming a number, because which files mismatch
+# depends on what a host script rewrote since the snapshot: this was written
+# against one error on /data, and the 2026-11-01 drill produced two (/data and
+# /data/audit/ids.status, which ids.sh had rewritten). It also does not pin the
+# path -- a restore narrowed to a subfolder reports e.g. /restore/ids.status, and
+# a path anchor is exactly the brittleness that broke the first version. The
+# cause is what must be SELinux-only, not the path.
 restore_acceptable() { # log rc
-    local log="$1" rc="$2"
+    local log="$1" rc="$2" seen benign sum fatals
     [ "$rc" -eq 0 ] && return 0
-    # Exactly one benign line...
-    [ "$(grep -cE 'xattr\.LSet /(restore/)?data security\.selinux: permission denied' "$log")" -eq 1 ] || return 1
-    # ...restic's own summary agreeing it was the only error...
-    grep -qE '^Fatal: There (was|were) 1 errors?$' "$log" || return 1
-    # ...and no other fatal line.
-    [ "$(grep -cE '^Fatal:' "$log")" -eq 1 ] || return 1
-    warn "ignored the SELinux label of /data (rootless podman cannot set security.selinux)"
+    # Every error restic reported (it counts these in the summary below)...
+    seen=$(grep -cE '^ignoring error for ' "$log" 2>/dev/null || true)
+    # ...is one of them...
+    benign=$(grep -cE '^ignoring error for [^:]*: xattr\.LSet .* security\.selinux: permission denied$' "$log" 2>/dev/null || true)
+    # ...restic's own summary agrees on the count...
+    sum=$(sed -nE 's/^Fatal: There (was|were) ([0-9]+) errors?$/\2/p' "$log" | head -n1)
+    # ...and the only Fatal line is that summary.
+    fatals=$(grep -cE '^Fatal:' "$log" 2>/dev/null || true)
+    [ "${seen:-0}" -gt 0 ] && [ "${seen:-0}" -eq "${benign:-0}" ] \
+        && [ "${sum:-x}" = "${seen}" ] && [ "${fatals:-0}" -eq 1 ] || return 1
+    warn "ignored ${seen} SELinux label error(s) (rootless podman cannot set security.selinux)"
     return 0
 }
 
@@ -480,7 +496,8 @@ case "$cmd" in
         rlog=$(mktemp)
         rrc=0
         podman run "${common[@]}" -v "$VERIFY_TARGET:/restore:z" \
-            "$RESTIC_IMAGE" restore "$snap_id" --target /restore --verify >"$rlog" 2>&1 || rrc=$?
+            "$RESTIC_IMAGE" restore "$snap_id" --exclude-xattr security.selinux \
+            --target /restore --verify >"$rlog" 2>&1 || rrc=$?
         cat "$rlog"
         if [ "$rrc" -ne 0 ] && verify_skip_if_locked "$rlog"; then
             rm -f "$rlog"
@@ -584,11 +601,14 @@ case "$cmd" in
         rlog=$(mktemp)
         rrc=0
         podman run "${common[@]}" "${data_rw[@]}" \
-            "$RESTIC_IMAGE" restore "$snapshot" --target / >"$rlog" 2>&1 || rrc=$?
+            "$RESTIC_IMAGE" restore "$snapshot" --exclude-xattr security.selinux \
+            --target / >"$rlog" 2>&1 || rrc=$?
         cat "$rlog"
-        # The /data label is the one error restic reports that is not a failure;
-        # without tolerating it this command would exit before the chown below,
-        # leaving bitcoind's image-uid data dir unreadable.
+        # Not a failure: the SELinux label is excluded above because rootless
+        # podman cannot set it, and this must not return before the chown below
+        # -- that chown is what makes bitcoind's image-uid datadir readable, and
+        # a "restore failed" here would leave the operator with a complete tree
+        # and a daemon that cannot open it.
         if ! restore_acceptable "$rlog" "$rrc"; then
             rm -f "$rlog"
             die "restore failed (see above)"
