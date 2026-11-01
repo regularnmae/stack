@@ -966,6 +966,16 @@ record. Three pieces fix that:
 | `vector` | ships the journal to `victoria-logs` continuously; it checkpoints one cursor per batch, so a restart resumes instead of replaying |
 | `victoria-logs` | the store and the LogsQL UI: 14 days (`LOGS_RETENTION`) or 10 GiB (`LOGS_MAX_BYTES`), whichever comes first |
 
+Podman's **own** events are deliberately not part of that stream: every exec and
+every healthcheck run used to write to the journal (4,000+ lines and 1.8 MB an
+hour on this host — two lines per exec, one per check), which is noise in a
+search. `deploy/install.sh` points podman's event log at a bounded file
+(`~/.config/containers/containers.conf`, `events_logger = "file"`, ~8 hours of
+ring, gone at reboot), and `sudo ./bootstrap.sh` writes the same setting for
+root's own podman, which is what the sensor's healthchecks use. `podman events`
+still reads it, and `scripts/logs.sh` never has to be searched past it.
+`verify.sh` checks both files and fails if the user-side one is lost.
+
 Search it from the CLI — this is the cross-service timeline that used to mean
 five `podman logs -f` windows:
 

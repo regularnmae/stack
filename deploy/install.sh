@@ -21,6 +21,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_DIR="$REPO_DIR/deploy"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 QUADLET_DIR="$CONFIG_HOME/containers/systemd"
+# podman's rootless configuration (podman_events_conf below). Same tree as the
+# quadlet units -- podman and the quadlet generator read it from here.
+PODMAN_CONF_DIR="$CONFIG_HOME/containers"
 # Plain systemd user units live here, not in the quadlet dir: Quadlet generates
 # .service files from .container/.volume/.network/... but has no .timer type,
 # and the monitors and jobs are host scripts rather than containers. USER_UNITS
@@ -63,6 +66,133 @@ export STACK_BACKUP_DIR
 # a failed command substitution in an argument does not trip `set -e`.
 esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
 
+# ---------------------------------------------------------------------------
+# podman's own event log
+# ---------------------------------------------------------------------------
+# Every podman invocation writes an event and the default backend is the
+# journal: an exec session is two lines (`exec`, `exec_died`, each with
+# the image's full label dump) and podman's generated healthcheck units log a
+# `health_status` line on *every* check, healthy or not. Measured on this host
+# before this setting existed: 4,156 of 9,315 journal lines an hour (1.8 MB of
+# 2.4 MB) were podman events -- 2,357 health_status, 1,352 exec -- and all of it
+# reached the log store, burying the cross-service timeline `scripts/logs.sh`
+# exists to answer questions from. metrics.sh alone makes eight execs a minute,
+# i.e. sixteen journal lines, every minute.
+#
+# This belongs in podman's own config, not in a flag at the 64 `podman exec`
+# call sites: `--events-backend=none` (scripts/lib.sh's net_curl) cannot reach
+# the healthcheck units at all, says nothing about the next script anyone
+# writes, and the one-flag-at-one-place version of it is exactly how the flood
+# came back. `events_logger` has no environment-variable equivalent, so the
+# config file is the one lever that covers them all -- and there are two of
+# them, because the sensor (deploy/root/, started by the *system* manager) is
+# not the login user's podman: the rootless file below, and root's own in
+# install_root_tier. Both are rendered here.
+#
+# "file", not "none": the events are a diagnostic (what started when, did the
+# check fire), and the file backend keeps `podman events` reading them from a
+# size-capped ring in the runtime dir (tmpfs, gone at reboot). At ~1.2 MB an
+# hour of events here, 10m is about eight hours; "none" would throw the
+# diagnostic away to save the same bytes. Nothing needs a restart: podman reads
+# this per invocation, so the next metrics tick and the next healthcheck pick it
+# up -- unlike a rendered unit, where a re-render alone changes nothing.
+#
+# The merge has to be table-aware. Appending a second `[engine]` to a file that
+# already has one is a TOML duplicate-table error, and podman then refuses to
+# run *anything* for that user, so the candidate is validated with podman itself
+# (`CONTAINERS_CONF` pointed at it, `podman info` must report "file") before it
+# replaces the real file. A file that does not pass is left alone.
+#
+# Defined above the root-tier block for the same reason as esc(): the root pass
+# runs before the rest of this file has been read, so a helper defined below it
+# is "command not found" when install_root_tier calls it.
+podman_events_write() { # conf-file
+    local conf="$1" src tmp val header=0
+    command -v podman >/dev/null 2>&1 || return 0
+    if [ -f "$conf" ]; then
+        src="$conf"
+    else
+        # A missing file is not the same as an empty one: only this case gets the
+        # header comment, so an operator's own file is never annotated.
+        src=/dev/null
+        header=1
+    fi
+    mkdir -p "$(dirname "$conf")"
+
+    tmp=$(mktemp) || return 1
+    awk -v header="$header" '
+        function flush(   i, last, line) {
+            # Trailing blank lines inside the table are held back, so an added
+            # key lands at the end of the table rather than after a gap.
+            last = 0
+            for (i = 1; i <= n; i++) if (body[i] ~ /[^[:space:]]/) last = i
+            print hdr
+            for (i = 1; i <= last; i++) {
+                line = body[i]
+                if (line ~ /^[[:space:]]*events_logger[[:space:]]*=/) {
+                    print "events_logger = \"file\""; saw1 = 1; continue
+                }
+                if (line ~ /^[[:space:]]*events_logfile_max_size[[:space:]]*=/) {
+                    print "events_logfile_max_size = \"10m\""; saw2 = 1; continue
+                }
+                print line
+            }
+            if (!saw1) print "events_logger = \"file\""
+            if (!saw2) print "events_logfile_max_size = \"10m\""
+            n = 0; saw1 = 0; saw2 = 0
+        }
+        BEGIN {
+            if (header) {
+                print "# Podman configuration written by deploy/install.sh."
+                print "# events_logger: journald is where podman events used to pile"
+                print "# up, two lines per exec and one per healthcheck, and it is the log"
+                print "# store behind it that paid for them."
+            }
+        }
+        /^[[:space:]]*\[/ {
+            if (in_engine) { flush(); in_engine = 0 }
+            if ($0 ~ /^[[:space:]]*\[[[:space:]]*engine[[:space:]]*\][[:space:]]*$/) {
+                in_engine = 1; seen = 1; hdr = $0
+            } else print
+            next
+        }
+        in_engine { body[++n] = $0; next }
+        { print }
+        END {
+            if (in_engine) flush()
+            else if (!seen) {
+                print ""
+                print "[engine]"
+                print "events_logger = \"file\""
+                print "events_logfile_max_size = \"10m\""
+            }
+        }
+    ' "$src" > "$tmp" || { rm -f "$tmp"; warn "could not render $conf"; return 0; }
+
+    if cmp -s "$tmp" "$conf" 2>/dev/null; then
+        rm -f "$tmp"
+        return 0
+    fi
+    if ! val=$(CONTAINERS_CONF="$tmp" podman info --format '{{.Host.EventLogger}}' 2>/dev/null) \
+        || [ "$val" != file ]; then
+        rm -f "$tmp"
+        warn "podman would not accept the event-logger setting (${val:-no answer}); leaving $conf alone -- fix or remove it by hand"
+        return 0
+    fi
+    install -m 644 "$tmp" "$conf"
+    rm -f "$tmp"
+    log "podman events -> bounded file, not journald ($conf)"
+}
+
+# The login user's own podman -- every script and timer this repo runs, plus the
+# shell an operator pokes a container from. Root's is written by the root tier
+# (install_root_tier) because the sensor's healthchecks are podman children of
+# the *system* manager. Called from the main flow below, and a no-op when the
+# file is already right.
+podman_events_conf() {
+    podman_events_write "$PODMAN_CONF_DIR/containers.conf"
+}
+
 ROOT_UNIT_DIR=/etc/containers/systemd
 ROOT_CONFIG_DIR=/etc/stack-ids
 
@@ -87,6 +217,14 @@ install_root_tier() {
     [ -f "$DEPLOY_DIR/root/suricata.container" ] || die "missing $DEPLOY_DIR/root/suricata.container"
 
     log "installing the root tier (Suricata) for data dir $data"
+
+    # Root's podman config, so the sensor's own healthchecks stop writing a
+    # `health_status` event to the journal every 30 seconds. They are podman's
+    # children under the *system* manager, so the login user's config (written on
+    # the user side, podman_events_write) cannot reach them; this is the same
+    # setting in root's chain, and it is the whole remainder of the flood once
+    # the user side is in place. /etc is where a system manager's podman reads it.
+    podman_events_write /etc/containers/containers.conf
 
     # The configuration the container reads. Root-owned: a rootful container
     # consuming a file the stack user can edit is a privilege boundary.
@@ -1506,6 +1644,9 @@ sync_tree() { # src-dir dest-dir
 }
 
 mkdir -p "$QUADLET_DIR"
+# Before the units: podman's event log is a host config, rendered once here
+# rather than flagged at every exec call site (see podman_events_conf).
+podman_events_conf
 for pair in "${UNITS[@]}"; do
     src="$DEPLOY_DIR/${pair%%:*}"
     unit="${pair##*:}"

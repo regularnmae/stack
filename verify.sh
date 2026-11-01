@@ -854,6 +854,31 @@ if [ -d "$DATA_DIR/logs/vl" ]; then
 else
     warn "no log store yet ($DATA_DIR/logs/vl); the first shipper run creates it"
 fi
+# podman's own events are the noisiest thing this store could index: two lines
+# per exec (each carrying the image's label dump) and a `health_status` line on
+# every check, healthy or not -- measured at 4,156 of 9,315 journal lines an
+# hour before this was set. deploy/install.sh points them at a bounded file
+# (podman_events_conf, ~/.config/containers/containers.conf), which is the only
+# lever that also reaches podman's generated healthcheck units: the per-call
+# `--events-backend=none` in scripts/lib.sh covers two call sites, not the
+# mechanism. "journald" here means the flood is back.
+podman_events=$(podman info --format '{{.Host.EventLogger}}' 2>/dev/null || true)
+case "$podman_events" in
+    journald) bad "podman events go to journald (deploy/install.sh moves them to a bounded file)" ;;
+    "")       warn "could not read podman's event logger (podman info failed)" ;;
+    *)        pass "podman events -> $podman_events, not the journal" ;;
+esac
+# ...and the sensor has its own, because its healthchecks are podman children of
+# the *system* manager, not of anything this login user runs. That file is
+# root-owned 0644 and merged (not rendered from deploy/root/), so it is read
+# rather than diffed, and the answer podman would give needs root: hence the
+# grep. Missing means ~120 health_status lines an hour -- small, but it is the
+# remainder of the flood, and bootstrap.sh is the only thing that can write it.
+if grep -Eq '^[[:space:]]*events_logger[[:space:]]*=[[:space:]]*"file"' /etc/containers/containers.conf 2>/dev/null; then
+    pass "root podman events -> file (/etc/containers/containers.conf)"
+else
+    warn "root podman events still go to journald (sudo ./bootstrap.sh writes /etc/containers/containers.conf)"
+fi
 
 # ---------------------------------------------------------------------------
 head2 "Intrusion detection"

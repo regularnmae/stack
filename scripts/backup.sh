@@ -117,8 +117,16 @@ export RESTIC_REPOSITORY RESTIC_PASSWORD RESTIC_CACHE_DIR
 
 # The repo is mounted at /repo for the local default; a remote
 # RESTIC_REPOSITORY makes that mount unused, which is harmless.
+#
+# --log-driver=none: restic's output is the *caller's* (a hand run prints it, the
+# monitor captures `list --json`, verify captures the snapshot table) and the
+# driver only controls whether podman also journals a copy. Without it every
+# monitor and verify sweep wrote the whole snapshot table into the journal --
+# 161 lines every five minutes -- which the log store then indexed: the same
+# one-shot-container noise kuma-ctl and the apprise probe already avoid.
 common=(
     --rm
+    --log-driver=none
     -v "$STACK_BACKUP_DIR:/repo:z"
     -v "$DATA_DIR/backup-cache:/cache:z"
     --env RESTIC_REPOSITORY --env RESTIC_PASSWORD --env RESTIC_CACHE_DIR

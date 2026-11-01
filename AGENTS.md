@@ -690,6 +690,41 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   `scripts/logs.sh` is the CLI over the same store. Read it over an SSH tunnel
   (`ssh -L 9428:…`, then `/select/vmui`), like `vmui`; there is no Grafana, by
   the same reasoning as the metrics store.
+- **podman's own event log is a config value, not a per-call flag.** Every podman
+  invocation writes an event, and the backend is `events_logger`, `journald` by
+  default (`/usr/share/containers/containers.conf`; there is no environment
+  variable for it): an exec is **two** lines (`exec`, `exec_died`, each
+  carrying the image's label dump) and podman's generated healthcheck units log
+  a `health_status` line on *every* check. Measured before `deploy/install.sh`
+  set it: 4,156 of 9,315 journal lines an hour (1.8 of 2.4 MB) -- 2,357
+  `health_status`, 1,352 exec -- all shipped into the store, i.e. the noise
+  `scripts/logs.sh` was supposed to answer past. `podman_events_conf` writes
+  `[engine] events_logger = "file"` plus `events_logfile_max_size = "10m"` into
+  `~/.config/containers/containers.conf`, and `verify.sh` fails if `podman info
+  --format {{.Host.EventLogger}}` reports `journald` again. Four reasons it
+  lives there rather than at the 64 `podman exec` call sites: a per-call
+  `--events-backend=none` cannot reach the healthcheck units at all; no
+  discipline survives the 65th call site (that is how the first one-place
+  mitigation decayed); `file` keeps `podman events` readable from a bounded ring
+  (`$XDG_RUNTIME_DIR/libpod/tmp/events`, tmpfs, ~8 h at this rate, gone at
+  reboot) where `none` would throw the diagnostic away; and **nothing needs a
+  restart** -- podman reads the file per invocation, unlike a rendered unit,
+  where a re-render alone changes nothing. Two traps: the merge must be
+  **table-aware**, because a second `[engine]` table is a TOML duplicate-table
+  error and podman then refuses to run *anything* for that user, so the candidate
+  is validated with `CONTAINERS_CONF=<candidate> podman info` before it replaces
+  the real file (a file that fails is left alone); and the price is that the
+  complete per-check health series leaves the journal, so a flap older than that
+  ring is answered by `monitor.sh`'s restart delta and the unit's state, not by
+  history. There are **two** copies of the setting, because root's podman is a
+  different config chain: the login user's file (written by the user-side
+  install) and `/etc/containers/containers.conf` (written by
+  `install.sh --root`, i.e. `sudo ./bootstrap.sh`), which is what the
+  `deploy/root/` sensor's own healthchecks read -- they are podman children of
+  the *system* manager, so the user file cannot reach them, and they were the
+  whole remainder of the flood (~120 lines an hour). `verify.sh` checks both: the
+  user side through `podman info`, the root side by reading the merged file,
+  since asking root's podman would need sudo.
 - **Reading the host journal from a rootless container is two settings, and
   both were measured.** `GroupAdd=keep-groups` (the journal files carry an ACL
   for the login user's groups, and supplementary groups are dropped by default
@@ -740,7 +775,10 @@ shellcheck -x -P SCRIPTDIR -S info bootstrap.sh deploy.sh verify.sh deploy/insta
   container ("cannot set multiple networks without bridge network mode") and
   NPM's admin API is a `127.0.0.1` bind that only a host-netns client can reach.
   `--events-backend=none` keeps the exec session
-  (`exec_create`/`exec_start`/`exec_died`) out of journald too. `netcheck_ready`
+  (`exec`/`exec_died`) out of the journal too, as belt to
+  `deploy/install.sh`'s braces: the mechanism itself is `events_logger` in the
+  user's `~/.config/containers/containers.conf` (the bullet above), because a flag at
+  the call site cannot reach podman's own healthcheck units. `netcheck_ready`
   fails with the one-line fix when either is stopped; `deploy.sh` starts them
   first in `start_infra`, after `refresh_image_unit` because install.sh rebuilds
   the image in place (a plain `start` on an active unit keeps the old bits), and

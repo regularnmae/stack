@@ -37,7 +37,13 @@ rand_hex() {
 # sweep, and each `podman run` created a veth pair and a cgroup scope, which the
 # kernel logged as a line per step -- about 12k lines an hour, the biggest
 # stream in the journal, and a third of what the log store was indexing.
-# `podman exec` output goes to the caller, not to journald.
+#
+# The exec *event* is a separate stream and is not this function's business:
+# podman writes two lines per exec (`exec`, `exec_died`) and one per
+# healthcheck run, and deploy/install.sh points the user's event log at a
+# bounded file instead of journald (podman_events_conf). That is the only place
+# it can be set -- a per-call flag cannot reach podman's own healthcheck units,
+# or the next script anyone writes.
 #
 # Two containers because podman refuses host + bridge on one ("cannot set
 # multiple networks without bridge network mode"), and nginx-proxy-manager's
@@ -67,9 +73,9 @@ netcheck_ready() { # container
 # config (`-K -`) rather than on a command line that `ps` can read.
 net_curl() {
     netcheck_ready "$NETCHECK_CONTAINER" || return 127
-    # --events-backend=none: an exec session logs exec_create/exec_start/
-    # exec_died to journald, and verify.sh makes dozens of probes per sweep --
-    # the probe's own result is what matters, not a record of having asked.
+    # --events-backend=none is belt to install.sh's braces: deploy/install.sh
+    # moves podman's event log to a bounded file (podman_events_conf), and a
+    # sweep's dozens of probes are not worth an entry even there.
     podman --events-backend=none exec -i "$NETCHECK_CONTAINER" curl "$@"
 }
 
