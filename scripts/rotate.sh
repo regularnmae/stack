@@ -691,7 +691,10 @@ apply_runes() {
 # holds one. Rotating therefore has two halves -- the server's token.env and,
 # for the client, a pointer at that file (the value is never printed, and
 # ~/.config/opencode/mcp.env already reads it from there at shell start).
-TOKEN_SERVERS=(searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp)
+TOKEN_SERVERS=(
+    searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp
+    lightning-mcp fulcrum-mcp
+)
 
 # env-file | read-token var | a read tool it answers | its args | spend-token var
 token_spec() { # server
@@ -711,6 +714,9 @@ token_spec() { # server
         lightning-mcp)
             printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/lightning-mcp/token.env" \
                 LIGHTNING_MCP_TOKEN getinfo '{}' LIGHTNING_MCP_SPEND_TOKEN ;;
+        fulcrum-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/fulcrum-mcp/token.env" \
+                FULCRUM_MCP_TOKEN get_chain_tip '{}' "" ;;
         *) return 1 ;;
     esac
 }

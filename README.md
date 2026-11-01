@@ -6,10 +6,11 @@ from scratch.
 
 The application code lives in sibling repos — `searxng-mcp`,
 `bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`, `lightning-mcp`,
-plus BoltMesh's `backend` and `frontend` (under the `boltmesh-labs` org) — each
-of which ships only its code, tests, CI and `Containerfile`. **Their units
-and env files live here**, so there is exactly one place that defines how the
-stack runs and one script that fixes a deployment problem.
+`fulcrum-mcp`, plus BoltMesh's `backend` and `frontend` (under the
+`boltmesh-labs` org) — each of which ships only its code, tests, CI and
+`Containerfile`. **Their units and env files live here**, so there is exactly
+one place that defines how the stack runs and one script that fixes a
+deployment problem.
 
 ## What runs
 
@@ -40,6 +41,7 @@ stack runs and one script that fixes a deployment problem.
 | `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` | — |
 | `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` 🔑 | — |
 | `lightning-mcp` | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` 🔑 | — |
+| `fulcrum-mcp` | `localhost/fulcrum-mcp:latest` | `127.0.0.1:8110` | — |
 | `postgres` | `docker.io/library/postgres:18-alpine` | — | `$DATA_DIR/postgres` |
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` | — |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
@@ -192,7 +194,7 @@ an OS reinstall. See [Where the data lives](#where-the-data-lives).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds + restarts the
-five MCP servers and the BoltMesh app tier (a plain start would keep running a
+six MCP servers and the BoltMesh app tier (a plain start would keep running a
 stale image). The five images built here — the two explorers, `kuma-ctl`,
 `netcheck` and `tor` — are rebuilt when their Containerfile changed and left
 alone otherwise: the digest of that file is baked into the image as a label, so
@@ -1383,6 +1385,7 @@ prefix** (`mcp` flag above):
 | `https://mcp.boltmesh.net/monero` | `127.0.0.1:8102` |
 | `https://mcp.boltmesh.net/monero-wallet` | `127.0.0.1:8103` |
 | `https://mcp.boltmesh.net/lightning` | `127.0.0.1:8104` |
+| `https://mcp.boltmesh.net/fulcrum` | `127.0.0.1:8110` |
 
 Each prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
 client's URL. The host and the prefixes are `MCP_HOST`/`MCP_HOSTS` in
@@ -1403,7 +1406,7 @@ it works before public DNS exists.
 ### Agent skills (harnesses without MCP)
 
 The [`agent-skills`](https://github.com/regularnmae/agent-skills) repo wraps
-those same five endpoints as five skills plus `agent-mcp`, a small stdlib-only
+those same six endpoints as six skills plus `agent-mcp`, a small stdlib-only
 MCP client, for harnesses that do not speak MCP: Codex, a plain shell, CI, a
 script. `./deploy.sh` clones it into `$BUILD_DIR/agent-skills` and runs its
 `install.sh`, which links each skill into the harnesses this host actually has
@@ -1480,12 +1483,12 @@ cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
 | `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `10.89.0.242:8000` |
 | `btc-explorer` | BTC RPC Explorer | `http://<addr>.onion/` → `10.89.0.243:3002` |
 | `xmr-explorer` | MoneroBlock | `http://<addr>.onion/style.css` → `10.89.0.244:31312` |
-| `mcp` | the five MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning>` → NPM's `*.onion` host |
+| `mcp` | the six MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning\|fulcrum>` → NPM's `*.onion` host |
 
 All but the MCP host forward to a container's pinned IP (the units set `IP=`):
 tor validates the target when it starts, so a name for a container that has not
 started yet would keep tor down. The MCP host cannot use an IP target — it is
-five servers split by *path*, which only nginx-proxy-manager does, and NPM is on
+six servers split by *path*, which only nginx-proxy-manager does, and NPM is on
 the host network, where a container has no route (`10.89.0.1:80` is refused from
 `npm-network`). The one reachable name is `host.containers.internal` (pasta's
 host gateway, added by podman), so the mcp onion forwards there and NPM matches

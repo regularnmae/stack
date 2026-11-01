@@ -439,6 +439,7 @@ UNITS=(
     "monero-node-mcp.container:monero-node-mcp.container"
     "monero-wallet-mcp.container:monero-wallet-mcp.container"
     "lightning-mcp.container:lightning-mcp.container"
+    "fulcrum-mcp.container:fulcrum-mcp.container"
     "postgres.container:postgres.container"
     "uptime-kuma.container:uptime-kuma.container"
     "boltmesh-backend.container:boltmesh-backend.container"
@@ -639,7 +640,7 @@ migrate_legacy_config() {
     adopt_file "$CONFIG_HOME/crypto-nodes/secrets.env" "$CONFIG_DIR/stack/secrets.env"
     adopt_file "$CONFIG_HOME/stack/secrets.env"        "$CONFIG_DIR/stack/secrets.env"
     local d f
-    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp; do
+    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp; do
         [ -d "$CONFIG_HOME/$d" ] || continue
         for f in "$CONFIG_HOME/$d"/*.env; do
             [ -e "$f" ] || continue
@@ -1111,6 +1112,23 @@ BITCOIN_RPC_USER=$BITCOIN_RPC_USER
 BITCOIN_RPC_PASSWORD=$BITCOIN_RPC_PASSWORD
 EOF
     log "wrote $BTC_ENV/upstream.env (mode 600)"
+fi
+
+FULCRUM_ENV="$CONFIG_DIR/fulcrum-mcp"
+if ensure_secret "$FULCRUM_ENV/token.env" "fulcrum-mcp token env"; then
+    token=$(new_or_reused_token fulcrum-mcp FULCRUM_MCP_TOKEN)
+    write_secret "$FULCRUM_ENV/token.env" <<EOF
+FULCRUM_MCP_TOKEN=$token
+EOF
+    log "wrote $FULCRUM_ENV/token.env (mode 600)"
+fi
+if ensure_secret "$FULCRUM_ENV/upstream.env" "fulcrum-mcp upstream env"; then
+    write_secret "$FULCRUM_ENV/upstream.env" <<EOF
+# The Electrum endpoint this server reads. Fulcrum is reachable only on
+# npm-network, and the Electrum protocol has no authentication of its own.
+FULCRUM_URL=tcp://fulcrum:50001
+EOF
+    log "wrote $FULCRUM_ENV/upstream.env (mode 600)"
 fi
 
 # BTC RPC Explorer's configuration. The app is configured entirely through the

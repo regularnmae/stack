@@ -1,0 +1,49 @@
+# Quadlet unit for the Fulcrum index MCP server. deploy/install.sh renders
+# this into ~/.config/containers/systemd/, where quadlet turns it into
+# fulcrum-mcp.service.
+[Unit]
+Description=Fulcrum Index MCP Server (streamable HTTP)
+After=network-online.target npm-network-network.service fulcrum.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=fulcrum-mcp
+Image=localhost/fulcrum-mcp:latest
+Network=npm-network.network
+
+# The bearer token clients must present, and the Electrum endpoint this server
+# reads. Both live OUTSIDE this repo in $DATA_DIR/config/fulcrum-mcp/ (mode
+# 600), written by deploy/install.sh, so no secret is ever committed -- only
+# the *.example files under deploy/ are.
+EnvironmentFile=@CONFIG_DIR@/fulcrum-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/fulcrum-mcp/upstream.env
+
+# SDK chatter (transport/session lifecycle) is per-client noise; keep only
+# WARNING and up so the log stays error- and warning-shaped.
+Environment=LOG_LEVEL=WARNING
+
+# Loopback only: nginx-proxy-manager runs on the host network and reaches this
+# server on host 8110 (MCP_HOSTS in stack.conf) -- it can no longer resolve the
+# container name. The app itself still listens on 8000 inside its own namespace.
+# Bind 127.0.0.1, never a LAN address: the firewall opens nothing for it and NPM
+# is still the only way in for a client. The host-side checks read the container
+# by name on npm-network, through scripts/lib.sh's net_curl.
+PublishPort=127.0.0.1:8110:8000
+
+# Healthcheck: MCP initialize probe (authenticated). Makes a wedged server
+# visible/restartable instead of silently erroring. The app's own /health is
+# the liveness path; /ready probes Fulcrum and must never gate podman, or a
+# syncing indexer restart-loops this container.
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
