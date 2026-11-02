@@ -602,6 +602,45 @@ EOF
     log "wrote $CONFIG_DIR/btcpay/backend.env (mode 600)"
 }
 
+# The read side of the same state: the store-scoped, read-only key
+# btcpay_bootstrap.py minted. It is rewritten every run (not seeded) so a
+# re-minted key cannot leave a stale copy in the unit's EnvironmentFile -- the
+# same reason crowdsec's lapi.env is derived from secrets.env. A change while
+# the unit is running is applied here, because `--only btcpay` never reaches
+# deploy_apps; a full deploy would also restart it after the rebuild.
+write_btcpay_mcp_env() {
+    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store envf tmp
+    [ -s "$state" ] || { warn "no $state; the BTCPay bootstrap has not completed"; return 1; }
+    key=$(env_value "$state" BTCPAY_MCP_KEY)
+    store=$(env_value "$state" BTCPAY_STORE_ID)
+    if [ -z "$key" ] || [ -z "$store" ]; then
+        warn "the BTCPay bootstrap has no read-only MCP key yet; btcpay-mcp will report unconfigured"
+        return 1
+    fi
+    envf="$CONFIG_DIR/btcpay-mcp/upstream.env"
+    mkdir -p "$(dirname "$envf")"
+    tmp=$(mktemp)
+    cat > "$tmp" <<EOF
+# Written by deploy.sh from btcpay/bootstrap.env. Do not hand-edit.
+BTCPAY_URL=http://btcpay:49392
+BTCPAY_PUBLIC_URL=https://$BTCPAY_HOST
+BTCPAY_API_KEY=$key
+BTCPAY_STORE_ID=$store
+EOF
+    if [ -s "$envf" ] && cmp -s "$tmp" "$envf"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    install -m 600 "$tmp" "$envf"
+    rm -f "$tmp"
+    log "wrote $envf (mode 600)"
+    if systemctl --user is-active --quiet btcpay-mcp.service 2>/dev/null; then
+        log "btcpay-mcp's upstream env changed; restarting it"
+        restart_unit btcpay-mcp
+        wait_healthy btcpay-mcp "$APP_HEALTH_WAIT" || warn "btcpay-mcp did not report healthy"
+    fi
+}
+
 start_btcpay() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping BTCPay (--skip-daemons)"; return 0; fi
     if [ "$DRY_RUN" = 1 ]; then
@@ -644,6 +683,7 @@ start_btcpay() {
 
     start_unit btcpay-bootstrap || warn "the BTCPay bootstrap did not complete; check: podman logs btcpay-bootstrap"
     write_btcpay_backend_env || warn "BTCPay is up but the backend env was not written"
+    write_btcpay_mcp_env || warn "BTCPay is up but the btcpay-mcp env was not written"
 }
 
 # ---------------------------------------------------------------------------
@@ -887,7 +927,7 @@ sync_npm_network() {
 # ---------------------------------------------------------------------------
 # Not a service: agent-skills ships no Containerfile and starts no container, so
 # it is deliberately absent from APP_REPOS (deploy_app would bail on the missing
-# Containerfile). Its install.sh links nine skills into whichever harnesses exist
+# Containerfile). Its install.sh links eleven skills into whichever harnesses exist
 # under $HOME (~/.config/opencode, ~/.codex, ~/.claude) and drops agent-mcp in
 # ~/.local/bin -- the only thing a deploy writes outside $DATA_DIR, hence
 # --skip-agent-skills for a host that only serves.
@@ -1076,7 +1116,7 @@ if [ "$SKIP_DAEMONS" = 1 ]; then verify_args+=(--no-nodes); fi
 "$REPO_DIR/verify.sh" ${verify_args[@]+"${verify_args[@]}"} || warn "verification reported problems"
 
 if [ "$DO_AGENT_SKILLS" = 1 ]; then
-    agent_skills_summary="agent-mcp + eight read-only skills in \$HOME"
+    agent_skills_summary="agent-mcp + eleven read-only skills in \$HOME"
 else
     agent_skills_summary="not installed (--skip-agent-skills)"
 fi
@@ -1089,7 +1129,8 @@ Stack deployed (chain daemons skipped).
   Web and MCP:  valkey, searxng, nginx-proxy-manager (80/443/81),
                 searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
                 monero-wallet-mcp, lightning-mcp, fulcrum-mcp,
-                victoria-logs-mcp, victoriametrics-mcp
+                victoria-logs-mcp, victoriametrics-mcp, crowdsec-mcp,
+                btcpay-mcp
   BoltMesh app: postgres, boltmesh-backend, boltmesh-worker,
                 boltmesh-frontend
   Explorers:    skipped with the chain daemons (--skip-daemons)
@@ -1120,7 +1161,8 @@ Stack deployed.
                     tor, valkey, searxng, nginx-proxy-manager
   MCP servers:      searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
                     monero-wallet-mcp, lightning-mcp, fulcrum-mcp,
-                    victoria-logs-mcp, victoriametrics-mcp
+                    victoria-logs-mcp, victoriametrics-mcp, crowdsec-mcp,
+                    btcpay-mcp
   BoltMesh app:     postgres, boltmesh-backend, boltmesh-worker,
                     boltmesh-frontend
   Explorers:        https://$BTC_EXPLORER_HOST (BTC RPC Explorer: bitcoind RPC

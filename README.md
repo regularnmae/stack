@@ -7,6 +7,7 @@ from scratch.
 The application code lives in sibling repos — `searxng-mcp`,
 `bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`, `lightning-mcp`,
 `fulcrum-mcp`, `victoria-logs-mcp`, `victoriametrics-mcp`, `crowdsec-mcp`,
+`btcpay-mcp`,
 plus BoltMesh's
 `backend` and `frontend`
 (under the `boltmesh-labs` org) — each of which ships only its code, tests, CI
@@ -47,6 +48,7 @@ deployment problem.
 | `victoria-logs-mcp` | `localhost/victoria-logs-mcp:latest` | `127.0.0.1:8111` | — |
 | `victoriametrics-mcp` | `localhost/victoriametrics-mcp:latest` | `127.0.0.1:8112` | — |
 | `crowdsec-mcp` | `localhost/crowdsec-mcp:latest` | host network, `127.0.0.1:8113` (the app's own bind) | — |
+| `btcpay-mcp` | `localhost/btcpay-mcp:latest` | `127.0.0.1:8114` | — |
 | `postgres` | `docker.io/library/postgres:18-alpine` | — | `$DATA_DIR/postgres` |
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` | — |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
@@ -199,7 +201,7 @@ an OS reinstall. See [Where the data lives](#where-the-data-lives).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds + restarts the
-nine MCP servers and the BoltMesh app tier (a plain start would keep running a
+ten MCP servers and the BoltMesh app tier (a plain start would keep running a
 stale image). The five images built here — the two explorers, `kuma-ctl`,
 `netcheck` and `tor` — are rebuilt when their Containerfile changed and left
 alone otherwise: the digest of that file is baked into the image as a label, so
@@ -1425,6 +1427,7 @@ prefix** (`mcp` flag above):
 | `https://mcp.boltmesh.net/logs` | `127.0.0.1:8111` |
 | `https://mcp.boltmesh.net/metrics` | `127.0.0.1:8112` |
 | `https://mcp.boltmesh.net/crowdsec` | `127.0.0.1:8113` (host network: the app's own bind) |
+| `https://mcp.boltmesh.net/btcpay` | `127.0.0.1:8114` |
 
 Each prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
 client's URL. The host and the prefixes are `MCP_HOST`/`MCP_HOSTS` in
@@ -1440,6 +1443,16 @@ gates it (the tokens are the `token.env` files under
 sets a long read timeout, because Streamable HTTP answers with `text/event-stream`
 and a buffered SSE body just hangs the MCP client.
 
+`/btcpay` is the read-only front door to BTCPay's Greenfield API: stores,
+invoices and their per-rail payment state, the on-chain wallet, rates and
+payment requests. Its BTCPay credential is a store-scoped key with four
+`canview*` permissions, minted by `btcpay-bootstrap` and kept in
+`config/btcpay/bootstrap.env` — never the admin key and never the backend's
+write-capable runtime key — so it cannot create or refund an invoice, pay out,
+generate a receiving address or broadcast. `get_btcpay_health` reports the
+key's label and permissions when a tool returns 403; preimages, the API-key
+echo and connection strings are redacted from every answer.
+
 Each declared host needs its DNS pointing here and `:80` reachable for the
 HTTP-01 challenge; set `NPM_REQUEST_CERT=0` to leave TLS to the UI instead.
 `./verify.sh` checks the MCP path a client takes — the public URL connected to
@@ -1449,7 +1462,7 @@ it works before public DNS exists.
 ### Agent skills (harnesses without MCP)
 
 The [`agent-skills`](https://github.com/regularnmae/agent-skills) repo wraps
-those same nine endpoints as nine skills plus `agent-mcp`, a small stdlib-only
+those same ten endpoints as eleven skills plus `agent-mcp`, a small stdlib-only
 MCP client, for harnesses that do not speak MCP: Codex, a plain shell, CI, a
 script. `./deploy.sh` clones it into `$BUILD_DIR/agent-skills` and runs its
 `install.sh`, which links each skill into the harnesses this host actually has
@@ -1526,12 +1539,12 @@ cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
 | `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `10.89.0.242:8000` |
 | `btc-explorer` | BTC RPC Explorer | `http://<addr>.onion/` → `10.89.0.243:3002` |
 | `xmr-explorer` | MoneroBlock | `http://<addr>.onion/style.css` → `10.89.0.244:31312` |
-| `mcp` | the nine MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning\|fulcrum\|logs\|metrics\|crowdsec>` → NPM's `*.onion` host |
+| `mcp` | the ten MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning\|fulcrum\|logs\|metrics\|crowdsec\|btcpay>` → NPM's `*.onion` host |
 
 All but the MCP host forward to a container's pinned IP (the units set `IP=`):
 tor validates the target when it starts, so a name for a container that has not
 started yet would keep tor down. The MCP host cannot use an IP target — it is
-eight servers split by *path*, which only nginx-proxy-manager does, and NPM is on
+ten servers split by *path*, which only nginx-proxy-manager does, and NPM is on
 the host network, where a container has no route (`10.89.0.1:80` is refused from
 `npm-network`). The one reachable name is `host.containers.internal` (pasta's
 host gateway, added by podman), so the mcp onion forwards there and NPM matches

@@ -203,6 +203,7 @@ endpoints=(
     "victoria-logs-mcp|$CONFIG_DIR/victoria-logs-mcp/token.env|LOGS_MCP_TOKEN|get_log_health|{}|0"
     "victoriametrics-mcp|$CONFIG_DIR/victoriametrics-mcp/token.env|METRICS_MCP_TOKEN|get_metrics_health|{}|0"
     "crowdsec-mcp|$CONFIG_DIR/crowdsec-mcp/token.env|CROWDSEC_MCP_TOKEN|list_decisions|{}|0"
+    "btcpay-mcp|$CONFIG_DIR/btcpay-mcp/token.env|BTCPAY_MCP_TOKEN|list_stores|{}|1"
 )
 
 # The token each container's endpoint needs, keyed by container name, so the
@@ -312,7 +313,7 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Agent tooling"
-# The nine skills plus `agent-mcp` from the agent-skills repo: the same servers,
+# The eleven skills plus `agent-mcp` from the agent-skills repo: the same servers,
 # through the same tokens, for harnesses that do not speak MCP (Codex, a plain
 # shell, CI). The registry reads $DATA_DIR/config/<server>/token.env on every
 # call -- never a copy -- so a rotated token needs no second edit. A host that

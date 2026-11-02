@@ -50,6 +50,18 @@ RUNTIME_PERMISSIONS = [
     "btcpay.store.canviewstoresettings",
 ]
 
+# The read-only key btcpay-mcp reads with. Four view permissions and nothing
+# that can create, refund, pay out, generate an address or broadcast -- the
+# server has no write tool, and the credential could not write even if one
+# appeared. Store-scoped (`perm:STORE_ID`) when this BTCPay accepts it, so a
+# second store added to the instance later is not readable through this key.
+MCP_PERMISSIONS = [
+    "btcpay.store.canviewstoresettings",
+    "btcpay.store.canviewinvoices",
+    "btcpay.store.canviewpaymentrequests",
+    "btcpay.store.canviewwallet",
+]
+
 WEBHOOK_EVENTS = [
     "InvoiceReceivedPayment",
     "InvoicePaymentSettled",
@@ -376,6 +388,102 @@ def ensure_runtime_key(client: BtcPay, key: str, store_id: str, api_key: str) ->
     return runtime_key, True
 
 
+def mcp_key_status(client: BtcPay, api_key: str) -> tuple[bool, str, list[str]]:
+    """Return ``(complete, key_id, missing_permissions)`` for the MCP key.
+
+    `/api/v1/api-keys/current` echoes the key itself in `apiKey`; only the id
+    and permissions are read here, and nothing from this response is logged.
+    A scoped permission comes back as `btcpay.store.canview...:<storeId>`, so
+    the comparison strips the suffix -- otherwise a correct key would look
+    incomplete forever and every bootstrap would mint another one.
+    """
+    try:
+        info = client.request("GET", "/api/v1/api-keys/current", token=api_key) or {}
+    except BootstrapError as exc:
+        log(f"could not read the MCP key's permissions: {exc}")
+        return False, "", ["unreadable"]
+    permissions = set(info.get("permissions") or [])
+    key_id = str(info.get("id") or "")
+    if "unrestricted" in permissions:
+        return True, key_id, []
+    names = {
+        permission.split(":", 1)[0]
+        for permission in permissions
+        if isinstance(permission, str)
+    }
+    missing = [permission for permission in MCP_PERMISSIONS if permission not in names]
+    return not missing, key_id, missing
+
+
+def ensure_mcp_key(
+    client: BtcPay, admin_key: str, store_id: str, api_key: str
+) -> tuple[str, bool]:
+    """Provision the read-only key btcpay-mcp reads with.
+
+    Same shape as the runtime key: prove an existing key, reuse it only when
+    its permission set is complete, otherwise mint a replacement and prove it
+    against the store and its invoice list. BTCPay keys are immutable, so a key
+    minted before a permission was added can only be replaced.
+    """
+    scoped = [f"{permission}:{store_id}" for permission in MCP_PERMISSIONS]
+    if api_key:
+        try:
+            client.request("GET", f"/api/v1/stores/{store_id}/invoices?take=1", token=api_key)
+        except BootstrapError:
+            log("the provided BTCPAY_MCP_KEY is not usable; minting a new one")
+        else:
+            complete, key_id, missing = mcp_key_status(client, api_key)
+            if complete:
+                log("reusing the provided read-only MCP API key")
+                return api_key, False
+            log(
+                "the provided BTCPAY_MCP_KEY is missing "
+                f"{', '.join(missing)}; minting a replacement "
+                f"(the superseded key {key_id or 'unknown'} is left active "
+                "so a running btcpay-mcp keeps working until upstream.env is rewritten)"
+            )
+
+    try:
+        created = client.request(
+            "POST",
+            "/api/v1/api-keys",
+            {"label": "boltmesh-mcp", "permissions": scoped},
+            token=admin_key,
+        )
+    except BootstrapError as exc:
+        # Store-scoped permission strings are documented but were added to the
+        # API over time; a build that refuses them gets the unscoped store
+        # permissions, which are still read-only. The narrowing is a preference,
+        # not the security boundary -- the four permissions are.
+        if "HTTP 400" not in str(exc):
+            raise
+        log(
+            "warning: this BTCPay refused store-scoped permissions "
+            f"({exc}); minting the read-only key with unscoped store permissions"
+        )
+        created = client.request(
+            "POST",
+            "/api/v1/api-keys",
+            {"label": "boltmesh-mcp", "permissions": MCP_PERMISSIONS},
+            token=admin_key,
+        )
+
+    key = created["apiKey"]
+    # Prove the new key with the two reads btcpay-mcp depends on: the store and
+    # its invoice list. A key that cannot answer those is not a key to save.
+    client.request("GET", f"/api/v1/stores/{store_id}", token=key)
+    client.request("GET", f"/api/v1/stores/{store_id}/invoices?take=1", token=key)
+    complete, _, missing = mcp_key_status(client, key)
+    if not complete:
+        raise BootstrapError(
+            "the freshly minted read-only MCP key is itself incomplete "
+            f"(missing {', '.join(missing)}); check MCP_PERMISSIONS"
+        )
+    # Never print this one: the bootstrap's stdout is shipped to the log store.
+    log("minted the read-only MCP API key (kept in the state file, not printed)")
+    return key, True
+
+
 def wallet_ready(uri: str) -> bool:
     """Return True when the plugin wallet-rpc has an open wallet.
 
@@ -414,6 +522,7 @@ def main() -> int:
     store_name = env("BTCPAY_STORE_NAME", "BoltMesh")
     store_id_env = setting("BTCPAY_STORE_ID")
     api_key_env = setting("BTCPAY_API_KEY")
+    mcp_key_env = setting("BTCPAY_MCP_KEY")
     webhook_url = setting(
         "BTCPAY_WEBHOOK_URL", "http://boltmesh-backend:8000/v1/webhooks/btcpay"
     )
@@ -460,20 +569,34 @@ def main() -> int:
     )
     runtime_key, runtime_created = ensure_runtime_key(client, admin_key, store_id, api_key_env)
 
-    save_state(
-        state_file,
-        {
-            # Merge rather than replace: the same file carries the operator's
-            # admin email/password and store/webhook inputs, and a later run
-            # needs them if the admin key is ever lost.
-            **state,
-            "BTCPAY_URL": base_url,
-            "BTCPAY_STORE_ID": store_id,
-            "BTCPAY_API_KEY": runtime_key,
-            "BTCPAY_WEBHOOK_SECRET": webhook_secret,
-            "BTCPAY_ADMIN_KEY": admin_key,
-        },
-    )
+    # The read-only MCP key is additive and must not be able to stop the
+    # settlement tier: a key problem leaves btcpay-mcp reporting "unconfigured"
+    # while the backend, store and webhook stay up.
+    try:
+        mcp_key, mcp_created = ensure_mcp_key(client, admin_key, store_id, mcp_key_env)
+    except BootstrapError as exc:
+        log(
+            "warning: the read-only MCP API key could not be provisioned "
+            f"({exc}); btcpay-mcp will report 'unconfigured' until a re-run succeeds"
+        )
+        mcp_key, mcp_created = mcp_key_env, False
+
+    next_state = {
+        # Merge rather than replace: the same file carries the operator's
+        # admin email/password and store/webhook inputs, and a later run
+        # needs them if the admin key is ever lost.
+        **state,
+        "BTCPAY_URL": base_url,
+        "BTCPAY_STORE_ID": store_id,
+        "BTCPAY_API_KEY": runtime_key,
+        "BTCPAY_WEBHOOK_SECRET": webhook_secret,
+        "BTCPAY_ADMIN_KEY": admin_key,
+    }
+    # Keep an older key rather than blanking it when this run could not mint a
+    # replacement: a stale key is still reported by the MCP, an empty one is not.
+    if mcp_key:
+        next_state["BTCPAY_MCP_KEY"] = mcp_key
+    save_state(state_file, next_state)
 
     print("# BTCPay bootstrap output - put these in backend/.env", flush=True)
     print(f"BTCPAY_URL={base_url}", flush=True)
@@ -488,6 +611,11 @@ def main() -> int:
     log(f"done: store {store_id}, webhook {webhook_url}")
     if runtime_created:
         log("update BTCPAY_API_KEY in backend/.env, then restart backend and worker")
+    if mcp_created:
+        log(
+            "the read-only MCP key is in BTCPAY_MCP_KEY; deploy.sh will write "
+            "config/btcpay-mcp/upstream.env from it"
+        )
     return 0
 
 

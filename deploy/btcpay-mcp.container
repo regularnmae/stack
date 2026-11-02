@@ -1,0 +1,55 @@
+# Quadlet unit for the BTCPay MCP server. deploy/install.sh renders this into
+# ~/.config/containers/systemd/, where quadlet turns it into
+# btcpay-mcp.service.
+#
+# What it is: the read-only front door to BTCPay's Greenfield API -- stores,
+# invoices and their per-rail payment state, the on-chain wallet, rates and
+# payment requests. It holds a store-scoped API key with four `canview*`
+# permissions (minted by scripts/btcpay_bootstrap.py), never the admin key or
+# the backend's write-capable runtime key. There is no create/refund/payout
+# tool, and the app only issues GETs.
+[Unit]
+Description=BTCPay MCP Server (streamable HTTP)
+After=network-online.target npm-network-network.service btcpay.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=btcpay-mcp
+Image=localhost/btcpay-mcp:latest
+Network=npm-network.network
+
+# The bearer token clients must present, and the BTCPay URL/key/store this
+# server reads. Both live OUTSIDE this repo in
+# $DATA_DIR/config/btcpay-mcp/ (mode 600). upstream.env is rewritten by
+# deploy.sh from btcpay/bootstrap.env after the bootstrap mints the key.
+EnvironmentFile=@CONFIG_DIR@/btcpay-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/btcpay-mcp/upstream.env
+
+# SDK chatter (transport/session lifecycle) is per-client noise; keep only
+# WARNING and up so the log stays error- and warning-shaped.
+Environment=LOG_LEVEL=WARNING
+
+# Loopback only: nginx-proxy-manager runs on the host network and reaches this
+# server on host 8114 (MCP_HOSTS in stack.conf) -- it cannot resolve the
+# container name. The app itself still listens on 8000 inside its own
+# namespace. Bind 127.0.0.1, never a LAN address: the firewall opens nothing
+# for it and NPM is still the only way in for a client.
+PublishPort=127.0.0.1:8114:8000
+
+# Healthcheck: MCP initialize probe (authenticated). Makes a wedged server
+# visible/restartable instead of silently erroring. The app's own /health is
+# the liveness path; /ready probes BTCPay and must never gate podman, or a
+# BTCPay restart would restart-loop this container.
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

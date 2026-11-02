@@ -443,6 +443,7 @@ UNITS=(
     "victoria-logs-mcp.container:victoria-logs-mcp.container"
     "victoriametrics-mcp.container:victoriametrics-mcp.container"
     "crowdsec-mcp.container:crowdsec-mcp.container"
+    "btcpay-mcp.container:btcpay-mcp.container"
     "postgres.container:postgres.container"
     "uptime-kuma.container:uptime-kuma.container"
     "boltmesh-backend.container:boltmesh-backend.container"
@@ -1220,6 +1221,31 @@ else
     install -m 600 "$lapi_tmp" "$lapi_env"
     rm -f "$lapi_tmp"
     log "wrote $lapi_env (mode 600)"
+fi
+
+# btcpay-mcp: the bearer token clients present, and the upstream wiring. The
+# token is seed-once like every other server's. The key is NOT seeded from a
+# copy: it is minted by scripts/btcpay_bootstrap.py into
+# config/btcpay/bootstrap.env, and deploy.sh's write_btcpay_mcp_env() rewrites
+# this file from that state after every bootstrap. Seeding the key here would
+# leave a rotated secret split across two files (the same rule as crowdsec's
+# lapi.env). This seed only gives the unit a URL before the first bootstrap.
+BTCPAY_MCP_ENV="$CONFIG_DIR/btcpay-mcp"
+if ensure_secret "$BTCPAY_MCP_ENV/token.env" "btcpay-mcp token env"; then
+    token=$(new_or_reused_token btcpay-mcp BTCPAY_MCP_TOKEN)
+    write_secret "$BTCPAY_MCP_ENV/token.env" <<EOF
+BTCPAY_MCP_TOKEN=$token
+EOF
+    log "wrote $BTCPAY_MCP_ENV/token.env (mode 600)"
+fi
+if ensure_secret "$BTCPAY_MCP_ENV/upstream.env" "btcpay-mcp upstream env"; then
+    write_secret "$BTCPAY_MCP_ENV/upstream.env" <<EOF
+# The BTCPay instance this server reads. deploy.sh rewrites this file from
+# config/btcpay/bootstrap.env (URL, the read-only BTCPAY_MCP_KEY, store id and
+# the public origin) after every bootstrap; do not hand-edit it.
+BTCPAY_URL=http://btcpay:49392
+EOF
+    log "wrote $BTCPAY_MCP_ENV/upstream.env (mode 600)"
 fi
 
 # BTC RPC Explorer's configuration. The app is configured entirely through the
