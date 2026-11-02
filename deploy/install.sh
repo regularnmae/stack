@@ -440,6 +440,7 @@ UNITS=(
     "monero-wallet-mcp.container:monero-wallet-mcp.container"
     "lightning-mcp.container:lightning-mcp.container"
     "fulcrum-mcp.container:fulcrum-mcp.container"
+    "victoria-logs-mcp.container:victoria-logs-mcp.container"
     "postgres.container:postgres.container"
     "uptime-kuma.container:uptime-kuma.container"
     "boltmesh-backend.container:boltmesh-backend.container"
@@ -640,7 +641,7 @@ migrate_legacy_config() {
     adopt_file "$CONFIG_HOME/crypto-nodes/secrets.env" "$CONFIG_DIR/stack/secrets.env"
     adopt_file "$CONFIG_HOME/stack/secrets.env"        "$CONFIG_DIR/stack/secrets.env"
     local d f
-    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp; do
+    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp; do
         [ -d "$CONFIG_HOME/$d" ] || continue
         for f in "$CONFIG_HOME/$d"/*.env; do
             [ -e "$f" ] || continue
@@ -1129,6 +1130,24 @@ if ensure_secret "$FULCRUM_ENV/upstream.env" "fulcrum-mcp upstream env"; then
 FULCRUM_URL=tcp://fulcrum:50001
 EOF
     log "wrote $FULCRUM_ENV/upstream.env (mode 600)"
+fi
+
+LOGS_ENV="$CONFIG_DIR/victoria-logs-mcp"
+if ensure_secret "$LOGS_ENV/token.env" "victoria-logs-mcp token env"; then
+    token=$(new_or_reused_token victoria-logs-mcp LOGS_MCP_TOKEN)
+    write_secret "$LOGS_ENV/token.env" <<EOF
+LOGS_MCP_TOKEN=$token
+EOF
+    log "wrote $LOGS_ENV/token.env (mode 600)"
+fi
+if ensure_secret "$LOGS_ENV/upstream.env" "victoria-logs-mcp upstream env"; then
+    write_secret "$LOGS_ENV/upstream.env" <<EOF
+# The log store this server reads. VictoriaLogs has no authentication of its
+# own: it is loopback-only on the host, and this MCP server is its
+# authenticated front door.
+VICTORIA_LOGS_URL=http://victoria-logs:9428
+EOF
+    log "wrote $LOGS_ENV/upstream.env (mode 600)"
 fi
 
 # BTC RPC Explorer's configuration. The app is configured entirely through the

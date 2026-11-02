@@ -119,7 +119,8 @@ targets (each one writes its source of truth, re-renders, restarts, verifies):
                  --spend rotates the spend token of monero-wallet-mcp or
                  lightning-mcp instead of the read token
                  servers: searxng-mcp bitcoin-node-mcp monero-node-mcp
-                          monero-wallet-mcp lightning-mcp
+                          monero-wallet-mcp lightning-mcp fulcrum-mcp
+                          victoria-logs-mcp
   searxng-secret SearXNG's settings.yml secret_key
   postgres       the vpnuser role's password -> db.env, dump.env, BoltMesh
   boltmesh-keys  SECRET_KEY/REFRESH_SECRET_KEY/NODE_SECRET_KEY/BOOTSTRAP_SECRET_PEPPER
@@ -693,7 +694,7 @@ apply_runes() {
 # ~/.config/opencode/mcp.env already reads it from there at shell start).
 TOKEN_SERVERS=(
     searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp
-    lightning-mcp fulcrum-mcp
+    lightning-mcp fulcrum-mcp victoria-logs-mcp
 )
 
 # env-file | read-token var | a read tool it answers | its args | spend-token var
@@ -717,6 +718,9 @@ token_spec() { # server
         fulcrum-mcp)
             printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/fulcrum-mcp/token.env" \
                 FULCRUM_MCP_TOKEN get_chain_tip '{}' "" ;;
+        victoria-logs-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/victoria-logs-mcp/token.env" \
+                LOGS_MCP_TOKEN get_log_health '{}' "" ;;
         *) return 1 ;;
     esac
 }

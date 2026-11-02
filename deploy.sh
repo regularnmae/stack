@@ -887,7 +887,7 @@ sync_npm_network() {
 # ---------------------------------------------------------------------------
 # Not a service: agent-skills ships no Containerfile and starts no container, so
 # it is deliberately absent from APP_REPOS (deploy_app would bail on the missing
-# Containerfile). Its install.sh links six skills into whichever harnesses exist
+# Containerfile). Its install.sh links seven skills into whichever harnesses exist
 # under $HOME (~/.config/opencode, ~/.codex, ~/.claude) and drops agent-mcp in
 # ~/.local/bin -- the only thing a deploy writes outside $DATA_DIR, hence
 # --skip-agent-skills for a host that only serves.
@@ -1076,7 +1076,7 @@ if [ "$SKIP_DAEMONS" = 1 ]; then verify_args+=(--no-nodes); fi
 "$REPO_DIR/verify.sh" ${verify_args[@]+"${verify_args[@]}"} || warn "verification reported problems"
 
 if [ "$DO_AGENT_SKILLS" = 1 ]; then
-    agent_skills_summary="agent-mcp + six read-only skills in \$HOME"
+    agent_skills_summary="agent-mcp + seven read-only skills in \$HOME"
 else
     agent_skills_summary="not installed (--skip-agent-skills)"
 fi
@@ -1088,7 +1088,8 @@ Stack deployed (chain daemons skipped).
 
   Web and MCP:  valkey, searxng, nginx-proxy-manager (80/443/81),
                 searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
-                monero-wallet-mcp, lightning-mcp, fulcrum-mcp
+                monero-wallet-mcp, lightning-mcp, fulcrum-mcp,
+                victoria-logs-mcp
   BoltMesh app: postgres, boltmesh-backend, boltmesh-worker,
                 boltmesh-frontend
   Explorers:    skipped with the chain daemons (--skip-daemons)
@@ -1118,7 +1119,8 @@ Stack deployed.
   Daemons and web:  bitcoind, monerod, fulcrum, lightningd, btcpay, nbxplorer,
                     tor, valkey, searxng, nginx-proxy-manager
   MCP servers:      searxng-mcp, bitcoin-node-mcp, monero-node-mcp,
-                    monero-wallet-mcp, lightning-mcp, fulcrum-mcp
+                    monero-wallet-mcp, lightning-mcp, fulcrum-mcp,
+                    victoria-logs-mcp
   BoltMesh app:     postgres, boltmesh-backend, boltmesh-worker,
                     boltmesh-frontend
   Explorers:        https://$BTC_EXPLORER_HOST (BTC RPC Explorer: bitcoind RPC
@@ -1135,7 +1137,7 @@ Stack deployed.
                     50002 (SSL, self-signed). Fulcrum indexes alongside
                     bitcoind and accepts wallets once its index has caught up
                     (podman logs fulcrum)
-  MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning>
+  MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning|fulcrum|logs>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
   Onion (no DNS):   the same surface as http://<onion>.onion/ (ONION_SERVICES in
                     stack.conf); the addresses are printed below once tor has
