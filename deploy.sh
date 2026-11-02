@@ -1179,7 +1179,7 @@ Stack deployed.
                     50002 (SSL, self-signed). Fulcrum indexes alongside
                     bitcoind and accepts wallets once its index has caught up
                     (podman logs fulcrum)
-  MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning|fulcrum|logs|metrics|crowdsec>
+  MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning|fulcrum|logs|metrics|crowdsec|btcpay>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
   Onion (no DNS):   the same surface as http://<onion>.onion/ (ONION_SERVICES in
                     stack.conf); the addresses are printed below once tor has
