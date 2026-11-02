@@ -1450,8 +1450,9 @@ payment requests. Its BTCPay credential is a store-scoped key with four
 `config/btcpay/bootstrap.env` — never the admin key and never the backend's
 write-capable runtime key — so it cannot create or refund an invoice, pay out,
 generate a receiving address or broadcast. `get_btcpay_health` reports the
-key's label and permissions when a tool returns 403; preimages, the API-key
-echo and connection strings are redacted from every answer.
+key's label and permissions when a tool returns 403, and marks the key
+`degraded` if one of the four is missing; preimages, the API-key echo and
+connection strings are redacted from every answer.
 
 Each declared host needs its DNS pointing here and `:80` reachable for the
 HTTP-01 challenge; set `NPM_REQUEST_CERT=0` to leave TLS to the UI instead.
