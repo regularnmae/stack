@@ -59,7 +59,7 @@ if [ "$NO_NODES" = 1 ]; then
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
         netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
-        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp
+        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 else
@@ -67,7 +67,7 @@ else
         bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-btcpay lightningd btcpay nbxplorer
         tor valkey searxng uptime-kuma nginx-proxy-manager
         netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
-        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp
+        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 fi
@@ -198,6 +198,7 @@ endpoints=(
     "lightning-mcp|$CONFIG_DIR/lightning-mcp/token.env|LIGHTNING_MCP_TOKEN|getinfo|{}|1"
     "fulcrum-mcp|$CONFIG_DIR/fulcrum-mcp/token.env|FULCRUM_MCP_TOKEN|get_chain_tip|{}|1"
     "victoria-logs-mcp|$CONFIG_DIR/victoria-logs-mcp/token.env|LOGS_MCP_TOKEN|get_log_health|{}|0"
+    "victoriametrics-mcp|$CONFIG_DIR/victoriametrics-mcp/token.env|METRICS_MCP_TOKEN|get_metrics_health|{}|0"
 )
 
 # The token each container's endpoint needs, keyed by container name, so the
@@ -308,7 +309,7 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Agent tooling"
-# The seven skills plus `agent-mcp` from the agent-skills repo: the same servers,
+# The eight skills plus `agent-mcp` from the agent-skills repo: the same servers,
 # through the same tokens, for harnesses that do not speak MCP (Codex, a plain
 # shell, CI). The registry reads $DATA_DIR/config/<server>/token.env on every
 # call -- never a copy -- so a rotated token needs no second edit. A host that
@@ -323,7 +324,7 @@ else
     missing=()
     for harness in "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.claude"; do
         [ -d "$harness" ] || continue
-        for skill in bitcoin-node monero-node monero-wallet lightning searxng fulcrum victoria-logs; do
+        for skill in bitcoin-node monero-node monero-wallet lightning searxng fulcrum victoria-logs victoriametrics; do
             [ -e "$harness/skills/$skill/SKILL.md" ] || missing+=("$harness/skills/$skill")
         done
     done

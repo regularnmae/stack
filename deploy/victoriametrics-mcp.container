@@ -1,0 +1,55 @@
+# Quadlet unit for the VictoriaMetrics MCP server. deploy/install.sh renders
+# this into ~/.config/containers/systemd/, where quadlet turns it into
+# victoriametrics-mcp.service.
+#
+# What it is: the authenticated front door to the metrics store.
+# `victoriametrics` has no authentication of its own and is loopback-only on
+# purpose: its labels name every service, scrape address, filesystem and
+# device in the stack, and its /api/v1 query surface is open. A client reaches
+# the history through this server and its bearer token, not through the
+# store's HTTP API.
+[Unit]
+Description=VictoriaMetrics MCP Server (streamable HTTP)
+After=network-online.target npm-network-network.service victoriametrics.service
+Requires=npm-network-network.service victoriametrics.service
+
+[Container]
+ContainerName=victoriametrics-mcp
+Image=localhost/victoriametrics-mcp:latest
+Network=npm-network.network
+
+# The bearer token clients must present, and the store this server reads. Both
+# live OUTSIDE this repo in $DATA_DIR/config/victoriametrics-mcp/ (mode 600),
+# written by deploy/install.sh, so no secret is ever committed -- only the
+# *.example files under deploy/ are.
+EnvironmentFile=@CONFIG_DIR@/victoriametrics-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/victoriametrics-mcp/upstream.env
+
+# SDK chatter (transport/session lifecycle) is per-client noise; keep only
+# WARNING and up so the log stays error- and warning-shaped.
+Environment=LOG_LEVEL=WARNING
+
+# Loopback only: nginx-proxy-manager runs on the host network and reaches this
+# server on host 8112 (MCP_HOSTS in stack.conf) -- it cannot resolve the
+# container name. The app itself still listens on 8000 inside its own
+# namespace. Bind 127.0.0.1, never a LAN address: the firewall opens nothing
+# for it and NPM is still the only way in for a client.
+PublishPort=127.0.0.1:8112:8000
+
+# Healthcheck: MCP initialize probe (authenticated). Makes a wedged server
+# visible/restartable instead of silently erroring. The app's own /health is
+# the liveness path; /ready probes the store and must never gate podman, or a
+# VictoriaMetrics restart would restart-loop this container.
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

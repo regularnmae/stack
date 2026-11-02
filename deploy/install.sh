@@ -441,6 +441,7 @@ UNITS=(
     "lightning-mcp.container:lightning-mcp.container"
     "fulcrum-mcp.container:fulcrum-mcp.container"
     "victoria-logs-mcp.container:victoria-logs-mcp.container"
+    "victoriametrics-mcp.container:victoriametrics-mcp.container"
     "postgres.container:postgres.container"
     "uptime-kuma.container:uptime-kuma.container"
     "boltmesh-backend.container:boltmesh-backend.container"
@@ -641,7 +642,7 @@ migrate_legacy_config() {
     adopt_file "$CONFIG_HOME/crypto-nodes/secrets.env" "$CONFIG_DIR/stack/secrets.env"
     adopt_file "$CONFIG_HOME/stack/secrets.env"        "$CONFIG_DIR/stack/secrets.env"
     local d f
-    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp; do
+    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp; do
         [ -d "$CONFIG_HOME/$d" ] || continue
         for f in "$CONFIG_HOME/$d"/*.env; do
             [ -e "$f" ] || continue
@@ -1148,6 +1149,24 @@ if ensure_secret "$LOGS_ENV/upstream.env" "victoria-logs-mcp upstream env"; then
 VICTORIA_LOGS_URL=http://victoria-logs:9428
 EOF
     log "wrote $LOGS_ENV/upstream.env (mode 600)"
+fi
+
+METRICS_ENV="$CONFIG_DIR/victoriametrics-mcp"
+if ensure_secret "$METRICS_ENV/token.env" "victoriametrics-mcp token env"; then
+    token=$(new_or_reused_token victoriametrics-mcp METRICS_MCP_TOKEN)
+    write_secret "$METRICS_ENV/token.env" <<EOF
+METRICS_MCP_TOKEN=$token
+EOF
+    log "wrote $METRICS_ENV/token.env (mode 600)"
+fi
+if ensure_secret "$METRICS_ENV/upstream.env" "victoriametrics-mcp upstream env"; then
+    write_secret "$METRICS_ENV/upstream.env" <<EOF
+# The metrics store this server reads. VictoriaMetrics has no authentication
+# of its own: it is loopback-only on the host, and this MCP server is its
+# authenticated front door.
+VICTORIA_METRICS_URL=http://victoriametrics:8428
+EOF
+    log "wrote $METRICS_ENV/upstream.env (mode 600)"
 fi
 
 # BTC RPC Explorer's configuration. The app is configured entirely through the

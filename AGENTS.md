@@ -3,7 +3,8 @@
 This repo is the **single owner of the runtime**: the scripts listed below and
 every unit the host runs. The application repos (`searxng-mcp`,
 `bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`, `lightning-mcp`,
-`fulcrum-mcp`, `victoria-logs-mcp`, and BoltMesh's `backend`/`frontend` under
+`fulcrum-mcp`, `victoria-logs-mcp`, `victoriametrics-mcp`, and BoltMesh's
+`backend`/`frontend` under
 `boltmesh-labs`) ship only code, tests, CI and a `Containerfile` — if a unit or
 an env file changes, it changes here.
 
@@ -189,7 +190,7 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   `podman ps`, so `wait_healthy` reads its terminal state instead
   (`exited 0` = done) — before that, `./deploy.sh --only postgres-dump` spun
   its whole 180 s and warned "container missing" about a job that had
-  succeeded. The seven MCP servers' `healthcheck.py` (authenticated `initialize`,
+  succeeded. The eight MCP servers' `healthcheck.py` (authenticated `initialize`,
   SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
 - **CLN peers and channels come from `listpeerchannels`/`listpeers`, never
   `listchannels` or `getinfo`'s `num_peers`:** the gossmap's `active` is an
@@ -713,6 +714,12 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   `$DATA_DIR/monitoring` is regenerable and outside the backup set, and
   `monitor.prom` carries the sweep's own numbers. The series and the
   observe/decide split are documented in `scripts/metrics.sh`.
+  `victoriametrics-mcp` is the authenticated front door (`/metrics` on the
+  MCP host), for the same reason as the log store: the store's own API has
+  no authentication, so it stays loopback-only and a bearer token gates the
+  PromQL the agent can ask. Its `get_metrics_health` reads
+  `stack_metrics_timestamp`, the same heartbeat the monitor's staleness
+  check is about, so an agent can tell an empty graph from a dead collector.
 - **Logs: journald is the source, `vector` the only shipper, `victoria-logs` the
   history.** Nothing in the units sets a log driver: podman's default is
   journald, so every container's stdout and every host script's output is
@@ -899,7 +906,7 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   `APP_REPOS`:** it ships no Containerfile and starts no container, so
   `deploy_app` would bail on it. `deploy.sh`'s `fetch_agent_skills`/
   `install_agent_skills` clone it into `$BUILD_DIR/agent-skills` and run its
-  `install.sh`, which links seven skills into the harnesses under `$HOME` and puts
+  `install.sh`, which links eight skills into the harnesses under `$HOME` and puts
   `agent-mcp` in `~/.local/bin` — the only thing a deploy writes outside
   `$DATA_DIR`, which is what `--skip-agent-skills` is for. Three traps: never run
   its `install.sh --from-opencode` here, because this host's `opencode.json`
@@ -918,7 +925,7 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
 
 ## Interface contract with the app repos
 
-The seven MCP servers are pure env-configured services: **they never read a stack
+The eight MCP servers are pure env-configured services: **they never read a stack
 path, a config file or a data dir** — only the variables below. This table is
 the shared contract; the app repos' docs own the *meaning* of the variables,
 this repo owns everything about *how they get set*. If a container name, port or
@@ -933,6 +940,7 @@ variable name changes, it changes on both sides at once.
 | `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `127.0.0.1:8104` | `0.0.0.0:8000`, `/health` |
 | `fulcrum-mcp` | `fulcrum-mcp` / `localhost/fulcrum-mcp:latest` | `token.env`, `upstream.env` | `fulcrum:50001` | `fulcrum-mcp:8000` | `127.0.0.1:8110` | `0.0.0.0:8000`, `/health` |
 | `victoria-logs-mcp` | `victoria-logs-mcp` / `localhost/victoria-logs-mcp:latest` | `token.env`, `upstream.env` | `victoria-logs:9428` | `victoria-logs-mcp:8000` | `127.0.0.1:8111` | `0.0.0.0:8000`, `/health` |
+| `victoriametrics-mcp` | `victoriametrics-mcp` / `localhost/victoriametrics-mcp:latest` | `token.env`, `upstream.env` | `victoriametrics:8428` | `victoriametrics-mcp:8000` | `127.0.0.1:8112` | `0.0.0.0:8000`, `/health` |
 
 None of them is reachable from the LAN. NPM terminates TLS on :80/:443 (its own
 bind, on the host network) and is the sole path to every MCP server for a client;
