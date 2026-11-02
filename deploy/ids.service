@@ -8,7 +8,7 @@
 # scripts/monitor.sh pages on, and the same file carries the counters into the
 # metrics textfile. Nothing here blocks anything -- enforcement is
 # `stack-bouncer`'s job (deploy/root/bouncer.sh, a root oneshot on a one-minute
-# system timer, driven by the LAPI over 127.0.0.1:8081).
+# system timer, driven by the LAPI over 127.0.0.1:8080).
 [Unit]
 Description=Roll up the IDS state (suricata alerts, crowdsec decisions)
 After=network-online.target

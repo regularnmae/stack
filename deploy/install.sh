@@ -340,7 +340,7 @@ EOF
         {
             printf '# Written by deploy/install.sh --root; do not edit (deploy/root/ owns it).\n'
             printf 'CROWDSEC_BOUNCER_KEY=%s\n' "$bkey"
-            printf 'LAPI=127.0.0.1:8081\n'
+            printf 'LAPI=127.0.0.1:8080\n'
             printf 'DATA_DIR=%s\n' "$data"
         } > "$benv"
         install -m 600 "$benv" "$ROOT_CONFIG_DIR/bouncer.env"

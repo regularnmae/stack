@@ -19,30 +19,34 @@
 # .container, never an env file (Quadlet does not expand variables in Exec=).
 #
 # Enforcement: decisions are applied by `stack-bouncer` (deploy/root/bouncer.sh,
-# a root oneshot on a timer), which polls this container's LAPI over loopback and
-# writes an nftables set with per-entry timeouts. There is no official firewall
-# bouncer IMAGE any more (docker.io/crowdsecurity/cs-firewall-bouncer answers
-# "access denied"), and the packaged one would be a second daemon outside this
-# repo's control -- so the applier is ours, and CrowdSec keeps the part that is
-# hard (decision lifecycle, TTLs, dedup).
+# a root oneshot on a timer), which polls this container's LAPI on the host's
+# loopback and writes an nftables set with per-entry timeouts. There is no
+# official firewall bouncer IMAGE any more (docker.io/crowdsecurity/cs-firewall-bouncer
+# answers "access denied"), and the packaged one would be a second daemon outside
+# this repo's control -- so the applier is ours, and CrowdSec keeps the part that
+# is hard (decision lifecycle, TTLs, dedup).
 [Unit]
 Description=CrowdSec (local detection from nginx-proxy-manager logs)
-After=network-online.target npm-network-network.service
+After=network-online.target
 Wants=network-online.target
-Requires=npm-network-network.service
 
 [Container]
 ContainerName=crowdsec
 Image=docker.io/crowdsecurity/crowdsec:v1.8.2
-# Outbound for the hub (parsers/scenarios) at first boot, and inbound from the
-# bouncer's loopback publish below.
-Network=npm-network.network
-# The LAPI, on the host's loopback ONLY, for stack-bouncer. 8081 because 8080 is
-# searxng's loopback publish. Inside the container the LAPI already listens on
-# 0.0.0.0:8080 (this image's default), so the publish is what makes it reachable
-# from the host -- and it is key-gated: a request without the bouncer key gets
-# 403. Nothing on the LAN or the internet can see it.
-PublishPort=127.0.0.1:8081:8080
+# Host networking on purpose. The LAPI has to be reachable by stack-bouncer,
+# which runs as *root on the host*, and this host's rootless podman keeps the
+# npm-network bridge inside its own network namespace: a container address
+# (10.89.0.x) is not routable from the host, so a pinned IP would not help. The
+# only other way in is a published port -- and that publish is a `rootlessport`
+# process owned by no unit. On 2026-11-02 one of those vanished mid-run: the
+# container kept running, host 8081 simply stopped listening, and enforcement
+# was silently off for 7h39m until the monitor caught the stale bouncer status.
+# On the host network the LAPI is a plain loopback socket that lives and dies
+# with the container, so nothing unsupervised sits between root and the
+# decisions. config.yaml.local pins it to 127.0.0.1:8080; it stays key-gated (a
+# request without the bouncer key gets 403) and it never reaches the LAN. The
+# host network also gives the first-boot hub install its outbound path.
+Network=host
 
 # CrowdSec keeps its own config here: the image's entrypoint seeds
 # /etc/crowdsec from /staging on first start and installs the hub items named in

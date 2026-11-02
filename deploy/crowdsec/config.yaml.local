@@ -8,3 +8,10 @@ common:
 api:
   server:
     log_level: warning
+    # This container runs with Network=host (see deploy/crowdsec.container.in),
+    # so the LAPI's listen address is the host's. Pin it to loopback: upstream's
+    # default is 0.0.0.0:8080, which on the host network would put the decisions
+    # API on the LAN and internet. stack-bouncer (root, on the host) reads the
+    # same 127.0.0.1:8080, and the in-container agent's local_api_credentials
+    # already points there -- no published port, nothing to lose.
+    listen_uri: 127.0.0.1:8080

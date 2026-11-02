@@ -412,9 +412,12 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   either one loses a distinct half. `DISABLE_ONLINE_API=true` is deliberate
   ("local detection only": no console, no CAPI blocklist, no telemetry).
   **Enforcement is `stack-bouncer`** (`deploy/root/bouncer.sh`, a root oneshot on
-  a one-minute system timer): it polls the LAPI over the crowdsec container's
-  loopback publish `127.0.0.1:8081` (8080 is searxng) with
-  `CROWDSEC_BOUNCER_KEY` and writes the `inet stack_bans` set, each element
+  a one-minute system timer): crowdsec runs on the host network, so it polls the
+  LAPI on `127.0.0.1:8080` directly — no published port, because rootless
+  podman's bridge is not routable from the host and its `rootlessport` forwarder
+  is owned by no unit (one vanished on 2026-11-02 and left enforcement off for
+  7h39m with the container still green) — with `CROWDSEC_BOUNCER_KEY`, and
+  writes the `inet stack_bans` set, each element
   carrying the decision's own duration as an nft timeout. There is no upstream
   bouncer image any more (`crowdsecurity/cs-firewall-bouncer` answers *access
   denied*), which is why the applier is ours: CrowdSec keeps the decision

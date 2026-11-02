@@ -27,7 +27,7 @@ deployment problem.
 | `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | — (clnrest internal for the MCP) | `$DATA_DIR/cln` |
 | `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8080` | `$DATA_DIR/searxng` |
+| `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8082` | `$DATA_DIR/searxng` |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
 | `netcheck`, `netcheck-host` | `localhost/netcheck:local` (built from `netcheck/Containerfile`) | — | — |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
@@ -46,7 +46,7 @@ deployment problem.
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` | — |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` | — |
-| `crowdsec` | `docker.io/crowdsecurity/crowdsec:v1.8.2` | — | `$DATA_DIR/ids/crowdsec` |
+| `crowdsec` | `docker.io/crowdsecurity/crowdsec:v1.8.2` | host network, `127.0.0.1:8080` (LAPI, key-gated) | `$DATA_DIR/ids/crowdsec` |
 | `suricata` ⚙️ | `docker.io/jasonish/suricata:8.0.8` | host network (IDS only, publishes nothing) | `$DATA_DIR/ids/suricata` |
 | `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — (writes the `inet stack_bans` nft set) | `$DATA_DIR/audit/bouncer.status` |
 
@@ -1110,9 +1110,10 @@ that a known-bad address is only banned here after it has misbehaved here.
 ### Enforcement
 
 Decisions are applied by `stack-bouncer` — a root oneshot on a one-minute timer
-(`deploy/root/bouncer.sh`, installed to `/etc/stack-ids/`). It polls the
-crowdsec container's LAPI over its loopback publish (`127.0.0.1:8081`, key-gated:
-an unauthenticated request gets 403) and writes one nftables set:
+(`deploy/root/bouncer.sh`, installed to `/etc/stack-ids/`). CrowdSec runs with
+host networking, so it polls the LAPI on the host's own loopback
+(`127.0.0.1:8080`, key-gated: an unauthenticated request gets 403) — there is no
+published port between root and the decisions — and writes one nftables set:
 
 ```
 table inet stack_bans
@@ -1340,7 +1341,7 @@ re-applies it after a change.
 NPM_HOSTS=(
     "${BOLTMESH_FRONTEND_HOST}|127.0.0.1:8106|ws,block"
     "${BOLTMESH_API_HOST}|127.0.0.1:8105|ws,block"
-    "${SEARXNG_HOST}|127.0.0.1:8080|ws,block"
+    "${SEARXNG_HOST}|127.0.0.1:8082|ws,block"
     "${BTCPAY_HOST}|127.0.0.1:49392|ws,force-ssl,block"
     "${BTC_EXPLORER_HOST}|127.0.0.1:8108|force-ssl,block"
     "${XMR_EXPLORER_HOST}|127.0.0.1:8109|force-ssl,block"

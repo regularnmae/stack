@@ -2,8 +2,9 @@
 #
 # A root oneshot on a timer, not a container: it needs nft(8) on the host's
 # network namespace, and the upstream bouncer image no longer exists. It talks to
-# the crowdsec container's LAPI over 127.0.0.1:8081 (its loopback publish) with
-# the key in /etc/stack-ids/bouncer.env.
+# the crowdsec container's LAPI on the host's loopback (127.0.0.1:8080 -- crowdsec
+# runs with Network=host, so there is no published port between root and the
+# decisions) with the key in /etc/stack-ids/bouncer.env.
 #
 # It drops packets, which is exactly why it is separate from everything else:
 # ./deploy.sh --only <service> cannot bounce it, `systemctl stop stack-bouncer.timer`
@@ -16,8 +17,8 @@
 # minute).
 [Unit]
 Description=Apply CrowdSec decisions to nftables (stack-bouncer)
-# The LAPI lives in a rootless container on npm-network; this waits for the
-# network, and the crowdsec unit's own restart loop is what recovers it.
+# The LAPI lives in a container on the host network; this waits for the network,
+# and the crowdsec unit's own restart loop is what recovers it.
 After=network-online.target
 Wants=network-online.target
 

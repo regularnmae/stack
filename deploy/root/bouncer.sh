@@ -27,9 +27,10 @@ TABLE=stack_bans
 SET_V4=banned_v4
 SET_V6=banned_v6
 
-# Rendered by install.sh --root: CROWDSEC_BOUNCER_KEY, LAPI (127.0.0.1:8081),
-# DATA_DIR. Root-owned 0600 -- root must not read its config from a file the
-# stack user can edit.
+# Rendered by install.sh --root: CROWDSEC_BOUNCER_KEY, LAPI (the host's own
+# loopback -- crowdsec runs on the host network, so there is no published port
+# between root and the decisions), DATA_DIR. Root-owned 0600 -- root must not
+# read its config from a file the stack user can edit.
 # shellcheck source=/dev/null
 . "$ENV_FILE"
 
