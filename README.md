@@ -258,8 +258,13 @@ XMR_RESTORE_HEIGHT=<height>
 
 Keep the spend key offline (a hardware/offline wallet). Until these are filled
 in, XMR-CHAIN stays disabled and `btcpay-bootstrap` re-enables it on the next
-`./deploy.sh --only btcpay`. The plugin wallet is internal-only and holds no
-spend key, so `monero-wallet-mcp` can read it but cannot move funds.
+`./deploy.sh --only btcpay`. The import also refuses while monerod is below the
+restore height: a wallet cannot open above the daemon's height (Monero's
+"Blocks start before blockchain offset"), and the stalled refresh takes the
+plugin's wallet RPC down with it. The env can be filled at any time; re-run
+`./deploy.sh --only btcpay` once the chain is current. The plugin wallet is
+internal-only and holds no spend key, so `monero-wallet-mcp` can read it but
+cannot move funds.
 
 ### Electrum (Bitcoin wallet)
 

@@ -239,7 +239,11 @@ for e in "${endpoints[@]}"; do
 
     if [ "$DEEP" = 1 ]; then
         if [ "$name" = monero-wallet-mcp ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
-            warn "$name deep check skipped (fill in config/btcpay/xmr-wallet.env to import the view-only wallet)"
+            if grep -q '^XMR_WALLET_ADDRESS=.' "$CONFIG_DIR/btcpay/xmr-wallet.env" 2>/dev/null; then
+                warn "$name deep check skipped (view-only wallet not imported yet; monerod must reach its restore height)"
+            else
+                warn "$name deep check skipped (fill in config/btcpay/xmr-wallet.env to import the view-only wallet)"
+            fi
         elif [ "$NO_NODES" = 1 ] && [ "$needs_nodes" = 1 ]; then
             warn "$name deep check skipped (needs a chain node)"
         else

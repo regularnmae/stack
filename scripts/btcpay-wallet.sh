@@ -52,6 +52,29 @@ if [ -f "$WALLET_DIR/wallet.keys" ]; then
     exit 0
 fi
 
+# A wallet whose restore height is above the daemon's current height cannot
+# open: Monero throws "Blocks start before blockchain offset" and the wallet
+# RPC stalls in a refresh loop, taking the plugin's XMR rail and this unit's
+# health down with it. The env is still correct -- this is the chain being
+# behind, not a bad value -- so leave the wallet absent and let a later run
+# import it once monerod has caught up.
+if [ "${restore_height:-0}" -gt 0 ] 2>/dev/null; then
+    daemon_height=$(podman exec monerod curl -s -m 120 -X POST \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' \
+        http://127.0.0.1:18081/json_rpc 2>/dev/null \
+        | sed -n 's/.*"height"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    if [ -z "$daemon_height" ]; then
+        warn "could not read monerod's height; not importing the BTCPay Monero wallet"
+        exit 0
+    fi
+    if [ "$restore_height" -gt "$daemon_height" ]; then
+        warn "restore height $restore_height is above monerod's current height $daemon_height"
+        log "the wallet cannot open until monerod catches up; leaving XMR-CHAIN disabled (re-run after the chain is current)"
+        exit 0
+    fi
+fi
+
 if ! podman ps --filter 'name=^monero-wallet-btcpay$' --format '{{.Status}}' 2>/dev/null | grep -q '^Up'; then
     warn "monero-wallet-btcpay is not running; start the stack first"
     exit 1

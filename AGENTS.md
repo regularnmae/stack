@@ -124,7 +124,13 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   starts `monero-wallet-btcpay` (no wallet file yet), then
   `scripts/btcpay-wallet.sh` imports it only when
   `config/btcpay/xmr-wallet.env` has an address and view key. The bootstrap
-  leaves XMR-CHAIN disabled while the wallet RPC has no wallet open.
+  leaves XMR-CHAIN disabled while the wallet RPC has no wallet open. The one
+  import that must not run is a restore height **above monerod's current
+  height**: Monero answers "Blocks start before blockchain offset", the wallet
+  RPC stalls in a refresh loop, and the plugin's wallet load times out — so
+  `btcpay-wallet.sh` compares the two and skips until the daemon catches up.
+  The env can be filled at any time; re-run `./deploy.sh --only btcpay` once
+  the chain is current.
 - **lightningd dies with its container left "Up":** bcli can time out while
   bitcoind is still loading its wallet, the entrypoint then keeps PID 1 alive,
   the unit reads "active" and `Restart=always` never fires -- which is how
