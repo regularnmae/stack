@@ -215,9 +215,12 @@ a hand rebuild (`--only` forces one anyway). Common flags:
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only backup-verify      # run the restore drill now (weekly on a timer)
 ./deploy.sh --only monitor            # run the health + spend checks now
-./deploy.sh --only npm-hosts           # re-apply every proxy host in NPM
-./deploy.sh --only tor                 # re-render the onion services and restart tor
-./deploy.sh --only agent-skills        # re-link the agent skills + agent-mcp
+./deploy.sh --only victoria-logs      # generic unit restart after a LOGS_* change or image bump
+./deploy.sh --only vector             # generic unit restart after deploy/logs/vector.toml changes
+./deploy.sh --only npm-hosts          # re-apply every proxy host in NPM
+./deploy.sh --only tor                # generic unit restart; the onion services re-render into torrc
+./deploy.sh --only crowdsec           # generic unit restart; its parsers/scenarios re-render
+./deploy.sh --only agent-skills       # re-link the agent skills + agent-mcp
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
 ./deploy.sh --skip-agent-skills       # leave the operator's harnesses untouched
 ./deploy.sh --no-wallets              # skip the interactive wallet prompts

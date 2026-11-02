@@ -38,13 +38,13 @@ credentials, so that image would be unreachable.
 ./deploy.sh --only backup           # run the backup job now
 ./deploy.sh --only backup-verify    # run the restore drill now (weekly on a timer)
 ./deploy.sh --only monitor          # run the health + spend checks now
-./deploy.sh --only victoria-logs    # after a LOGS_* change or an image bump
-./deploy.sh --only vector           # after deploy/logs/vector.toml changes
+./deploy.sh --only victoria-logs    # generic unit restart (LOGS_* land in the .container)
+./deploy.sh --only vector           # generic unit restart; vector.toml is in unit_digest
 ./scripts/logs.sh --since 1h        # cross-service log search (LogsQL; UI on :9428)
 ./deploy.sh --only npm-hosts        # (re)reconcile every proxy host in nginx-proxy-manager
 ./deploy.sh --only agent-skills     # re-link the skills + agent-mcp into the harnesses
-./deploy.sh --only tor              # re-render the onion services into torrc and restart tor
-./deploy.sh --only crowdsec         # re-render its parser/scenarios and restart the engine
+./deploy.sh --only tor              # generic unit restart; the torrc digest is in unit_digest
+./deploy.sh --only crowdsec         # generic unit restart; its config tree digest is in unit_digest
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract (the CI gate)
@@ -59,6 +59,14 @@ credentials, so that image would be unreachable.
 ./scripts/kuma-monitors.sh          # reconcile the status page's monitors, via uptime-kuma's socket.io API
 shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every tracked shell script, enumerated from git so a new one cannot be skipped; CI pins shellcheck v0.11.0, so match it locally (the runner's own is older and disagrees -- SC2015)
 ```
+
+Four `--only` targets above -- `victoria-logs`, `vector`, `tor`, `crowdsec` --
+have no dedicated case in `deploy.sh`, on purpose: they are ordinary unit
+restarts. `install.sh` re-renders them, and the restart is what `unit_digest`
+decides, over `torrc`, the CrowdSec config tree and `vector.toml` under their
+unit's stem (`LOGS_*` reach `victoria-logs` through the rendered `.container`
+itself). Only the targets with real extra work -- rebuild, migrate, host
+rewrite, run-now -- are branches in the dispatch.
 
 ## Facts that are easy to get wrong
 
