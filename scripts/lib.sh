@@ -423,6 +423,46 @@ prom_write() {
 MCP_SESSION_ID=""
 MCP_SID_MARKER='__mcp_session_id__'
 
+# MCP servers that are not on npm-network, as "<container>:<port>". One entry
+# today: crowdsec-mcp runs with Network=host, because its upstream (the CrowdSec
+# LAPI) is a loopback bind that a bridge container cannot reach -- pasta's
+# host.containers.internal lands on the host's LAN address, not its loopback.
+# Such a unit binds its own port on the host's loopback instead of publishing
+# one, so it is reached as 127.0.0.1:<port> through netcheck-host, the same
+# client nginx-proxy-manager's admin API needs. Declared once here so every
+# caller (verify.sh, rotate.sh, monitor.sh, spend-audit.sh) keeps naming the
+# container and gets the right transport.
+MCP_HOST_NETNS=("crowdsec-mcp:8113")
+
+# "<curl function> <address>" for a container's MCP endpoint.
+_mcp_transport() { # container
+    local entry
+    for entry in "${MCP_HOST_NETNS[@]}"; do
+        if [ "${entry%%:*}" = "$1" ]; then
+            printf 'net_curl_host 127.0.0.1:%s' "${entry##*:}"
+            return 0
+        fi
+    done
+    printf 'net_curl %s:8000' "$1"
+}
+
+# The container's MCP base URL, for callers that build their own paths
+# (verify.sh's /health and its 401 gate).
+mcp_base() { # container
+    local transport
+    transport=$(_mcp_transport "$1")
+    printf 'http://%s' "${transport#* }"
+}
+
+# curl against the container's MCP endpoint, from the network namespace that can
+# reach it. Arguments are curl's, verbatim.
+mcp_curl() { # container curl-args...
+    local transport
+    transport=$(_mcp_transport "$1")
+    shift
+    "${transport%% *}" "$@"
+}
+
 # The handshake every MCP streamable-HTTP session starts with. The version is
 # the protocol revision, not this stack's.
 MCP_INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"monitor","version":"0"}}}'
@@ -430,17 +470,18 @@ MCP_INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 # Authenticate against CONTAINER's MCP endpoint: do the initialize handshake,
 # print the response body and record the session id in MCP_SESSION_ID. Returns 1
 # when the server did not answer with a serverInfo result. The bearer token goes
-# in a curl config on stdin, so it never reaches the host's argv.
+# in a curl config on stdin, so it never reaches the host's argv. CONTAINER is
+# the unit's container name; MCP_HOST_NETNS above decides where it is reached.
 #   mcp_initialize CONTAINER TOKEN [timeout]
 mcp_initialize() {
     local c="$1" token="$2" t="${3:-20}" resp
     MCP_SESSION_ID=""
     resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | \
-        net_curl -s -m "$t" -K - \
+        mcp_curl "$c" -s -m "$t" -K - \
             -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' \
             -w "\n$MCP_SID_MARKER%header{mcp-session-id}" \
-            -X POST "http://$c:8000/mcp" -d "$MCP_INIT_BODY" 2>/dev/null) || return 1
+            -X POST "$(mcp_base "$c")/mcp" -d "$MCP_INIT_BODY" 2>/dev/null) || return 1
     case "$resp" in *"$MCP_SID_MARKER"*) ;; *) return 1 ;; esac
     MCP_SESSION_ID="${resp##*"$MCP_SID_MARKER"}"
     resp="${resp%%"$MCP_SID_MARKER"*}"
@@ -455,11 +496,11 @@ mcp_tool_call() {
     local c="$1" token="$2" tool="$3" args="$4" t="${5:-20}" call
     call=$(printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$tool" "$args")
     printf 'header = "Authorization: Bearer %s"\n' "$token" | \
-        net_curl -s -m "$t" -K - \
+        mcp_curl "$c" -s -m "$t" -K - \
             -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' \
             ${MCP_SESSION_ID:+-H "mcp-session-id: $MCP_SESSION_ID"} \
-            -X POST "http://$c:8000/mcp" -d "$call" 2>/dev/null
+            -X POST "$(mcp_base "$c")/mcp" -d "$call" 2>/dev/null
 }
 
 # Call one tool on an MCP streamable-HTTP endpoint and print the response body.

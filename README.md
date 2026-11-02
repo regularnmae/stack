@@ -6,7 +6,8 @@ from scratch.
 
 The application code lives in sibling repos — `searxng-mcp`,
 `bitcoin-node-mcp`, `monero-node-mcp`, `monero-wallet-mcp`, `lightning-mcp`,
-`fulcrum-mcp`, `victoria-logs-mcp`, `victoriametrics-mcp`, plus BoltMesh's
+`fulcrum-mcp`, `victoria-logs-mcp`, `victoriametrics-mcp`, `crowdsec-mcp`,
+plus BoltMesh's
 `backend` and `frontend`
 (under the `boltmesh-labs` org) — each of which ships only its code, tests, CI
 and `Containerfile`. **Their units and env files live here**, so there is
@@ -45,6 +46,7 @@ deployment problem.
 | `fulcrum-mcp` | `localhost/fulcrum-mcp:latest` | `127.0.0.1:8110` | — |
 | `victoria-logs-mcp` | `localhost/victoria-logs-mcp:latest` | `127.0.0.1:8111` | — |
 | `victoriametrics-mcp` | `localhost/victoriametrics-mcp:latest` | `127.0.0.1:8112` | — |
+| `crowdsec-mcp` | `localhost/crowdsec-mcp:latest` | host network, `127.0.0.1:8113` (the app's own bind) | — |
 | `postgres` | `docker.io/library/postgres:18-alpine` | — | `$DATA_DIR/postgres` |
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` | — |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
@@ -197,7 +199,7 @@ an OS reinstall. See [Where the data lives](#where-the-data-lives).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds + restarts the
-eight MCP servers and the BoltMesh app tier (a plain start would keep running a
+nine MCP servers and the BoltMesh app tier (a plain start would keep running a
 stale image). The five images built here — the two explorers, `kuma-ctl`,
 `netcheck` and `tor` — are rebuilt when their Containerfile changed and left
 alone otherwise: the digest of that file is baked into the image as a label, so
@@ -1045,6 +1047,14 @@ API, so `vmui` stays an SSH-tunnel view and the store stays out of
 monitor does, so "the graph has a gap" and "the collector died" are
 distinguishable from an agent.
 
+`crowdsec` has an exposition of its own on `127.0.0.1:6060`, pinned to loopback
+for the same reason (`deploy/crowdsec/config.yaml.local`), and its one reader is
+`crowdsec-mcp` — `get_engine_health` folds it into decisions per scenario,
+detection counters and the agent's heartbeat age. Nothing scrapes it into
+VictoriaMetrics; if that history is ever wanted, the host script that writes
+the textfile collector is the path, because the metrics container cannot reach
+host loopback.
+
 Two consequences worth knowing:
 
 - **`$DATA_DIR/logs` is not in the backup set.** It is history, not state, like
@@ -1178,6 +1188,17 @@ podman exec crowdsec cscli metrics         # lines read/parsed/whitelisted per l
 tail -f $DATA_DIR/ids/suricata/eve.json | jq 'select(.event_type=="alert")'
 ./scripts/logs.sh --since 6h --unit suricata.service   # the same alerts, searchable
 ```
+
+The same read state reaches an agent over MCP at
+`https://mcp.boltmesh.net/crowdsec` (`crowdsec-mcp`): `list_decisions`,
+`check_ip` and `get_engine_health`. It holds a **second, read-only bouncer key**
+(`CROWDSEC_MCP_BOUNCER_KEY`, registered as `BOUNCER_KEY_mcp`), so its pulls are
+attributed on their own in `cs_lapi_bouncer_requests_total` and
+`podman exec crowdsec cscli bouncers delete mcp` revokes it without touching
+enforcement. Deliberately absent: alerts (they need a *machine* credential,
+which can also create and delete decisions — i.e. ban and unban) and any
+ban/unban tool. It sees active decisions only, so "why was that address blocked
+this morning" is `cscli alerts list` / the log store, not a tool.
 
 eve.json is also shipped into the log store (`vector` reads it as a file; see
 [Logs and history](#logs-and-history)), so an alert can be read next to what
@@ -1403,12 +1424,17 @@ prefix** (`mcp` flag above):
 | `https://mcp.boltmesh.net/fulcrum` | `127.0.0.1:8110` |
 | `https://mcp.boltmesh.net/logs` | `127.0.0.1:8111` |
 | `https://mcp.boltmesh.net/metrics` | `127.0.0.1:8112` |
+| `https://mcp.boltmesh.net/crowdsec` | `127.0.0.1:8113` (host network: the app's own bind) |
 
 Each prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
 client's URL. The host and the prefixes are `MCP_HOST`/`MCP_HOSTS` in
 `stack.conf`; each entry is `prefix:container:port`, where the port is that
 server's loopback publish (the container name is kept because it also names the
-`token.env` that is the prefix's credential). Each server's bearer token still
+`token.env` that is the prefix's credential). `crowdsec-mcp` is the one
+exception: it runs on the host network (its upstream LAPI is a loopback bind a
+bridge container cannot reach) and binds `127.0.0.1:8113` itself, so its "port"
+is the app's own bind rather than a publish — same URL for a client, but
+host-side probes go through `netcheck-host`. Each server's bearer token still
 gates it (the tokens are the `token.env` files under
 `$DATA_DIR/config/<server>/`). The host's nginx config turns buffering off and
 sets a long read timeout, because Streamable HTTP answers with `text/event-stream`
@@ -1423,7 +1449,7 @@ it works before public DNS exists.
 ### Agent skills (harnesses without MCP)
 
 The [`agent-skills`](https://github.com/regularnmae/agent-skills) repo wraps
-those same eight endpoints as eight skills plus `agent-mcp`, a small stdlib-only
+those same nine endpoints as nine skills plus `agent-mcp`, a small stdlib-only
 MCP client, for harnesses that do not speak MCP: Codex, a plain shell, CI, a
 script. `./deploy.sh` clones it into `$BUILD_DIR/agent-skills` and runs its
 `install.sh`, which links each skill into the harnesses this host actually has
@@ -1500,7 +1526,7 @@ cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
 | `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `10.89.0.242:8000` |
 | `btc-explorer` | BTC RPC Explorer | `http://<addr>.onion/` → `10.89.0.243:3002` |
 | `xmr-explorer` | MoneroBlock | `http://<addr>.onion/style.css` → `10.89.0.244:31312` |
-| `mcp` | the eight MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning\|fulcrum\|logs\|metrics>` → NPM's `*.onion` host |
+| `mcp` | the nine MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning\|fulcrum\|logs\|metrics\|crowdsec>` → NPM's `*.onion` host |
 
 All but the MCP host forward to a container's pinned IP (the units set `IP=`):
 tor validates the target when it starts, so a name for a container that has not
@@ -1591,9 +1617,11 @@ under `$DATA_DIR/config/`, mode 600.
 
 - **`$DATA_DIR/config/stack/secrets.env`** holds the node secrets (bitcoind RPC
   user and password, Tor service password), `BTCPAY_DB_PASSWORD` (the `btcpay`
-  role in the Postgres cluster) and `CROWDSEC_BOUNCER_KEY`, which is append-only
-  and must never be regenerated — the crowdsec container registers that exact
-  key in its LAPI at start, so a new value silently leaves enforcement dead. It
+  role in the Postgres cluster), `CROWDSEC_BOUNCER_KEY` and
+  `CROWDSEC_MCP_BOUNCER_KEY`, both of which are append-only and must never be
+  regenerated — the crowdsec container registers those exact keys in its LAPI at
+  start (as the `firewall` and `mcp` bouncers), so a new value silently leaves
+  enforcement dead, or `crowdsec-mcp` answering 403. It
   is resolved in the order **`secrets.env` → the currently-installed unit → the
   daemon's own config → generate**, so adopting the deploy on a running host
   changes no credential. Keep it with the data: it is what opens Postgres, the

@@ -887,7 +887,7 @@ sync_npm_network() {
 # ---------------------------------------------------------------------------
 # Not a service: agent-skills ships no Containerfile and starts no container, so
 # it is deliberately absent from APP_REPOS (deploy_app would bail on the missing
-# Containerfile). Its install.sh links eight skills into whichever harnesses exist
+# Containerfile). Its install.sh links nine skills into whichever harnesses exist
 # under $HOME (~/.config/opencode, ~/.codex, ~/.claude) and drops agent-mcp in
 # ~/.local/bin -- the only thing a deploy writes outside $DATA_DIR, hence
 # --skip-agent-skills for a host that only serves.
@@ -1137,7 +1137,7 @@ Stack deployed.
                     50002 (SSL, self-signed). Fulcrum indexes alongside
                     bitcoind and accepts wallets once its index has caught up
                     (podman logs fulcrum)
-  MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning|fulcrum|logs|metrics>
+  MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning|fulcrum|logs|metrics|crowdsec>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
   Onion (no DNS):   the same surface as http://<onion>.onion/ (ONION_SERVICES in
                     stack.conf); the addresses are printed below once tor has

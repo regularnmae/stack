@@ -120,7 +120,7 @@ targets (each one writes its source of truth, re-renders, restarts, verifies):
                  lightning-mcp instead of the read token
                  servers: searxng-mcp bitcoin-node-mcp monero-node-mcp
                           monero-wallet-mcp lightning-mcp fulcrum-mcp
-                          victoria-logs-mcp victoriametrics-mcp
+                          victoria-logs-mcp victoriametrics-mcp crowdsec-mcp
   searxng-secret SearXNG's settings.yml secret_key
   postgres       the vpnuser role's password -> db.env, dump.env, BoltMesh
   boltmesh-keys  SECRET_KEY/REFRESH_SECRET_KEY/NODE_SECRET_KEY/BOOTSTRAP_SECRET_PEPPER
@@ -695,6 +695,7 @@ apply_runes() {
 TOKEN_SERVERS=(
     searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp
     lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp
+    crowdsec-mcp
 )
 
 # env-file | read-token var | a read tool it answers | its args | spend-token var
@@ -724,6 +725,9 @@ token_spec() { # server
         victoriametrics-mcp)
             printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/victoriametrics-mcp/token.env" \
                 METRICS_MCP_TOKEN get_metrics_health '{}' "" ;;
+        crowdsec-mcp)
+            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/crowdsec-mcp/token.env" \
+                CROWDSEC_MCP_TOKEN list_decisions '{}' "" ;;
         *) return 1 ;;
     esac
 }

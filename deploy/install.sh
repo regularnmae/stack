@@ -442,6 +442,7 @@ UNITS=(
     "fulcrum-mcp.container:fulcrum-mcp.container"
     "victoria-logs-mcp.container:victoria-logs-mcp.container"
     "victoriametrics-mcp.container:victoriametrics-mcp.container"
+    "crowdsec-mcp.container:crowdsec-mcp.container"
     "postgres.container:postgres.container"
     "uptime-kuma.container:uptime-kuma.container"
     "boltmesh-backend.container:boltmesh-backend.container"
@@ -713,6 +714,23 @@ if [ -z "$CROWDSEC_BOUNCER_KEY" ]; then
     log "generated CROWDSEC_BOUNCER_KEY and appended it to $SECRETS_FILE"
 fi
 export CROWDSEC_BOUNCER_KEY
+
+# The MCP server's own bouncer key: a second, read-only client of the same
+# LAPI. Separate from the one above so its pulls are attributable in
+# cs_lapi_bouncer_requests_total and so revoking it (`cscli bouncers delete
+# mcp`) never touches enforcement. Appended rather than seeded for the same
+# reason -- a host deployed before this server existed has a secrets.env
+# without it -- and under the same never-regenerate rule: the crowdsec
+# entrypoint only registers a bouncer when the name is absent, so a new value
+# would leave `mcp` holding the old key and every tool answering 403.
+CROWDSEC_MCP_BOUNCER_KEY=$(read_secret CROWDSEC_MCP_BOUNCER_KEY)
+if [ -z "$CROWDSEC_MCP_BOUNCER_KEY" ]; then
+    CROWDSEC_MCP_BOUNCER_KEY=$(rand_hex)
+    printf 'CROWDSEC_MCP_BOUNCER_KEY=%s\n' "$CROWDSEC_MCP_BOUNCER_KEY" >> "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
+    log "generated CROWDSEC_MCP_BOUNCER_KEY and appended it to $SECRETS_FILE"
+fi
+export CROWDSEC_MCP_BOUNCER_KEY
 
 # ---------------------------------------------------------------------------
 # 2. bitcoind config + ownership (fresh host)
@@ -1169,6 +1187,41 @@ EOF
     log "wrote $METRICS_ENV/upstream.env (mode 600)"
 fi
 
+# crowdsec-mcp: the bearer token clients present, and the bouncer key it reads
+# decisions with. The token is seed-once like every other server's; the key is
+# NOT -- it is derived from $CROWDSEC_MCP_BOUNCER_KEY in secrets.env, which is
+# the authority (the same value the rendered crowdsec unit registers as the
+# "mcp" bouncer), so this file is rewritten whenever the two disagree. Seeding
+# it once would leave a rotated secret split across two files.
+CROWDSEC_ENV="$CONFIG_DIR/crowdsec-mcp"
+if ensure_secret "$CROWDSEC_ENV/token.env" "crowdsec-mcp token env"; then
+    token=$(new_or_reused_token crowdsec-mcp CROWDSEC_MCP_TOKEN)
+    write_secret "$CROWDSEC_ENV/token.env" <<EOF
+CROWDSEC_MCP_TOKEN=$token
+EOF
+    log "wrote $CROWDSEC_ENV/token.env (mode 600)"
+fi
+mkdir -p "$CROWDSEC_ENV"
+lapi_env="$CROWDSEC_ENV/lapi.env"
+lapi_tmp=$(mktemp)
+cat > "$lapi_tmp" <<EOF
+# The bouncer key this server reads decisions with (rendered from
+# CROWDSEC_MCP_BOUNCER_KEY in config/stack/secrets.env). Read-only by nature:
+# a bouncer may pull decisions and cannot write. Never put a machine password
+# here -- a machine may also create and delete decisions.
+CROWDSEC_LAPI_KEY=$CROWDSEC_MCP_BOUNCER_KEY
+EOF
+# Rewritten from the authority whenever it differs, unlike the seed-once token
+# above: this file is derived, not operator-edited. cmp rather than a rewrite on
+# principle -- an unchanged file must not churn the unit's mtime.
+if [ -s "$lapi_env" ] && cmp -s "$lapi_tmp" "$lapi_env"; then
+    rm -f "$lapi_tmp"
+else
+    install -m 600 "$lapi_tmp" "$lapi_env"
+    rm -f "$lapi_tmp"
+    log "wrote $lapi_env (mode 600)"
+fi
+
 # BTC RPC Explorer's configuration. The app is configured entirely through the
 # environment (so the unit uses EnvironmentFile=, not a rendered Exec=), and it
 # needs the same bitcoind RPC credentials plus Fulcrum's Electrum endpoint. It
@@ -1618,6 +1671,7 @@ render_unit() {
         -e "s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g" \
         -e "s|@BTCPAY_HOST@|$(esc "$BTCPAY_HOST")|g" \
         -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
+        -e "s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
         -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
         -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \

@@ -188,8 +188,11 @@ fi
 # ---------------------------------------------------------------------------
 head2 "MCP endpoints"
 # name|env-file|token-var|deep-tool|deep-args|needs-nodes
-# The name is the container name; it is read by name on npm-network, and it
-# names the MCP_HOSTS entry whose loopback publish nginx-proxy-manager fronts.
+# The name is the container name. scripts/lib.sh decides where it is reached:
+# by name on npm-network for every server but crowdsec-mcp, which runs on the
+# host network and is read through netcheck-host at 127.0.0.1:8113 (mcp_base /
+# mcp_curl). It also names the MCP_HOSTS entry whose loopback port
+# nginx-proxy-manager fronts.
 endpoints=(
     "searxng-mcp|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
     "bitcoin-node-mcp|$CONFIG_DIR/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
@@ -199,6 +202,7 @@ endpoints=(
     "fulcrum-mcp|$CONFIG_DIR/fulcrum-mcp/token.env|FULCRUM_MCP_TOKEN|get_chain_tip|{}|1"
     "victoria-logs-mcp|$CONFIG_DIR/victoria-logs-mcp/token.env|LOGS_MCP_TOKEN|get_log_health|{}|0"
     "victoriametrics-mcp|$CONFIG_DIR/victoriametrics-mcp/token.env|METRICS_MCP_TOKEN|get_metrics_health|{}|0"
+    "crowdsec-mcp|$CONFIG_DIR/crowdsec-mcp/token.env|CROWDSEC_MCP_TOKEN|list_decisions|{}|0"
 )
 
 # The token each container's endpoint needs, keyed by container name, so the
@@ -210,14 +214,13 @@ for e in "${endpoints[@]}"; do
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"
 
-    # Read through net_curl (the long-lived netcheck container on npm-network;
-    # the mcp_* helpers live in scripts/lib.sh). This is the container's own
-    # address; nginx-proxy-manager, on the host network, reaches the same
-    # server through the loopback publish the unit declares.
-    health=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 "http://$name:8000/health" 2>/dev/null || echo 000)
+    # Read through mcp_curl (scripts/lib.sh), which picks netcheck or
+    # netcheck-host for this container and knows its base URL. nginx-proxy-manager,
+    # on the host network, reaches the same server through its loopback port.
+    health=$(mcp_curl "$name" -s -o /dev/null -w '%{http_code}' -m 10 "$(mcp_base "$name")/health" 2>/dev/null || echo 000)
     if [ "$health" = "200" ]; then pass "$name /health 200"; else bad "$name /health -> $health"; fi
 
-    gated=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://$name:8000/mcp" \
+    gated=$(mcp_curl "$name" -s -o /dev/null -w '%{http_code}' -m 10 -X POST "$(mcp_base "$name")/mcp" \
         -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)
     if [ "$gated" = "401" ]; then pass "$name /mcp is token-gated (401)"; else bad "$name /mcp without a token -> $gated (expected 401)"; fi
 
@@ -309,7 +312,7 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Agent tooling"
-# The eight skills plus `agent-mcp` from the agent-skills repo: the same servers,
+# The nine skills plus `agent-mcp` from the agent-skills repo: the same servers,
 # through the same tokens, for harnesses that do not speak MCP (Codex, a plain
 # shell, CI). The registry reads $DATA_DIR/config/<server>/token.env on every
 # call -- never a copy -- so a rotated token needs no second edit. A host that

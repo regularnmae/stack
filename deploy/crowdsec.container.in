@@ -91,6 +91,13 @@ Environment=USE_WAL=true
 # reads BOUNCER_KEY_<name> and calls `cscli bouncers add` when the name is absent).
 # The name must match nothing else: stack-bouncer authenticates as "firewall".
 Environment=BOUNCER_KEY_firewall=@CROWDSEC_BOUNCER_KEY@
+# The MCP server's own key ("mcp"): a second bouncer, read-only by nature, whose
+# pulls are attributable in cs_lapi_bouncer_requests_total and which can be
+# deleted on its own (`cscli bouncers delete mcp`) without touching enforcement.
+# Same never-regenerate rule as the firewall key -- the entrypoint only adds a
+# bouncer when the name is absent, so a changed value would leave the old key
+# registered and the new one answered with 403.
+Environment=BOUNCER_KEY_mcp=@CROWDSEC_MCP_BOUNCER_KEY@
 # The base parsers the acquisition needs. Everything stack-specific is the file
 # mounts above; these two are generic and come from the hub: non-syslog turns a
 # raw log line into an event, dateparse-enrich turns evt.StrTime into evt.Time

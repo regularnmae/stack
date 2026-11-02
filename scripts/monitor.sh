@@ -463,7 +463,8 @@ fi
 
 # Monero heights are read through the node MCP and the wallet MCP (the daemons
 # carry no curl/wget of their own, so this goes through the MCP servers, which
-# mcp_call reaches as containers on npm-network). Missing/unparseable
+# mcp_call reaches on npm-network or, for a host-network unit, through
+# netcheck-host). Missing/unparseable
 # output is a warning only -- verify.sh already fails if the endpoint is down.
 #
 # The node's own probe is the process, not its RPC (deploy/monerod.container:

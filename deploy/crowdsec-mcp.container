@@ -1,0 +1,75 @@
+# Quadlet unit for the CrowdSec MCP server. deploy/install.sh renders this
+# into ~/.config/containers/systemd/, where quadlet turns it into
+# crowdsec-mcp.service.
+#
+# What it is: the authenticated front door to the engine's *read* state --
+# which decisions are being enforced, whether one address is blocked, and the
+# engine's own health counters. It holds a bouncer key and nothing else: a
+# bouncer may pull decisions and cannot write, which is why there is no alert
+# tool (alerts need a machine credential, and a machine may also create and
+# delete decisions -- see the app repo's README) and no ban/unban tool.
+[Unit]
+Description=CrowdSec MCP Server (streamable HTTP)
+After=network-online.target crowdsec.service
+# The engine is the only thing this server can answer about, and the unit's
+# healthcheck proves it answers. Stopping crowdsec stops this with it.
+Requires=crowdsec.service
+
+[Container]
+ContainerName=crowdsec-mcp
+Image=localhost/crowdsec-mcp:latest
+
+# THE ONE HOST-NETWORK MCP SERVER, and the reason is upstream of it: crowdsec
+# runs with Network=host (so stack-bouncer, root on the host, can reach the
+# LAPI on the host's loopback -- see deploy/crowdsec.container.in), and this
+# host's rootless podman keeps npm-network inside its own namespace. A bridge
+# container therefore cannot reach 127.0.0.1:8080, and pasta's
+# host.containers.internal lands on the host's LAN address, not its loopback.
+# The alternatives were both rejected already, for the same reasons: publishing
+# the LAPI needs an address that is not loopback, and a published port here
+# would put a rootlessport forwarder between NPM and this server.
+#
+# The price, stated plainly: this container shares the host's network
+# namespace and can therefore reach every loopback-only service (alertmanager,
+# the metrics and log stores, NPM's admin API). It is bounded by the app --
+# three fixed-URL GETs behind a bearer token, no generic fetch tool -- but it
+# is a wider blast radius than any other MCP server here.
+Network=host
+
+# The bearer token clients must present, and the bouncer key this server reads
+# decisions with. Both live OUTSIDE this repo in $DATA_DIR/config/crowdsec-mcp/
+# (mode 600), written by deploy/install.sh, so no secret is ever committed.
+# The key is a *separate* bouncer ("mcp", not stack-bouncer's "firewall"), so
+# the LAPI attributes this server's pulls to its own client and revoking it
+# never touches enforcement.
+EnvironmentFile=@CONFIG_DIR@/crowdsec-mcp/token.env
+EnvironmentFile=@CONFIG_DIR@/crowdsec-mcp/lapi.env
+
+# Bind the host's loopback, not 0.0.0.0: on the host network the latter is a
+# LAN surface, and the firewall opens nothing for it. 8113 is this unit's
+# entry in MCP_HOSTS; nginx-proxy-manager (also host network) reaches it there,
+# exactly as it reaches a `PublishPort=127.0.0.1:<port>` unit.
+Environment=MCP_HOST=127.0.0.1
+Environment=MCP_PORT=8113
+
+# SDK chatter (transport/session lifecycle) is per-client noise; keep only
+# WARNING and up so the log stays error- and warning-shaped.
+Environment=LOG_LEVEL=WARNING
+
+# Healthcheck: MCP initialize probe (authenticated). Makes a wedged server
+# visible/restartable instead of silently erroring. /health is the liveness
+# path; /ready probes the LAPI and must never gate podman, or an engine restart
+# would restart-loop this container.
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

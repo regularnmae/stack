@@ -190,7 +190,7 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   `podman ps`, so `wait_healthy` reads its terminal state instead
   (`exited 0` = done) — before that, `./deploy.sh --only postgres-dump` spun
   its whole 180 s and warned "container missing" about a job that had
-  succeeded. The eight MCP servers' `healthcheck.py` (authenticated `initialize`,
+  succeeded. The nine MCP servers' `healthcheck.py` (authenticated `initialize`,
   SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
 - **CLN peers and channels come from `listpeerchannels`/`listpeers`, never
   `listchannels` or `getinfo`'s `num_peers`:** the gossmap's `active` is an
@@ -906,7 +906,7 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
   `APP_REPOS`:** it ships no Containerfile and starts no container, so
   `deploy_app` would bail on it. `deploy.sh`'s `fetch_agent_skills`/
   `install_agent_skills` clone it into `$BUILD_DIR/agent-skills` and run its
-  `install.sh`, which links eight skills into the harnesses under `$HOME` and puts
+  `install.sh`, which links nine skills into the harnesses under `$HOME` and puts
   `agent-mcp` in `~/.local/bin` — the only thing a deploy writes outside
   `$DATA_DIR`, which is what `--skip-agent-skills` is for. Three traps: never run
   its `install.sh --from-opencode` here, because this host's `opencode.json`
@@ -925,7 +925,7 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint: every 
 
 ## Interface contract with the app repos
 
-The eight MCP servers are pure env-configured services: **they never read a stack
+The nine MCP servers are pure env-configured services: **they never read a stack
 path, a config file or a data dir** — only the variables below. This table is
 the shared contract; the app repos' docs own the *meaning* of the variables,
 this repo owns everything about *how they get set*. If a container name, port or
@@ -941,6 +941,7 @@ variable name changes, it changes on both sides at once.
 | `fulcrum-mcp` | `fulcrum-mcp` / `localhost/fulcrum-mcp:latest` | `token.env`, `upstream.env` | `fulcrum:50001` | `fulcrum-mcp:8000` | `127.0.0.1:8110` | `0.0.0.0:8000`, `/health` |
 | `victoria-logs-mcp` | `victoria-logs-mcp` / `localhost/victoria-logs-mcp:latest` | `token.env`, `upstream.env` | `victoria-logs:9428` | `victoria-logs-mcp:8000` | `127.0.0.1:8111` | `0.0.0.0:8000`, `/health` |
 | `victoriametrics-mcp` | `victoriametrics-mcp` / `localhost/victoriametrics-mcp:latest` | `token.env`, `upstream.env` | `victoriametrics:8428` | `victoriametrics-mcp:8000` | `127.0.0.1:8112` | `0.0.0.0:8000`, `/health` |
+| `crowdsec-mcp` | `crowdsec-mcp` / `localhost/crowdsec-mcp:latest` | `token.env`, `lapi.env` | CrowdSec LAPI, `127.0.0.1:8080` | **— (`Network=host`)** | `127.0.0.1:8113` | `127.0.0.1:8113` (host net), `/health` |
 
 None of them is reachable from the LAN. NPM terminates TLS on :80/:443 (its own
 bind, on the host network) and is the sole path to every MCP server for a client;
@@ -954,6 +955,40 @@ one host with a path prefix each — `https://$MCP_HOST/<prefix>`, mapped onto t
 container's `/mcp` by the `mcp` proxy host `scripts/npm-hosts.sh` reconciles
 from `NPM_HOSTS`; each `MCP_HOSTS` entry is `/prefix:container:port` (the
 container names the `token.env`, the port is the loopback publish).
+
+**`crowdsec-mcp` is the one exception, and it is forced from upstream.**
+`crowdsec` runs on the host network because `stack-bouncer` (root, on the host)
+must reach the LAPI on `127.0.0.1:8080`, and a rootless bridge is not routable
+from the host; pasta's `host.containers.internal` lands on the host's LAN
+address, not its loopback, so a bridge container cannot reach the LAPI at all.
+The MCP unit therefore also runs `Network=host` and binds `MCP_HOST=127.0.0.1`,
+`MCP_PORT=8113` itself — no `PublishPort`, and no LAN surface. Two consequences
+worth knowing: NPM reaches it exactly like a loopback publish, but every
+host-side probe must go through `netcheck-host`, which `scripts/lib.sh`'s
+`MCP_HOST_NETNS` declares once (`mcp_base`/`mcp_curl`, used by `verify.sh`,
+`rotate.sh` and `monitor.sh`) — so callers keep naming the container. And the
+container joins the host's network namespace, i.e. it can reach every
+loopback-only service (alertmanager, the metrics and log stores, NPM's admin
+API); the app is three fixed-URL GETs behind a bearer token with no generic
+fetch tool, which bounds but does not remove that blast radius.
+
+**The CrowdSec tier's read surface stops at decisions, on purpose.** A bouncer
+key answers `/v1/decisions` and nothing else; `/v1/alerts` needs a *machine*
+credential, and a machine may also create and delete decisions and push alerts
+— i.e. ban and unban — which is exactly the authority this stack keeps out of
+an agent's reach. So there is no alert tool and no ban/unban tool, and
+`lapi.env` must never hold a machine password. The key is a **second** bouncer
+(`mcp`, rendered into the crowdsec unit from `CROWDSEC_MCP_BOUNCER_KEY`) rather
+than stack-bouncer's `firewall` one: the LAPI attributes each client's pulls
+separately in `cs_lapi_bouncer_requests_total`, and `cscli bouncers delete mcp`
+revokes the server without touching enforcement. Both keys are
+never-regenerate (the entrypoint only registers a bouncer when the name is
+absent). `list_bouncers` is not implementable over the LAPI at all — there is no
+`/v1/bouncers` route, and `cscli bouncers list` reads the DB and shows stale
+entries for our hand-rolled poller, which never heartbeats; enforcement
+freshness stays `audit/bouncer.status`. The engine's own Prometheus endpoint is
+pinned to `127.0.0.1:6060` in `deploy/crowdsec/config.yaml.local` (upstream
+defaults to `0.0.0.0`), and `crowdsec-mcp` is its one reader.
 
 The variables the apps read (names and defaults are the app repos' contract):
 `SEARXNG_URL`/`SEARXNG_MCP_TOKEN`; `BITCOIN_RPC_URL`/`BITCOIN_RPC_USER`/

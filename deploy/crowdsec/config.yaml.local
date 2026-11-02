@@ -15,3 +15,15 @@ api:
     # same 127.0.0.1:8080, and the in-container agent's local_api_credentials
     # already points there -- no published port, nothing to lose.
     listen_uri: 127.0.0.1:8080
+# Same reasoning for the engine's own Prometheus endpoint: upstream listens on
+# 0.0.0.0:6060, which on the host network is a LAN surface with no
+# authentication at all. Its one reader is crowdsec-mcp, which shares this
+# container's network namespace (Network=host in deploy/crowdsec-mcp.container)
+# and therefore reads 127.0.0.1:6060. Nothing else needs it -- if the metrics
+# store ever wants this history, the host script that feeds the textfile
+# collector is the path (the metrics container cannot reach host loopback).
+prometheus:
+  enabled: true
+  level: full
+  listen_addr: 127.0.0.1
+  listen_port: 6060
