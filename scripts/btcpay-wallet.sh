@@ -59,11 +59,19 @@ fi
 # behind, not a bad value -- so leave the wallet absent and let a later run
 # import it once monerod has caught up.
 if [ "${restore_height:-0}" -gt 0 ] 2>/dev/null; then
-    daemon_height=$(podman exec monerod curl -s -m 120 -X POST \
+    # `if ! ...` and not a bare assignment: under `set -e` a failed exec (monerod
+    # down, or its RPC stalling while a sync batch holds the chain lock) would
+    # end the script right here -- silently, since podman's stderr is discarded
+    # -- and the warning below would never be reached. The condition context is
+    # what lets an unreadable height fall through to it.
+    if ! daemon_height=$(podman exec monerod curl -s -m 120 -X POST \
         -H 'Content-Type: application/json' \
         -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' \
         http://127.0.0.1:18081/json_rpc 2>/dev/null \
         | sed -n 's/.*"height"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    then
+        daemon_height=""
+    fi
     if [ -z "$daemon_height" ]; then
         warn "could not read monerod's height; not importing the BTCPay Monero wallet"
         exit 0
