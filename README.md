@@ -399,10 +399,11 @@ sudo restorecon -RF /data/stack
 `bitcoind` and `monerod` are **full (archival) nodes**: both store and validate
 the entire chain, which dominates the data dir — roughly 800 GB for Bitcoin and
 250 GB for Monero as of late 2026, both growing. Fulcrum's Electrum index adds
-roughly 100–135 GB and ~3–4 GB of RAM (`--db_mem 3072` caps its RocksDB cache;
-a rebuild is compaction-bound below that). Budget a 2 TB data disk. The chains
-and the index are excluded from the backup set for exactly this reason: they are
-large and re-downloadable, not irreplaceable state.
+roughly 100–135 GB and ~2–4 GB of RAM (`--db_mem` is left at Fulcrum's own
+autodetect, 2048 MiB here; a rebuild is compaction-bound below that). Budget a
+2 TB data disk. The chains and the index are excluded from the backup set for
+exactly this reason: they are large and re-downloadable, not irreplaceable
+state.
 
 The data dir sits on a rotational disk in this layout, which is fine for serving
 but not for building: a Fulcrum index that has to be rebuilt from block 0 runs

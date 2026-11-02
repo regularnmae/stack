@@ -355,9 +355,12 @@ rewrite, run-now -- are branches in the dispatch.
   publishes raw Electrum `50001`/`50002` straight on the LAN, because NPM only
   proxies HTTP — don't add it to `NPM_HOSTS`, and keep the ports in
   `FIREWALL_PORTS`. It indexes from bitcoind's RPC and follows it through IBD,
-  accepting wallets only once its own index catches up. `--db_mem 3072` bounds
-  RocksDB and still leaves ~6 GB for the daemons on a 16 GB host; check
-  `free -h` before going to RocksDB's default 4096. A rebuild loses the DB's
+  accepting wallets only once its own index catches up. `--db_mem` is left at
+  Fulcrum 2.1.4's own autodetect — 2048 MiB or 25% of physical RAM, whichever is
+  smaller, i.e. 2048 MiB on a 16 GB host — which is what keeps bitcoind and
+  monerod their room instead of being swapped out. Setting the flag explicitly
+  trades RAM for index throughput (the old 3072 was such a trade); check
+  `free -h` during a full resync before raising it. A rebuild loses the DB's
   undo info (Fulcrum's "presume the DB is consistent"), so the next restart
   cannot undo a block. `$DATA_DIR` is a rotational disk, so a from-scratch index
   runs ~40 blocks/min — slow is not a fault to chase, `--db_mem` is the only
