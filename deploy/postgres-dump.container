@@ -34,8 +34,15 @@ Volume=@DATA_DIR@/postgres-dump:/dump:z
 # The write is a rename within one directory, so the backup never sees a
 # half-written file. umask 077 because the dump carries the cluster's role
 # password hashes: the restic repository is encrypted, the staging file is not.
+#
+# The staging file is removed on failure and at the start of every run, so a
+# dump that dies mid-write does not leave a stale all.sql.tmp beside the last
+# good all.sql for a restore to puzzle over: EXIT covers pg_dumpall exiting
+# non-zero, TERM/INT cover TimeoutStartSec below (a bare sh -c dies on SIGTERM
+# without running its EXIT trap), and the leading rm makes a SIGKILL
+# self-healing on the next run.
 Entrypoint=/bin/sh
-Exec=-c "umask 077; pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
+Exec=-c "rm -f /dump/all.sql.tmp; trap 'rm -f /dump/all.sql.tmp' EXIT; trap 'rm -f /dump/all.sql.tmp; exit 143' TERM INT; umask 077; pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
 
 [Service]
 Type=oneshot
