@@ -390,8 +390,8 @@ sudo mkdir -p /data/stack && sudo chown "$(id -u):$(id -g)" /data/stack
 ```
 
 When SELinux is enforcing, the dir must be labelled for containers. The units
-mount their subdirectories with `:z`/`:Z`, which podman relabels rootlessly on
-every start, so `deploy.sh` only needs a top-level label and attempts it
+mount their subdirectories with `:z` (shared), which podman relabels rootlessly
+on every start, so `deploy.sh` only needs a top-level label and attempts it
 unprivileged. If the path is not yours to relabel (a freshly formatted disk is
 often `unlabeled_t`), it prints the root commands:
 
