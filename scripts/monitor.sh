@@ -95,6 +95,7 @@ ALERT_INSTANCE="$(hostname -s 2>/dev/null || echo stack)"
 # Where the pushed alert set and Alertmanager's delivery counter are remembered
 # between sweeps. Both are host state, not config, so they live in audit/.
 ALERT_STATE="$AUDIT_DIR/alerts.state"
+ALERT_LOCK="$AUDIT_DIR/alerts.lock"
 ALERT_FAILED_FILE="$AUDIT_DIR/alertmanager.failed"
 
 # The host-check thresholds follow the same order as the four above -- the unit's
@@ -204,8 +205,26 @@ fail() { PROBLEMS+=("$*"); PROBLEM_SECTIONS+=("$SECTION"); say "  FAIL  $*"; }
 # from one that has been down for an hour unless the producer holds the state.
 # The state file is that memory -- name, service, severity, first seen, last
 # pushed -- and it is also what makes explicit resolution possible.
-emit_alerts() { # push the current set; resolve the sections that cleared
+#
+# The state file is a read-modify-write, and the timer only serializes its own
+# runs: a hand run overlapping a sweep could lose the other's first-seen and
+# pushed columns. So emit_alerts takes a lock over exactly that window (the
+# push, seconds) and emit_alerts_locked does the work; a lock that cannot be
+# had in two minutes fails the push instead of clobbering the memory, which the
+# caller turns into a failed heartbeat. flock is util-linux; without it, behave
+# as before rather than refuse to monitor.
+emit_alerts() { # take the state lock, then emit_alerts_locked
     [ "$MONITOR_ALERTMANAGER_URL" = off ] && return 0
+    if command -v flock >/dev/null 2>&1; then
+        ( flock -w 120 9 \
+              || { say "  warn  could not lock $ALERT_LOCK within 120s (another sweep?); alert state not pushed"; exit 1; }
+          emit_alerts_locked ) 9>"$ALERT_LOCK"
+    else
+        emit_alerts_locked
+    fi
+}
+
+emit_alerts_locked() { # push the current set; resolve the sections that cleared
     local now url i s name psev psince psent body starts ends
     local -A sev=() desc=() p_since=() p_sent=() p_svc=() p_sev=() current=()
     local payload='[]' resolved='[]' new_state='' retry_state=''
