@@ -185,8 +185,17 @@ rewrite, run-now -- are branches in the dispatch.
   the data path** — a check that is legitimately red while recovering (IBD,
   monerod sync, wallet refresh, Fulcrum's first index) belongs in `monitor.sh`,
   never in a unit; that is why `fulcrum`'s and `monerod`'s probes are the
-  process table and `tor`'s is a port, and replacing any of them with a data
-  probe is a regression, not a fix. `monerod` is the worked example: its
+  process table, `tor`'s is a port and `bitcoind`'s is a bare TCP connect to its
+  RPC listener (`nc -z`, no request), and replacing any of them with a data
+  probe is a regression, not a fix. `bitcoind` is the second worked example, and
+  the sharper one: its probe *was* `bitcoin-cli getblockchaininfo`, so it
+  entered the RPC work queue that Fulcrum's first index, the explorers and
+  nbxplorer were already filling — the check itself answered "error: Server
+  response: Work queue depth exceeded", and `HealthOnFailure=kill` turned three
+  of those into a restart every ~8 minutes (13 starts in 48 h), each one
+  resetting Fulcrum's connections and re-verifying the index. A probe that
+  competes for the resource under load is a kill switch aimed at the work.
+  `monerod` is the worked example: its
   restricted-RPC handler blocks for 60 s or more while the chain lock is held
   across a `--block-sync-size` batch, so the image's own `/healthcheck.sh` (an
   unbounded curl of `/get_height`) went stall → stall → stall → a killed full

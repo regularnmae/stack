@@ -33,17 +33,35 @@ Network=npm-network.network
 Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 
 # The lncm image ships no HEALTHCHECK, so without this podman reports
-# "Up (no health status)" and verify.sh can only warn. Probe the RPC the
-# same way deploy.sh does; bitcoin-cli reads bitcoin.conf from the image's
-# datadir. The call is loopback in-container, so rpcallowip still applies.
-HealthCmd=bitcoin-cli getblockchaininfo
+# "Up (no health status)" and verify.sh can only warn.
+#
+# The probe is a TCP connect to the RPC listener, NOT an RPC call. It used to be
+# `bitcoin-cli getblockchaininfo`, which was the wrong level: that is a data-path
+# check that enqueues work in bitcoind's RPC work queue (16 by default), so any
+# RPC load -- Fulcrum's initial index with three workers, the explorers,
+# nbxplorer, a deploy's own probes -- could answer the check with "error: Server
+# response: Work queue depth exceeded", and HealthOnFailure=kill turned three of
+# those in a row into a restart. Measured 2026-11-03: nine queue-depth rejections
+# in 30 s, the probe's own health log reading -28 / exit 125 / queue-depth-
+# exceeded, and a kill-restart every ~8 minutes (13 starts in 48 h: eleven in one
+# 83-minute burst on 11-02, one at 19:54, one at 20:01). Each restart reset
+# Fulcrum's RPC connections and re-ran the block-index verify, i.e. exactly the
+# load the node was already struggling with.
+#
+# `nc -z` proves the process is up and its HTTP server is accepting, and sends no
+# request, so it cannot be starved by legitimate RPC load and creates no work
+# item. "Alive but not answering RPC" is monitor.sh's job, not the unit's: it
+# already fails on "bitcoind RPC unreachable" and then reads height, peers and
+# mempool, and verify.sh --deep reads the node through the MCP (AGENTS.md,
+# "Healthchecks follow a contract"). busybox nc is in the image; loopback is
+# inside the container, so rpcallowip still applies.
+HealthCmd=nc -z 127.0.0.1 8332
 HealthInterval=60s
 HealthTimeout=15s
-# Bitcoind's restart re-verifies the block index, which on the rotational
-# data disk can outlast the default 2m -- measured at 40+ kill-restart
-# cycles one busy morning because every cycle began the verify over. The
-# probe itself is right; only the start budget was wrong. 5m is twice the
-# worst verify measured here (3m50s across 43 starts, median 1m29s).
+# The listener only binds after the block-index verify, which on the rotational
+# data disk has been measured at 3m50s worst (median 1m29s across 43 starts), so
+# the default 2m start budget would report "unhealthy" for a normal start. 5m is
+# twice that worst case.
 HealthStartPeriod=5m
 HealthRetries=3
 HealthOnFailure=kill
