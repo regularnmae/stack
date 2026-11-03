@@ -102,23 +102,41 @@ net_curl_host() {
     podman --events-backend=none exec -i "$NETCHECK_HOST_CONTAINER" curl "$@"
 }
 
-# "1m30s" / "2m0s" / "500ms" / "30s" -> seconds. Podman prints a healthcheck's
-# durations as Go duration strings; the only use here is a floor, so a
-# millisecond value rounds up to one second. A bare number (unset field) is
-# treated as 0.
-dur_s() {
-    local d="$1" total=0
-    if [ -z "$d" ]; then
-        printf '0'
-        return
-    fi
-    case "$d" in
-        *ms) printf '1'; return ;;
-    esac
-    [[ $d =~ ([0-9]+)h ]] && total=$(( total + 10#${BASH_REMATCH[1]} * 3600 ))
-    [[ $d =~ ([0-9]+)m ]] && total=$(( total + 10#${BASH_REMATCH[1]} * 60 ))
-    [[ $d =~ ([0-9]+)s ]] && total=$(( total + 10#${BASH_REMATCH[1]} ))
+# "1m30s" / "500ms" / "1h2m3.5s" -> MILLIseconds. Podman prints a healthcheck's
+# durations as Go duration strings, and so does CrowdSec's LAPI ("3h59m59.7s" is
+# what a decision carries), so a fraction can sit on any component. Each
+# component is therefore parsed by its unit and summed in ms. The whole-second
+# regexes this replaced matched the digits AFTER the dot instead of the component
+# before it, which is not a rounding difference: "1m30.5s" became 65s, "2.5h"
+# became 18000s and "1.5m" became 300s. Three details are load-bearing: `ms`
+# precedes `m` in the alternation or "500ms" reads as 500 minutes, 10# keeps
+# "08m" from being parsed as octal, and the fraction is padded/truncated to three
+# digits because bash has no arithmetic on it. Unparsable input (or none, which
+# is an unset healthcheck field) is 0.
+dur_ms() {
+    local d="$1" total=0 num frac unit
+    while [ -n "$d" ] && [[ $d =~ ^[^0-9]*([0-9]+)(\.([0-9]+))?(ms|h|m|s)(.*)$ ]]; do
+        num=${BASH_REMATCH[1]} frac=${BASH_REMATCH[3]} unit=${BASH_REMATCH[4]} d=${BASH_REMATCH[5]}
+        frac="${frac}000"; frac="${frac:0:3}"
+        case "$unit" in
+            h)  total=$(( total + 10#$num * 3600000 + 10#$frac * 3600 )) ;;
+            m)  total=$(( total + 10#$num * 60000 + 10#$frac * 60 )) ;;
+            s)  total=$(( total + 10#$num * 1000 + 10#$frac )) ;;
+            ms) total=$(( total + 10#$num )) ;;
+        esac
+    done
     printf '%s' "$total"
+}
+
+# Whole seconds, rounded UP. The caller is wait_healthy's floor, where waiting
+# longer than the unit's own numbers is the safe direction -- so a sub-second
+# value still becomes 1s. Anything that needs the value exactly (healthcheck-lint
+# judging a 5-20s window, or a probe bound against a timeout) rounds in dur_ms
+# instead; rounding here would let a 4.5s timeout pass a 5s floor.
+dur_s() {
+    local ms
+    ms=$(dur_ms "$1")
+    printf '%s' $(( (ms + 999) / 1000 ))
 }
 
 # Wait for a container's own healthcheck to report healthy. Shared by deploy.sh

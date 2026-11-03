@@ -90,15 +90,33 @@ is_internal() { # ip -> 0 when it must never be banned
 }
 
 # ---------------------------------------------------------------------------
-# Go duration ("3h59m59.7s") -> seconds nft understands. Sub-minute precision is
-# dropped: the LAPI re-sends the decision every minute, so a ban that comes back
-# a few seconds short is refreshed long before it lapses.
+# Go duration ("3h59m59.7s") -> whole seconds nft understands. Sub-SECOND
+# precision is dropped: the LAPI re-sends the decision every minute, so a ban
+# that comes back a fraction of a second short is refreshed long before it lapses.
+#
+# Parsed by unit, not by "digits before the unit" anywhere in the string: a
+# fractional component was read as the digits AFTER its dot, which turned
+# "2.5h" into a 5-hour ban (18000 s), "1m30.5s" into 65 s, and "500ms" into
+# 30000 s because there is no ms case -- the worst direction, since a sub-second
+# decision became an eight-hour ban. 10# keeps "08m" from being read as octal
+# (which errored and left the previous subtotal in place). This is the same
+# parser as scripts/lib.sh's dur_ms, floored instead of rounded up; it cannot be
+# sourced from there because this script runs as root and must not read a
+# config or helper out of the user-writable checkout.
 # ---------------------------------------------------------------------------
 dur_to_sec() {
-    local d="$1" s=0
-    [[ $d =~ ([0-9]+)h ]] && s=$((s + BASH_REMATCH[1] * 3600))
-    [[ $d =~ ([0-9]+)m ]] && s=$((s + BASH_REMATCH[1] * 60))
-    [[ $d =~ ([0-9]+)s ]] && s=$((s + BASH_REMATCH[1]))
+    local d="$1" ms=0 num frac unit s
+    while [ -n "$d" ] && [[ $d =~ ^[^0-9]*([0-9]+)(\.([0-9]+))?(ms|h|m|s)(.*)$ ]]; do
+        num=${BASH_REMATCH[1]} frac=${BASH_REMATCH[3]} unit=${BASH_REMATCH[4]} d=${BASH_REMATCH[5]}
+        frac="${frac}000"; frac="${frac:0:3}"
+        case "$unit" in
+            h)  ms=$(( ms + 10#$num * 3600000 + 10#$frac * 3600 )) ;;
+            m)  ms=$(( ms + 10#$num * 60000 + 10#$frac * 60 )) ;;
+            s)  ms=$(( ms + 10#$num * 1000 + 10#$frac )) ;;
+            ms) ms=$(( ms + 10#$num )) ;;
+        esac
+    done
+    s=$(( ms / 1000 ))
     [ "$s" -gt 0 ] || s=3600
     [ "$s" -le 86400 ] || s=86400
     printf '%s' "$s"

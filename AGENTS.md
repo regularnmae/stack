@@ -200,7 +200,15 @@ rewrite, run-now -- are branches in the dispatch.
   And **`wait_healthy` raises a caller's timeout to the unit's
   `StartPeriod + Interval`**: podman runs no check during the start period, so a
   shorter wait reports "not healthy" about a service that never had a chance to
-  answer. A **one-shot unit (`Type=oneshot`) is the other way a wait lies**:
+  answer. Those are **Go duration strings and may be fractional**
+  (`HealthTimeout=7.5s` is legal), which is why `lib.sh`'s `dur_ms` parses each
+  component by its unit: the whole-second regex it replaced matched the digits
+  *after* the dot, reading `2.5h` as `5h`, `1m30.5s` as 65 s and `500ms` as 500
+  minutes — and `healthcheck-lint.sh` judges HC006 in ms for the same reason, so
+  a 6 s probe still fails against a 5.5 s timeout. `deploy/root/bouncer.sh` keeps
+  its own copy (floored), because a root script must not source a helper out of
+  the user-writable checkout; change both together. A **one-shot unit
+  (`Type=oneshot`) is the other way a wait lies**:
   the job *exits* instead of reporting `(healthy)` and never appears in
   `podman ps`, so `wait_healthy` reads its terminal state instead
   (`exited 0` = done) — before that, `./deploy.sh --only postgres-dump` spun

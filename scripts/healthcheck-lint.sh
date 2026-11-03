@@ -57,8 +57,8 @@ done
 # other declaration too; it sets defaults and runs nothing.
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
-# dur_s, shared with wait_healthy: the same parser reads a unit's durations here
-# and at deploy time.
+# dur_ms (and dur_s, the rounded-up whole-second view) is shared with
+# wait_healthy: the same parser reads a unit's durations here and at deploy time.
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 HEALTHLESS_UNITS=("${HEALTHLESS_UNITS[@]:-}")
@@ -177,8 +177,11 @@ for f in "${unit_files[@]}"; do
 
     # --- timeout ------------------------------------------------------------
     if [ -n "$timeout" ]; then
-        ts=$(dur_s "$timeout")
-        if [ "$ts" -lt 5 ] || [ "$ts" -gt 20 ]; then
+        # Compared in ms: HealthTimeout is a Go duration, so a fractional value is
+        # legal, and rounding it here would judge the wrong number (5.5s rounding
+        # up would let a 4.5s timeout clear a 5s floor).
+        ts=$(dur_ms "$timeout")
+        if [ "$ts" -lt 5000 ] || [ "$ts" -gt 20000 ]; then
             w=$(waiver_for "$f" HC006)
             if [ -n "$w" ]; then waived "$name" HC006 "timeout $timeout" "$w"
             else bad "$name" HC006 "HealthTimeout=$timeout (5-20s)"; fi
@@ -209,8 +212,10 @@ for f in "${unit_files[@]}"; do
         else bad "$name" HC007 "http probe:$why"; fi
     fi
     # A probe bound longer than podman's timeout is killed mid-request, which
-    # reads as a failure of the service instead of of the probe.
-    if [ -n "$bound" ] && [ -n "$timeout" ] && [ "$bound" -gt "$(dur_s "$timeout")" ]; then
+    # reads as a failure of the service instead of of the probe. Both sides in ms
+    # for the same reason as the window above: a 6s probe must fail against a
+    # 5.5s timeout, which rounding the timeout up to 6s would let through.
+    if [ -n "$bound" ] && [ -n "$timeout" ] && [ $(( bound * 1000 )) -gt "$(dur_ms "$timeout")" ]; then
         w=$(waiver_for "$f" HC006)
         if [ -n "$w" ]; then waived "$name" HC006 "probe $bound""s > timeout $timeout" "$w"
         else bad "$name" HC006 "probe bound ${bound}s exceeds HealthTimeout=$timeout"; fi
