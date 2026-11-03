@@ -502,7 +502,14 @@ rewrite, run-now -- are branches in the dispatch.
   is the only signal that detection is healthy while nothing enforces.
   `scripts/ids.sh` rolls the engines up into `$DATA_DIR/audit/ids.status` (the
   `backup-verify.status` pattern) rather than letting the monitor reach into a
-  rootful unit and a `podman exec`; a stale status is the failure signal.
+  rootful unit and a `podman exec`; a stale status is the failure signal. Its
+  decision counter reads `cscli **decisions** list -o json`, which is
+  **alert-shaped** -- an array of groups, each holding the decision(s) that alert
+  produced under `.decisions[]` and the address under `.source.value` -- because
+  the command prints `Alerts.List`'s response, not `/v1/decisions`. Reading the
+  top level as the decision list counts groups and formats `NEWEST` out of a
+  group that has no `.value` ("stack/http-probing ?"); the flat shape belongs to
+  `bouncer.sh`'s `/v1/decisions` pull, so the two must not be "aligned".
   Two more traps: NPM writes a **custom log_format**, not `combined`, so the
   stock nginx parser matches nothing --
   `deploy/crowdsec/parsers/s01-parse/stack-npm.yaml` owns both shapes and

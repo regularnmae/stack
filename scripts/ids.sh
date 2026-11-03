@@ -76,12 +76,41 @@ if podman container exists crowdsec 2>/dev/null; then
     [ -n "$CROWDSEC_STATE" ] || CROWDSEC_STATE=unknown
     # cscli inside the running container: the same binary the LAPI answers, no
     # extra credentials to hold on the host.
+    #
+    # The shape is ALERT-grouped, not decision-flat: `cscli decisions list -o json`
+    # marshals the Alerts.List response (upstream clidecision's decisionsToTable),
+    # so the array holds one entry per alert -- scenario, source.value, created_at
+    # -- and the decision(s) that alert produced under .decisions[] (one per
+    # scope/origin variant). There is no top-level .value. Reading the top level
+    # as the decision list therefore counted groups rather than decisions and
+    # formatted NEWEST out of the group, which is how the roll-up printed
+    # "stack/http-probing ?" instead of the offending address. bouncer.sh is not
+    # the other side of this: it reads /v1/decisions, which really is flat -- do
+    # not "align" the two.
     decisions_json=$(podman exec crowdsec cscli decisions list -o json 2>/dev/null || true)
     if [ -n "$decisions_json" ]; then
-        DECISIONS=$(printf '%s' "$decisions_json" \
-            | jq -r 'if type == "array" then length else 0 end' 2>/dev/null) || DECISIONS=0
-        NEWEST=$(printf '%s' "$decisions_json" \
-            | jq -r 'if type == "array" and length > 0 then (.[0] | "\(.scenario // "?") \(.value // "?")") else "" end' 2>/dev/null) || NEWEST=""
+        # Distinct decisions, not nested rows: the same decision can come back
+        # under two alert groups (the human table dedupes by
+        # simulated:type:scope:value for the same reason), and this counter means
+        # "how many are in force". .id is the LAPI's own decision id; the tuple is
+        # only the fallback for an entry that carries none.
+        #
+        # cscli's default --limit 100 caps this at the first 100 groups, on
+        # purpose: each group carries its event list, so lifting the cap would
+        # make a five-minute sweep parse an arbitrary payload. The counter is a
+        # report (monitor.sh shows it, metrics.sh graphs it), never a threshold.
+        DECISIONS=$(printf '%s' "$decisions_json" | jq -r '
+            if type == "array"
+            then ([.[] | .decisions[]?]
+                  | unique_by(.id // "\(.scope):\(.value):\(.type):\(.simulated)")
+                  | length)
+            else 0 end' 2>/dev/null) || DECISIONS=0
+        # Newest = the first decision of the first group, i.e. the LAPI's own
+        # newest-first order (the assumption the old code already made);
+        # .decisions[]? walks past a group with none instead of printing a bare "?".
+        NEWEST=$(printf '%s' "$decisions_json" | jq -r '
+            if type == "array" then ([.[] | .decisions[]?][0]) else null end
+            | if . == null then "" else "\(.scenario // "?") \(.value // "?")" end' 2>/dev/null) || NEWEST=""
     else
         CROWDSEC_STATE="unreachable"
     fi
