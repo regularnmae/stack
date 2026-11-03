@@ -395,6 +395,25 @@ image_inputs_label() { # containerfile -> LABEL=VALUE for podman build --label
     printf 'org.stack.inputs=%s' "$(image_inputs_digest "$1")"
 }
 
+# The image a unit is running, falling back to a given tag when the container
+# does not exist yet (a fresh host, before the first start). Host-side jobs that
+# read a service's own database must not pin a second copy of its Image=: on a
+# deployed host the running container answers, so a Renovate bump reaches them
+# too. The fallback is a bootstrap default, not a pin to maintain.
+container_image_or() { # container default-image
+    local img=""
+    if command -v podman >/dev/null 2>&1 && podman container exists "$1" 2>/dev/null; then
+        img=$(podman inspect "$1" --format '{{.ImageName}}' 2>/dev/null || true)
+    fi
+    printf '%s' "${img:-$2}"
+}
+npm_image() {
+    container_image_or nginx-proxy-manager "${NPM_IMAGE:-docker.io/jc21/nginx-proxy-manager:2.16.0}"
+}
+kuma_image() {
+    container_image_or uptime-kuma "${UPTIME_KUMA_IMAGE:-docker.io/louislam/uptime-kuma:2}"
+}
+
 # Write a Prometheus textfile for node-exporter's textfile collector: stdin -> a
 # .prom file, atomically, with the permissions the exporter needs. node-exporter
 # runs as uid 65534 -- a *subuid* under rootless podman -- so it owns neither the

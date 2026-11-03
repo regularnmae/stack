@@ -9,11 +9,16 @@
 # list in Exec=), and scripts/backup.sh derives its own mounts and arguments from
 # the same array -- so adding a directory is a one-line edit in stack.conf, never
 # an edit here. The rationale for each entry (and for what is deliberately absent)
-# lives in that declaration.
+# lives in that declaration. BACKUP_EXCLUDES in the same file is rendered into
+# Exec= as the --exclude list.
 #
-# The BoltMesh database is backed up as a pg_dumpall, not as its raw cluster
-# ($DATA_DIR/postgres): postgres-dump.service runs first (Wants=/After=
-# below) and writes $DATA_DIR/postgres-dump/all.sql, which is what is mounted.
+# The three live databases are backed up as DUMPS, not as their files:
+# postgres-dump.service writes $DATA_DIR/postgres-dump/all.sql and db-dump.service
+# writes $DATA_DIR/npm-dump/database.sqlite and $DATA_DIR/uptime-kuma-dump/kuma.sql.
+# Both run first (Wants=/After= below). The live files are in BACKUP_EXCLUDES:
+# a file-by-file copy of a database a daemon is writing is only crash-recoverable,
+# and restic reads each file at its own instant, so even an InnoDB tree that would
+# recover from a crash image can come back with mismatched LSNs.
 #
 # The chain data (bitcoin/, monero/), the Electrum index (fulcrum/), searxng/
 # and the metrics store are deliberately NOT backed up: they are huge and
@@ -31,10 +36,12 @@
 # ever firing again.)
 [Unit]
 Description=Encrypted backup of the stack's irreplaceable state (restic)
-# Wants=, not Requires=: the dump is best-effort, and a Postgres outage must
-# never stop the restic run that protects the CLN identity and the wallet.
-Wants=postgres-dump.service
-After=postgres-dump.service
+# Wants=, not Requires=: the dumps are best-effort, and a database outage must
+# never stop the restic run that protects the CLN identity and the wallet -- the
+# previous dump is still worth copying, and scripts/monitor.sh fails on a dump
+# that stops being refreshed.
+Wants=postgres-dump.service db-dump.service
+After=postgres-dump.service db-dump.service
 
 [Container]
 ContainerName=stack-backup
@@ -55,11 +62,10 @@ EnvironmentFile=@CONFIG_DIR@/backup/backup.env
 Volume=@BACKUP_DIR@:/repo:z
 Volume=@DATA_DIR@/backup-cache:/cache:z
 Entrypoint=/bin/sh
-# audit/auditd.fim is a root-owned FIM baseline written by the rootful IDS; the
-# container cannot read it (SELinux initrc_tmp_t), and restic exits 1 when a
-# source is unreadable, which skipped the retention pass. Exclude that one file
-# so the rest of audit/ still lands in the snapshot.
-Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup @BACKUP_PATHS@ --exclude=/data/audit/auditd.fim --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
+# The --exclude list is BACKUP_EXCLUDES in stack.conf (the live databases and
+# the root-owned IDS baseline); deploy/install.sh renders it here and
+# scripts/backup.sh builds the same flags for a hand run.
+Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup @BACKUP_PATHS@ @BACKUP_EXCLUDES@ --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
 
 [Service]
 Type=oneshot

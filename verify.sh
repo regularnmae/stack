@@ -639,6 +639,15 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet ba
 else
     warn "backup-verify.timer is not active (systemctl --user status backup-verify.timer)"
 fi
+# The dump job that replaces the live databases in the snapshot: without it
+# restic still succeeds, copying the previous dumps, so a missing unit is silent
+# until monitor.sh's freshness check (36h) or a restore.
+DB_DUMP_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/db-dump.service"
+if [ -f "$DB_DUMP_UNIT" ]; then
+    pass "db-dump.service installed"
+else
+    bad "db-dump.service is not installed (run deploy/install.sh)"
+fi
 if [ "$DEEP" = 1 ]; then
     # Freshness is best-effort and a fresh host legitimately has no snapshot, so
     # this only warns. A failure means the repository or password is wrong.

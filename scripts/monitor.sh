@@ -106,6 +106,7 @@ MONITOR_INODES_FREE_PCT="${MONITOR_INODES_FREE_PCT:-$(env_value "$MONITOR_ENV" M
 MONITOR_IO_UTIL_PCT="${MONITOR_IO_UTIL_PCT:-$(env_value "$MONITOR_ENV" MONITOR_IO_UTIL_PCT)}"
 MONITOR_BACKUP_MAX_AGE_H="${MONITOR_BACKUP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_MAX_AGE_H)}"
 MONITOR_BACKUP_VERIFY_MAX_AGE_H="${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_VERIFY_MAX_AGE_H)}"
+MONITOR_DUMP_MAX_AGE_H="${MONITOR_DUMP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_DUMP_MAX_AGE_H)}"
 MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONITOR_CERT_MIN_DAYS)}"
 MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
 MONITOR_METRICS_MAX_AGE_S="${MONITOR_METRICS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_METRICS_MAX_AGE_S)}"
@@ -549,6 +550,7 @@ THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
 THRESH_IO=$(num_or "${MONITOR_IO_UTIL_PCT:-}" 90)
 THRESH_BACKUP_H=$(num_or "${MONITOR_BACKUP_MAX_AGE_H:-}" 36)
 THRESH_VERIFY_H=$(num_or "${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-}" 192)
+THRESH_DUMP_H=$(num_or "${MONITOR_DUMP_MAX_AGE_H:-}" 36)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
 THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
 THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
@@ -707,6 +709,41 @@ if command -v jq >/dev/null 2>&1; then
 else
     soft "jq missing; skipped the backup age check"
 fi
+
+# The pre-backup database dumps: the live database files are in stack.conf's
+# BACKUP_EXCLUDES, so restic copies these dumps instead. A dump job that stops
+# working therefore does not break the backup -- restic keeps copying the last
+# good copy -- which is exactly why this check exists: without it the loss only
+# appears on restore day. Each dump is renamed into place only after it was
+# validated (scripts/db-dump.sh, postgres-dump.container), so its mtime is the
+# time it was taken.
+dump_missing=""
+dump_stale=""
+dump_oldest=0
+for dump_rel in postgres-dump/all.sql npm-dump/database.sqlite uptime-kuma-dump/kuma.sql; do
+    dump_file="$DATA_DIR/$dump_rel"
+    if [ ! -s "$dump_file" ]; then
+        dump_missing="$dump_missing $dump_rel"
+        continue
+    fi
+    dump_m=$(stat -c %Y "$dump_file" 2>/dev/null || true)
+    case "$dump_m" in ''|*[!0-9]*) dump_missing="$dump_missing $dump_rel"; continue ;; esac
+    dump_age_h=$(( ( $(date +%s) - dump_m ) / 3600 ))
+    [ "$dump_age_h" -gt "$dump_oldest" ] && dump_oldest=$dump_age_h
+    [ "$dump_age_h" -gt "$THRESH_DUMP_H" ] && dump_stale="$dump_stale $dump_rel (${dump_age_h}h)"
+done
+case "${backup_count:-}" in
+    ''|*[!0-9]*|0)
+        soft "no restic snapshot yet; skipped the pre-backup dump freshness check" ;;
+    *)
+        if [ -n "$dump_missing" ]; then
+            fail "pre-backup dump(s) missing:$dump_missing -- the live databases are excluded from the snapshot, so a restore would lose them; run ./deploy.sh --only backup (or the dump units) to take them"
+        elif [ -n "$dump_stale" ]; then
+            fail "pre-backup dump(s) not refreshed:$dump_stale (threshold ${THRESH_DUMP_H}h) -- the dump job is failing and restic is copying the last good copy"
+        else
+            ok "pre-backup dumps fresh (oldest ${dump_oldest}h)"
+        fi ;;
+esac
 
 # The restore drill (scripts/backup.sh verify, run weekly by backup-verify.timer):
 # a repository that opens and lists is not a repository that restores. The age is

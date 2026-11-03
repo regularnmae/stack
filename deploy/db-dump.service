@@ -1,0 +1,36 @@
+# The consistent dumps of the two LIVE application databases, taken immediately
+# before the nightly restic run: NPM's SQLite database and Uptime-Kuma's embedded
+# MariaDB. deploy/backup.container pulls this in with Wants=/After=, next to
+# postgres-dump.service, which does the same for the BoltMesh cluster.
+#
+# Why a host unit and not a container (postgres-dump.container is one):
+# Uptime-Kuma's MariaDB only listens on a unix socket INSIDE its own container
+# (/app/data/run/mariadb.sock), so the dump is `podman exec uptime-kuma
+# mariadb-dump` -- and a container cannot exec into a sibling. The NPM half runs
+# a throwaway container, but the two are one job: both exist to keep the restic
+# set free of warm database files (BACKUP_EXCLUDES in stack.conf), and splitting
+# them would let one rot unnoticed.
+#
+# scripts/db-dump.sh owns the mechanics and the validation: each dump is written
+# to a .tmp, checked (SQLite PRAGMA quick_check / MariaDB completion trailer) and
+# only then renamed over the previous one, so a failed dump leaves the last good
+# copy in place -- the snapshot then holds a stale dump, which scripts/monitor.sh
+# fails on, rather than a torn fresh one.
+#
+# No Wants= on the applications: a backup job must never resurrect a service an
+# operator stopped. `podman exec` then fails with a clear message, the dump keeps
+# its previous copy, and the monitor reports it.
+#
+# No [Install]: backup.service activates it (and `./deploy.sh --only db-dump`
+# runs it by hand).
+[Unit]
+Description=Consistent dumps of the live application databases (NPM SQLite, Uptime-Kuma MariaDB)
+After=nginx-proxy-manager.service uptime-kuma.service
+
+[Service]
+Type=oneshot
+ExecStart=@REPO_DIR@/scripts/db-dump.sh
+# The MariaDB dump is a few seconds on this host; the limit is for a big history
+# table, not routine operation, and it must stay under backup.service's own start
+# wait.
+TimeoutStartSec=600

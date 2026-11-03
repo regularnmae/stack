@@ -1,9 +1,10 @@
 # Quadlet unit for Uptime-Kuma, the public status page. Owned by this repo so
-# the whole stack deploys whole. Its state (sqlite, history, monitor config)
-# lives in @DATA_DIR@/uptime-kuma; everything else is configured in its web UI
-# -- this unit reads no config file and no secret, so it is the one unit with
-# no env file. install.sh renders this into ~/.config/containers/systemd/,
-# where quadlet turns it into uptime-kuma.service.
+# the whole stack deploys whole. Its state (monitors, history, login and an
+# EMBEDDED MARIADB -- kuma v2 does not use sqlite any more) lives in
+# @DATA_DIR@/uptime-kuma; everything else is configured in its web UI -- this
+# unit reads no config file and no secret, so it is the one unit with no env
+# file. install.sh renders this into ~/.config/containers/systemd/, where quadlet
+# turns it into uptime-kuma.service.
 [Unit]
 Description=Uptime-Kuma (public status page)
 After=network-online.target npm-network-network.service
@@ -20,15 +21,24 @@ Network=npm-network.network
 # (which terminates TLS) stays the only way in for a client.
 PublishPort=127.0.0.1:8107:3001
 
-# kuma's sqlite + history. container root == the host user under rootless
-# podman (same as cln/ and tor/), so no unshare chown is needed -- install.sh
-# only mkdirs.
+# kuma's embedded MariaDB, its own sqlite-era leftovers and the uploaded images.
+# The top level is written by container root (= the host user under rootless
+# podman), so install.sh only mkdirs it; mariadb/ and run/ inside are owned by
+# kuma's in-image uid (host subuid 525287), which is why the restore runbook
+# chowns the datadir it recreates.
+#
+# The live mariadb/ datadir is NOT part of the backup set (stack.conf's
+# BACKUP_EXCLUDES): restic would copy a tree MariaDB is writing, one file at a
+# time, which is how a restore gets a redo log that disagrees with its data
+# pages. scripts/db-dump.sh takes `mariadb-dump --single-transaction` into
+# $DATA_DIR/uptime-kuma-dump/kuma.sql instead, and the restore runbook imports
+# it. `run/` (socket + pid) is excluded for the same "not state" reason.
 # :z label required (SELinux enforcing host), same as monerod.
 Volume=@DATA_DIR@/uptime-kuma:/app/data:z
 
 # `extra/healthcheck` is the Go binary the image ships for exactly this; it
 # GETs http://127.0.0.1:3001 inside the container. The long start period
-# matters: on a version bump kuma migrates its sqlite before it opens :3001.
+# matters: on a version bump kuma migrates its database before it opens :3001.
 #
 # 5 retries, not 3, for a related reason: the migration is not bounded by the
 # start period when a large DB is being upgraded, and 3 failed probes would kill

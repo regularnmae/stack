@@ -460,8 +460,12 @@ UNITS=(
 )
 
 # Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir).
+# db-dump.service is here rather than in UNITS because it is a host job: the kuma
+# half is `podman exec` into the running container, which a container cannot do
+# (deploy/db-dump.service explains).
 USER_UNITS=(
     "backup.timer"
+    "db-dump.service"
     "backup-verify.service"
     "backup-verify.timer"
     "monitor.service"
@@ -591,6 +595,18 @@ backup_restic_paths() {
         out+="${out:+ }/data/$p"
     done
     printf '%s' "$out"
+}
+
+# BACKUP_EXCLUDES as restic flags, one per entry. Quoted because an entry may be
+# a glob (npm/data/database.sqlite* covers the db and its -journal/-wal/-shm):
+# restic matches the pattern itself, and the container's /bin/sh must not expand
+# it first. scripts/backup.sh builds the same flags for a hand run.
+backup_excludes() {
+    local p out=""
+    for p in ${BACKUP_EXCLUDES[@]+"${BACKUP_EXCLUDES[@]}"}; do
+        out+="--exclude='/data/$p' "
+    done
+    printf '%s' "${out% }"
 }
 
 first_nonempty() {
@@ -868,12 +884,26 @@ chmod 700 "$TOR_DIR/onion"
 # own PGDATA, so neither dir needs the image-uid chown the other apps need.
 mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/postgres-dump"
 
-# Uptime-Kuma's state (sqlite, history, monitor config): written by container
-# root -- the host user under rootless podman, same as cln/ and tor/ -- so a
-# plain mkdir, no uid chown. Nothing is seeded into the state itself: the admin
-# account is created in its web UI on first use, and the monitors are
-# reconciled by scripts/kuma-monitors.sh once the api.env has the login.
+# Uptime-Kuma's state: its UI-configured monitors/history and login, plus the
+# EMBEDDED MARIADB (kuma v2 runs MariaDB, not sqlite -- db-config.json says
+# embedded-mariadb and the live tree is mariadb/). Written by container root --
+# the host user under rootless podman, same as cln/ and tor/ -- so a plain mkdir,
+# no uid chown. Nothing is seeded into the state itself: the admin account is
+# created in its web UI on first use, and the monitors are reconciled by
+# scripts/kuma-monitors.sh once the api.env has the login.
 mkdir -p "$DATA_DIR/uptime-kuma"
+
+# Every BACKUP_PATHS entry must exist before the job's first run: restic would
+# otherwise create it as root inside the container (the wrong owner), and the
+# unit's :z relabel statfs's the source. postgres-dump and the two dump dirs are
+# listed above so their modes can be set here; the loop is what keeps a new
+# stack.conf entry from needing a second edit in this file.
+for _backup_path in "${BACKUP_PATHS[@]}"; do
+    mkdir -p "$DATA_DIR/$_backup_path"
+done
+unset _backup_path
+# The pre-backup dumps carry live user tables: keep the staging/dump dirs private.
+chmod 700 "$DATA_DIR/npm-dump" "$DATA_DIR/uptime-kuma-dump" 2>/dev/null || true
 
 # Monitoring: the metrics store, and the textfile node-exporter serves.
 # victoriametrics and node-exporter both run as container root == the login user
@@ -1691,6 +1721,7 @@ render_unit() {
         -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
         -e "s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g" \
         -e "s|@BACKUP_PATHS@|$(esc "$(backup_restic_paths)")|g" \
+        -e "s|@BACKUP_EXCLUDES@|$(esc "$(backup_excludes)")|g" \
         -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
         -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
@@ -1858,10 +1889,12 @@ cat <<EOF
 Done. Everything the stack owns lives under:
   $DATA_DIR
     bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ searxng/ npm/
-    uptime-kuma/    <- the status page's sqlite, history and login (its own UI)
+    uptime-kuma/    <- the status page's state: embedded MariaDB, monitors, login
     ids/            <- suricata's eve.json (root-owned) and crowdsec's state
     postgres/       <- the BoltMesh cluster (dumped, not backed up raw)
     postgres-dump/  <- the pre-backup pg_dumpall
+    npm-dump/       <- NPM's SQLite database, consistent copy for the backup
+    uptime-kuma-dump/ <- kuma's embedded MariaDB, mariadb-dump for the backup
     config/         <- all bearer tokens and secrets (mode 600)
     audit/          <- the monitor's log and the spend tripwire baselines
     monitoring/     <- the metrics store and node-exporter's textfile (regenerable)

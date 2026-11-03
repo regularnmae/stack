@@ -25,16 +25,19 @@
 #   --no-check        skip `restic check --read-data-subset` (the restore still
 #                     verifies the restored bytes)
 #   --keep            leave the restored tree in place to inspect it
-#   --with-db         additionally replay postgres-dump/all.sql into a throwaway
-#                     postgres and assert it produces tables (the quarterly
-#                     drill; the weekly run only checks the dump is complete)
+#   --with-db         additionally replay all three dumps -- postgres-dump/all.sql
+#                     into a throwaway postgres, uptime-kuma-dump/kuma.sql into a
+#                     throwaway MariaDB -- and prove they produce tables. The
+#                     SQLite copy is checked on every run instead (quick_check is
+#                     cheap); this is the quarterly drill for the two server dumps.
 #
 # The scheduled run lives in deploy/backup.container + deploy/backup.timer;
 # this helper runs the same job by hand and adds the read/restore commands. Both
 # read the backup set from one declaration -- BACKUP_PATHS in stack.conf -- which
 # deploy/install.sh also renders into the unit, so what a hand run copies is
-# exactly what the nightly job copies, and the database dump is refreshed here
-# the same way the unit's Wants=postgres-dump.service refreshes it.
+# exactly what the nightly job copies. The database dumps are refreshed here the
+# same way the unit's Wants=postgres-dump.service/db-dump.service refreshes them:
+# the live database files are in BACKUP_EXCLUDES, and the dumps replace them.
 #
 # The repository and password are read from the ENVIRONMENT FIRST, then from
 # $DATA_DIR/config/backup/backup.env. That order is what makes recovery on a
@@ -158,6 +161,17 @@ for p in "${BACKUP_PATHS[@]}"; do
     backup_paths+=("/data/$p")
 done
 
+# What restic must not walk inside those directories (BACKUP_EXCLUDES in
+# stack.conf): the live database files, whose consistent copies are the dumps.
+# Each flag is single-quoted because an entry can be a glob
+# (npm/data/database.sqlite* covers the db and any -journal/-wal/-shm beside it):
+# restic matches it, and the container's shell must pass it through unexpanded.
+exclude_args=""
+for p in ${BACKUP_EXCLUDES[@]+"${BACKUP_EXCLUDES[@]}"}; do
+    exclude_args+="--exclude='/data/$p' "
+done
+exclude_args="${exclude_args% }"
+
 restic() { podman run "${common[@]}" "$RESTIC_IMAGE" "$@"; }
 
 # Every bind-mount source must exist before podman runs: with SELinux relabel
@@ -173,37 +187,42 @@ ensure_mount_dirs() {
 ensure_mount_dirs
 
 # The same job the nightly unit runs (deploy/backup.container's Exec=), built
-# from the same declaration: the path list and the retention policy are
-# generated, so the two cannot drift.
+# from the same declaration: the path list, the excludes and the retention
+# policy are generated, so the two cannot drift.
 job_script=$(
     printf 'set -e\n'
     printf 'restic snapshots >/dev/null 2>&1 || restic init\n'
-    printf 'restic backup %s --exclude=/data/audit/auditd.fim --host stack --tag stack\n' "${backup_paths[*]}"
+    printf 'restic backup %s %s --host stack --tag stack\n' "${backup_paths[*]}" "$exclude_args"
     printf 'restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune\n'
 )
 
-# The nightly unit gets a fresh pg_dumpall from postgres-dump.service, pulled in
-# by Wants=/After= in deploy/backup.container. A hand run has no such ordering,
-# so it takes the same dump here. Best-effort, exactly like the unit: a Postgres
-# outage must never stop the run that protects the wallet and the CLN identity,
-# and the previous dump is still worth copying.
-refresh_postgres_dump() {
-    local p in_set=0
+# The nightly unit gets fresh dumps from postgres-dump.service and
+# db-dump.service, pulled in by Wants=/After= in deploy/backup.container. A hand
+# run has no such ordering, so it runs whichever of the two are installed here.
+# Best-effort, exactly like the units: a database outage must never stop the run
+# that protects the wallet and the CLN identity, and the previous dump is still
+# worth copying.
+refresh_dumps() {
+    local p unit in_set=0 ran=0
     for p in "${BACKUP_PATHS[@]}"; do
-        [ "$p" = postgres-dump ] && in_set=1
+        case "$p" in postgres-dump|npm-dump|uptime-kuma-dump) in_set=1 ;; esac
     done
     [ "$in_set" = 1 ] || return 0
 
-    if ! command -v systemctl >/dev/null 2>&1 \
-        || ! systemctl --user cat postgres-dump.service >/dev/null 2>&1; then
-        warn "postgres-dump.service is not installed (or not reachable); copying $DATA_DIR/postgres-dump as it stands"
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "systemctl is unavailable; copying the dumps as they stand"
         return 0
     fi
-    if systemctl --user start postgres-dump.service; then
-        log "took a fresh BoltMesh database dump"
-    else
-        warn "postgres-dump.service failed; copying the previous dump (if any)"
-    fi
+    for unit in postgres-dump db-dump; do
+        systemctl --user cat "$unit.service" >/dev/null 2>&1 || continue
+        ran=1
+        if systemctl --user start "$unit.service"; then
+            log "refreshed the $unit dump"
+        else
+            warn "$unit.service failed; copying the previous dump (if any)"
+        fi
+    done
+    [ "$ran" = 1 ] || warn "the dump services are not installed; copying the dumps as they stand"
 }
 
 # ---------------------------------------------------------------------------
@@ -272,10 +291,10 @@ verify_cleanup() {
 }
 
 # restic restores the numeric owners, so the wallet comes back as the image uid
-# (host 525287) and uptime-kuma's mariadb as its own uid: a plain `rm -rf` as the
-# host user cannot unlink inside those directories. `podman unshare` enters the
-# user namespace where they are mapped, which is the same trick install.sh uses
-# to chown the wallet. Fall back to rm when podman is unavailable.
+# (host 525287): a plain `rm -rf` as the host user cannot unlink inside those
+# directories. `podman unshare` enters the user namespace where they are mapped,
+# which is the same trick install.sh uses to chown the wallet. Fall back to rm
+# when podman is unavailable.
 remove_verify_target() {
     case "${VERIFY_TARGET:-}" in
         ""|/) return 0 ;;
@@ -287,10 +306,9 @@ remove_verify_target() {
 }
 
 # Count and measure a restored subtree from inside the user namespace: restic
-# restores the numeric owners, so the wallet and uptime-kuma's mariadb come back
-# owned by subuids the host user cannot read. A plain find/du would under-count
-# them (and, with pipefail, abort the drill on exactly the directories that
-# matter).
+# restores the numeric owners, so the wallet comes back owned by a subuid the
+# host user cannot read. A plain find/du would under-count it (and, with
+# pipefail, abort the drill on exactly the directories that matter).
 tree_count() { # path -> number of files
     local n
     n=$(podman unshare find "$1" -type f 2>/dev/null | wc -l | tr -d ' ') || n=0
@@ -402,6 +420,114 @@ verify_replay_dump() { # restored data root
     log "database replay passed: $total table(s)"
 }
 
+# Replay the restored kuma dump into a throwaway MariaDB started from the
+# uptime-kuma image: the same server version that wrote it, so no second image to
+# pull, and the only proof that matters -- the SQL imports and the kuma schema is
+# there. Manual (--with-db) for the same reason as the postgres replay.
+verify_replay_kuma_dump() { # restored data root
+    local root="$1" dump="$1/uptime-kuma-dump/kuma.sql" image out tables
+    image=$(kuma_image)
+    [ -s "$dump" ] || die "--with-db: the snapshot holds no uptime-kuma-dump/kuma.sql"
+    if ! podman image exists "$image" 2>/dev/null; then
+        warn "--with-db: $image is not present; skipped the kuma replay"
+        return 0
+    fi
+    log "replaying kuma.sql into a throwaway $image"
+    if ! out=$(podman run --rm --pull=never --network none \
+        -v "$root/uptime-kuma-dump:/dump:ro,z" \
+        --entrypoint /bin/sh "$image" -c '
+set -e
+d=$(mktemp -d)
+mariadb-install-db --user=root --datadir="$d" --auth-root-authentication-method=normal >/dev/null 2>&1
+mariadbd --user=root --datadir="$d" --socket=/tmp/m.sock --skip-networking --pid-file=/tmp/m.pid >/dev/null 2>&1 &
+i=0
+until mariadb --socket=/tmp/m.sock -u root -e "select 1" >/dev/null 2>&1; do
+    i=$((i+1))
+    [ "$i" -lt 60 ] || { echo "mariadbd did not come up" >&2; exit 1; }
+    sleep 2
+done
+mariadb --socket=/tmp/m.sock -u root < /dump/kuma.sql
+n=$(mariadb --socket=/tmp/m.sock -u root -N -B -e "select count(*) from information_schema.tables where table_schema=\"kuma\"")
+echo "KUMA_TABLES=$n"
+' 2>&1); then
+        printf '%s\n' "$out"
+        die "--with-db: the kuma dump did not import"
+    fi
+    tables=$(printf '%s\n' "$out" | sed -n 's/.*KUMA_TABLES=\([0-9][0-9]*\).*/\1/p' | tail -n1)
+    case "$tables" in ''|*[!0-9]*) tables=0 ;; esac
+    [ "$tables" -gt 0 ] || die "--with-db: the kuma dump replayed but produced no tables"
+    log "kuma replay passed: $tables table(s)"
+}
+
+# The dumps are the only part of the set whose CONTENT can be wrong while every
+# file is present -- and presence is all the marker loop proves. Each format gets
+# the cheapest check that can actually tell:
+#   * kuma      header + completion trailer; a dump killed mid-write is still a
+#               valid SQL prefix, so the trailer is the proof it finished
+#   * npm       PRAGMA quick_check on the restored copy (SQLite has no trailer),
+#               read through the NPM image; soft-skipped if that image is gone
+#   * freshness every dump's mtime sits inside the snapshot's own run. restic
+#               preserves mtimes, so a dump job that has been failing for months
+#               while restic kept copying the last good file cannot pass -- the
+#               exact hole "the marker exists" leaves open.
+# --with-db is the expensive proof that the SQL imports at all.
+verify_dump_contents() { # restored data root
+    local root="$1" dump image snap_epoch dump_epoch age_h
+    local max_h="${VERIFY_DUMP_MAX_AGE_H:-12}"
+
+    dump="$root/uptime-kuma-dump/kuma.sql"
+    if [ -s "$dump" ]; then
+        if ! grep -q '^-- MariaDB dump' "$dump"; then
+            write_verify_status fail "uptime-kuma-dump/kuma.sql has no mariadb-dump header" "$snap_id" "$files" "$total_bytes" "$subset"
+            die "uptime-kuma-dump/kuma.sql has no mariadb-dump header"
+        fi
+        if ! grep -q '^-- Dump completed' "$dump"; then
+            write_verify_status fail "uptime-kuma-dump/kuma.sql is truncated (no completion trailer)" "$snap_id" "$files" "$total_bytes" "$subset"
+            die "uptime-kuma-dump/kuma.sql is truncated: the dump did not finish"
+        fi
+    fi
+
+    dump="$root/npm-dump/database.sqlite"
+    if [ -s "$dump" ]; then
+        image=$(npm_image)
+        if ! podman image exists "$image" 2>/dev/null; then
+            warn "npm-dump/database.sqlite integrity not checked: $image is not present"
+        elif ! podman run --rm --pull=never --network none --user 0 \
+            --entrypoint /usr/bin/node -v "$root/npm-dump:/d:ro,z" "$image" -e '
+const Database = require("/app/node_modules/better-sqlite3");
+const db = new Database("/d/database.sqlite", { readonly: true, fileMustExist: true });
+const rows = db.pragma("quick_check");
+db.close();
+const verdict = Array.isArray(rows) && rows[0] ? rows[0].quick_check : "";
+if (verdict !== "ok") { console.error("quick_check: " + JSON.stringify(rows)); process.exit(1); }
+' >/dev/null 2>&1; then
+            write_verify_status fail "npm-dump/database.sqlite failed SQLite quick_check" "$snap_id" "$files" "$total_bytes" "$subset"
+            die "npm-dump/database.sqlite failed SQLite quick_check: the copy is damaged"
+        fi
+    fi
+
+    if [ -n "${snap_time:-}" ] && command -v jq >/dev/null 2>&1; then
+        snap_epoch=$(date -d "$snap_time" +%s 2>/dev/null || true)
+        case "$snap_epoch" in ''|*[!0-9]*) snap_epoch="" ;; esac
+        if [ -n "$snap_epoch" ]; then
+            for dump in "$root/postgres-dump/all.sql" \
+                "$root/npm-dump/database.sqlite" \
+                "$root/uptime-kuma-dump/kuma.sql"; do
+                [ -s "$dump" ] || continue
+                dump_epoch=$(stat -c %Y "$dump" 2>/dev/null || true)
+                case "$dump_epoch" in ''|*[!0-9]*) continue ;; esac
+                age_h=$(( (snap_epoch - dump_epoch) / 3600 ))
+                if [ "$age_h" -gt "$max_h" ]; then
+                    write_verify_status fail "${dump#"$root"/} is ${age_h}h older than the snapshot: the dump job was not refreshed for this run" "$snap_id" "$files" "$total_bytes" "$subset"
+                    die "${dump#"$root"/} is ${age_h}h older than the snapshot (max ${max_h}h): the dump was not taken as part of this backup"
+                fi
+            done
+        fi
+    fi
+
+    return 0
+}
+
 case "$cmd" in
     init)
         restic init
@@ -433,11 +559,15 @@ case "$cmd" in
         fi
         trap verify_cleanup EXIT
 
-        # Resolve `latest` so the report names the snapshot that was proven.
+        # Resolve `latest` so the report names the snapshot that was proven, and
+        # keep its time: the dumps inside it must come from that run, not from
+        # months earlier (see verify_dump_contents).
         snap_id="$snapshot"
-        if [ "$snapshot" = latest ] && command -v jq >/dev/null 2>&1; then
-            snap_id=$(restic snapshots --latest 1 --json "$snapshot" 2>/dev/null \
-                | jq -r '.[0].short_id // empty' 2>/dev/null || true)
+        snap_time=""
+        if command -v jq >/dev/null 2>&1; then
+            sjson=$(restic snapshots --latest 1 --json "$snapshot" 2>/dev/null || true)
+            snap_id=$(printf '%s' "$sjson" | jq -r '.[0].short_id // empty' 2>/dev/null || true)
+            snap_time=$(printf '%s' "$sjson" | jq -r '.[0].time // empty' 2>/dev/null || true)
             snap_id="${snap_id:-$snapshot}"
         fi
 
@@ -566,8 +696,13 @@ case "$cmd" in
             fi
         fi
 
+        # The other two dumps, plus the freshness of all three: presence is not
+        # consistency, and a stale dump passes every marker.
+        verify_dump_contents "$root"
+
         if [ "$VERIFY_DB" = 1 ]; then
             verify_replay_dump "$root"
+            verify_replay_kuma_dump "$root"
         fi
 
         write_verify_status ok "" "$snap_id" "$files" "$total_bytes" "$subset"
@@ -583,7 +718,7 @@ case "$cmd" in
         restic version
         ;;
     backup)
-        refresh_postgres_dump
+        refresh_dumps
         log "backing up ${backup_paths[*]} to $RESTIC_REPOSITORY"
         podman run "${common[@]}" "${data_ro[@]}" \
             --entrypoint /bin/sh "$RESTIC_IMAGE" -c "$job_script"
@@ -626,5 +761,8 @@ case "$cmd" in
         podman unshare chown -R 1000:1000 "$DATA_DIR/bitcoin" 2>/dev/null \
             || warn "could not chown $DATA_DIR/bitcoin to the image uid"
         log "restore complete; start the stack with ./deploy.sh"
+        # The two live databases are not in the snapshot as files: their dumps
+        # are. Say so here, where an operator finishing a restore is looking.
+        log "after ./deploy.sh: copy $DATA_DIR/npm-dump/database.sqlite over $DATA_DIR/npm/data/database.sqlite (NPM stopped), and import $DATA_DIR/uptime-kuma-dump/kuma.sql into kuma's MariaDB -- see README 'Disaster recovery'"
         ;;
 esac

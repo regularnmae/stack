@@ -150,8 +150,8 @@ everything else runs rootless. See [Intrusion detection](#intrusion-detection).
 
 A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
 `btcpay/` (plugin + the view-only wallet), `tor/`, `config/`, `npm/`, `audit/`,
-`uptime-kuma/`, and the BoltMesh
-database as a `pg_dumpall`) runs from `backup.timer` into
+`uptime-kuma/`, and the three live databases as dumps: BoltMesh's `pg_dumpall`,
+NPM's SQLite copy and kuma's `mariadb-dump`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`, and `backup-verify.timer` restores one snapshot a week to
 prove it works. It is the one thing that recovers you if the data disk
 itself is lost — see [Backup & restore](#backup--restore) and the
@@ -346,12 +346,18 @@ remembers the answer in `~/.config/stack/data-dir.env`:
     is the Electrum index and its self-signed certificate, regenerable and excluded
     from backups)
   - `npm/{data,letsencrypt}` — nginx-proxy-manager
-  - `uptime-kuma/` — the status page's state (sqlite, history; configured in its UI)
+  - `uptime-kuma/` — the status page's state (its embedded MariaDB, history and
+    login; configured in its UI). The live `mariadb/` datadir is excluded from
+    the backup — see below
   - `ids/` — the two IDS engines' state: suricata's `eve.json` and rules
     (root-owned) and crowdsec's database beside them (see
     [Intrusion detection](#intrusion-detection))
   - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
   - `postgres-dump/` — the pre-backup `pg_dumpall`
+  - `npm-dump/` — NPM's SQLite database as a consistent copy, written before
+    each backup (`scripts/db-dump.sh`)
+  - `uptime-kuma-dump/` — kuma's database as a `mariadb-dump`, written by the
+    same job
   - `config/` — every bearer token and secret
   - `bin/` — the two scripts `install.sh` stages for the containers that run them
     (`monerod`'s block-notify helper, the BTCPay bootstrap); rewritten on every
@@ -455,20 +461,36 @@ the things in `$DATA_DIR` that cannot be re-downloaded:
 - `audit/` — the monitor's log and the spend tripwire baselines (see
   [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire))
 - `uptime-kuma/` — the status page's own state (its monitors, history and login;
-  UI-configured, see [Status page](#status-page))
+  UI-configured, see [Status page](#status-page)), minus the live datadir
 - `postgres-dump/` — `pg_dumpall` of the BoltMesh database, taken by
-  `deploy/postgres-dump.container` immediately before each backup run (the raw
-  `postgres/` cluster is not copied: a file-by-file copy of a live `PGDATA` is
-  only crash-recoverable)
+  `deploy/postgres-dump.container` immediately before each backup run
+- `npm-dump/` — NPM's SQLite database, copied through SQLite's online backup
+  API by `scripts/db-dump.sh` immediately before each run
+- `uptime-kuma-dump/` — kuma's embedded-MariaDB database as a `mariadb-dump
+  --single-transaction`, written by the same job
+
+**Every live database is a dump, never a file copy.** The three of them —
+BoltMesh's Postgres cluster (`postgres/`), NPM's `npm/data/database.sqlite` and
+kuma's `uptime-kuma/mariadb/` datadir — are deliberately **excluded** from the
+snapshot (`BACKUP_EXCLUDES` in `stack.conf`), for the same reason: a file-by-file
+copy of something a daemon is writing is only crash-recoverable, and restic reads
+each file at its own instant, so even a tree that would recover from a crash
+image can come back with a redo log and data pages from different moments. Two
+host jobs write the dumps just before restic starts (`postgres-dump.service`,
+`db-dump.service`); each validates its output and only then renames it into
+place, so a failed dump leaves the previous copy rather than a torn one.
+`monitor.timer` fails on a dump that stops being refreshed.
 
 The chains (`bitcoin/`, `monero/`), the Electrum index (`fulcrum/`), `searxng/`,
 `bin/` (rewritten by every deploy), the two explorers (stateless, RPC-only) and
 the raw `postgres/` cluster are deliberately **excluded**: they are large and
 regenerable, so restic never walks them.
 
-That set is declared **once**, as `BACKUP_PATHS` in `stack.conf`. `install.sh`
-renders it into the job's mounts and its `Exec=`, and `scripts/backup.sh` derives
-its own mounts, restic arguments and restore prompt from the same array — so a
+That set is declared **once**, as `BACKUP_PATHS` in `stack.conf` — and what
+restic must skip inside it once too, as `BACKUP_EXCLUDES` (the live database
+files and the root-owned IDS baseline). `install.sh`
+renders both into the job's mounts and its `Exec=`, and `scripts/backup.sh` derives
+its own mounts, restic arguments and restore prompt from the same arrays — so a
 hand run copies exactly what the nightly run copies, and adding a directory is a
 one-line edit in `stack.conf` rather than four edits in two files.
 
@@ -479,13 +501,17 @@ one-line edit in `stack.conf` rather than four edits in two files.
   unit at `~/.config/systemd/user/backup.timer`, enabled by `install.sh`.
 - `deploy/backup-verify.service` + `deploy/backup-verify.timer` — the weekly
   restore drill (below), also plain user units.
+- `deploy/db-dump.service` — `scripts/db-dump.sh` before each run: NPM's SQLite
+  copy and kuma's `mariadb-dump`. A plain user unit because the kuma half is
+  `podman exec` into the running container, which a container cannot do.
+  `./deploy.sh --only db-dump` runs it by hand.
 - `scripts/backup.sh` — run it by hand and inspect what you have:
   `backup | init | list | ls | check | verify | forget | restore <snap> | unlock`.
   `ls [<snap>]` lists the paths inside a snapshot, which is how you prove a
-  given run really holds the database dump and not just the wallet. `backup`
-  also takes the same pre-backup `pg_dumpall` as the unit (it starts
-  `postgres-dump.service` when that unit is installed), because a hand run has
-  none of the unit's `Wants=` ordering.
+  given run really holds the database dumps and not just the wallet. `backup`
+  also refreshes the same dumps the units do (it starts
+  `postgres-dump.service` and `db-dump.service` when installed), because a hand
+  run has none of the unit's `Wants=` ordering.
 - `./deploy.sh --only backup` runs the job once, now.
 
 The repository defaults to the host directory `$STACK_BACKUP_DIR` (default
@@ -542,6 +568,7 @@ systemctl --user stop lightningd btcpay nbxplorer monero-wallet-btcpay tor nginx
 ./scripts/backup.sh ls latest      # what the snapshot holds, before overwriting anything
 ./scripts/backup.sh restore latest # in place; add -y when there is no TTY
 ./deploy.sh                        # adopts, re-renders, restarts, reconciles, verifies
+# then replay the live databases (the next section) -- the servers are up but empty
 ./verify.sh --deep
 ```
 
@@ -563,6 +590,55 @@ Then restart what reads it (`./deploy.sh` for config, `./deploy.sh --only tor`
 for the onion keys). Keep the single-directory mount: a target of `/` with the
 whole data dir mounted is an in-place restore of everything, which is the
 previous runbook.
+
+#### Replay the live databases
+
+The three live databases are in the snapshot as dumps, not as files, so a restore
+leaves the servers with nothing to open: BoltMesh's Postgres comes back as
+`postgres-dump/all.sql`, NPM's as `npm-dump/database.sqlite`, kuma's as
+`uptime-kuma-dump/kuma.sql`. The Postgres replay is [step 5 of the next
+runbook](#the-data-disk-is-gone-or-a-new-host) (it needs the cluster `deploy.sh`
+starts). The other two:
+
+NPM's copy is a consistent single file — stop NPM, put it in place, start it:
+
+```sh
+systemctl --user stop nginx-proxy-manager
+install -m 600 "$DATA_DIR/npm-dump/database.sqlite" "$DATA_DIR/npm/data/database.sqlite"
+systemctl --user start nginx-proxy-manager
+```
+
+kuma's is SQL, so it needs a datadir to import into. `./deploy.sh` has already
+had kuma initialise one (empty); replace it with a fresh datadir carrying the
+dump, then let kuma start on it:
+
+```sh
+systemctl --user stop uptime-kuma
+podman unshare rm -rf "$DATA_DIR/uptime-kuma/mariadb"
+mkdir -p "$DATA_DIR/uptime-kuma/mariadb"
+podman run --rm --network none \
+  -v "$DATA_DIR/uptime-kuma/mariadb:/var/lib/mysql:z" \
+  -v "$DATA_DIR/uptime-kuma-dump:/dump:ro,z" \
+  --entrypoint /bin/sh \
+  "$(podman inspect uptime-kuma --format '{{.ImageName}}')" -c '
+    set -e
+    mariadb-install-db --user=root --datadir=/var/lib/mysql --auth-root-authentication-method=normal >/dev/null
+    mariadbd --user=root --datadir=/var/lib/mysql --socket=/tmp/m.sock --skip-networking --pid-file=/tmp/m.pid >/dev/null 2>&1 &
+    i=0
+    until mariadb --socket=/tmp/m.sock -u root -e "select 1" >/dev/null 2>&1; do
+        i=$((i+1)); [ "$i" -lt 60 ] || { echo "mariadbd did not start" >&2; exit 1; }; sleep 2
+    done
+    mariadb --socket=/tmp/m.sock -u root < /dump/kuma.sql'
+# the container ran as root; kuma runs as its own uid inside the image
+podman unshare chown -R 1000:1000 "$DATA_DIR/uptime-kuma/mariadb"
+systemctl --user start uptime-kuma
+```
+
+`mariadb-install-db` builds the system tables the dump deliberately does not
+carry, and the dump recreates the `kuma` database and its tables (28 of them on
+this host). `scripts/backup.sh verify --with-db` runs the same import, so a drill
+that passes is a rehearsal of this step. Both replays are confirmed by
+`./verify.sh --deep` and by the status page/proxy hosts actually serving.
 
 #### The data disk is gone (or a new host)
 
@@ -599,8 +675,9 @@ first means every seed-once file is derived from the snapshot.
    ```
 
    It writes `cln/`, `btcpay/`, `tor/`, `config/`, `npm/`, `audit/`,
-   `uptime-kuma/` and `postgres-dump/`, and hands bitcoind's directory back to
-   the image uid, so bitcoind opens it directly.
+   `uptime-kuma/`, `postgres-dump/`, `npm-dump/` and `uptime-kuma-dump/`, and
+   hands bitcoind's directory back to the image uid, so bitcoind opens it
+   directly.
 
 4. Deploy. This adopts the restored secrets (never overwriting an existing
    file), seeds `bitcoin.conf`/`torrc` from them, builds the images, proves the
@@ -630,7 +707,12 @@ first means every seed-once file is derived from the snapshot.
    landed with `podman exec postgres psql -U vpnuser -d vpndb -c '\dt'`, then
    migrate: the dump is as old as the snapshot, and the code is not.
 
-6. Check it with [After any recovery](#after-any-recovery). The chains and
+6. Replay the other two databases the same way — NPM's `database.sqlite` and
+   kuma's MariaDB. Both are dumps in the snapshot, and the containers `deploy.sh`
+   started have empty databases of their own by now: see [Replay the live
+   databases](#replay-the-live-databases).
+
+7. Check it with [After any recovery](#after-any-recovery). The chains and
    Fulcrum start from zero — see [What comes back](#what-comes-back-what-re-downloads)
    for what that costs in time.
 
@@ -706,10 +788,14 @@ What rotation cannot fix, and what to do instead:
 
 | Path | Backed up | After a fresh-host restore |
 | --- | --- | --- |
-| `config/`, `tor/`, `npm/`, `audit/`, `uptime-kuma/` | yes | exactly as snapshotted |
+| `config/`, `tor/`, `audit/` | yes | exactly as snapshotted |
+| `npm/` | yes | config and TLS material; the database is a dump (next rows) |
+| `uptime-kuma/` | yes | monitors, login and uploads; the database is a dump (next rows) |
 | `cln/` | yes | channels as of the snapshot; an older state can force-close |
 | `btcpay/` | yes | the plugin and view-only wallet reopen; may rescan against `monerod` |
 | `postgres-dump/all.sql` | yes | a file — replay it (step 5) |
+| `npm-dump/database.sqlite` | yes | a file — copy it over `npm/data/database.sqlite` (step 6) |
+| `uptime-kuma-dump/kuma.sql` | yes | SQL — import it into a fresh datadir (step 6) |
 | `bitcoin/` | no | re-download; `bitcoin.conf` is seeded from the restored secret |
 | `monero/` | no | re-download |
 | `fulcrum/` | no | re-index from block 0: weeks on this disk (see [Full nodes and disk](#full-nodes-and-disk)) |
@@ -727,6 +813,12 @@ coming up — the stack is *serving* long before it is *synced*.
 > cleanly even if `lightningd.sqlite3` is torn, so the worst case is a
 > force-close and on-chain recovery, not lost funds; the wallet is written
 > periodically, so a live copy is safe in practice.
+>
+> The three live *databases* are not treated that way: Postgres, NPM's SQLite db
+> and kuma's MariaDB are excluded from the file set and come back as dumps taken
+> immediately before the backup (see [Backup & restore](#backup--restore)). NPM
+> and kuma therefore need one replay step after a restore, which [Replay the live
+> databases](#replay-the-live-databases) gives.
 >
 > "Safe" means *funds*: a wallet cache is a cache. One captured while the wallet
 > was rebuilding, or torn mid-write, is rejected when it is loaded, and the
@@ -749,7 +841,7 @@ coming up — the stack is *serving* long before it is *synced*.
 
 ```sh
 ./verify.sh --deep                  # containers, MCP handshakes, chains, Fulcrum
-./scripts/monitor.sh                # the sweep, including backup age and the drill
+./scripts/monitor.sh                # the sweep, including backup age, the dumps and the drill
 ./scripts/spend-audit.sh            # ENABLE_SPENDING=0 and no drift
 ./scripts/backup.sh verify          # the new repository restores too
 ```
@@ -784,11 +876,15 @@ second timer opens one:
   with `restic restore --verify`, and asserts that every directory in
   `BACKUP_PATHS` came back non-empty along with the markers in
   `BACKUP_VERIFY_PATHS` (`cln/bitcoin/hsm_secret`, the BTCPay Monero plugin's
-  DLL, `tor/onion`, `config/stack/secrets.env`, NPM's sqlite database,
-  uptime-kuma's embedded mariadb — the wallet itself only becomes a marker once
-  the operator's view key has imported it). The database dump must also carry its
-  `pg_dumpall` completion trailer, which is what catches a dump killed
-  mid-write.
+  DLL, `tor/onion`, `config/stack/secrets.env`, the three dumps — the wallet
+  itself only becomes a marker once the operator's view key has imported it).
+- Presence is not consistency, so the dumps are checked by content too: the
+  `pg_dumpall` and `mariadb-dump` completion trailers (a dump killed mid-write is
+  still a valid SQL prefix), `PRAGMA quick_check` on the restored SQLite copy,
+  and a freshness check — each dump's mtime (restic preserves mtimes) must fall
+  inside the snapshot's own run, so a dump job that has been failing for months
+  while restic kept copying the last good file fails the drill instead of passing
+  on the marker.
 - It never touches the live data dirs: only the repository, restic's cache and
   the scratch target are mounted, and that tree is removed on every exit path.
   A restore larger than `BACKUP_VERIFY_MAX_MB` (5 GiB) or one that does not fit
@@ -818,19 +914,22 @@ opens and re-syncs, or that the daemons come up on the restored state. That is
 what the walkthrough above is for, and it is worth running once against a spare
 host rather than trusting a green drill.
 
-The database is the one part a file-level check cannot settle, so replay it on
-demand:
+The databases are the one part a structural check cannot settle, so replay them
+on demand:
 
 ```sh
 ./scripts/backup.sh verify --with-db
 ```
 
 That restores as usual and then replays `postgres-dump/all.sql` into a throwaway
-`postgres` container, asserting the dump produces tables (the database name is
-not hardcoded: whatever the dump creates is discovered and counted). It is
-deliberately not part of the weekly run — it puts the postgres image in the
+`postgres` container and `uptime-kuma-dump/kuma.sql` into a throwaway MariaDB
+started from the uptime-kuma image (the same server version that wrote it),
+asserting each produces tables. The postgres database name is not hardcoded:
+whatever the dump creates is discovered and counted. It is
+deliberately not part of the weekly run — it puts those images in the
 drill's path, and the weekly run should stay deterministic. Do it before a
-release, or quarterly.
+release, or quarterly. It is also a rehearsal of [Replay the live
+databases](#replay-the-live-databases), which is the step a real recovery needs.
 
 ## Monitoring & the spend tripwire
 
@@ -853,7 +952,8 @@ check the data path are in `AGENTS.md`, "Healthchecks follow a contract".
   nothing else does — bitcoind freshness, **Fulcrum's Electrum index** (the tip
   it serves against bitcoind's height), CLN peers and **offline channels**, the
   Monero wallet's lag behind `monerod`, the host itself (disk and inode space,
-  disk saturation, backup age, certificate expiry, units that crash-looped
+  disk saturation, backup age, the pre-backup dump freshness, certificate
+  expiry, units that crash-looped
   since the last sweep, the metrics collector going quiet, the log pipeline
   going quiet, a live CLN rune the stack does not reference, and bitcoind's
   RPC password disagreeing with `secrets.env`) — then the spend tripwire.
@@ -921,7 +1021,8 @@ With no heartbeat the monitor still runs and records to
 `$DATA_DIR/audit/audit.log`, and `verify.sh` reports whether the timer is
 installed and active. The host checks' thresholds are the same file
 (`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
-`MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`, `MONITOR_METRICS_MAX_AGE_S`,
+`MONITOR_DUMP_MAX_AGE_H`, `MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`,
+`MONITOR_METRICS_MAX_AGE_S`,
 `MONITOR_FULCRUM_LAG_BLOCKS`, `MONITOR_BTC_MIN_PEERS`, `MONITOR_MEMPOOL_MB`,
 `MONITOR_XMR_LAG_BLOCKS`, `MONITOR_NET_DROP`, `MONITOR_TEMP_MAX`,
 `MONITOR_LOGS_MAX_AGE_S`, `MONITOR_ALERT_FOR`, …);
@@ -1363,7 +1464,9 @@ Notes:
 - **No tokens enter kuma's database.** Everything the declared monitors check
   is on the public surface (a token-gated endpoint answering 401 counts as
   up); the authenticated MCP handshakes stay in `verify.sh`/`monitor.sh`.
-- Its state (`$DATA_DIR/uptime-kuma`) is part of the [backup set](#backup--restore).
+- Its state (`$DATA_DIR/uptime-kuma`, including the embedded MariaDB it runs in
+  v2) is part of the [backup set](#backup--restore) — as a `mariadb-dump`, not a
+  copy of the live datadir.
 - `verify.sh` checks the dashboard through nginx-proxy-manager and by container
   name on `npm-network`, and probes the published page's public data endpoint.
 - The websockets it serves for its dashboard are why the proxy host carries the

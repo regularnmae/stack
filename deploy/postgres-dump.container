@@ -1,5 +1,7 @@
 # Quadlet unit for the BoltMesh database dump: a one-shot pg_dumpall that
-# deploy/backup.container pulls in before the nightly restic job.
+# deploy/backup.container pulls in before the nightly restic job, alongside
+# db-dump.service (which does the same for NPM's SQLite database and
+# Uptime-Kuma's embedded MariaDB).
 #
 # Why a dump and not the raw cluster: a copy of a live PGDATA taken file by
 # file is only crash-recoverable, so the backup set holds this SQL instead of
@@ -30,9 +32,10 @@ Volume=@DATA_DIR@/postgres-dump:/dump:z
 # shell. There is no $VAR anywhere: the systemd generator expands $ in Exec,
 # not the container, so PGHOST/PGUSER/PGPASSWORD are read by libpq directly.
 # The write is a rename within one directory, so the backup never sees a
-# half-written file.
+# half-written file. umask 077 because the dump carries the cluster's role
+# password hashes: the restic repository is encrypted, the staging file is not.
 Entrypoint=/bin/sh
-Exec=-c "pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
+Exec=-c "umask 077; pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
 
 [Service]
 Type=oneshot

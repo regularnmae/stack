@@ -36,6 +36,7 @@ credentials, so that image would be unreachable.
 ./deploy.sh                         # fetch repos, build, start, verify
 ./deploy.sh --only <name>           # one service; --dry-run to plan
 ./deploy.sh --only backup           # run the backup job now
+./deploy.sh --only db-dump          # refresh the two live-database dumps now
 ./deploy.sh --only backup-verify    # run the restore drill now (weekly on a timer)
 ./deploy.sh --only monitor          # run the health + spend checks now
 ./deploy.sh --only victoria-logs    # generic unit restart (LOGS_* land in the .container)
@@ -220,7 +221,10 @@ rewrite, run-now -- are branches in the dispatch.
   own directory. `cln/`, `tor/`, `uptime-kuma/` and `fulcrum/` are written by
   container root (= the host user under rootless podman).
 - **`uptime-kuma` is UI-configured for its own account, declared for everything
-  else:** no env file, nothing seeded into its sqlite, and its monitors are
+  else:** no env file, nothing seeded into its state — kuma v2 runs an
+  **embedded MariaDB** (`UPTIME_KUMA_ENABLE_EMBEDDED_MARIADB=1`,
+  `db-config.json` says `embedded-mariadb`; the sqlite-era `kuma.db` is a 0-byte
+  leftover) — and its monitors are
   `KUMA_MONITORS` in `stack.conf`, reconciled by `scripts/kuma-monitors.sh`
   through the `kuma-ctl` image because kuma has no REST write API. The admin
   login the setup wizard creates lives in `config/uptime-kuma/api.env` (UI-first
@@ -307,8 +311,13 @@ rewrite, run-now -- are branches in the dispatch.
   --read-data-subset=n/4` with a rotating counter, a `restore --target /restore`
   into `$DATA_DIR/backup-verify` (the live data dirs are **not** mounted, which is
   what makes it safe on a serving host), and assertions that every `BACKUP_PATHS`
-  entry came back non-empty plus the `BACKUP_VERIFY_PATHS` markers and the dump's
-  `pg_dumpall` completion trailer. It writes
+  entry came back non-empty plus the `BACKUP_VERIFY_PATHS` markers. Presence is
+  not consistency, so the three dumps get content checks on every run: the
+  `pg_dumpall` and `mariadb-dump` completion trailers, `PRAGMA quick_check` on
+  the restored SQLite copy (run in the NPM image), and a freshness check — each
+  dump's mtime (restic preserves them) must sit inside the snapshot's own run, so
+  a dump job that has been failing for months cannot pass on the last good file.
+  It writes
   `$DATA_DIR/audit/backup-verify.status`, and **that file is what
   `scripts/monitor.sh` reads** — a failed oneshot unit is otherwise just a line
   in `systemctl --user status`. The age check keys on `ok_epoch` (the last
@@ -385,20 +394,35 @@ rewrite, run-now -- are branches in the dispatch.
   RPC/Fulcrum wiring. `xmr-explorer` probes its static `/style.css`, not `/`,
   which can time out during monerod's initial sync.
 - **The backup set is declared once, as `BACKUP_PATHS` in `stack.conf`**
-  (`cln btcpay tor config npm audit uptime-kuma postgres-dump`).
-  `install.sh` renders it into `backup.container` (one read-only `Volume=` per
-  entry plus the path list in `Exec=`), and `scripts/backup.sh` derives its own
-  mounts, restic arguments, restore directories and confirmation prompt from the
-  same array, so a hand run and the nightly job copy the same thing. Chains, the
-  Fulcrum index, `searxng/`, `monitoring/`, `logs/` and the raw `postgres/`
-  cluster stay out so restic never walks them. `tor/` is in it for `tor/onion/` — a lost key
-  is a new `.onion` address. `postgres-dump.container` `pg_dumpall`s into
+  (`cln btcpay tor config npm audit uptime-kuma postgres-dump npm-dump
+  uptime-kuma-dump`), and what restic must skip inside it once too, as
+  `BACKUP_EXCLUDES` (`audit/auditd.fim` plus the three live database files).
+  `install.sh` renders both into `backup.container` (one read-only `Volume=` per
+  entry, the path list and the `--exclude` flags in `Exec=`), and
+  `scripts/backup.sh` derives its own mounts, restic arguments, restore
+  directories and confirmation prompt from the same arrays, so a hand run and the
+  nightly job copy the same thing. Chains, the Fulcrum index, `searxng/`,
+  `monitoring/`, `logs/` and the raw `postgres/` cluster stay out so restic never
+  walks them. `tor/` is in it for `tor/onion/` — a lost key
+  is a new `.onion` address.
+- **Every live database is backed up as a dump, never as files.** The same
+  sentence `postgres-dump.container` carries for `PGDATA` applies to NPM's
+  SQLite db and kuma's MariaDB datadir: a file-by-file copy of something a daemon
+  is writing is only crash-recoverable, and restic reads each file at its own
+  instant, so an InnoDB tree can come back with a redo log and data pages from
+  different moments. So `postgres-dump.container` `pg_dumpall`s into
   `$DATA_DIR/postgres-dump`; its libpq settings belong in
   `config/boltmesh/dump.env`, **not** `db.env` (`PGHOST`/`PGUSER` in the server's
-  own env break its socket-based entrypoint bootstrap). The unit reaches it
-  through `Wants=/After=postgres-dump.service`, but a bare `scripts/backup.sh
-  backup` starts that unit itself (best-effort — a Postgres outage must not stop
-  the run that protects the wallet). The repo is `$STACK_BACKUP_DIR`, reached
+  own env break its socket-based entrypoint bootstrap). `scripts/db-dump.sh`
+  (run by `db-dump.service`, a plain user unit — the kuma half is `podman exec`,
+  which a container cannot do) writes `npm-dump/database.sqlite` through SQLite's
+  online backup API and `uptime-kuma-dump/kuma.sql` through `mariadb-dump
+  --single-transaction`. Both units are reached through
+  `Wants=/After=postgres-dump.service db-dump.service`, but a bare
+  `scripts/backup.sh backup` starts them itself (best-effort — a database outage
+  must not stop the run that protects the wallet; `monitor.sh` fails on a dump
+  that stops being refreshed, `MONITOR_DUMP_MAX_AGE_H`). The repo is
+  `$STACK_BACKUP_DIR`, reached
   through `backup.env`; `scripts/backup.sh` reads `RESTIC_*` from **the
   environment first, then the file** — the only order that can recover a fresh
   host.
