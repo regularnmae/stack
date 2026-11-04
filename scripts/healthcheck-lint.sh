@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check every container unit against the healthcheck contract (AGENTS.md,
+# Check every container unit against the healthcheck contract (docs/units.md,
 # "Healthchecks follow a contract"). Reads the TEMPLATES in deploy/, not the
 # rendered units in ~/.config/containers/systemd: this answers "does the repo
 # still say the same thing about health", which is a question about a commit,

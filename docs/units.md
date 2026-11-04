@@ -1,0 +1,314 @@
+# Units, the installer, and what the host is running
+
+How `deploy/install.sh` renders the Quadlet units, how `deploy.sh` decides which
+of them to restart, what a unit may mount, and the healthcheck contract every
+container unit has to meet. Read this before touching `deploy/*.container*`,
+`deploy/install.sh`, `deploy.sh`'s `sync_units`, or
+`scripts/healthcheck-lint.sh`. The operator narrative is README's "Layout" and
+"Rollback".
+
+## Invariants
+
+- **`install.sh` is the only installer.** Every env file is seeded and every unit
+  rendered there; a new service is a unit in its `UNITS` array, never a change in
+  an app repo.
+- **A re-render does not change a running container.** `install.sh` advances
+  `units.rendered`; only `deploy.sh` and `rotate.sh` advance `units.applied`,
+  and only after applying. A hand render is drift and `verify.sh` names it.
+- **`HealthOnFailure=kill`, never `restart`** -- podman's own restart leaves the
+  unit active, so `NRestarts` never moves and the monitor cannot see the flap.
+- **`HealthCmd` proves the process, not the data path.** A probe that is red
+  while recovering (IBD, sync, first index) belongs in `monitor.sh`.
+- **A container unit mounts only from `$DATA_DIR` (or a podman volume).** A bind
+  source from the checkout breaks at the container's *next* start, not at
+  deploy time.
+
+## The render, and what the host is running
+
+- **`install.sh` is the only installer:** every env file is seeded and every unit
+  rendered there. A new service means a unit added to its `UNITS` (or
+  `USER_UNITS`/`USER_TIMERS`) array plus env seeding — nothing in the app repos.
+
+- **Secret resolution order** is `secrets.env` → the installed unit
+  (`flag_value`) → the daemon's config (`bitcoin_conf_value`) → generate. That
+  order is what makes adoption on a running host a no-op; keep it.
+
+- **`deploy.sh` runs `install.sh` twice** — up front, then again after
+  `lightningd` is up, because the CLN runes need a running node. Don't collapse
+  them.
+
+- **A re-render alone does not change a running container** (systemd keeps the
+  old one), so the host persists the answer to "which definition are the
+  containers running?": `install.sh` writes `$DATA_DIR/audit/units.rendered` on
+  every render, and `deploy.sh`/`scripts/rotate.sh` write
+  `$DATA_DIR/audit/units.applied` only after applying it. `deploy.sh` compares
+  the live digests against `units.applied` (`scripts/lib.sh`'s `unit_digest` /
+  `unit_digest_changed`, shared with `install.sh` and `verify.sh` so render and
+  compare cannot drift apart) and restarts exactly the units whose definition
+  changed — never ones that are inactive, since those are started later in
+  order. This is what makes **a hand `deploy/install.sh` visible drift instead
+  of a swallowed signal**: it advances `units.rendered`, `verify.sh` fails
+  naming the units (and the monitor pages through it), and the next deploy
+  restarts them. Do not go back to digesting the files either side of the
+  installer: that compares the render with itself. `units.applied` advances only
+  on success — `set -e` stops a failed deploy before `units_commit`, so the
+  baseline never records a restart that did not happen and the next run repeats
+  it. The first deploy on a host without a baseline adopts the render on disk
+  once, with a warning (drift older than that run is unknowable).
+  `nginx-proxy-manager` is only flagged by the restart pass: its restart is
+  deferred to `sync_npm_network`, after the proxy hosts are rewritten
+  (`deploy.sh` says why the order is load-bearing), and `units_commit` refuses
+  to record the baseline while that flag is still set — a `--only` branch that
+  never reached the rewrite must not claim NPM applied. Every `--only` branch
+  goes through `sync_units` and commits at the end; `agent-skills` runs no
+  installer and therefore commits nothing. Two ordering facts inside
+  `sync_units`: **`ensure_netcheck` is its last step, not part of the `--only`
+  prologue**, because `install.sh` rebuilds the `netcheck` image in
+  `install_units` and a refresh before that compared the container with the old
+  image and did nothing (the new client reached the containers one deploy
+  later); and an app branch sets `DEFER_UNITS` so `restart_changed_units` leaves
+  that unit alone — `deploy_app` restarts it after the build, and restarting it
+  twice is two outages for one edit.
+
+- **`scripts/rotate.sh` is the third writer of `units.applied`.** A rotation
+  re-renders through `install.sh` (only `bitcoin-rpc` and `tor-control` bake a
+  secret into a unit's `Exec=`), restarts its dependents and then advances the
+  baseline — otherwise the next deploy would bounce the units it just restarted.
+  Because `install.sh` re-renders *every* unit, `complete()` commits only when
+  the changed definitions are ones the rotation restarted or proved already
+  current; anything else stays unapplied for the next deploy, with a warning.
+
+- **`<unit>.bak` is the *previous* render, and only when the render changes
+  something.** It used to be written only if it did not already exist, so it
+  was frozen at the host's first install while README's Rollback section
+  presents it as the rollback path. The fix cannot be "always overwrite it":
+  `deploy.sh` runs `install.sh` twice per deploy (the CLN runes need a running
+  node), so the second run would back up the file the first run just wrote and
+  destroy the rollback. Hence the `cmp`: back up the old bytes only when the new
+  ones differ, always as one generation, always mode 600 (`cp -p` — several
+  rendered units carry `@PLACEHOLDER@` secrets).
+
+## Units, mounts and runes
+
+- **A container unit mounts only from `$DATA_DIR` (or a podman volume), never
+  from the checkout.** The host scripts in `deploy/*.service` do run from the
+  checkout — they *are* the tooling — but a container that a daemon starts is
+  different: `monerod`'s `--block-notify` helper and the BTCPay bootstrap script
+  were the last two exceptions, and moving or deleting the repo broke them at
+  their *next* start, with podman naming a missing bind source nobody had
+  edited. `install.sh` stages both into `$DATA_DIR/bin` on every run (small,
+  secret-free, regenerable, so not in `BACKUP_PATHS`); edit the repo copy and
+  deploy. CI fails if any `deploy/*.container*` mentions `@REPO_DIR@`, which is
+  what keeps the next one from creeping back.
+
+- **CLN runes are verified, not trusted:** `createrune` can return a rune whose
+  `unique_id` the node blacklisted, so `install.sh` proves each with `checkrune`
+  and retries on a fresh id.
+
+## Healthchecks follow a contract
+
+- **Healthchecks follow a contract, and `HealthOnFailure=restart` hides a
+  restart from the monitor.** Every container unit that is not `Type=oneshot`
+  defines a probe with all five keys explicit (`HealthCmd`, `HealthInterval`,
+  `HealthStartPeriod`, `HealthRetries`, `HealthTimeout`). The units that cannot
+  are declared once, with a reason, in `stack.conf`'s `HEALTHLESS_UNITS`
+  (`victoria-logs` is distroless — podman runs a string health command through
+  the container's `/bin/sh` — and the two netcheck clients only sleep), which
+  `verify.sh` reads instead of keeping its own copy. `scripts/healthcheck-lint.sh`
+  is the gate: interval is 30 s (HTTP) or 60 s (daemons), retries 3 or 5 with a
+  reason, timeout explicit and 5–20 s, an HTTP probe fails on non-2xx, discards
+  the body and bounds itself, and a rule is waived only by an inline
+  `# health-lint: <code> <reason>` comment, printed on every run so exemptions
+  stay visible. Three decisions carry the reasoning:
+  **`HealthOnFailure=kill`, never `restart`** — podman's own restart leaves the
+  unit active, so `NRestarts` does not move and `monitor.sh`'s restart delta
+  cannot see a container flapping every 30 s; systemd's `Restart=always` is the
+  process that should act. The two exceptions are `monero-wallet-btcpay` (red for a
+  whole refresh) and `boltmesh-backend`, whose health is **deep** (postgres +
+  valkey): a database blip must not restart-loop the app tier, and `verify.sh`
+  pages on the same endpoint. **`HealthCmd` proves the process/serving path, not
+  the data path** — a check that is legitimately red while recovering (IBD,
+  monerod sync, wallet refresh, Fulcrum's first index) belongs in `monitor.sh`,
+  never in a unit; that is why `fulcrum`'s and `monerod`'s probes are the
+  process table, `tor`'s is a port and `bitcoind`'s is a bare TCP connect to its
+  RPC listener (`nc -z`, no request), and replacing any of them with a data
+  probe is a regression, not a fix. `bitcoind` is the second worked example, and
+  the sharper one: its probe *was* `bitcoin-cli getblockchaininfo`, so it
+  entered the RPC work queue that Fulcrum's first index, the explorers and
+  nbxplorer were already filling — the check itself answered "error: Server
+  response: Work queue depth exceeded", and `HealthOnFailure=kill` turned three
+  of those into a restart every ~8 minutes (13 starts in 48 h), each one
+  resetting Fulcrum's connections and re-verifying the index. A probe that
+  competes for the resource under load is a kill switch aimed at the work.
+  `monerod` is the worked example: its
+  restricted-RPC handler blocks for 60 s or more while the chain lock is held
+  across a `--block-sync-size` batch, so the image's own `/healthcheck.sh` (an
+  unbounded curl of `/get_height`) went stall → stall → stall → a killed full
+  node roughly once an hour, mid-sync (6 `unhealthy` transitions and 8
+  container instances in six hours here). A socket check does not fix it
+  either: after such a kill the daemon refuses connections until LMDB reopens
+  (134 s measured, 0.5 s after a clean stop), which puts the same kill switch
+  on a different trigger with only `StartPeriod` in the way. So `monitor.sh`
+  owns "alive but not answering" — a warning under `MONITOR_GRACE_SYNC`, a
+  failure without it — and `metrics.sh`'s `stack_xmr_rpc_up` is the history.
+  And **`wait_healthy` raises a caller's timeout to the unit's
+  `StartPeriod + Interval`**: podman runs no check during the start period, so a
+  shorter wait reports "not healthy" about a service that never had a chance to
+  answer. Those are **Go duration strings and may be fractional**
+  (`HealthTimeout=7.5s` is legal), which is why `lib.sh`'s `dur_ms` parses each
+  component by its unit: the whole-second regex it replaced matched the digits
+  *after* the dot, reading `2.5h` as `5h`, `1m30.5s` as 65 s and `500ms` as 500
+  minutes — and `healthcheck-lint.sh` judges HC006 in ms for the same reason, so
+  a 6 s probe still fails against a 5.5 s timeout. `deploy/root/bouncer.sh` keeps
+  its own copy (floored), because a root script must not source a helper out of
+  the user-writable checkout; change both together. A **one-shot unit
+  (`Type=oneshot`) is the other way a wait lies**:
+  the job *exits* instead of reporting `(healthy)` and never appears in
+  `podman ps`, so `wait_healthy` reads its terminal state instead
+  (`exited 0` = done) — before that, `./deploy.sh --only postgres-dump` spun
+  its whole 180 s and warned "container missing" about a job that had
+  succeeded. The ten MCP servers' `healthcheck.py` (authenticated `initialize`,
+  SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
+
+## Ownership and images
+
+- **Data-dir ownership:** `bitcoind` runs as the image uid
+  (host 525287 = in-container 1000) and do **not** re-own their bind mounts, so
+  `install.sh` `podman unshare chown -R 1000:1000`s them; `monerod` re-owns its
+  own directory. `cln/`, `tor/`, `uptime-kuma/` and `fulcrum/` are written by
+  container root (= the host user under rootless podman).
+
+- **Every pulled image carries a real tag, and two managers cover them.**
+  Renovate's Quadlet manager reads `*.container`/`*.image`/`*.volume` and
+  **cannot see `deploy/*.container.in`**; those three templates, and the one
+  image default that lives in shell (`RESTIC_IMAGE`, which both
+  `scripts/backup.sh` and `scripts/rotate.sh` define — no manager reads a shell
+  default), are matched by `renovate.json`'s regex manager. Both files are
+  matched so a restic bump moves them together. The wallet tag appears in
+  the `btcpayserver/monero` unit, and one PR moves both; it also appears in
+  the README's "What runs" table, which is hand-maintained. `postgres` (hand
+  pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
+  (`pinDigests` off): kuma's `2` and searxng's date tags move on their own, a
+  digest pin would turn a reviewable version bump into a PR per upstream
+  rebuild, and a regex manager can only *update* a digest, never add one —
+  inheriting `docker:pinDigests` failed the whole branch. Every managed tag must
+  carry a version (`latest` buys nothing), and docker versioning wants the same
+  suffix and component count, so `9-alpine` never becomes `9.1-alpine` and
+  searxng's `<date>-<commit>` tags need `versioning: loose`. Digests belong in
+  the Containerfiles; the helper images' apk packages stay unpinned to the
+  branch for the same reason. The Monero pair is grouped (a wallet older than
+  its daemon is unsupported) and the daemons' PRs carry `prBodyNotes` that
+  merging changes nothing until `./deploy.sh --only <svc>`.
+
+- **A merged Containerfile digest bump reaches the host on the next
+  `./deploy.sh`:** each locally-built image is labelled with the sha256 of the
+  Containerfile that built it, and `deploy_explorers`/`ensure_local_image`
+  rebuild when the label differs (`scripts/lib.sh`'s `image_is_current`; no
+  label counts as stale). `podman image exists` alone would keep the old bits
+  forever, and `verify.sh`'s "Local images" section runs the same comparison. A
+  failed rebuild is fatal only when the image is *missing* — a stale one warns
+  and keeps the bits that work. `tor` is the only long-lived one, so
+  `start_infra` calls `refresh_image_unit` to restart it when the image id
+  changed; a changed `Image=` otherwise arrives only via
+  `restart_changed_units`. The Containerfile is the whole recipe — base digest,
+  upstream `ARG` pins, and deliberately no `COPY` out of the build context
+  (`kuma-ctl/monitors.mjs` is bind-mounted at run time), which is why the hash is
+  the Containerfile's and not the directory's.
+
+## The app tier, shared mounts, and the root tier
+
+- **BoltMesh is a tier of four units, not an MCP server**, built by
+  `deploy_boltmesh` (not `deploy_app`). The private `boltmesh-labs` repos clone
+  over SSH (`GITHUB_SSH_HOST`), and `deploy.sh` sets `GIT_TERMINAL_PROMPT=0`/
+  `GIT_SSH_COMMAND=ssh -o BatchMode=yes` so a missing key is a clear error, not a
+  prompt. The frontend needs `--target prod` plus the `VITE_*` build args (baked
+  into the bundle, so a hostname change is a rebuild). **BoltMesh holds no CLN
+  rune:** BTCPay is its settlement engine and reaches CLN itself over the unix
+  socket (`BTCPAY_BTCLIGHTNING`), so the only runes are `lightning-mcp`'s
+  read/spend pair -- `stack.conf` says why there is no boltmesh rune to mint.
+
+- **Shared bind mounts use `:z`, not `:Z`** — the backup container mounts `cln/`
+  and `npm/` read-only alongside `lightningd` and NPM, and two containers cannot
+  share a path one labels private.
+
+- **`sudo` lives only in `bootstrap.sh`.** `deploy.sh`, `install.sh`, `verify.sh`
+  and the `scripts/` helpers never call it; an unprepared data dir is an error
+  carrying the one-time commands, not a prompt. The one thing bootstrap uses it
+  for beyond provisioning is the **root tier** (`deploy/install.sh --root`): the
+  Suricata sensor, which cannot be rootless because AF_PACKET needs
+  `CAP_NET_RAW` in the init user namespace. That is why bootstrap is a
+  **two-pass** install -- the sensor's unit and config reference `@DATA_DIR@`,
+  so the first run (before any data dir exists) only prints a notice and the
+  rerun after the first `./deploy.sh` installs it. Everything it installs is
+  root-owned: the unit in `/etc/containers/systemd/`, the config in
+  `/etc/stack-ids/`, the tmpfiles rule in `/etc/tmpfiles.d/`. That unit is mode
+  0644 (not the 0600 the user units get) because `verify.sh` diffs it against
+  `deploy/root/` to catch drift and it carries no secret -- the secret-bearing
+  templates are the *user* units. Nothing
+  root-owned is *read* from `$DATA_DIR` -- the sensor only writes its logs there
+  (root-owned, 0644, so the unprivileged `scripts/ids.sh` can read them), and a
+  user-writable config consumed by a root container would be a privilege
+  boundary. A change to `deploy/root/` therefore needs `sudo ./bootstrap.sh`
+  again; `verify.sh` walks a declared table (`ROOT_FILES`) of every file
+  `install.sh --root` renders and warns per file when one has drifted or is
+  missing. Content only -- bootstrap owns the modes -- and three kinds are
+  excluded on purpose: the 0600 env files and the tmpfiles rule (written from
+  heredocs, no repo counterpart) and `60-stack.rules` (0640 in a 0750 directory,
+  unreadable to an unprivileged sweep; the audit section reads the report's
+  verdict instead). The bouncer's three are marked `opt`, absent until the
+  second bootstrap pass has a key, so they are skipped rather than warned about
+  on a host that has not got one yet.
+
+- **A Quadlet unit without `[Install]` never starts at boot.** `crowdsec` was
+  written without it, so after the first reboot it was simply absent, and the
+  only visible symptom was `stack-bouncer` failing every minute with "LAPI
+  unreachable" -- the applier failing loudly is what made it findable. Every
+  other container in `deploy/` has `[Install] WantedBy=default.target`; the
+  generator creates the `.wants` symlink from it, so `systemctl enable` is neither
+  needed nor possible ("transient or generated").
+  `podman exec crowdsec cscli …` is how decisions are read (no credentials on the
+  host), and `Network=none` was rejected because the agent installs hub parsers
+  on first boot. Suricata costs ~650 MB with the full ET
+  Open ruleset, which `start.sh` refreshes best-effort at container start and
+  falls back from to the twelve local rules. Three tuning facts learned by running
+  it here: (1) `tpacket-v3` on `lo` needs a block size **above the loopback MTU**
+  (128 KB, not the 32 KB default) -- with the default the ring mmap fails with
+  "Invalid argument", and the copy-mode fallback it forced made the worker spin at
+  **98% of a core on an interface carrying 30 packets/s**, which read as normal
+  load until `ps -L` showed one thread hot and the other two idle; (2) the ET TOR
+  family must be disabled through `disable.conf`'s `re:` filter --
+  `suricata-update`'s `group:` matching does not resolve ET's rule-file groups,
+  and this host's own tor client otherwise buries the inbound reputation alerts;
+  (3) ring sizes are per interface and mmapped at start: 4096 blocks x 32 KB for
+  the LAN NIC is 128 MB per thread, and the 32768 I copied from a tuning example
+  bought nothing while making VIRT read 1.3 GB.
+
+## The host-side probes
+
+- **The host-side probes exec into two long-lived `netcheck` containers; they do
+  not `podman run` per probe.** `net_curl`/`net_curl_host` run
+  `podman --events-backend=none exec` against `netcheck` (npm-network) and
+  `netcheck-host` (host network). A throwaway container per probe created a veth
+  pair and a cgroup scope each time, and `verify.sh` makes dozens per sweep --
+  the kernel logged ~12k lines an hour of veth churn, the biggest stream in the
+  journal, and journald paid for it twice once the log store indexed it. Two
+  containers, not one, because podman rejects host + bridge on the same
+  container ("cannot set multiple networks without bridge network mode") and
+  NPM's admin API is a `127.0.0.1` bind that only a host-netns client can reach.
+  `--events-backend=none` keeps the exec session
+  (`exec`/`exec_died`) out of the journal too, as belt to
+  `deploy/install.sh`'s braces: the mechanism itself is `events_logger` in the
+  user's `~/.config/containers/containers.conf` (the bullet above), because a flag at
+  the call site cannot reach podman's own healthcheck units. `netcheck_ready`
+  fails with the one-line fix when either is stopped; `deploy.sh` starts them
+  first in `start_infra`, after `refresh_image_unit` because install.sh rebuilds
+  the image in place (a plain `start` on an active unit keeps the old bits), and
+  `ensure_netcheck` covers every `--only` branch (the monitor's verify sweep,
+  npm-hosts, kuma-monitors all probe). `kuma-ctl` is still a one-shot
+  `podman run` and keeps `--log-driver=none`: the driver only
+  controls persistence, so their stdout still reaches the caller's command
+  substitution while the journal stays clean. `wait_healthy` treats a container
+  with no healthcheck as "up" -- `victoria-logs` is distroless and the netcheck
+  pair only sleeps, so neither can define a health command; their functional
+  checks are the LogsQL query and the probes themselves.
+

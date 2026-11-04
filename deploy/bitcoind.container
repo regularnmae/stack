@@ -52,7 +52,7 @@ Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 # request, so it cannot be starved by legitimate RPC load and creates no work
 # item. "Alive but not answering RPC" is monitor.sh's job, not the unit's: it
 # already fails on "bitcoind RPC unreachable" and then reads height, peers and
-# mempool, and verify.sh --deep reads the node through the MCP (AGENTS.md,
+# mempool, and verify.sh --deep reads the node through the MCP (docs/units.md,
 # "Healthchecks follow a contract"). busybox nc is in the image; loopback is
 # inside the container, so rpcallowip still applies.
 HealthCmd=nc -z 127.0.0.1 8332

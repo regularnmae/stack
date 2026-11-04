@@ -45,7 +45,7 @@
       "enabled": false
     },
     {
-      "description": "hand-pinned on purpose: the Postgres cluster is upgraded by the operator, not by a PR (renovate.json's own rule, documented in AGENTS.md)",
+      "description": "hand-pinned on purpose: the Postgres cluster is upgraded by the operator, not by a PR (renovate.json's own rule, documented in docs/units.md)",
       "matchDatasources": [
         "docker"
       ],

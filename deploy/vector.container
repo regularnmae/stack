@@ -46,7 +46,7 @@ Network=npm-network.network
 #       option, so this is the second unit (after node-exporter) with SELinux
 #       separation off. It is acceptable here because the mounts are :ro and the
 #       container publishes nothing to the LAN; the exception is documented in
-#       AGENTS.md.
+#       docs/logs.md.
 GroupAdd=keep-groups
 SecurityLabelDisable=true
 # BOTH journal directories. journald starts volatile and is switched to

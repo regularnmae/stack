@@ -77,7 +77,7 @@ Exec=--rpc-restricted-bind-ip=0.0.0.0 \
 # stack_xmr_rpc_up from a 5s-bounded probe every minute, scripts/monitor.sh
 # names an RPC that does not answer, and verify.sh --deep reads the node
 # through the MCP. Replacing any of those with a data probe here is a
-# regression, not a fix (AGENTS.md, "Healthchecks follow a contract").
+# regression, not a fix (docs/units.md, "Healthchecks follow a contract").
 HealthCmd=sh -c 'grep -qx monerod /proc/1/comm'
 HealthInterval=60s
 HealthTimeout=15s

@@ -995,7 +995,7 @@ defines one or is declared healthless in `stack.conf` with a reason, and
 (explicit interval/start/retries/timeout, a bounded HTTP probe, and
 `HealthOnFailure=kill` so the restart is systemd's and the monitor's restart
 counter can see it). The rules, the two exemptions and why a probe must not
-check the data path are in `AGENTS.md`, "Healthchecks follow a contract".
+check the data path are in `docs/units.md`, "Healthchecks follow a contract".
 
 - `scripts/monitor.sh` — runs every five minutes from
   `deploy/monitor.timer`. Read-only: it starts nothing and rewrites no config.
@@ -1990,6 +1990,10 @@ stack/
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
   renovate.json           # Renovate policy (pinned images and git refs)
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
+  AGENTS.md               # agent index: invariants, traps, the shared contract
+  docs/                   # the detail behind that index, one file per subsystem
+                          #   (units, logs, ids, backup, proxy, alerting,
+                          #   chains, credentials, btcpay, clients)
   scripts/lib.sh          # data-dir resolution + SELinux labelling + the
                           #   net_curl / mcp_* helpers every check goes through
   scripts/wallets.sh      # the Bitcoin Core wallet (create/restore/load)

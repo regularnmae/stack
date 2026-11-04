@@ -33,10 +33,33 @@ jobs:
           printf 'shellcheck: %d scripts\n' "${#files[@]}"
           "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x -P SCRIPTDIR -S info \
             "${files[@]}"
-      # The healthcheck contract (AGENTS.md): explicit keys, a bounded probe,
-      # systemd owning the restart. Reads deploy/ templates, so it needs no host.
+      # The healthcheck contract (docs/units.md): explicit keys, a bounded
+      # probe, systemd owning the restart. Reads deploy/ templates, so it needs
+      # no host.
       - name: healthcheck contract
         run: ./scripts/healthcheck-lint.sh
+      # AGENTS.md is the index and docs/ is the detail. The split's one failure
+      # mode is silent: rename a doc, or delete one, and the index points at
+      # nothing while every other check still passes. So each doc must be named
+      # in AGENTS.md and must open with its invariant list (the part that keeps
+      # a partial read useful), and every docs/ path named anywhere in the tree
+      # must exist.
+      - name: docs index agrees with AGENTS.md
+        run: |
+          mapfile -t docs < <(git ls-files 'docs/*.md')
+          [ "${#docs[@]}" -gt 0 ] || { echo "::error::no docs/*.md found"; exit 1; }
+          fail=0
+          for f in "${docs[@]}"; do
+            grep -qF "\`$f\`" AGENTS.md \
+              || { echo "::error::$f is not reachable from AGENTS.md"; fail=1; }
+            grep -qx '## Invariants' "$f" \
+              || { echo "::error::$f has no '## Invariants' list"; fail=1; }
+          done
+          while IFS= read -r ref; do
+            [ -f "$ref" ] || { echo "::error::referenced but missing: $ref"; fail=1; }
+          done < <(git grep -hoE 'docs/[a-z0-9-]+\.md' -- ':!docs/' | sort -u)
+          [ "$fail" -eq 0 ] || exit 1
+          printf 'docs index: %s docs, all reachable from AGENTS.md\n' "${#docs[@]}"
       # A container unit may mount only from $DATA_DIR (or a podman volume), never
       # from the checkout. Host scripts still run from the checkout (deploy/*.service
       # is the tooling), but a container a daemon starts fails at its *next* start
