@@ -200,6 +200,18 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   its daemon is unsupported) and the daemons' PRs carry `prBodyNotes` that
   merging changes nothing until `./deploy.sh --only <svc>`.
 
+- **Workflow actions go the opposite way: pinned by digest.**
+  `helpers:pinGitHubActionDigests` in `renovate.json` rewrites every `uses:`
+  ref in `.github/workflows/*.yml` to `<sha> # <tag>`, and keeps it there. The
+  asymmetry with the images is deliberate: a moved image tag only reaches the
+  host through a deploy the operator asked for, while a moved action tag *is*
+  the code that runs, on a runner, with the repo's token -- so an unreviewed
+  tag move is exactly the supply-chain hole, and a digest bump that arrives as
+  a PR is not noise but the review. By hand the bump is
+  `git ls-remote <repo> refs/tags/<tag>`. The job's
+  `permissions: contents: read` is the same reasoning: checkout, curl and
+  `git ls-files` write nothing.
+
 - **A merged Containerfile digest bump reaches the host on the next
   `./deploy.sh`:** each locally-built image is labelled with the sha256 of the
   Containerfile that built it, and `deploy_explorers`/`ensure_local_image`

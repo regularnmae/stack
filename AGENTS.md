@@ -105,7 +105,8 @@ below states the rule, the doc says why it is the rule.
 - **Data-dir ownership:** bitcoind runs as the image uid and does not re-own its
   bind mount; `monerod` re-owns its own.
 - **Every pulled image carries a real tag**, and two Renovate managers cover
-  them -- the Quadlet one cannot see `deploy/*.container.in`.
+  them -- the Quadlet one cannot see `deploy/*.container.in`. Workflow actions
+  go the *other* way: digest-pinned, because their tag is mutable.
 - **A merged Containerfile digest bump reaches the host on the next deploy**:
   images are labelled with their Containerfile's hash.
 - **BoltMesh is a tier of four units, not an MCP server**, and holds no CLN rune.

@@ -1988,7 +1988,7 @@ stack/
   deploy.sh               # the one-click orchestrator (asks for the data dir)
   verify.sh               # health + endpoint checks
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
-  renovate.json           # Renovate policy (pinned images and git refs)
+  renovate.json           # Renovate policy (pinned images, git refs, actions)
   .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
   AGENTS.md               # agent index: invariants, traps, the shared contract
   docs/                   # the detail behind that index, one file per subsystem

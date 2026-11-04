@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# The lint job checks out, curls shellcheck and reads git -- nothing here
+# writes to the repository, so the token the action inherits is read-only
+# rather than the repository default.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -15,7 +21,12 @@ jobs:
       # AGENTS.md); bump both together.
       SHELLCHECK_VERSION: v0.11.0
     steps:
-      - uses: actions/checkout@v7
+      # Digest-pinned, not tag-pinned: `helpers:pinGitHubActionDigests` in
+      # renovate.json owns this line (the comment carries the tag), because a
+      # workflow action runs inside CI with the repo's token and its tag is
+      # mutable -- see docs/units.md. A hand bump is
+      # `git ls-remote https://github.com/actions/checkout refs/tags/v7`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # -P SCRIPTDIR makes the `# shellcheck source=…` directives resolve
       # relative to each script, and -S info gates on every finding. The file
       # list is enumerated from git rather than written out: a hardcoded list
