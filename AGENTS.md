@@ -945,7 +945,7 @@ rewrite, run-now -- are branches in the dispatch.
   with no healthcheck as "up" -- `victoria-logs` is distroless and the netcheck
   pair only sleeps, so neither can define a health command; their functional
   checks are the LogsQL query and the probes themselves.
-- **Two more sources feed the store, and each needed a correction.** Suricata's
+- **Three more sources feed the store, and each needed a correction.** Suricata's
   `eve.json` is a file (the sensor never writes alerts to stdout), read by
   `vector`'s file source and labelled `unit=suricata.service`; the container
   mounts the **parent** `$DATA_DIR/ids`, not `ids/suricata`, because a
@@ -960,7 +960,25 @@ rewrite, run-now -- are branches in the dispatch.
   those two containers only, promotes `level`/`logger`, replaces `message` with
   the human line, and **overrides `priority`** with the app's level, because
   journald reports every stdout line as informational -- without that,
-  `--priority warning` silently misses every BoltMesh warning.
+  `--priority warning` silently misses every BoltMesh warning. nginx-proxy-manager's
+  **access and error logs** are the third source, and the one to reach for when a
+  question is about a request rather than a service: NPM terminates TLS, so the
+  request exists in those files and nowhere else (Suricata sees ciphertext on the
+  wire, and CrowdSec reads the same files but keeps only as long as logrotate
+  does -- two days plain, four more gzipped). `sources.npm` globs
+  `*_access.log` and `*_error.log` out of `$DATA_DIR/npm/data/logs` (mounted
+  `:ro` at `/npm-logs`; the same directory crowdsec mounts, which is the point --
+  enforcement and history are two different reads of one record). The remap
+  handles three shapes and keeps a fourth rather than dropping it: NPM's custom
+  proxy format, combined (the default-host catch-all), nginx's own error-log
+  lines (whose `[error]`/`[warn]` becomes `priority`, which is what makes a dead
+  upstream a `--priority err` search), and `npm_raw` for anything else -- an
+  unrecognised line means the format moved again, and silent loss is the failure
+  this source exists to prevent. Error-log timestamps are left at arrival time on
+  purpose: nginx writes them in the host's local time with no offset, so a naive
+  parse is four hours out on this host. Both file sources set `host` themselves
+  -- a file source labels it from the container's hostname, which is neither the
+  host nor stable across a recreate, and `host` is a *stream* field.
 - **The monitor queries a store exactly once, and only to prove the log
   pipeline is alive.** `scripts/logs.sh --health` (newest entry within
   `MONITOR_LOGS_MAX_AGE_S`, default 900) is the one exception to "alerting never

@@ -75,6 +75,14 @@ Volume=@DATA_DIR@/logs/vector:/var/lib/vector:z
 # until the sensor creates eve.json. :ro, and this container has SELinux off, so
 # the root-owned 0644 file is readable through the user-owned parent.
 Volume=@DATA_DIR@/ids:/ids:ro
+# nginx-proxy-manager's access and error logs, read-only: the record of every
+# public request (and every upstream failure). It is the same directory crowdsec
+# already reads -- that is the point, not a coincidence: CrowdSec turns it into
+# decisions and keeps as long as logrotate does, this keeps it searchable for
+# LOGS_RETENTION, and neither is a copy of the other. NPM writes these as
+# container root, i.e. this same user, so no relabel and no ownership change;
+# the whole directory (not a file) because vector globs across proxy-host-N.
+Volume=@DATA_DIR@/npm/data/logs:/npm-logs:ro
 
 # The image's entrypoint is /usr/bin/vector; Exec= supplies its arguments (the
 # image's own default points at /etc/vector/vector.yaml, which does not exist

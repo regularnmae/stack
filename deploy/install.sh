@@ -1847,6 +1847,11 @@ log "installed ${#USER_UNITS[@]} user unit(s) into $USER_UNIT_DIR"
 # undeclared zone makes nginx refuse to start -- and on Network=host that takes
 # the admin UI down with the site.
 mkdir -p "$NPM_DIR/data/nginx/custom"
+# vector ships NPM's access and error logs (deploy/logs/vector.toml), and it
+# bind-mounts this directory -- so it has to exist before that unit starts, or
+# podman creates it at the wrong moment and with the wrong owner. NPM creates it
+# itself on first start, which is after install.sh.
+mkdir -p "$NPM_DIR/data/logs"
 if ! cmp -s "$DEPLOY_DIR/npm/http.conf" "$NPM_DIR/data/nginx/custom/http.conf" 2>/dev/null; then
     install -m 644 "$DEPLOY_DIR/npm/http.conf" "$NPM_DIR/data/nginx/custom/http.conf"
     # The npm/data tree is mounted with :z, which relabels the whole subtree when

@@ -21,6 +21,16 @@
 #   transforms.suricata_normalize
 #                       parses eve.json's line into fields, normalizes Suricata's
 #                       "+0000" timestamp and writes a readable message.
+#   sources.npm         nginx-proxy-manager's access and error logs -- also files,
+#                       not stdout. The access half is the record of every public
+#                       request (which CrowdSec reads to make decisions, but keeps
+#                       only as long as logrotate does: two days plain, four more
+#                       gzipped); the error half is where a dead upstream shows up
+#                       as a 502 and is otherwise a `grep` on the host.
+#   transforms.npm_normalize
+#                       three shapes in those files -- NPM's custom proxy format,
+#                       combined (the default-host catch-all) and nginx's own
+#                       error-log lines -- onto the same field names.
 #   sinks.victoria_logs native /insert/jsonline, so every remaining field stays
 #                       searchable. Only host/unit/container become *streams*:
 #                       CONTAINER_ID would create a new stream per container
@@ -171,6 +181,11 @@ if err == null && is_object(parsed) {
     .ts = parse_timestamp(to_string(.timestamp) ?? "", "%Y-%m-%dT%H:%M:%S%.f%z") ?? now()
     .timestamp = .ts
     del(.ts)
+    # A file source labels `host` from the container's own hostname (a hex id),
+    # which is neither the host nor stable across a recreate -- and `host` is a
+    # stream field, so it would open a new stream every time this container is
+    # rebuilt. journald's value is what every other entry carries.
+    .host = "localhost.localdomain"
     # The sensor is a system unit; label its entries like every other service so
     # `logs.sh --unit suricata.service` is the one way to ask.
     .unit = "suricata.service"
@@ -183,9 +198,125 @@ if err == null && is_object(parsed) {
 }
 '''
 
+# ---------------------------------------------------------------------------
+# nginx-proxy-manager: access and error logs
+# ---------------------------------------------------------------------------
+# The one public surface this stack has, and the only place a request exists as
+# a request: NPM terminates TLS, so what a client asked for is in these files
+# and nowhere else (Suricata sees ciphertext on the wire; CrowdSec sees the same
+# files and keeps only as long as logrotate does). Shipping them is what makes
+# "who hit this at 03:10, and what did the backend answer" a store query with
+# 14 days behind it instead of a grep over two live files and four gzipped ones.
+#
+# The mount is read-only and the directory is mounted whole (see
+# deploy/vector.container). Rotated files (*.log.1.gz) are deliberately not
+# matched, for the same reason eve.json.YYYYMMDD is not: the store keeps what it
+# ingests, and re-reading yesterday on every restart would duplicate it.
+[sources.npm]
+type = "file"
+include = ["/npm-logs/*_access.log", "/npm-logs/*_error.log"]
+read_from = "beginning"
+
+[transforms.npm_normalize]
+type = "remap"
+inputs = ["npm"]
+source = '''
+# A file source starts `timestamp` at the file's mtime and `host` at the
+# container's hostname; both are wrong here for the reasons in
+# suricata_normalize (one instant for a whole file, and a stream per recreate).
+.host = "localhost.localdomain"
+# Labelled like the journald entries from the same container, so
+# `--container nginx-proxy-manager` is one query for "what did the proxy do" --
+# its own output and every request it served. No `unit`: like every container
+# line, the container IS the label.
+.container = "nginx-proxy-manager"
+# The basename is worth keeping: it is what separates the catch-all vhost
+# (default-host_access.log, where scanners arrive by raw IP) from a real host's
+# log, and the error files from the access ones.
+f = parse_regex(to_string(.file) ?? "", r'.*/(?P<name>[^/]+)$') ?? {}
+.logfile = to_string(f.name)
+del(.file)
+del(.source_type)
+.priority = to_syslog_level(6) ?? "informational"
+# A file source's `.message` is typed `any`, and every parser below wants a
+# string; one coercion here keeps the three attempts infallible (`?? {}` turns an
+# unmatched regex into an empty object instead of an error).
+msg = to_string(.message) ?? ""
+
+# 1. NPM's custom proxy-host format -- what every `proxy-host-N_access.log`
+#    carries. The status appears twice: the client-facing code and the upstream
+#    code, and they differ on a 502, which is how a dead backend shows up.
+p = parse_regex(msg, r'^\[(?P<ts>[^\]]+)\] - (?P<up>[^ ]+) (?P<st>\d{3}) - (?P<method>[A-Z]+) (?P<scheme>[a-z]+) (?P<vhost>[^ ]+) "(?P<path>[^"]*)" \[Client (?P<ip>[^\]]+)\] \[Length (?P<len>[^\]]*)\] \[Gzip (?P<gz>[^\]]*)\] \[Sent-to (?P<sent>[^\]]+)\] "(?P<ua>[^"]*)" "(?P<ref>[^"]*)"$') ?? {}
+if p.ts != null {
+    .log_type = "npm_access"
+    .timestamp = parse_timestamp(to_string(p.ts), "%d/%b/%Y:%H:%M:%S %z") ?? now()
+    .remote_addr = to_string(p.ip)
+    .vhost = to_string(p.vhost)
+    .http_status = to_int(p.st) ?? 0
+    .upstream_status = to_string(p.up)
+    .method = to_string(p.method)
+    .scheme = to_string(p.scheme)
+    .path = to_string(p.path)
+    .user_agent = to_string(p.ua)
+    .referer = to_string(p.ref)
+    .message = .remote_addr + " " + .method + " " + .scheme + " " + .vhost + " \"" + .path + "\" " + to_string(.http_status)
+} else {
+    # 2. Plain combined -- NPM's catch-all vhost, where scanners arrive by raw
+    #    IP. The version suffix is optional because nginx logs a request it
+    #    could not parse at all (a TLS handshake sent to :80) as a bare quoted
+    #    blob with no "HTTP/1.1"; that shape falls through to npm_raw below
+    #    rather than being dropped.
+    q = parse_regex(msg, r'^(?P<ip>[0-9a-fA-F:.]+) - (?P<user>[^ ]+) \[(?P<ts>[^\]]+)\] "(?P<method>[A-Z]+) (?P<path>[^"]*?)(?: HTTP/[^"]*)?" (?P<st>\d{3}) (?P<len>[^ ]+) "(?P<ref>[^"]*)" "(?P<ua>[^"]*)"$') ?? {}
+    if q.ts != null {
+        .log_type = "npm_access"
+        .timestamp = parse_timestamp(to_string(q.ts), "%d/%b/%Y:%H:%M:%S %z") ?? now()
+        .remote_addr = to_string(q.ip)
+        .http_status = to_int(q.st) ?? 0
+        .method = to_string(q.method)
+        .path = to_string(q.path)
+        .user_agent = to_string(q.ua)
+        .referer = to_string(q.ref)
+        .message = .remote_addr + " " + .method + " \"" + .path + "\" " + to_string(.http_status)
+    } else {
+        # 3. nginx's error log -- `2026/11/04 10:18:08 [error] ...`. The LEVEL is
+        #    the point: "connect() failed (111) while connecting to upstream" on
+        #    a vhost is an outage, and this is what makes it `--priority err`.
+        #    The timestamp is NOT parsed: nginx writes these in the host's local
+        #    time with no offset, so a naive parse would put every one of them
+        #    four hours out; the arrival time is within a second for a live line
+        #    and the text keeps the original anyway.
+        e = parse_regex(msg, r'^(?P<ts>\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) \[(?P<level>\w+)\] (?P<rest>.*)$') ?? {}
+        if e.ts != null {
+            .log_type = "npm_error"
+            .level = to_string(e.level)
+            num = 6
+            if e.level == "warn" { num = 4 }
+            if e.level == "error" { num = 3 }
+            if e.level == "crit" { num = 2 }
+            if e.level == "alert" { num = 1 }
+            if e.level == "emerg" { num = 0 }
+            if e.level == "notice" { num = 5 }
+            if e.level == "debug" { num = 7 }
+            .priority = to_syslog_level(num) ?? "informational"
+            # The three fields worth querying out of the prose. Absent on some
+            # lines (a bare "log rotate" notice), hence the null checks.
+            c = parse_regex(msg, r'client: (?P<ip>[0-9a-fA-F:.]+), server: (?P<vhost>[^,]+), request: "(?P<req>[^"]*)"') ?? {}
+            if c.ip != null { .remote_addr = to_string(c.ip) }
+            if c.vhost != null { .vhost = to_string(c.vhost) }
+            if c.req != null { .request = to_string(c.req) }
+        } else {
+            # Anything else is kept, not dropped: an unrecognised line in these
+            # files means nginx's log format moved again, and silent loss is
+            # exactly what this source exists to prevent.
+            .log_type = "npm_raw"
+        }
+    }
+}
+'''
+
 [sinks.victoria_logs]
 type = "http"
-inputs = ["normalize", "suricata_normalize"]
+inputs = ["normalize", "suricata_normalize", "npm_normalize"]
 uri = "http://victoria-logs:9428/insert/jsonline?_stream_fields=host,unit,container&_msg_field=message&_time_field=timestamp"
 encoding.codec = "json"
 framing.method = "newline_delimited"

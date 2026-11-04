@@ -853,6 +853,20 @@ if [ "$logs_n" -gt 0 ]; then
 else
     bad "no log entries in the last 15m (vector is not shipping)"
 fi
+# The file sources are the half journald cannot see, and each fails on its own:
+# eve.json stops being written, or the NPM log directory is not mounted. Check
+# the NPM one by content -- a request in the last 15m -- because it is both the
+# newest source and the one an NPM image update could move (a changed log path or
+# log_format leaves the source reading nothing, forever, with the unit green).
+npm_q=$(net_curl -s -m 15 --get --data-urlencode 'query=_time:15m log_type:"npm_access" | stats count() as n' \
+    http://victoria-logs:9428/select/logsql/query 2>/dev/null) || npm_q=""
+npm_n=$(printf '%s' "$npm_q" | jq -r '.n // empty' 2>/dev/null) || npm_n=""
+case "$npm_n" in ''|*[!0-9]*) npm_n=0 ;; esac
+if [ "$npm_n" -gt 0 ]; then
+    pass "log store has $npm_n nginx-proxy-manager request(s) from the last 15m"
+else
+    bad "no nginx-proxy-manager access entries in the last 15m (deploy/logs/vector.toml's npm source is not reading $DATA_DIR/npm/data/logs)"
+fi
 if [ -x "$REPO_DIR/scripts/logs.sh" ] && "$REPO_DIR/scripts/logs.sh" --health --quiet >/dev/null 2>&1; then
     pass "scripts/logs.sh --health"
 elif [ -x "$REPO_DIR/scripts/logs.sh" ]; then

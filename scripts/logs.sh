@@ -14,10 +14,13 @@
 #   scripts/logs.sh --health                   # is the pipeline still shipping?
 #
 # This is the CLI over the same store the LogsQL UI reads: journald -> vector ->
-# victoria-logs (127.0.0.1:9428, no public host). The UI is one SSH tunnel away
-# (`ssh -L 9428:127.0.0.1:9428 host`, then /select/vmui); this script exists so
-# the common question -- "what did everything do around 03:10?" -- does not need
-# a browser or a LogsQL query.
+# victoria-logs (127.0.0.1:9428, no public host). Two things journald never sees
+# are shipped by the same shipper as files -- Suricata's eve.json, and
+# nginx-proxy-manager's access and error logs -- so `--container
+# nginx-proxy-manager` returns both NPM's own output and every public request.
+# The UI is one SSH tunnel away (`ssh -L 9428:127.0.0.1:9428 host`, then
+# /select/vmui); this script exists so the common question -- "what did
+# everything do around 03:10?" -- does not need a browser or a LogsQL query.
 #
 # `--since` takes VictoriaLogs durations: 15m, 2h, 7d. Times are printed in UTC,
 # which is what the store keeps; the journal on the host shows local time.
@@ -92,8 +95,12 @@ priority_levels() {
         3|err|error)         printf 'emerg,alert,crit,err' ;;
         4|warn|warning)      printf 'emerg,alert,crit,err,warning' ;;
         5|notice)            printf 'emerg,alert,crit,err,warning,notice' ;;
-        6|info|informational) printf 'emerg,alert,crit,err,warning,notice,informational' ;;
-        7|debug)             printf 'emerg,alert,crit,err,warning,notice,informational,debug' ;;
+        # The store's names are VRL's to_syslog_level() output, i.e. the SHORT
+        # RFC forms -- "info", not "informational". Listing the long form here
+        # made `--priority info` ("everything") silently drop every info entry,
+        # which is the one thing it must not do.
+        6|info|informational) printf 'emerg,alert,crit,err,warning,notice,info' ;;
+        7|debug)             printf 'emerg,alert,crit,err,warning,notice,info,debug' ;;
         *)                   die "unknown --priority level: $1" ;;
     esac
 }

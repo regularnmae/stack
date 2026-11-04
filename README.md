@@ -1089,6 +1089,26 @@ record. Three pieces fix that:
 | `vector` | ships the journal to `victoria-logs` continuously; it checkpoints one cursor per batch, so a restart resumes instead of replaying |
 | `victoria-logs` | the store and the LogsQL UI: 14 days (`LOGS_RETENTION`) or 10 GiB (`LOGS_MAX_BYTES`), whichever comes first |
 
+Two things never reach journald, so `vector` reads them as files: Suricata's
+`eve.json` (the sensor writes a file, not stdout, and its alerts arrive labelled
+`unit=suricata.service`) and **nginx-proxy-manager's access and error logs**.
+The second is the one that answers questions about a *request* — NPM terminates
+TLS, so what a client asked for is in those files and nowhere else, and CrowdSec
+reads the same directory only for as long as logrotate keeps it (two days plain,
+four more gzipped). Shipping them means:
+
+```sh
+# who is probing, and what they asked for
+./scripts/logs.sh --since 24h --container nginx-proxy-manager --grep '\.env|\.git/'
+# upstream failures -- these are the entries the error log contributes
+./scripts/logs.sh --since 7d --container nginx-proxy-manager --priority err
+```
+
+The MCP edge's own 401s are in there too (`--grep 'mcp.boltmesh.net.* 401'`).
+Rotated `*.log.1.gz` files are not re-read (the store already has them; a
+restart would duplicate the day), so the store's 14 days and logrotate's 6 cover
+different windows rather than the same one twice.
+
 Podman's **own** events are deliberately not part of that stream: every exec and
 every healthcheck run used to write to the journal (4,000+ lines and 1.8 MB an
 hour on this host — two lines per exec, one per check), which is noise in a
