@@ -81,32 +81,44 @@ rewrite, run-now -- are branches in the dispatch.
   `lightningd` is up, because the CLN runes need a running node. Don't collapse
   them.
 - **A re-render alone does not change a running container** (systemd keeps the
-  old one), so `deploy.sh` digest-compares the rendered `.container` files
-  either side of the first `install.sh` (`unit_digest` /
-  `restart_changed_units`) and restarts exactly the units whose definition
+  old one), so the host persists the answer to "which definition are the
+  containers running?": `install.sh` writes `$DATA_DIR/audit/units.rendered` on
+  every render, and `deploy.sh`/`scripts/rotate.sh` write
+  `$DATA_DIR/audit/units.applied` only after applying it. `deploy.sh` compares
+  the live digests against `units.applied` (`scripts/lib.sh`'s `unit_digest` /
+  `unit_digest_changed`, shared with `install.sh` and `verify.sh` so render and
+  compare cannot drift apart) and restarts exactly the units whose definition
   changed — never ones that are inactive, since those are started later in
-  order. `nginx-proxy-manager` is only flagged there: its restart is deferred to
-  `sync_npm_network`, after the proxy hosts are rewritten (`deploy.sh` says why
-  the order is load-bearing). **Running `deploy/install.sh` by hand consumes
-  that signal**: it rewrites the rendered files, so the next `deploy.sh`
-  digests the already-new files either side of its own `install.sh`, finds no
-  change and restarts nothing — the unit edit then sits unapplied while every
-  health check reports `(healthy)`. After a hand render, restart the affected
-  units yourself (`systemctl --user restart <unit>`); this is also why
-  `install.sh` alone is not a deploy. Every `--only` branch goes through
-  `sync_units` (the same digest pair) for exactly this reason — an `--only` run
-  must not consume the signal for the units it was not asked about. The one
-  exception is `nginx-proxy-manager`, which `--only` only warns about: its
-  restart belongs after the host rewrite, so `--only npm-hosts` rewrites and
-  then calls `sync_npm_network`, and every other branch tells the operator to
-  finish with a full deploy. Two ordering facts inside `sync_units`:
-  **`ensure_netcheck` is its last step, not part of the `--only` prologue**,
-  because `install.sh` rebuilds the `netcheck` image in `install_units` and a
-  refresh before that compared the container with the old image and did nothing
-  (the new client reached the containers one deploy later); and an app branch
-  sets `DEFER_UNITS` so `restart_changed_units` leaves that unit alone —
-  `deploy_app` restarts it after the build, and restarting it twice is two
-  outages for one edit.
+  order. This is what makes **a hand `deploy/install.sh` visible drift instead
+  of a swallowed signal**: it advances `units.rendered`, `verify.sh` fails
+  naming the units (and the monitor pages through it), and the next deploy
+  restarts them. Do not go back to digesting the files either side of the
+  installer: that compares the render with itself. `units.applied` advances only
+  on success — `set -e` stops a failed deploy before `units_commit`, so the
+  baseline never records a restart that did not happen and the next run repeats
+  it. The first deploy on a host without a baseline adopts the render on disk
+  once, with a warning (drift older than that run is unknowable).
+  `nginx-proxy-manager` is only flagged by the restart pass: its restart is
+  deferred to `sync_npm_network`, after the proxy hosts are rewritten
+  (`deploy.sh` says why the order is load-bearing), and `units_commit` refuses
+  to record the baseline while that flag is still set — a `--only` branch that
+  never reached the rewrite must not claim NPM applied. Every `--only` branch
+  goes through `sync_units` and commits at the end; `agent-skills` runs no
+  installer and therefore commits nothing. Two ordering facts inside
+  `sync_units`: **`ensure_netcheck` is its last step, not part of the `--only`
+  prologue**, because `install.sh` rebuilds the `netcheck` image in
+  `install_units` and a refresh before that compared the container with the old
+  image and did nothing (the new client reached the containers one deploy
+  later); and an app branch sets `DEFER_UNITS` so `restart_changed_units` leaves
+  that unit alone — `deploy_app` restarts it after the build, and restarting it
+  twice is two outages for one edit.
+- **`scripts/rotate.sh` is the third writer of `units.applied`.** A rotation
+  re-renders through `install.sh` (only `bitcoin-rpc` and `tor-control` bake a
+  secret into a unit's `Exec=`), restarts its dependents and then advances the
+  baseline — otherwise the next deploy would bounce the units it just restarted.
+  Because `install.sh` re-renders *every* unit, `complete()` commits only when
+  the changed definitions are ones the rotation restarted or proved already
+  current; anything else stays unapplied for the next deploy, with a warning.
 - **`<unit>.bak` is the *previous* render, and only when the render changes
   something.** It used to be written only if it did not already exist, so it
   was frozen at the host's first install while README's Rollback section
@@ -292,8 +304,9 @@ rewrite, run-now -- are branches in the dispatch.
   extraction goes into a staging sibling and is swapped in whole, so a new
   version never inherits the old one's leftover files and a failed download or
   extract leaves the working plugin alone. But a unit digest cannot see a file in
-  `$DATA_DIR`, `start` is a no-op on an active container, and `--only btcpay`
-  never runs `unit_digest` at all — so `start_btcpay` calls
+  `$DATA_DIR` — it hashes the unit definitions, and `--only btcpay` finds
+  btcpay's unit unchanged — and `start` is a no-op on an active container, so
+  `start_btcpay` calls
   `btcpay_plugin_newer` (the DLL's mtime against podman's `StartedAt`, i.e.
   `refresh_image_unit` answered for a file) and restarts before its single health
   wait. BTCPay loads plugin assemblies at start and keeps the mapped copy, which

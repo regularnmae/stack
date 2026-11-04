@@ -380,6 +380,113 @@ electrum_tip() { # port [tls] -> height, empty on failure
         | grep -oE '[0-9]+$' | head -n1
 }
 
+# --- rendered-unit digests -------------------------------------------------
+# A *running* container keeps the definition it started with: re-rendering a
+# unit changes nothing until that unit restarts. deploy.sh therefore has to know
+# which rendered definitions the running containers were started from, and it
+# used to answer that by digesting the files either side of its own install.sh
+# run. That made the baseline "whatever was on disk when this process started",
+# so a hand `deploy/install.sh` (or scripts/rotate.sh's re-render) rewrote the
+# files and the next deploy compared them with themselves -- the edit sat
+# unapplied while every health check reported healthy. The fix is to persist the
+# answer:
+#
+#   $DATA_DIR/audit/units.rendered   what install.sh just wrote (every render)
+#   $DATA_DIR/audit/units.applied    the render the containers were started from
+#
+# install.sh owns the first; deploy.sh and rotate.sh advance the second only
+# after they have applied it. Live digests are compared against `applied`, never
+# against the render, so a unit edited after install.sh wrote it is caught too.
+# The format is exactly `sha256sum`'s (`<hash>  <stem>`), with the pseudo-names
+# `tor.unit`, `crowdsec.unit` and `vector.unit` for the three config trees that
+# are not units but are read only at start. A digest is not a secret, but the
+# files are mode 600 like the rest of audit/: several rendered units embed one.
+#
+# These live here because deploy/install.sh, deploy.sh, verify.sh and
+# scripts/rotate.sh must agree byte for byte: two implementations would report
+# permanent drift (esc() above exists for the same reason).
+unit_digest() {
+    local q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
+    [ -d "$q" ] || return 0
+    ( cd "$q" && sha256sum -- *.container 2>/dev/null ) || true
+    # torrc is not a unit, but a running tor keeps the config it started with all
+    # the same -- and the onion services are declared in stack.conf and rendered
+    # into it. Hash it under a pseudo-name whose stem is the unit ("tor"), so the
+    # restart pass bounces tor when a hidden service was added, removed or
+    # retargeted.
+    if [ -s "$DATA_DIR/tor/torrc" ]; then
+        sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 " tor.unit" }'
+    fi
+    # The crowdsec config is not a unit either, and the container reads it only
+    # at start: a changed parser, scenario or whitelist would otherwise wait for
+    # the next reboot. One digest over the rendered tree, under the stem
+    # "crowdsec", so exactly that unit is restarted.
+    if [ -d "$DATA_DIR/config/ids/crowdsec" ]; then
+        find "$DATA_DIR/config/ids/crowdsec" -type f -print0 2>/dev/null \
+            | sort -z | xargs -0 -r sha256sum 2>/dev/null \
+            | sha256sum | awk '{ print $1 " crowdsec.unit" }'
+    fi
+    # The log shipper's config is rendered by install.sh, not mounted from the
+    # repo, and Vector reads it only at start (there is no reload). Hash it under
+    # the unit's stem so a changed transform restarts exactly that unit, the same
+    # contract as crowdsec's tree.
+    if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
+        sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 " vector.unit" }'
+    fi
+}
+
+# The unit stems whose digest differs between two digest sets, one per line.
+# A unit present on only one side is not reported: a newly rendered unit is not
+# running yet (it starts from the new file), and a removed one is not this
+# function's business.
+unit_digest_changed() { # before-digest after-digest
+    awk 'NR==FNR { old[$2] = $1; next }
+         ($2 in old) && old[$2] != $1 { print $2 }' \
+        <(printf '%s\n' "$1") <(printf '%s\n' "$2") \
+        | sed 's/\.[^.]*$//' | sort -u
+}
+
+# Write a digest set to a manifest file, atomically and mode 600. Called with an
+# explicit set when the caller already holds one (deploy.sh records the digests
+# that were applied, not whatever is on disk a moment later).
+unit_digest_write() { # file [digest-set]
+    local f="$1" d="${2:-}" tmp
+    [ -n "$d" ] || d=$(unit_digest)
+    mkdir -p "$(dirname "$f")" || return 1
+    tmp=$(mktemp "${f}.XXXXXX") || return 1
+    if [ -n "$d" ]; then
+        printf '%s\n' "$d" > "$tmp"
+    fi
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$f"
+}
+
+# The last applied digest set, empty when this host has no baseline yet (a fresh
+# host, or the first deploy after this file was introduced).
+unit_applied_read() {
+    local f="$DATA_DIR/audit/units.applied"
+    if [ -s "$f" ]; then
+        cat "$f"
+    fi
+}
+
+# The digest set the running containers were last started from. Before that file
+# existed (the first deploy after this change) the only baseline available is the
+# render on disk -- which is what the old before/after comparison used -- so
+# adopt it once, loudly, rather than bouncing every daemon on the host. Drift
+# that predates that first run is invisible; the run that adopts the baseline
+# becomes it. deploy.sh and scripts/rotate.sh both read it here.
+units_baseline() {
+    local applied
+    applied=$(unit_applied_read)
+    if [ -n "$applied" ]; then
+        printf '%s\n' "$applied"
+        return 0
+    fi
+    warn "no applied-unit baseline yet ($DATA_DIR/audit/units.applied); adopting the units on disk as deployed. Drift that predates this run is invisible -- this run becomes the baseline."
+    unit_digest
+}
+
 # --- locally-built images --------------------------------------------------
 # The images this repo builds itself (btc-explorer, xmr-explorer, kuma-ctl,
 # netcheck, tor) are described completely by their Containerfile: the base image

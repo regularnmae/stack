@@ -202,7 +202,11 @@ an OS reinstall. See [Where the data lives](#where-the-data-lives).
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds + restarts the
 ten MCP servers and the BoltMesh app tier (a plain start would keep running a
-stale image). The five images built here — the two explorers, `kuma-ctl`,
+stale image). It also records the unit definitions it applied in
+`$DATA_DIR/audit/units.applied`, while `deploy/install.sh` records what it
+rendered in `units.rendered` — so running the installer by hand shows up as
+drift (`./verify.sh` fails naming the units) instead of being swallowed by the
+next deploy. The five images built here — the two explorers, `kuma-ctl`,
 `netcheck` and `tor` — are rebuilt when their Containerfile changed and left
 alone otherwise: the digest of that file is baked into the image as a label, so
 a merged base-image bump reaches the host on the next deploy instead of needing
@@ -362,7 +366,8 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `bin/` — the two scripts `install.sh` stages for the containers that run them
     (`monerod`'s block-notify helper, the BTCPay bootstrap); rewritten on every
     deploy, so edit the copy in the repo, not this one
-  - `audit/` — the monitor's log and the spend tripwire baselines
+  - `audit/` — the monitor's log, the spend tripwire baselines and the
+    rendered/applied unit digests
   - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
     (both regenerable, both excluded from backups)
   - `logs/` — the log store (`vl/`) and `vector`'s checkpoint; journald history,
@@ -459,7 +464,8 @@ the things in `$DATA_DIR` that cannot be re-downloaded:
 - `config/` — every token, rune and secret
 - `npm/` — nginx-proxy-manager's config and TLS material
 - `audit/` — the monitor's log and the spend tripwire baselines (see
-  [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire))
+  [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire)), plus the
+  unit digests (`units.rendered`/`units.applied`)
 - `uptime-kuma/` — the status page's own state (its monitors, history and login;
   UI-configured, see [Status page](#status-page)), minus the live datadir
 - `postgres-dump/` — `pg_dumpall` of the BoltMesh database, taken by
@@ -1856,7 +1862,11 @@ them:
   rotation is never just one file.
 - **A re-render does not change a running container.** Every target restarts its
   own dependents in order and waits for podman's health, so a credential the
-  daemon has not picked up cannot look rotated.
+  daemon has not picked up cannot look rotated. A target that re-rendered
+  (`bitcoin-rpc`, `tor-control`) then advances the applied-unit baseline
+  (`$DATA_DIR/audit/units.applied`), so the next deploy does not bounce the units
+  it just restarted; if the re-render changed a unit the rotation does not
+  restart, it leaves the baseline alone and says so.
 - **Revocation is last, and it is a set comparison rather than a remembered
   id.** The CLN runes are minted, proved with `checkrune`, put in
   `lightning-mcp/node.env`, proven again through the server with `getinfo`, and
@@ -1990,6 +2000,11 @@ Everything is idempotent and the unit each deploy replaces is kept as
 `~/.config/containers/systemd/<unit>.bak` — one generation, the one before the
 last deploy, and only rewritten when that deploy actually changed the file. (It
 is not a history: for anything older, check the unit template out of an older
-commit.) Restore the `.bak` beside its unit and
-`systemctl --user daemon-reload`. To roll back an application, check out an
-older commit in its repo and `./deploy.sh --only <app>`.
+commit.) Restore the `.bak` beside its unit, `systemctl --user daemon-reload`,
+and restart that unit — a daemon-reload alone leaves the running container on
+the old definition. The restored file is not what the last deploy recorded as
+applied, so `./verify.sh` keeps naming that unit as drift until the checkout is
+rolled back too: check out the older stack commit and run
+`./deploy.sh --only <unit>`, which re-renders it and records the baseline. To
+roll back an application, check out an older commit in its repo and
+`./deploy.sh --only <app>`.

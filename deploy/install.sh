@@ -15,7 +15,11 @@
 # overwritten, secret resolution order is secrets.env -> the installed unit ->
 # the daemon's own config -> generate, and the unit a render replaces is kept as
 # <unit>.bak (one generation: what the last deploy changed, which is what the
-# README's rollback section promises). Nothing here prints a secret.
+# README's rollback section promises). Every run also records what it rendered
+# in $DATA_DIR/audit/units.rendered; deploy.sh compares that against the render
+# it last applied (units.applied) and restarts exactly the units that differ, so
+# running this script by hand is visible drift rather than a swallowed signal.
+# Nothing here prints a secret.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1882,6 +1886,16 @@ sync_tree "$DEPLOY_DIR/crowdsec" "$CONFIG_DIR/ids/crowdsec"
 # stay outside BACKUP_PATHS.
 mkdir -p "$DATA_DIR/ids/crowdsec/etc" "$DATA_DIR/ids/crowdsec/data"
 log "rendered the crowdsec config into $CONFIG_DIR/ids/crowdsec"
+
+# What this render produced, for the one question a running container cannot
+# answer: which definition was it started from? deploy.sh compares the live
+# files against $DATA_DIR/audit/units.applied -- the render it last applied --
+# and restarts exactly the units that differ. A hand run of this script
+# therefore shows up as drift instead of consuming the signal, and verify.sh
+# reports it. Written last, after every render above (the units, torrc,
+# vector.toml and the crowdsec tree), because the digest covers all of them.
+unit_digest_write "$DATA_DIR/audit/units.rendered"
+log "recorded the rendered-unit digests in $DATA_DIR/audit/units.rendered"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload

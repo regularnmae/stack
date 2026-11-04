@@ -73,6 +73,14 @@ TARGET=""
 # 1 once preflight has passed and the target is about to run: the EXIT trap must
 # not report a refusal-to-start as a failed rotation.
 STARTED=0
+# The applied-unit baseline (scripts/lib.sh's units_baseline) read before the
+# target edits anything, the units this rotation restarted or proved already
+# current, and whether it re-rendered at all. Only bitcoin-rpc and tor-control
+# re-render (the secrets they rotate are baked into a unit's Exec=), and only
+# those advance the baseline -- see complete().
+UNITS_BEFORE=""
+APPLIED_UNITS=" "
+RERENDERED=0
 
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
@@ -291,6 +299,7 @@ install_rerender() {
         die "deploy/install.sh failed; the units may be half-rendered. Re-run it, or ./deploy.sh"
     fi
     rm -f "$out"
+    RERENDERED=1
 }
 
 restart_unit_and_wait() { # container [timeout]
@@ -299,6 +308,7 @@ restart_unit_and_wait() { # container [timeout]
     if ! wait_healthy "$c" "$t"; then
         die "$c did not report healthy; re-run the same target once it does (./scripts/rotate.sh $TARGET)"
     fi
+    APPLIED_UNITS="$APPLIED_UNITS$c "
 }
 
 # True when the RUNNING container's PID 1 already carries the value the unit was
@@ -343,10 +353,12 @@ restart_if_stale() { # container argv|env value
         case "$via" in
             argv) if container_runs_secret "$c" "$val"; then
                       log "$c already runs the new value; not restarting it"
+                      APPLIED_UNITS="$APPLIED_UNITS$c "
                       return 0
                   fi ;;
             env)  if container_env_is "$c" "$val"; then
                       log "$c already carries the new value; not restarting it"
+                      APPLIED_UNITS="$APPLIED_UNITS$c "
                       return 0
                   fi ;;
         esac
@@ -1071,9 +1083,29 @@ backup_age_h() {
 # the run
 # ---------------------------------------------------------------------------
 complete() {
+    local changed unexpected u now
     if [ "$DRY_RUN" = 1 ]; then
         log "dry run complete for $TARGET; nothing was written and nothing was restarted"
         return 0
+    fi
+    # A rotation that re-rendered through install.sh has to advance the
+    # applied-unit baseline, or the next ./deploy.sh would restart the units this
+    # run just restarted (and verify.sh would report drift until it did). But
+    # install.sh re-renders *every* unit, so commit only when the definitions
+    # that changed are ones this rotation restarted or proved already current.
+    # Anything else was never applied and must stay visible to the next deploy.
+    if [ "$RERENDERED" = 1 ]; then
+        now=$(unit_digest)
+        changed=$(unit_digest_changed "$UNITS_BEFORE" "$now")
+        unexpected=""
+        for u in $changed; do
+            case "$APPLIED_UNITS" in *" $u "*) ;; *) unexpected="$unexpected $u" ;; esac
+        done
+        if [ -n "$unexpected" ]; then
+            warn "the re-render also changed$unexpected, which this rotation did not restart; leaving the applied-unit baseline alone -- run ./deploy.sh to apply them"
+        else
+            unit_digest_write "$DATA_DIR/audit/units.applied" "$now"
+        fi
     fi
     record_rotation "$TARGET" ok
     log "$TARGET rotated"
@@ -1177,6 +1209,9 @@ else
     chmod 700 "$ROT_DIR"
 fi
 STARTED=1
+# Read before any target edits or re-renders: complete() compares this with the
+# state after the rotation to decide what it is allowed to record as applied.
+UNITS_BEFORE=$(units_baseline)
 
 case "$TARGET" in
     bitcoin-rpc) apply_bitcoin_rpc ;;

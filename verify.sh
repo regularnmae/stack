@@ -138,6 +138,44 @@ done
 
 
 # ---------------------------------------------------------------------------
+head2 "Unit definitions"
+# A running container keeps the definition it started with, so a rendered unit
+# that was never applied is invisible to every health check -- the one failure
+# mode that silently leaves the host on old config. install.sh records what it
+# rendered ($DATA_DIR/audit/units.rendered); deploy.sh and scripts/rotate.sh
+# record what they applied (units.applied). Comparing the live digests with the
+# applied set makes a hand render, a hand edit and an interrupted deploy fail
+# here instead of waiting to be noticed. This is a FAIL, not a warning: the
+# monitor carries verify's FAIL lines, and a warning would be silent.
+unit_lines() { # digest-set stem -> that unit's manifest lines
+    printf '%s\n' "$1" | awk -v u="$2" '$2 ~ ("^" u "\\.") { print }' | sort
+}
+unit_applied=$(unit_applied_read)
+unit_current=$(unit_digest)
+if [ -z "$unit_applied" ]; then
+    warn "no applied-unit baseline ($DATA_DIR/audit/units.applied); ./deploy.sh establishes it"
+elif [ -z "$unit_current" ]; then
+    warn "no rendered unit files found (is the stack installed?); ./deploy.sh renders them"
+else
+    unit_changed=$(unit_digest_changed "$unit_applied" "$unit_current")
+    if [ -z "$unit_changed" ]; then
+        pass "every rendered unit matches the definition last applied"
+    else
+        unit_rendered=$(cat "$DATA_DIR/audit/units.rendered" 2>/dev/null || true)
+        for unit in $unit_changed; do
+            if [ -n "$unit_rendered" ] \
+                && [ "$(unit_lines "$unit_rendered" "$unit")" = "$(unit_lines "$unit_current" "$unit")" ]; then
+                how="rendered by install.sh and never applied"
+            else
+                how="edited after install.sh rendered it"
+            fi
+            bad "$unit: $how; run ./deploy.sh (or ./deploy.sh --only $unit)"
+        done
+    fi
+fi
+
+
+# ---------------------------------------------------------------------------
 head2 "Host tools"
 # The monitor's alert path is the host's own curl + jq (Alertmanager is a
 # loopback bind and the heartbeat an outbound POST), and openssl reads
