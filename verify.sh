@@ -677,6 +677,20 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet ba
 else
     warn "backup-verify.timer is not active (systemctl --user status backup-verify.timer)"
 fi
+# The monthly database drill: the weekly run proves restic mechanics, never that
+# postgres-dump/all.sql replays -- and that dump is the only copy of the app
+# tier's data, because the live cluster is excluded from the snapshot.
+BACKUP_VERIFY_DB_TIMER="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/backup-verify-db.timer"
+if [ -f "$BACKUP_VERIFY_DB_TIMER" ]; then
+    pass "backup-verify-db.timer installed"
+else
+    bad "backup-verify-db.timer is not installed (run deploy/install.sh)"
+fi
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet backup-verify-db.timer 2>/dev/null; then
+    pass "backup-verify-db.timer is active"
+else
+    warn "backup-verify-db.timer is not active (systemctl --user status backup-verify-db.timer)"
+fi
 # The dump job that replaces the live databases in the snapshot: without it
 # restic still succeeds, copying the previous dumps, so a missing unit is silent
 # until monitor.sh's freshness check (36h) or a restore.
@@ -715,6 +729,28 @@ if [ "$DEEP" = 1 ]; then
         esac
     else
         warn "no backup restore drill yet (expected until backup-verify.timer runs)"
+    fi
+    # The database drill's verdict, written by scripts/backup.sh verify-db. Same
+    # rule: judged on the last success, so a drill that keeps skipping (no image,
+    # no repository lock) is visible rather than invisible.
+    DBSTATUS="$DATA_DIR/audit/backup-verify-db.status"
+    if [ -f "$DBSTATUS" ]; then
+        dres=$(sed -n 's/^result=//p' "$DBSTATUS" | head -n1)
+        dok=$(sed -n 's/^ok_epoch=//p' "$DBSTATUS" | head -n1)
+        ddet=$(sed -n 's/^detail=//p' "$DBSTATUS" | head -n1)
+        case "$dok" in
+            ''|*[!0-9]*) warn "database drill has no recorded success yet" ;;
+            *)
+                dage=$(( ( $(date +%s) - dok ) / 3600 ))
+                if [ "$dres" = fail ]; then
+                    bad "last database drill failed: ${ddet:-run scripts/backup.sh verify-db}"
+                else
+                    pass "last database drill passed ${dage}h ago"
+                fi
+                ;;
+        esac
+    else
+        warn "no database drill yet (expected until backup-verify-db.timer runs)"
     fi
 fi
 

@@ -38,6 +38,7 @@ credentials, so that image would be unreachable.
 ./deploy.sh --only backup           # run the backup job now
 ./deploy.sh --only db-dump          # refresh the two live-database dumps now
 ./deploy.sh --only backup-verify    # run the restore drill now (weekly on a timer)
+./deploy.sh --only backup-verify-db # replay the snapshot's postgres dump now (monthly on a timer)
 ./deploy.sh --only monitor          # run the health + spend checks now
 ./deploy.sh --only victoria-logs    # generic unit restart (LOGS_* land in the .container)
 ./deploy.sh --only vector           # generic unit restart; vector.toml is in unit_digest
@@ -371,6 +372,31 @@ rewrite, run-now -- are branches in the dispatch.
   `/data` either: a subfolder restore reports `/restore/<file>`. In the in-place
   path this matters more than noise, since the `die` would fire before the
   `chown` that makes bitcoind's datadir readable.
+- **The dump is drilled monthly, and by a second drill for a reason.**
+  `deploy/backup-verify-db.timer` (first Wednesday 06:30 — `Wed *-*-01..07`, not a
+  monthly-on-the-1st expression, which can land on the weekly drill's Sunday and
+  its restic lock) runs `scripts/backup.sh verify-db`: it restores **only**
+  `/data/postgres-dump` (`restore --include`) into `$DATA_DIR/backup-verify-db`,
+  checks header, completion trailer and mtime, and replays the dump into a
+  throwaway `postgres` — the one claim the weekly run cannot make, because the
+  weekly proves mechanics and presence but never that the SQL applies. Three
+  decisions carry it. **No `BACKUP_VERIFY_MAX_MB` gate**: a subset restore is a
+  few MiB, and inheriting the weekly's gate would stop the proof at exactly the
+  set size where a restore matters. **A pull is allowed, and a failed pull is a
+  `skip`, never a `fail`**: a registry that will not answer says nothing about
+  the dump, so the status file's age check (not the failed run) is what turns a
+  run of skips into an alert — the same shape as the weekly's lost-lock skip.
+  The image is read from the running `postgres` container, so a Renovate bump
+  reaches the drill without an edit here. **Its own status file and scratch
+  root** (`audit/backup-verify-db.status`), because one drill's result or
+  `ok_epoch` must not mask the other's age. Two mechanics are load-bearing and
+  easy to undo: the replay helpers return a code and a message instead of calling
+  `die` (a `die` exits with the previous `result=ok` still in the file, i.e. a
+  failed drill reading healthy), and an `EXIT` trap records a failure for any
+  exit path that wrote no verdict, including the unit's `TimeoutStartSec` kill.
+  `monitor.sh` reads the file against `MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H`
+  (1080 h). Do not fold this back into `backup-verify`: the weekly run staying
+  free of image pulls is the property the split buys.
 - **Restore before deploy, replay the dump after, migrate last.** The order is
   load-bearing, not stylistic: `install.sh` seeds `bitcoin.conf` and `torrc` once
   and never overwrites them, so a `./deploy.sh` that runs first writes a *fresh*

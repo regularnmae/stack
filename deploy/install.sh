@@ -476,6 +476,8 @@ USER_UNITS=(
     "db-dump.service"
     "backup-verify.service"
     "backup-verify.timer"
+    "backup-verify-db.service"
+    "backup-verify-db.timer"
     "monitor.service"
     "monitor.timer"
     "metrics.service"
@@ -489,6 +491,7 @@ USER_UNITS=(
 USER_TIMERS=(
     "backup.timer"
     "backup-verify.timer"
+    "backup-verify-db.timer"
     "monitor.timer"
     "metrics.timer"
     "ids.timer"
@@ -1925,10 +1928,14 @@ Done. Everything the stack owns lives under:
     backup-cache/   <- restic's cache (regenerable)
     backup-verify/  <- the restore drill's scratch target: created by its first
                        run, wiped before and after each one (regenerable)
+    backup-verify-db/ <- the database drill's scratch target: the postgres dump
+                       only, same lifecycle as backup-verify/ (regenerable)
   $STACK_BACKUP_DIR
     the restic repository the nightly backup writes (backup.timer);
-    backup-verify.timer restores it to a scratch dir every week and records the
-    verdict in $DATA_DIR/audit/backup-verify.status
+    backup-verify.timer restores it to a scratch dir every week (verdict in
+    $DATA_DIR/audit/backup-verify.status), and backup-verify-db.timer replays
+    the postgres dump into a throwaway cluster every month (verdict in
+    $DATA_DIR/audit/backup-verify-db.status)
 
 Next:  ./deploy.sh         # build images, start everything, verify
 The two explorers are built by ./deploy.sh from btc-explorer/ and xmr-explorer/

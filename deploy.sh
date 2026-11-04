@@ -1021,6 +1021,15 @@ if [ -n "$ONLY" ]; then
         # $DATA_DIR/audit/backup-verify.status.
         sync_units
         start_unit backup-verify
+    elif [ "$ONLY" = backup-verify-db ]; then
+        # The monthly database drill (scripts/backup.sh verify-db): replay the
+        # snapshot's postgres dump into a throwaway cluster now rather than
+        # waiting for the first Wednesday. Same safety property as the restore
+        # drill -- the live data dirs are never mounted -- and it may pull the
+        # postgres image, which the weekly drill deliberately does not. The
+        # verdict lands in $DATA_DIR/audit/backup-verify-db.status.
+        sync_units
+        start_unit backup-verify-db
     elif [ "$ONLY" = monitor ]; then
         # Like backup: install.sh has (re)enabled monitor.timer; run the sweep
         # once now. monitor.service is oneshot and takes no arguments.
@@ -1211,7 +1220,9 @@ Stack deployed.
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR;
                     weekly restore drill (backup-verify.timer), verdict in
-                    $DATA_DIR/audit/backup-verify.status
+                    $DATA_DIR/audit/backup-verify.status; monthly postgres dump
+                    replay (backup-verify-db.timer), verdict in
+                    $DATA_DIR/audit/backup-verify-db.status
   Monitoring:       every 5 min (monitor.timer) + spend tripwire, pushed to
                     alertmanager (loopback :9093); mail once SMTP is filled in
                     $DATA_DIR/config/monitoring/alertmanager/alertmanager.yml

@@ -153,7 +153,9 @@ A nightly, encrypted restic backup of the irreplaceable state (`cln/`,
 `uptime-kuma/`, and the three live databases as dumps: BoltMesh's `pg_dumpall`,
 NPM's SQLite copy and kuma's `mariadb-dump`) runs from `backup.timer` into
 `$STACK_BACKUP_DIR`, and `backup-verify.timer` restores one snapshot a week to
-prove it works. It is the one thing that recovers you if the data disk
+prove it works. `backup-verify-db.timer` then proves once a month that the
+`pg_dumpall` actually replays into a cluster. It is the one thing that recovers
+you if the data disk
 itself is lost — see [Backup & restore](#backup--restore) and the
 [Disaster recovery](#disaster-recovery) runbooks.
 
@@ -218,6 +220,7 @@ a hand rebuild (`--only` forces one anyway). Common flags:
 ./deploy.sh --only explorers          # rebuild both explorer images
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only backup-verify      # run the restore drill now (weekly on a timer)
+./deploy.sh --only backup-verify-db   # replay the snapshot's postgres dump now (monthly on a timer)
 ./deploy.sh --only monitor            # run the health + spend checks now
 ./deploy.sh --only victoria-logs      # generic unit restart after a LOGS_* change or image bump
 ./deploy.sh --only vector             # generic unit restart after deploy/logs/vector.toml changes
@@ -375,6 +378,9 @@ remembers the answer in `~/.config/stack/data-dir.env`:
   - `backup-cache/` — restic's cache (regenerable)
   - `backup-verify/` — the restore drill's scratch target; a copy of the backup
     set, wiped before and after every drill (regenerable, excluded from backups)
+  - `backup-verify-db/` — the database drill's scratch target; just the
+    snapshot's `postgres-dump/`, same lifecycle (regenerable, excluded from
+    backups)
 
 The explorers keep no data directory: both are stateless and read their daemon
 over RPC. Their only persistent input is
@@ -507,12 +513,14 @@ one-line edit in `stack.conf` rather than four edits in two files.
   unit at `~/.config/systemd/user/backup.timer`, enabled by `install.sh`.
 - `deploy/backup-verify.service` + `deploy/backup-verify.timer` — the weekly
   restore drill (below), also plain user units.
+- `deploy/backup-verify-db.service` + `deploy/backup-verify-db.timer` — the
+  monthly database drill (below), the run that proves the `pg_dumpall` replays.
 - `deploy/db-dump.service` — `scripts/db-dump.sh` before each run: NPM's SQLite
   copy and kuma's `mariadb-dump`. A plain user unit because the kuma half is
   `podman exec` into the running container, which a container cannot do.
   `./deploy.sh --only db-dump` runs it by hand.
 - `scripts/backup.sh` — run it by hand and inspect what you have:
-  `backup | init | list | ls | check | verify | forget | restore <snap> | unlock`.
+  `backup | init | list | ls | check | verify | verify-db | forget | restore <snap> | unlock`.
   `ls [<snap>]` lists the paths inside a snapshot, which is how you prove a
   given run really holds the database dumps and not just the wallet. `backup`
   also refreshes the same dumps the units do (it starts
@@ -645,6 +653,8 @@ carry, and the dump recreates the `kuma` database and its tables (28 of them on
 this host). `scripts/backup.sh verify --with-db` runs the same import, so a drill
 that passes is a rehearsal of this step. Both replays are confirmed by
 `./verify.sh --deep` and by the status page/proxy hosts actually serving.
+The `pg_dumpall` half is drilled monthly by `backup-verify-db.timer`, because
+that is the import a restore cannot be rehearsed without.
 
 #### The data disk is gone (or a new host)
 
@@ -920,8 +930,40 @@ opens and re-syncs, or that the daemons come up on the restored state. That is
 what the walkthrough above is for, and it is worth running once against a spare
 host rather than trusting a green drill.
 
-The databases are the one part a structural check cannot settle, so replay them
-on demand:
+### Proving the database dump replays
+
+The mechanics above never say the SQL *applies*: every file can be present and
+every trailer intact while `pg_dumpall`'s output is unloadable. So a second
+drill owns that claim, and it runs monthly:
+
+- `deploy/backup-verify-db.timer` runs `scripts/backup.sh verify-db` on the
+  first Wednesday at 06:30 (plus up to 30 min of jitter) — 24 h clear of the
+  weekly drill and its restic lock.
+- It restores **only** the snapshot's `postgres-dump/` (a few MiB, not the whole
+  set) into `$DATA_DIR/backup-verify-db`, checks the dump's header, completion
+  trailer and mtime against the snapshot's own run, then replays it into a
+  throwaway `postgres` and asserts the databases it creates hold tables.
+- It restores a subset rather than the whole set, so it has no
+  `BACKUP_VERIFY_MAX_MB` gate — the proof cannot stop existing because the set
+  grew.
+- It is allowed to pull the `postgres` image, which the weekly drill
+  deliberately never does. A pull that fails (registry down) is recorded as a
+  *skip*, not a failure: it says nothing about the dump. The status file's age
+  check is what turns a run of skips into an alert.
+- The verdict lands in `$DATA_DIR/audit/backup-verify-db.status`, a file of its
+  own so neither drill's result can mask the other's age. `scripts/monitor.sh`
+  fails on a failed replay and on a last success older than
+  `MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H` (1080 h, 45 days — one missed monthly run).
+
+```sh
+./scripts/backup.sh verify-db           # what the timer does
+./scripts/backup.sh verify-db --keep    # leave the restored dump to inspect it
+./scripts/backup.sh verify-db --snapshot <id>
+./deploy.sh --only backup-verify-db     # run it now
+```
+
+The full drill — restore everything, then replay all three dumps — is still
+available on demand:
 
 ```sh
 ./scripts/backup.sh verify --with-db
@@ -931,11 +973,14 @@ That restores as usual and then replays `postgres-dump/all.sql` into a throwaway
 `postgres` container and `uptime-kuma-dump/kuma.sql` into a throwaway MariaDB
 started from the uptime-kuma image (the same server version that wrote it),
 asserting each produces tables. The postgres database name is not hardcoded:
-whatever the dump creates is discovered and counted. It is
-deliberately not part of the weekly run — it puts those images in the
-drill's path, and the weekly run should stay deterministic. Do it before a
-release, or quarterly. It is also a rehearsal of [Replay the live
-databases](#replay-the-live-databases), which is the step a real recovery needs.
+whatever the dump creates is discovered and counted. It is also a rehearsal of
+[Replay the live databases](#replay-the-live-databases), which is the step a real
+recovery needs.
+
+What the replay still does not prove: that the data is *usable* (roles,
+extensions, row-level security — it counts tables), that `boltmesh-backend` boots
+on the replayed cluster (that is `./deploy.sh --only boltmesh` after a restore,
+which runs `alembic upgrade head`), or anything about the offsite copy.
 
 ## Monitoring & the spend tripwire
 
@@ -1963,11 +2008,11 @@ stack/
     install.sh            # the ONLY installer: units + secrets + data dirs
     *.container           # every unit, rendered (they reference the data dir)
     *.container.in        # lightningd, fulcrum, crowdsec, rendered (secrets)
-    *.timer               # every schedule: backup, backup-verify, monitor,
-                          #   metrics, ids (plain user units; Quadlet has no
-                          #   .timer type)
-    *.service             # their one-shot hosts: backup-verify, monitor,
-                          #   metrics, ids
+    *.timer               # every schedule: backup, backup-verify,
+                          #   backup-verify-db, monitor, metrics, ids (plain
+                          #   user units; Quadlet has no .timer type)
+    *.service             # their one-shot hosts: backup-verify,
+                          #   backup-verify-db, monitor, metrics, ids
     npm-network.network
     crowdsec.container    # rootless: NPM access log -> decisions (local only)
     root/                 # the ONE rootful tier: suricata.container + its config,

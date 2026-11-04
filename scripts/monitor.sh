@@ -107,6 +107,7 @@ MONITOR_INODES_FREE_PCT="${MONITOR_INODES_FREE_PCT:-$(env_value "$MONITOR_ENV" M
 MONITOR_IO_UTIL_PCT="${MONITOR_IO_UTIL_PCT:-$(env_value "$MONITOR_ENV" MONITOR_IO_UTIL_PCT)}"
 MONITOR_BACKUP_MAX_AGE_H="${MONITOR_BACKUP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_MAX_AGE_H)}"
 MONITOR_BACKUP_VERIFY_MAX_AGE_H="${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_VERIFY_MAX_AGE_H)}"
+MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H="${MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H)}"
 MONITOR_DUMP_MAX_AGE_H="${MONITOR_DUMP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_DUMP_MAX_AGE_H)}"
 MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONITOR_CERT_MIN_DAYS)}"
 MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
@@ -185,6 +186,8 @@ backup_age_s=""
 backup_count=""
 backup_verify_age_s=""
 backup_verify_ok=""
+backup_verify_db_age_s=""
+backup_verify_db_ok=""
 say()  { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
 slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/_/g; s/^_//; s/_$//'; }
 head3() { say ""; say "$*"; SECTION=$(slug "$*"); }
@@ -569,6 +572,7 @@ THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
 THRESH_IO=$(num_or "${MONITOR_IO_UTIL_PCT:-}" 90)
 THRESH_BACKUP_H=$(num_or "${MONITOR_BACKUP_MAX_AGE_H:-}" 36)
 THRESH_VERIFY_H=$(num_or "${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-}" 192)
+THRESH_VERIFY_DB_H=$(num_or "${MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H:-}" 1080)
 THRESH_DUMP_H=$(num_or "${MONITOR_DUMP_MAX_AGE_H:-}" 36)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
 THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
@@ -794,6 +798,41 @@ if [ -f "$VERIFY_STATUS_FILE" ]; then
     fi
 else
     soft "no backup restore drill yet (expected until backup-verify.timer runs)"
+fi
+
+# The database drill (scripts/backup.sh verify-db, run monthly by
+# backup-verify-db.timer): the weekly drill proves restic mechanics and that the
+# dump files are present, never that all.sql REPLAYS -- and the dump is the only
+# copy of the app tier's data. Its verdict is a file of its own, judged on its
+# own last success: sharing the weekly one would let either drill's result mask
+# the other's age. A skip (no pull, no repository lock, not enough disk) carries
+# ok_epoch forward, so a run of skips fails on age instead of looking green.
+VERIFY_DB_STATUS_FILE="$AUDIT_DIR/backup-verify-db.status"
+if [ -f "$VERIFY_DB_STATUS_FILE" ]; then
+    vdres=$(env_value "$VERIFY_DB_STATUS_FILE" result)
+    vdok=$(num_or "$(env_value "$VERIFY_DB_STATUS_FILE" ok_epoch)" "")
+    vddetail=$(env_value "$VERIFY_DB_STATUS_FILE" detail)
+    if [ "$vdres" = fail ]; then
+        fail "backup database drill failed: ${vddetail:-run scripts/backup.sh verify-db}"
+        backup_verify_db_ok=0
+    elif [ -n "$vdok" ]; then
+        backup_verify_db_age_s=$(( $(date +%s) - vdok ))
+        vdage_h=$(( backup_verify_db_age_s / 3600 ))
+        if [ "$vdage_h" -gt "$THRESH_VERIFY_DB_H" ]; then
+            fail "no successful backup database drill for ${vdage_h}h (threshold ${THRESH_VERIFY_DB_H}h, last result ${vdres:-?})"
+            backup_verify_db_ok=0
+        elif [ "$vdres" = skip ]; then
+            soft "backup database drill skipped: ${vddetail:-no detail} (last success ${vdage_h}h ago)"
+            backup_verify_db_ok=1
+        else
+            ok "backup database drill passed ${vdage_h}h ago"
+            backup_verify_db_ok=1
+        fi
+    else
+        soft "backup database drill has no recorded success yet (expected until the first run)"
+    fi
+else
+    soft "no backup database drill yet (expected until backup-verify-db.timer runs)"
 fi
 
 # Certificate expiry: NPM renews by itself, and fails silently. One cert per
@@ -1194,6 +1233,8 @@ fi
     [ -n "$backup_count" ] && printf 'stack_backup_snapshots %s\n' "$backup_count"
     [ -n "$backup_verify_age_s" ] && printf 'stack_backup_verify_age_seconds %s\n' "$backup_verify_age_s"
     [ -n "$backup_verify_ok" ] && printf 'stack_backup_verify_ok %s\n' "$backup_verify_ok"
+    [ -n "$backup_verify_db_age_s" ] && printf 'stack_backup_verify_db_age_seconds %s\n' "$backup_verify_db_age_s"
+    [ -n "$backup_verify_db_ok" ] && printf 'stack_backup_verify_db_ok %s\n' "$backup_verify_db_ok"
     printf 'stack_ids_up %s\n' "${ids_up:-0}"
     printf 'stack_ids_alerts %s\n' "${ids_alerts:-0}"
     printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
