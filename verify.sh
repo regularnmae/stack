@@ -964,6 +964,28 @@ else
     warn "crowdsec unit is not installed (run deploy/install.sh)"
 fi
 
+# The other half of not banning the operator: stack-bouncer refuses to ENFORCE a
+# ban on the host's own public address (STACK_WAN_IP, stack.conf), because every
+# check that leaves this host -- Uptime-Kuma, agent-mcp, the MCP clients -- comes
+# back through the router's NAT loopback with that one address as its source, and
+# a decision against it takes the whole public surface down. A stale declaration
+# is silently that self-lockout waiting to happen again, and an empty one is no
+# protection at all, so compare it with the address NPM actually logs for the
+# host's own monitoring: the Uptime-Kuma user agent is what identifies it (the
+# agent clients share the address, but poll too rarely to rely on).
+npm_logs="$DATA_DIR/npm/data/logs"
+wan_seen=$(grep -h 'Uptime-Kuma/' "$npm_logs"/*_access.log 2>/dev/null \
+    | sed -n 's/.*\[Client \([^]]*\)\].*/\1/p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+if [ -z "${STACK_WAN_IP:-}" ]; then
+    warn "no STACK_WAN_IP in stack.conf: a decision against the host's own public address (Uptime-Kuma, the MCP clients) will be enforced"
+elif [ -z "$wan_seen" ]; then
+    warn "STACK_WAN_IP=$STACK_WAN_IP is unverified (no Uptime-Kuma request in $npm_logs)"
+elif [ "$wan_seen" = "$STACK_WAN_IP" ]; then
+    pass "stack-bouncer will not enforce a ban on the host's own public address ($STACK_WAN_IP)"
+else
+    warn "STACK_WAN_IP=$STACK_WAN_IP but NPM logs the host's own monitoring from $wan_seen (WAN change or a CDN? update stack.conf, then sudo ./bootstrap.sh)"
+fi
+
 # Render a deploy/root/ file the way install.sh does, so a drift check compares
 # what bootstrap would write, not the literal template. Keep the substitution
 # list in step with root_render() in deploy/install.sh: if it falls behind, the

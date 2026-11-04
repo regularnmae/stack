@@ -513,6 +513,21 @@ rewrite, run-now -- are branches in the dispatch.
   private space **and every address the host holds** -- `192.168.1.112` is what
   onion traffic and Uptime-Kuma look like, so banning it takes the onion
   services, the status page and the operator's own SSH session down together.
+  Enforcement also refuses **`STACK_WAN_IP`**, and that one is not in `OWN_IPS`:
+  the router holds the public address, not the host, yet every check that leaves
+  this host resolves the public names and comes back through the router's NAT
+  loopback, so Uptime-Kuma, agent-mcp and the MCP clients all arrive as one
+  shared source IP. Measured near miss: three 401s from one MCP client in one
+  second against `stack/http-authfail`'s bucket of five, i.e. two retries from
+  banning the operator's own egress (5 minutes of a dark public surface,
+  including the status page). The refusal is at the **bouncer**, deliberately
+  not in the whitelist: detection still decides, `cscli` still shows it, the
+  monitor still pages -- only the drop is skipped, so `bouncer.status` gains
+  `skipped=` and `banned=0 skipped=1` means "your own egress is tripping a
+  rule", not a quiet host. The address is a declaration (`stack.conf`), never a
+  DNS lookup, because a future CDN would turn a lookup into an exemption for one
+  of its edges; `verify.sh` warns when it disagrees with the source address NPM
+  logs for the host's own monitoring, which is how a WAN change is noticed.
   Failure directions are chosen: an unreachable LAPI leaves existing bans alone
   (never read "no decisions" as "unban all"), and a failed `nft -f` rolls back
   atomically. `scripts/monitor.sh` fails on a stale `audit/bouncer.status`, which

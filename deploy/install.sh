@@ -342,6 +342,10 @@ EOF
             printf 'CROWDSEC_BOUNCER_KEY=%s\n' "$bkey"
             printf 'LAPI=127.0.0.1:8080\n'
             printf 'DATA_DIR=%s\n' "$data"
+            # The host's own public address (stack.conf). Root must not read it
+            # from $DATA_DIR/config -- that tree belongs to the stack user, and
+            # this value decides what enforcement never touches.
+            printf 'STACK_WAN_IP=%s\n' "${STACK_WAN_IP:-}"
         } > "$benv"
         install -m 600 "$benv" "$ROOT_CONFIG_DIR/bouncer.env"
         rm -f "$benv"

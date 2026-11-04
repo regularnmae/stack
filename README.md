@@ -1280,6 +1280,18 @@ Three properties worth knowing:
   network, and every address the host itself holds — checked at run time, so a
   DHCP change cannot produce a self-ban. Banning `192.168.1.112` would cut the
   `.onion` proxies, the status page and your own SSH session at once.
+  It also refuses **`STACK_WAN_IP`** (`stack.conf`), which is *not* an address
+  the host holds: the router holds it. Every check that leaves this host —
+  Uptime-Kuma, agent-mcp, the MCP clients — resolves the public names and comes
+  back through the router's NAT loopback, so all of it arrives as that one
+  source IP, and `stack/http-authfail` bans five 401s in ten seconds. Three
+  from one client in one second is on this host's own log. The refusal is
+  deliberately at the bouncer and **not** in the whitelist: the decision still
+  exists, still shows in `cscli decisions`, still pages — only the drop is
+  skipped, so `audit/bouncer.status` reports `skipped=1` and `banned=0` means
+  "your own egress is tripping a rule", not a quiet host. `verify.sh` warns when
+  the declaration disagrees with the address NPM actually logs for your own
+  monitoring (a WAN change, or a CDN in front of the site).
 * **Fails open in the safe direction.** An unreachable LAPI or a non-JSON answer
   leaves the existing bans alone (it never reads "no decisions" as "unban
   everything"), and a failed `nft -f` rolls back atomically.

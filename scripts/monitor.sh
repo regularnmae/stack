@@ -1072,6 +1072,11 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
         bok=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" ok_epoch)" "")
         bdetail=$(env_value "$BOUNCER_STATUS_FILE" detail)
         bouncer_bans=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" banned)" 0)
+        # Decisions enforcement declined because they name an address the
+        # operator holds or their own public egress: a decision that exists and
+        # is deliberately not applied. Worth a line, because "0 banned" next to
+        # a live decision reads like a broken applier.
+        bouncer_skipped=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" skipped)" 0)
         if [ "$bres" = fail ]; then
             fail "the bouncer is not applying decisions: ${bdetail:-see $AUDIT_DIR/bouncer.status}"
         elif [ -z "$bok" ]; then
@@ -1082,6 +1087,9 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
                 fail "the bouncer has not applied decisions for ${bage_m} min (systemctl status stack-bouncer.timer)"
             else
                 ok "bouncer: ${bouncer_bans} address(es) banned"
+                if [ "${bouncer_skipped:-0}" -gt 0 ]; then
+                    soft "the bouncer declined ${bouncer_skipped} decision(s) naming an address this host is or uses (its own egress): something here is tripping a rule -- a stale token will do it"
+                fi
             fi
         fi
     fi
@@ -1190,6 +1198,7 @@ fi
     printf 'stack_ids_alerts %s\n' "${ids_alerts:-0}"
     printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
     printf 'stack_bouncer_bans %s\n' "${bouncer_bans:-0}"
+    printf 'stack_bouncer_skipped %s\n' "${bouncer_skipped:-0}"
     printf 'stack_audit_fim_changes %s\n' "${audit_fim:-0}"
     printf 'stack_logs_ok %s\n' "${logs_ok:-0}"
 } | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" || soft "could not write monitor.prom"

@@ -29,8 +29,9 @@ SET_V6=banned_v6
 
 # Rendered by install.sh --root: CROWDSEC_BOUNCER_KEY, LAPI (the host's own
 # loopback -- crowdsec runs on the host network, so there is no published port
-# between root and the decisions), DATA_DIR. Root-owned 0600 -- root must not
-# read its config from a file the stack user can edit.
+# between root and the decisions), DATA_DIR, and STACK_WAN_IP (the operator's
+# public address, which is never enforced against). Root-owned 0600 -- root must
+# not read its config from a file the stack user can edit.
 # shellcheck source=/dev/null
 . "$ENV_FILE"
 
@@ -65,20 +66,29 @@ lapi_get() { # host port path key -> body on stdout, non-zero on a non-200
 # ---------------------------------------------------------------------------
 # never ban these, whatever the LAPI says
 # ---------------------------------------------------------------------------
-# Two classes, both learned from this host's own logs:
+# Three classes, all learned from this host's own logs:
 #   * private space -- 10.89.0.0/24 is the podman network, 192.168.0.0/16 the
 #     LAN, and the .onion proxies plus Uptime-Kuma's self-checks arrive from the
-#     host's own address (192.168.1.112) or its WAN address. Banning any of it
-#     takes the onion services, the status page, or the operator's own session
-#     down -- all at once, including the SSH session doing the unbanning.
-#   * any address this host actually holds (checked at run time, so a DHCP
-#     change or a new WAN address cannot produce a self-ban).
+#     host's own address (192.168.1.112). Banning any of it takes the onion
+#     services, the status page, or the operator's own session down -- all at
+#     once, including the SSH session doing the unbanning.
+#   * any address this host actually holds (checked at run time, so a DHCP change
+#     on the LAN cannot produce a self-ban).
+#   * the declared WAN address (STACK_WAN_IP, from bouncer.env). This one is NOT
+#     in OWN_IPS: the router holds it, not the host. Every check that leaves this
+#     host resolves the public names and comes back through the router's NAT
+#     loopback, so Uptime-Kuma, agent-mcp and the MCP clients all appear here as
+#     the operator's own egress -- one shared source IP, which is the whole
+#     problem: five 401s in ten seconds from one stale token would ban all of
+#     them together. Detection is untouched (the decision still exists, still
+#     pages, still shows in cscli); only enforcement skips it.
 own_ips() {
     ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' '
 }
 
 is_internal() { # ip -> 0 when it must never be banned
     local ip="$1"
+    [ -n "${STACK_WAN_IP:-}" ] && [ "$ip" = "$STACK_WAN_IP" ] && return 0
     case "$ip" in
         127.*|10.*|192.168.*|169.254.*|0.0.0.0) return 0 ;;
         172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
@@ -122,8 +132,8 @@ dur_to_sec() {
     printf '%s' "$s"
 }
 
-write_status() { # result detail banned
-    local result="$1" detail="$2" banned="$3" now prev_ok="" ok_epoch tmp
+write_status() { # result detail banned [skipped]
+    local result="$1" detail="$2" banned="$3" skipped="${4:-0}" now prev_ok="" ok_epoch tmp
     now=$(date +%s)
     [ -f "$STATUS" ] && prev_ok=$(sed -n 's/^ok_epoch=//p' "$STATUS" | tail -1)
     case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
@@ -136,6 +146,7 @@ write_status() { # result detail banned
         printf 'result=%s\n' "$result"
         printf 'ok_epoch=%s\n' "$ok_epoch"
         printf 'banned=%s\n' "$banned"
+        printf 'skipped=%s\n' "$skipped"
         printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
     } > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$STATUS"
 }
@@ -163,6 +174,12 @@ if ! printf '%s' "$body" | jq -e 'type == "array" or . == null' >/dev/null 2>&1;
 fi
 
 rules=$(mktemp) || exit 1
+# The addresses enforcement declined, one per line. The loop below runs in a
+# pipeline (a subshell), so a counter could not escape it -- and the count is
+# what makes the interesting state legible in the status file: `banned=0
+# skipped=1` means the LAPI is holding a decision about the operator's own
+# egress, which is a stale token or a broken loop somewhere, not a quiet host.
+skips=$(mktemp) || exit 1
 {
     # The table is created once; `nft -f` MERGES a table declaration rather than
     # recreating it, so re-declaring the chain on every run would append a second
@@ -183,6 +200,7 @@ rules=$(mktemp) || exit 1
             [ -n "$ip" ] || continue
             if is_internal "$ip"; then
                 say "skip (internal): $ip"
+                printf '%s\n' "$ip" >> "$skips"
                 continue
             fi
             case "$ip" in
@@ -194,23 +212,25 @@ rules=$(mktemp) || exit 1
 
 banned=$(grep -c '^add element' "$rules" 2>/dev/null || true)
 case "$banned" in ''|*[!0-9]*) banned=0 ;; esac
+skipped=$(grep -c . "$skips" 2>/dev/null || true)
+case "$skipped" in ''|*[!0-9]*) skipped=0 ;; esac
 
 if [ "$DRY_RUN" = 1 ]; then
-    say "--- would apply ($banned ban(s)):"
+    say "--- would apply ($banned ban(s), $skipped skipped):"
     cat "$rules"
-    rm -f "$rules"
+    rm -f "$rules" "$skips"
     exit 0
 fi
 
 if ! "$NFT" -f "$rules" 2>/tmp/stack-bouncer.err; then
     detail=$(tail -3 /tmp/stack-bouncer.err 2>/dev/null | tr '\n' ' ')
-    rm -f "$rules"
+    rm -f "$rules" "$skips"
     # The previous transaction is still in place: nft applies atomically, so a
     # failed apply changes nothing rather than emptying the set.
     write_status fail "nft apply failed: ${detail:-unknown}" ""
     exit 1
 fi
-rm -f "$rules"
+rm -f "$rules" "$skips"
 
-write_status ok "" "$banned"
+write_status ok "" "$banned" "$skipped"
 exit 0
