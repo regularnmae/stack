@@ -13,7 +13,8 @@
 #     the alerts going with it, and an alert needs no query engine to be
 #     healthy;
 #   * this script only OBSERVES, for history: how fast a chain synced, when the
-#     Monero RPC wedged, how the wallet's lag moved. It never alerts.
+#     Monero RPC wedged, how the wallet's lag moved, what each container costs.
+#     It never alerts.
 #
 # A metric that cannot be collected is omitted and its collector is recorded as
 # stack_collector_error{collector="..."} 1, so a hole in a graph is never
@@ -237,6 +238,109 @@ if command -v systemctl >/dev/null 2>&1; then
         case "$nr" in (*[!0-9]*) continue ;; esac
         emit "stack_systemd_restarts{unit=\"$cname\"}" "$nr"
     done < <(podman ps --format '{{.Names}}' 2>/dev/null)
+fi
+
+# ---------------------------------------------------------------------------
+# containers -- what each running unit actually costs. One `podman stats
+# --no-stream` call reads the cgroup counters for the whole stack (measured at
+# ~85ms for 35 containers), which is the only place they exist: no daemon
+# exports its own resource use, and node-exporter's cpu collector is host-wide.
+#
+# The shape is deliberate:
+#   * cpu_time is cumulative -> a *_total counter, so the query is rate().
+#     cpu_percent is NOT written: on --no-stream it is a one-shot reading over
+#     an unknown interval (measured: bitcoind 25.5% against a 1.8% lifetime
+#     average), i.e. not comparable across scrapes.
+#   * mem_usage is podman's working set (memory.current - inactive_file), not
+#     RSS, hence the name; its units are decimal (4.176GB == 4176224256 B,
+#     verified against the cgroup), but go-units' binary suffixes are accepted
+#     too so a podman change cannot silently zero the series. Sizes inherit
+#     podman's 4-significant-digit rendering: right for a graph, and the exact
+#     values are always in the container's cgroup (cpu.stat usage_usec,
+#     memory.current) if a one-off measurement needs them.
+#   * block_io reads 0B/0B on every container here -- the io controller does
+#     not account under rootless cgroups -- so it is not exported at all.
+#   * the label is the container NAME, never the id: a recreated container keeps
+#     its series, and rate() sees the counter reset instead of a new series.
+#
+# A hole stays a hole: a container whose cpu/mem cannot be parsed is skipped for
+# that run rather than written as zero, and one collector_error names the parse
+# without a per-container label (that would explode the cardinality on a bad
+# podman release).
+# ---------------------------------------------------------------------------
+
+# podman prints cpu_time as a Go duration ("47m45.158824s"), and lib.sh's
+# dur_ms already parses those -- it is what wait_healthy and healthcheck-lint
+# read, so this must not grow a second parser that could disagree on a fraction.
+# Its floor is a millisecond: a container younger than one tick reads 0.000,
+# which rate() tolerates, while an empty field stays a hole (below), because
+# dur_ms answers 0 for unparsable input and that is not the same thing.
+cpu_seconds() { awk -v ms="$(dur_ms "$1")" 'BEGIN { printf "%.3f", ms / 1000 }'; }
+
+# "4.176GB" -> bytes. Only the first half of mem_usage/net_io is ever passed in.
+human_bytes() {
+    awk -v s="$1" '
+        BEGIN {
+            if (!match(s, /^[0-9]+(\.[0-9]+)?/)) exit 1
+            num = substr(s, 1, RLENGTH) + 0
+            u = substr(s, RLENGTH + 1)
+            if      (u == ""   || u == "B")   mult = 1
+            else if (u == "kB")               mult = 1e3
+            else if (u == "MB")               mult = 1e6
+            else if (u == "GB")               mult = 1e9
+            else if (u == "TB")               mult = 1e12
+            else if (u == "PB")               mult = 1e15
+            else if (u == "KiB")              mult = 1024
+            else if (u == "MiB")              mult = 1024 * 1024
+            else if (u == "GiB")              mult = 1024 * 1024 * 1024
+            else if (u == "TiB")              mult = 1024 * 1024 * 1024 * 1024
+            else exit 1
+            printf "%.0f\n", num * mult
+        }'
+}
+
+if cstats=$(podman stats --no-stream --format json 2>/dev/null) \
+    && jq -e 'type == "array"' >/dev/null 2>&1 <<<"$cstats"; then
+    cbad=0
+    while IFS=$'\t' read -r cname cputime cmem cpids cnet; do
+        [ -n "$cname" ] || continue
+        # The label is written into the exposition text, so refuse anything that
+        # is not a container-name character rather than emit a broken line.
+        case "$cname" in
+            *[!A-Za-z0-9_.-]*) cbad=1; continue ;;
+        esac
+        csecs=""
+        [ -n "$cputime" ] && csecs=$(cpu_seconds "$cputime")
+        cmem_b=$(human_bytes "$cmem") || cmem_b=""
+        [ -n "$csecs" ] && [ -n "$cmem_b" ] || { cbad=1; continue; }
+        emit "stack_container_cpu_seconds_total{container=\"$cname\"}" "$csecs"
+        emit "stack_container_mem_working_set_bytes{container=\"$cname\"}" "$cmem_b"
+        case "$cpids" in
+            ''|*[!0-9]*) cbad=1 ;;
+            *) emit "stack_container_pids{container=\"$cname\"}" "$cpids" ;;
+        esac
+        # rx / tx, both cumulative for the container's lifetime. A container on
+        # the host network legitimately reports 0B/0B (no veth), which is a real
+        # value, not a missing one.
+        crx="" tx=""
+        case "$cnet" in
+            *" / "*)
+                crx=$(human_bytes "${cnet%% / *}") || crx=""
+                tx=$(human_bytes "${cnet##* / }") || tx=""
+                ;;
+        esac
+        if [ -n "$crx" ] && [ -n "$tx" ]; then
+            emit "stack_container_network_receive_bytes_total{container=\"$cname\"}" "$crx"
+            emit "stack_container_network_transmit_bytes_total{container=\"$cname\"}" "$tx"
+        else
+            cbad=1
+        fi
+    done < <(jq -r '.[] | [.name, .cpu_time, (.mem_usage | split(" ")[0]), .pids, .net_io] | @tsv' <<<"$cstats")
+    [ "$cbad" = 0 ] || collector_error podman-stats-parse
+    say "containers: $(jq -r 'length' <<<"$cstats") running"
+else
+    collector_error podman-stats
+    say "podman stats did not answer"
 fi
 
 # ---------------------------------------------------------------------------

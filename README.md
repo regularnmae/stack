@@ -1091,7 +1091,7 @@ did the Monero RPC wedge?").
 | --- | --- |
   | `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION` in `stack.conf`), `127.0.0.1:8428` |
 | `node-exporter` | the host: disk space, inodes, I/O saturation, memory, load, NIC bandwidth/errors, temperatures — plus the **textfile collector**, which is how the stack's own numbers get in |
-| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, bitcoind's peer count and mempool, Fulcrum's Electrum reachability, the tip it serves and its lag behind bitcoind, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability** and its lag behind `target_height`, the wallet's lag, and each managed unit's systemd restart counter |
+| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, bitcoind's peer count and mempool, Fulcrum's Electrum reachability, the tip it serves and its lag behind bitcoind, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability** and its lag behind `target_height`, the wallet's lag, each managed unit's systemd restart counter, and every running container's CPU seconds, memory working set, pids and network bytes |
 | `scripts/monitor.sh` (every five minutes) | writes `monitor.prom` beside it: backup age and snapshot count, verify failures, spend trips, sweep timestamp |
 
 **Read it over an SSH tunnel, by design:**

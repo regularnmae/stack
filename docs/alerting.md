@@ -113,6 +113,23 @@ tripwire".
   `stack_metrics_timestamp`, the same heartbeat the monitor's staleness
   check is about, so an agent can tell an empty graph from a dead collector.
 
+- **Per-container cost is stored, but only as counters and gauges a query can
+  trust.** `scripts/metrics.sh` reads `podman stats --no-stream --format json`
+  once a minute and emits `stack_container_cpu_seconds_total`,
+  `stack_container_mem_working_set_bytes`, `stack_container_pids` and
+  `stack_container_network_{receive,transmit}_bytes_total`, labelled by
+  container **name** (a recreated container keeps its series, and `rate()`
+  handles the reset). Three deliberate omissions: podman's `cpu_percent` on
+  `--no-stream` is a one-shot reading over an unknown interval — measured at
+  25.5% against a 1.8% lifetime average — so `rate()` over the counter is the
+  query, not a stored percentage; `mem_usage` is the working set
+  (`memory.current - inactive_file`), not RSS, hence the name; and `block_io`
+  reads `0B / 0B` on every container here because the io controller does not
+  account under rootless cgroups, so it is not exported. This is history only:
+  `monitor.sh` gains no container check, preserving the rule above. A container
+  whose counters cannot be parsed is skipped and `stack_collector_error` names
+  the parse, so a hole is never written as a zero.
+
 ## The one store query
 
 - **The monitor queries a store exactly once, and only to prove the log
