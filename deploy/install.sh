@@ -1116,8 +1116,9 @@ sync_torrc_onions() { # torrc
     if [ "${ONION_SERVICES+x}" = x ]; then
         for entry in "${ONION_SERVICES[@]}"; do
             IFS='|' read -r name target _ <<<"$entry"
-            [ -n "$name" ] && [ -n "$target" ] \
-                || die "bad ONION_SERVICES entry: $entry (want \"name|target|mirrors|path|code\")"
+            if [ -z "$name" ] || [ -z "$target" ]; then
+                die "bad ONION_SERVICES entry: $entry (want \"name|target|mirrors|path|code\")"
+            fi
         done
     fi
     stanzas=$(onion_stanzas)

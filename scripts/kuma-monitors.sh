@@ -91,8 +91,9 @@ fi
 monitors_json="[]"
 for entry in "${KUMA_MONITORS[@]}"; do
     IFS='|' read -r mname murl mcodes minterval mretries <<<"$entry"
-    [ -n "$mname" ] && [ -n "$murl" ] \
-        || die "bad KUMA_MONITORS entry: $entry (want \"name|url[|codes[|interval[|retries]]]\")"
+    if [ -z "$mname" ] || [ -z "$murl" ]; then
+        die "bad KUMA_MONITORS entry: $entry (want \"name|url[|codes[|interval[|retries]]]\")"
+    fi
     case "$murl" in
         http://*|https://*)
             mcodes="${mcodes:-200-299}"
@@ -113,8 +114,9 @@ for entry in "${KUMA_MONITORS[@]}"; do
         mtarget="${murl#tcp://}"
         mhost="${mtarget%:*}"
         mport="${mtarget##*:}"
-        [ -n "$mhost" ] && [ "$mport" != "$mtarget" ] \
-            || die "bad tcp:// target in KUMA_MONITORS entry: $entry (want tcp://host:port)"
+        if [ -z "$mhost" ] || [ "$mport" = "$mtarget" ]; then
+            die "bad tcp:// target in KUMA_MONITORS entry: $entry (want tcp://host:port)"
+        fi
         case "$mport" in ''|*[!0-9]*) die "bad port in KUMA_MONITORS entry: $entry (1-65535)" ;; esac
         { [ "$mport" -ge 1 ] && [ "$mport" -le 65535 ]; } \
             || die "bad port in KUMA_MONITORS entry: $entry (1-65535)"

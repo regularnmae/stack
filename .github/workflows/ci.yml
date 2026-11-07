@@ -140,3 +140,5 @@ jobs:
           for f in "${files[@]}"; do
             bash -n "$f"
           done
+      - name: shared shell helper tests
+        run: tests/test-lib.sh

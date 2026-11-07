@@ -81,7 +81,11 @@ Options:
 EOF
 }
 
-need_arg() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
+need_arg() {
+    if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        die "$1 needs a value"
+    fi
+}
 
 # The severities at or above the requested one, worst first. LogsQL's in()
 # matches any of them, so `--priority warning` means warning + err + crit... --

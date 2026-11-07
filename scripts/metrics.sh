@@ -312,7 +312,10 @@ if cstats=$(podman stats --no-stream --format json 2>/dev/null) \
         csecs=""
         [ -n "$cputime" ] && csecs=$(cpu_seconds "$cputime")
         cmem_b=$(human_bytes "$cmem") || cmem_b=""
-        [ -n "$csecs" ] && [ -n "$cmem_b" ] || { cbad=1; continue; }
+        if [ -z "$csecs" ] || [ -z "$cmem_b" ]; then
+            cbad=1
+            continue
+        fi
         emit "stack_container_cpu_seconds_total{container=\"$cname\"}" "$csecs"
         emit "stack_container_mem_working_set_bytes{container=\"$cname\"}" "$cmem_b"
         case "$cpids" in
