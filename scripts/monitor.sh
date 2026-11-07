@@ -989,6 +989,28 @@ if command -v find >/dev/null 2>&1; then
     fi
 fi
 
+# The syslog socket. sshd, PAM, sudo and cron all log through /dev/log; if that
+# inode goes stale every one of them gets ECONNREFUSED and the message is simply
+# dropped. This host spent six days in exactly that state (journald restarted
+# 2026-10-31 and never re-bound the path): /var/log/secure stayed at 0 bytes while
+# SSH logins went unrecorded, and nothing else noticed, because the journal kept
+# filling from container stdout. Probe the whole path rather than the file --
+# write a sentinel with logger (the same syslog(3) call sshd makes) and require it
+# back out of the journal.
+if command -v logger >/dev/null 2>&1 && command -v journalctl >/dev/null 2>&1; then
+    auth_probe="stack-monitor-authlog-$$-$(date +%s)"
+    if auth_err=$(logger -p authpriv.info -- "$auth_probe" 2>&1); then
+        sleep 1
+        if journalctl --since "-120 seconds" --no-pager -q 2>/dev/null | grep -qF -- "$auth_probe"; then
+            ok "auth log path: /dev/log -> journal"
+        else
+            fail "logger accepted a message that never reached the journal; sshd/PAM/sudo events are being dropped unrecorded"
+        fi
+    else
+        fail "the syslog socket is dead, so sshd/PAM/sudo events are dropped unrecorded (${auth_err:-logger failed})"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 4. the spend tripwire
 # ---------------------------------------------------------------------------

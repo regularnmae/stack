@@ -38,9 +38,18 @@ tripwire".
   that check is the only thing keeping a new threshold discoverable. It carries
   the host checks (disk, inodes, disk saturation,
   backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
-  hottest sensor, a stale metrics textfile) and the chain/daemon checks (a
+  hottest sensor, a stale metrics textfile, the syslog socket) and the
+  chain/daemon checks (a
   `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
   peers/channels, monerod's lag, the wallet's lag).
+
+- **The syslog socket is probed, not assumed:** sshd, PAM, sudo and cron all log
+  through `/dev/log`, and a stale socket inode drops every one of those messages —
+  this host ran six days (Oct 31 → Nov 7, 2026) with SSH logins recorded nowhere
+  while the journal still looked healthy, because container stdout kept filling
+  it. The sweep writes a `logger -p authpriv.info` sentinel and fails unless it
+  comes back out of the journal: that is the only probe covering the whole path,
+  and `/var/log/secure` is root-only so the file cannot be the check.
 
 ## Alerting is two processes
 
