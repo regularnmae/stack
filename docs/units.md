@@ -252,8 +252,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   **two-pass** install -- the sensor's unit and config reference `@DATA_DIR@`,
   so the first run (before any data dir exists) only prints a notice and the
   rerun after the first `./deploy.sh` installs it. Everything it installs is
-  root-owned: the unit in `/etc/containers/systemd/`, the config in
-  `/etc/stack-ids/`, the tmpfiles rule in `/etc/tmpfiles.d/`. That unit is mode
+  root-owned: the unit in `/etc/containers/systemd/` and the config in
+  `/etc/stack-ids/`. That unit is mode
   0644 (not the 0600 the user units get) because `verify.sh` diffs it against
   `deploy/root/` to catch drift and it carries no secret -- the secret-bearing
   templates are the *user* units. Nothing
@@ -263,9 +263,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   boundary. A change to `deploy/root/` therefore needs `sudo ./bootstrap.sh`
   again; `verify.sh` walks a declared table (`ROOT_FILES`) of every file
   `install.sh --root` renders and warns per file when one has drifted or is
-  missing. Content only -- bootstrap owns the modes -- and three kinds are
-  excluded on purpose: the 0600 env files and the tmpfiles rule (written from
-  heredocs, no repo counterpart) and `60-stack.rules` (0640 in a 0750 directory,
+  missing. Content only -- bootstrap owns the modes -- and two kinds are
+  excluded on purpose: the 0600 env files (written from heredocs, no repo
+  counterpart) and `60-stack.rules` (0640 in a 0750 directory,
   unreadable to an unprivileged sweep; the audit section reads the report's
   verdict instead). The bouncer's three are marked `opt`, absent until the
   second bootstrap pass has a key, so they are skipped rather than warned about

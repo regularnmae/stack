@@ -50,6 +50,20 @@ LOGS_RETENTION="${LOGS_RETENTION:-14d}"
 LOGS_MAX_BYTES="${LOGS_MAX_BYTES:-10GiB}"
 export STACK_BACKUP_DIR
 
+# Uptime-Kuma's static host entries (deploy/uptime-kuma.container): every
+# monitored vhost except MCP_HOST resolves to the container's host gateway, so
+# the checks do not hairpin through the router and come back wearing the WAN
+# address. MCP_HOST stays literal on purpose -- its monitor is the one canary
+# verify.sh reads to notice a WAN change. Built from the declarations, so a
+# renamed vhost cannot leave a stale entry behind.
+kuma_add_hosts=""
+for _kuma_host in "$BOLTMESH_FRONTEND_HOST" "$BOLTMESH_API_HOST" "$SEARXNG_HOST" \
+                  "$BTCPAY_HOST" "$BTC_EXPLORER_HOST" "$XMR_EXPLORER_HOST"; do
+    [ -n "$_kuma_host" ] \
+        && kuma_add_hosts="${kuma_add_hosts:+$kuma_add_hosts }--add-host=$_kuma_host:host-gateway"
+done
+unset _kuma_host
+
 # ---------------------------------------------------------------------------
 # the root tier
 # ---------------------------------------------------------------------------
@@ -206,7 +220,6 @@ root_render() { # src dest mode [data-dir]
     sed -e "s|@DATA_DIR@|$(esc "$4")|g" \
         -e "s|@CONFIG_DIR@|$(esc "$4/config")|g" \
         -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
-        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" \
         "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
     install -m "$3" "$tmp" "$2"
     rm -f "$tmp"
@@ -252,16 +265,33 @@ install_root_tier() {
     fi
     install -d -m 755 "$data/ids/suricata" "$data/ids/suricata/lib"
 
-    # Retention for Suricata's rotated EVE files, which no unprivileged process
-    # may delete. tmpfiles.d owns that, on the same schedule as the rest of the
-    # host's cleanup.
-    root_render /dev/stdin /etc/tmpfiles.d/stack-ids.conf 644 "$data" <<'EOF'
-# Written by deploy/install.sh --root; do not edit (deploy/root/ owns it).
-# Suricata rotates eve.json daily (rotate-interval) and never prunes; the files
-# are root-owned, so this is the only thing that can delete them.
-d @DATA_DIR@/ids/suricata 0755 root root -
-e @DATA_DIR@/ids/suricata/*.json.* - - - @IDS_RETENTION_DAYS@d
-EOF
+    # The alert-only feed CrowdSec tails (the second eve-log output in
+    # deploy/root/suricata/suricata.yaml). Created here rather than left to the
+    # sensor because crowdsec may start first, and a fixed path that does not
+    # exist yet is not retried by its file acquisition. `:` creates without
+    # truncating a live file. The label is load-bearing: a file created under
+    # this root-owned directory inherits default_t, which a container cannot
+    # read (measured), so it is set explicitly -- the same chcon install.sh
+    # already does for NPM's http.conf. There is no tmpfiles rule (see below):
+    # the file persists on disk, and start.sh recreates it if a restart finds
+    # it missing.
+    [ -e "$data/ids/suricata/alerts.json" ] || : > "$data/ids/suricata/alerts.json"
+    chmod 644 "$data/ids/suricata/alerts.json" 2>/dev/null || true
+    chcon -t container_file_t "$data/ids/suricata/alerts.json" 2>/dev/null \
+        || warn "could not label $data/ids/suricata/alerts.json for containers"
+
+    # There is deliberately no /etc/tmpfiles.d/stack-ids.conf any more, and any
+    # copy an earlier bootstrap wrote is removed below. The retention rule it
+    # carried could never work: every path under $DATA_DIR crosses the
+    # user-owned data dir before reaching the root-owned ids/suricata, and
+    # systemd-tmpfiles refuses to canonicalize that ("unsafe path transition"),
+    # so `--create` exited 73 on every bootstrap and pruned nothing. Rotation is
+    # moot too -- Suricata needs a strftime template in `filename`, and ours is
+    # static -- so the live files are uncapped: eve.json grows at ~50 MB/day and
+    # the alert-only alerts.json at a few MB/day. A real fix has to move the
+    # sensor's state out from under $DATA_DIR or add a root prune oneshot;
+    # until then this script creates the directory and the feed itself.
+    rm -f /etc/tmpfiles.d/stack-ids.conf
 
     # The unit itself. Render, then let systemd regenerate suricata.service from
     # it -- the same render-then-daemon-reload cycle as the user side, just in
@@ -279,8 +309,6 @@ EOF
     # manager under test.
     grep -qF "$data/ids/suricata" "$ROOT_UNIT_DIR/suricata.container" \
         || die "rendered $ROOT_UNIT_DIR/suricata.container does not reference $data/ids/suricata -- the substitution failed"
-    grep -qF "$data/ids/suricata" /etc/tmpfiles.d/stack-ids.conf \
-        || die "rendered /etc/tmpfiles.d/stack-ids.conf does not reference $data/ids/suricata -- the substitution failed"
 
     # ------------------------------------------------------------------
     # auditd: watch the host-level surfaces nothing in this repo writes
@@ -359,18 +387,21 @@ EOF
     fi
 
     systemctl daemon-reload
-    systemd-tmpfiles --create /etc/tmpfiles.d/stack-ids.conf 2>/dev/null \
-        || warn "could not apply /etc/tmpfiles.d/stack-ids.conf"
     # Quadlet turns the rendered .container into suricata.service, and the
     # generator's [Install] WantedBy=multi-user.target is what pulls it in at
     # boot -- exactly like the rootless units, which are never `systemctl --user
     # enable`d either. `systemctl enable` is REFUSED for a generated unit
-    # ("transient or generated"), so starting is all there is to do here. A
-    # failure is a warning, not a failed bootstrap: the rest of the stack is
-    # unaffected by a sensor that cannot open its interface (a renamed NIC is the
-    # usual cause).
-    if systemctl start suricata 2>/dev/null; then
-        log "suricata started"
+    # ("transient or generated").
+    #
+    # `restart`, not `start`: a re-render never reaches a running process, and
+    # `start` on an already-active unit is a no-op -- a changed suricata.yaml
+    # (a new eve-log output, a rule) would sit in /etc/stack-ids until someone
+    # restarted it by hand. The sensor has no packet path, so a restart costs a
+    # few seconds of visibility, never an outage. A failure is a warning, not a
+    # failed bootstrap: the rest of the stack is unaffected by a sensor that
+    # cannot open its interface (a renamed NIC is the usual cause).
+    if systemctl restart suricata 2>/dev/null; then
+        log "suricata restarted with the rendered config"
     else
         warn "suricata did not start; check: journalctl -u suricata"
     fi
@@ -1738,6 +1769,7 @@ render_unit() {
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
         -e "s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g" \
         -e "s|@BTCPAY_HOST@|$(esc "$BTCPAY_HOST")|g" \
+        -e "s|@KUMA_ADD_HOSTS@|$(esc "$kuma_add_hosts")|g" \
         -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
         -e "s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \

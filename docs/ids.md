@@ -26,7 +26,8 @@ README's "Intrusion detection".
 
 - **Intrusion detection is two engines and two privilege domains:**
   `suricata` (rootful, `deploy/root/`, enp8s0 + lo) sees packets and no TLS
-  content; `crowdsec` (rootless) sees NPM's access log and nothing on the wire.
+  content; `crowdsec` (rootless) reads NPM's access log and Suricata's
+  alert-only feed, and nothing on the wire itself.
   Neither is redundant: NPM terminates TLS, so the request exists only in its
   log, and the onion traffic exists only on the wire as ciphertext. Silencing
   either one loses a distinct half. `DISABLE_ONLINE_API=true` is deliberate
@@ -56,20 +57,24 @@ README's "Intrusion detection".
   onion traffic and Uptime-Kuma look like, so banning it takes the onion
   services, the status page and the operator's own SSH session down together.
   Enforcement also refuses **`STACK_WAN_IP`**, and that one is not in `OWN_IPS`:
-  the router holds the public address, not the host, yet every check that leaves
-  this host resolves the public names and comes back through the router's NAT
-  loopback, so Uptime-Kuma, agent-mcp and the MCP clients all arrive as one
-  shared source IP. Measured near miss: three 401s from one MCP client in one
-  second against `stack/http-authfail`'s bucket of five, i.e. two retries from
-  banning the operator's own egress (5 minutes of a dark public surface,
-  including the status page). The refusal is at the **bouncer**, deliberately
-  not in the whitelist: detection still decides, `cscli` still shows it, the
-  monitor still pages -- only the drop is skipped, so `bouncer.status` gains
-  `skipped=` and `banned=0 skipped=1` means "your own egress is tripping a
-  rule", not a quiet host. The address is a declaration (`stack.conf`), never a
-  DNS lookup, because a future CDN would turn a lookup into an exemption for one
-  of its edges; `verify.sh` warns when it disagrees with the source address NPM
-  logs for the host's own monitoring, which is how a WAN change is noticed.
+  the router holds the public address, not the host, yet a LAN client that
+  resolves a public name goes out through the router and comes back through NAT
+  loopback, arriving as that one shared source IP -- agent-mcp and the MCP
+  clients still do, and a browser using the public name does. Uptime-Kuma used
+  to; it now resolves its vhosts through the container's host gateway, leaving
+  one public canary (see "What the sensor can attribute" below). Measured near
+  miss: three 401s from one MCP client in one second against
+  `stack/http-authfail`'s bucket of five, i.e. two retries from banning the
+  operator's own egress (the decision's four-hour default of a dark public
+  surface, including the status page). The refusal is at the **bouncer**,
+  deliberately not in the whitelist: detection still decides, `cscli` still
+  shows it, the monitor still pages -- only the drop is skipped, so
+  `bouncer.status` gains `skipped=` and `banned=0 skipped=1` means "your own
+  egress is tripping a rule", not a quiet host. The address is a declaration
+  (`stack.conf`), never a DNS lookup, because a future CDN would turn a lookup
+  into an exemption for one of its edges; `verify.sh` warns when it disagrees
+  with the source address NPM logs for the canary, which is how a WAN change is
+  noticed.
   Failure directions are chosen: an unreachable LAPI leaves existing bans alone
   (never read "no decisions" as "unban all"), and a failed `nft -f` rolls back
   atomically. `scripts/monitor.sh` fails on a stale `audit/bouncer.status`, which
@@ -109,6 +114,63 @@ README's "Intrusion detection".
   Uptime-Kuma user agent must be -- that last one is the only probe the stock
   `crowdsecurity/whitelists` cannot answer for us, so it is what proves this file
   is loaded at all.
+
+## What the sensor can attribute, and what it can ban
+
+- **The client address dies at four boundaries, and only one is fixable here.**
+  (1) NPM terminates TLS and opens a *new* loopback connection, so the HTTP
+  request Suricata sees is `127.0.0.1 -> 127.0.0.1:<port>` while the handshake
+  that carries the real address is encrypted -- the two flows share no tuple and
+  Community ID cannot join them. (2) A LAN client using a public name leaves
+  through the router and comes back through NAT loopback, which SNATs it to
+  `STACK_WAN_IP` before the packet reaches `enp8s0`. (3) container-to-container
+  traffic lives on the rootless bridge, which a rootful sensor cannot enter (zero
+  events carry `10.89.x`). (4) an `.onion` visitor is tor's own connection; the
+  address never reaches this host. Measured over eight days: 321k HTTP records,
+  of which ~317k are `lo 127.0.0.1 -> 127.0.0.1`, and 89,766 of the 196k `:443`
+  handshakes were the host's own hairpin.
+- **The monitors no longer hairpin.** `deploy/install.sh` renders
+  `--add-host=<vhost>:host-gateway` into `uptime-kuma.container` for every
+  monitored vhost except `MCP_HOST`, which stays public as the WAN canary that
+  `verify.sh` reads. `host-gateway` is pasta's `169.254.1.2`; the host's LAN
+  address does **not** work from a pasta container (measured: connection
+  refused), and the URL/SNI is unchanged, so certificates still validate. LAN
+  *browsers* using the public name still hairpin and still arrive as
+  `STACK_WAN_IP` -- only a router-side split-horizon DNS changes that.
+- **Suricata bans only the external half.** `alerts.json` is a second,
+  alert-only eve-log output; `deploy/crowdsec/acquis.d/suricata.yaml` tails it
+  under the label `suricata-evelogs`, which `crowdsecurity/non-syslog` copies
+  into `evt.Parsed.program` and the hub's `crowdsecurity/suricata-logs` EVE node
+  filters on. `stack-suricata.yaml` turns the policy sids (9000001-9000003,
+  9000004, the 9001xxx set) into trigger decisions and three *distinct* ET
+  severity 1/2 signatures into a leaky one. **Ban length lives in
+  `deploy/crowdsec/profiles.yaml`, not in the scenario** -- CrowdSec 1.8 ignores
+  a scenario's `duration:` (measured: the first live policy ban came out 4 h
+  from the stock profile), so a `stack_suricata_ban` profile ahead of the stock
+  ones gives these two 1 h while everything NPM-derived keeps 4 h. The
+  `s02-enrich` whitelist
+  runs first, so every `lo`/private event is dropped before a scenario; the WAN
+  address stays unwhitelisted so the bouncer records `skipped=` instead. The
+  sensor still never drops a packet -- `stack-bouncer` remains the only enforcer,
+  and a bad rules reload can only produce a wrong decision, not an outage.
+- **The feed is one file with two failure modes.** `alerts.json` is root-owned
+  and must carry `container_file_t` (a `default_t` file is unreadable by a
+  container -- measured); `install.sh --root` creates and labels it, and
+  `start.sh` recreates it if a restart finds it missing (there is no tmpfiles
+  rule: `systemd-tmpfiles` refuses a path that crosses the user-owned data dir,
+  which is also why nothing prunes the EVE files). CrowdSec's `file`
+  acquisition does not retry a *fixed* path that is missing when the agent
+  starts (it only adds a directory watch for glob patterns), which is why the
+  file exists before either container starts. `mode: tail` means a restart does
+  not replay old alerts into new decisions. It is not rotated: Suricata only
+  rotates a `filename` containing a strftime template, and an alert-only file
+  grows at a few MB/day (unlike `eve.json`, which is ~50 MB/day and has never
+  rotated here -- a separate, open sizing issue).
+- **A dead feed must not look healthy.** `verify.sh` replays a synthetic public
+  EVE alert through `cscli explain` (expects `stack/suricata-policy`), replays
+  the same alert from `127.0.0.1` (expects `whitelisted`), and proves the
+  container can read the feed. `scripts/ids.sh` still counts alerts from
+  `eve.json`; its decision counter now includes the Suricata scenarios too.
 
 ## The audit tier watches files only
 

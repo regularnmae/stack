@@ -123,8 +123,9 @@ say "crowdsec: $CROWDSEC_STATE, $DECISIONS decision(s)${NEWEST:+ (newest: $NEWES
 # A byte cursor, not a scan of the whole file: eve.json is the highest-volume
 # artefact in the stack (every HTTP/TLS/DNS record), and re-reading it every
 # five minutes to count a handful of alerts is how a monitor becomes the load it
-# is supposed to notice. Rotation (rotate-interval in the yaml) truncates the
-# file, which the size-decreased check catches by restarting from zero.
+# is supposed to notice. A truncate -- or a rotation, if the filename ever
+# gains a strftime template -- shrinks the file, which the size-decreased check
+# catches by restarting from zero.
 ALERTS=0
 LAST_ALERT=""
 if [ -s "$EVE" ]; then

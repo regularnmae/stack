@@ -19,9 +19,15 @@
 #
 # It does NOT see: container-to-container traffic on npm-network (that is a
 # bridge inside the rootless user netns, and a rootful sensor cannot enter it),
-# or the contents of a TLS connection (NPM terminates it; the app-layer view of
-# those requests is nginx-proxy-manager's access log, which the crowdsec unit
-# reads -- see deploy/crowdsec/).
+# the contents of a TLS connection (NPM terminates it), or a client address on
+# the *re-originated* loopback leg NPM opens to each app -- that request is
+# visible here as 127.0.0.1 -> 127.0.0.1, so its alerts have no client. The
+# attributable view of those requests is NPM's access log, which the crowdsec
+# unit reads; the plaintext past TLS termination does not exist on any wire.
+#
+# Its external (severity 1/2, $EXTERNAL_NET) alerts are a decision source:
+# CrowdSec tails the alert-only alerts.json written by the second eve-log output
+# below. Everything on lo is whitelisted before a scenario can see it.
 #
 # Validated with: suricata -T -c this-file
 
@@ -112,6 +118,30 @@ outputs:
             enabled: no
         - stats:
             enabled: no
+
+  # The alert-only twin of eve.json, and the packet tier's one input to
+  # enforcement: CrowdSec's file acquisition tails it (deploy/crowdsec/
+  # acquis.d/suricata.yaml) and a matching scenario turns a public source into
+  # a decision. It is separate on purpose -- eve.json is ~50 MB/day of DNS/TLS/
+  # HTTP context and ~1,900 alerts/day, and making the engine parse all of it to
+  # find the alerts would be the load the sensor exists to notice.
+  #
+  # Deliberately NOT rotated. Suricata only rotates a `filename` that contains a
+  # strftime template (measured: eve.json's rotate-interval has never produced a
+  # rotated file on this host), and a date-named feed would break the fixed-path
+  # acquisition and be born with this root-owned directory's default_t label,
+  # which a container cannot read. One file, alert-only, a few MB/day.
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: alerts.json
+      community-id: yes
+      types:
+        - alert:
+            payload: no
+            payload-printable: yes
+            packet: no
+            metadata: yes
 
 logging:
   default-log-level: notice

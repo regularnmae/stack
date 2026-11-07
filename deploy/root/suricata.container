@@ -10,11 +10,16 @@
 # started as a rootful Quadlet by `sudo ./bootstrap.sh` (deploy/install.sh
 # --root). Everything else in the stack stays rootless.
 #
-# It is IDS-ONLY. Nothing in this unit drops packets: enforcement is the
-# crowdsec unit's bouncer (deploy/root/bouncer.sh, a root oneshot on a
-# one-minute timer), which applies the LAPI's decisions to the `inet stack_bans`
-# nftables set with each element carrying its own timeout. That keeps a sensor
-# crash or a bad rules reload from being an outage.
+# It never drops packets: enforcement is the crowdsec unit's bouncer
+# (deploy/root/bouncer.sh, a root oneshot on a one-minute timer), which applies
+# the LAPI's decisions to the `inet stack_bans` nftables set with each element
+# carrying its own timeout. Its external alerts are a *decision source* now --
+# CrowdSec tails the alert-only alerts.json (the second eve-log output in
+# suricata.yaml, acquired by deploy/crowdsec/acquis.d/suricata.yaml) -- but the
+# sensor still has no packet path, so a crash or a bad rules reload cannot
+# itself be an outage. The worst it can do is feed a wrong decision, which the
+# bouncer's own refusals (private space, every address the host holds, the
+# operator's WAN address) bound.
 #
 # What it can and cannot see is documented in deploy/root/suricata/suricata.yaml
 # (short version: the LAN NIC and lo; not the rootless container bridge, and not
@@ -42,10 +47,12 @@ AddCapability=NET_RAW
 AddCapability=NET_ADMIN
 AddCapability=SYS_NICE
 
-# EVE JSON, the engine log and suricata-update's log. Root-owned because the
-# container writes as root; scripts/ids.sh only reads them (0644), and Suricata
-# rotates eve.json itself (rotate-interval in the yaml), so nothing needs to
-# delete root-owned files. Outside BACKUP_PATHS: regenerable telemetry.
+# EVE JSON, the alert-only feed CrowdSec tails, the engine log and
+# suricata-update's log. Root-owned because the container writes as root;
+# scripts/ids.sh only reads them (0644). Suricata only rotates a `filename`
+# containing a strftime template and ours is static, so eve.json does NOT
+# rotate -- nothing prunes it (deploy/install.sh --root explains why the
+# tmpfiles rule is gone). Outside BACKUP_PATHS: regenerable telemetry.
 Volume=@DATA_DIR@/ids/suricata:/var/log/suricata:z
 # /var/lib/suricata holds the ruleset suricata-update downloads (46 MB with ET
 # Open) and its cache. On the data disk, not in an anonymous volume, so a

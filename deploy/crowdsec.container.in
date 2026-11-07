@@ -1,12 +1,14 @@
 # CrowdSec: the behaviour engine that turns nginx-proxy-manager's access logs
-# into decisions. Rootless and ordinary -- it reads files, it never touches the
-# wire, so it needs none of the privileges Suricata does.
+# and Suricata's external alerts into decisions. Rootless and ordinary -- it
+# reads files, it never touches the wire, so it needs none of the privileges
+# Suricata does.
 #
-# The division of labour matters: Suricata sees packets (and nothing inside
-# TLS), CrowdSec sees requests (and nothing about the network). This unit is the
-# only thing that can attribute an attack to a *client*, because NPM logs the
-# real address -- the `.onion` path excepted, where every visitor is the host's
-# own address and scripts/ids.sh reports on it instead.
+# Two sources with different reach: NPM's log is the attributable request (it
+# exists inside TLS, which the sensor cannot read), and Suricata's alert feed is
+# the wire half (plain-HTTP payloads, and ports NPM never sees). The `.onion`
+# path is the one where neither gives a client -- tor forwards to
+# host.containers.internal, so every visitor is the host's own address and
+# scripts/ids.sh reports on it instead.
 #
 # Local only, by decision: DISABLE_ONLINE_API=true means no console enrolment,
 # no CAPI community blocklist, and no telemetry leaving this host. Every
@@ -57,10 +59,21 @@ Volume=@DATA_DIR@/ids/crowdsec/etc:/etc/crowdsec:z
 # cache of the last few hours of logs): outside BACKUP_PATHS.
 Volume=@DATA_DIR@/ids/crowdsec/data:/var/lib/crowdsec/data:z
 
-# nginx-proxy-manager's access logs -- the whole point of this container. NPM
-# writes them as container root, which is this same user under rootless podman,
-# so a read-only bind needs no relabel and no ownership change.
+# nginx-proxy-manager's access logs -- the attributable half of this container.
+# NPM writes them as container root, which is this same user under rootless
+# podman, so a read-only bind needs no relabel and no ownership change.
 Volume=@DATA_DIR@/npm/data/logs:/var/log/npm:ro
+
+# Suricata's alert-only feed (the second eve-log output in
+# deploy/root/suricata/suricata.yaml), the wire half. The PARENT is mounted, not
+# ids/suricata: mounting the subdirectory here would make podman create it as
+# this user on a host that has not run `sudo ./bootstrap.sh`, handing the
+# rootful sensor a user-owned directory to write into -- the same trap
+# vector.container documents. `:ro` without `:z` because the files are
+# root-owned and already carry container_file_t from the sensor's own :z mount;
+# a rootless relabel of them would fail (and a default_t file is unreadable,
+# which is why install.sh --root sets the label on alerts.json explicitly).
+Volume=@DATA_DIR@/ids:/ids:ro
 
 # This repo's parser and scenarios, rendered by deploy/install.sh into
 # $CONFIG_DIR/ids/crowdsec/ so the install-path tokens (@CONFIG_DIR@ and
@@ -70,15 +83,21 @@ Volume=@DATA_DIR@/npm/data/logs:/var/log/npm:ro
 # config.yaml/local_api_credentials.yaml are absent -- which stays true because
 # nothing below touches those two files.
 Volume=@CONFIG_DIR@/ids/crowdsec/acquis.d/stack.yaml:/etc/crowdsec/acquis.d/stack.yaml:ro,z
+Volume=@CONFIG_DIR@/ids/crowdsec/acquis.d/suricata.yaml:/etc/crowdsec/acquis.d/suricata.yaml:ro,z
 # config.yaml.local lowers the log level of the LAPI and the agent; upstream
 # reads it merged on top of config.yaml. It is not config.yaml, so the
 # entrypoint still seeds /etc/crowdsec (see above).
 Volume=@CONFIG_DIR@/ids/crowdsec/config.yaml.local:/etc/crowdsec/config.yaml.local:ro,z
+# Where ban durations are decided (a scenario's `duration:` is ignored in 1.8).
+# The file carries the stock IP/Range profiles too; the seeded copy is left
+# alone by the entrypoint's `rsync --ignore-existing`.
+Volume=@CONFIG_DIR@/ids/crowdsec/profiles.yaml:/etc/crowdsec/profiles.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/parsers/s01-parse/stack-npm.yaml:/etc/crowdsec/parsers/s01-parse/stack-npm.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/parsers/s02-enrich/stack-whitelists.yaml:/etc/crowdsec/parsers/s02-enrich/stack-whitelists.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-probing.yaml:/etc/crowdsec/scenarios/stack-http-probing.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-authfail.yaml:/etc/crowdsec/scenarios/stack-http-authfail.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-flood.yaml:/etc/crowdsec/scenarios/stack-http-flood.yaml:ro,z
+Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-suricata.yaml:/etc/crowdsec/scenarios/stack-suricata.yaml:ro,z
 
 # The machine name the agent registers under in its own LAPI. Stable, so a
 # re-created container keeps its credentials.
@@ -98,12 +117,16 @@ Environment=BOUNCER_KEY_firewall=@CROWDSEC_BOUNCER_KEY@
 # bouncer when the name is absent, so a changed value would leave the old key
 # registered and the new one answered with 403.
 Environment=BOUNCER_KEY_mcp=@CROWDSEC_MCP_BOUNCER_KEY@
-# The base parsers the acquisition needs. Everything stack-specific is the file
-# mounts above; these two are generic and come from the hub: non-syslog turns a
-# raw log line into an event, dateparse-enrich turns evt.StrTime into evt.Time
+# The base parsers the acquisitions need. Everything stack-specific is the file
+# mounts above; these three are generic and come from the hub: non-syslog turns
+# a raw log line into an event, dateparse-enrich turns evt.StrTime into evt.Time
 # (the leaky buckets in our scenarios are time-based, so without it every
-# decision would be instant).
-Environment="PARSERS=crowdsecurity/syslog-logs crowdsecurity/dateparse-enrich"
+# decision would be instant), and suricata-logs' EVE node parses alerts.json
+# into source_ip/signature_id/severity. Its filter matches the acquisition's
+# `type: suricata-evelogs` label, which non-syslog copies into
+# evt.Parsed.program -- a rename on either side turns enforcement off silently,
+# which is what verify.sh's explain probe catches.
+Environment="PARSERS=crowdsecurity/syslog-logs crowdsecurity/dateparse-enrich crowdsecurity/suricata-logs"
 
 # LAPI reachable and the agent answering: `cscli lapi status` is the one command
 # that proves the DB, the API and the credentials together.

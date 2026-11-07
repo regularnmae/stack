@@ -8,8 +8,10 @@
 # the cost of a noisy IDS is that its alerts stop being read.
 #
 # Sids are grouped: 9000xxx is the public surface, 9001xxx the daemon ports,
-# 9002xxx the proxies. Keep them stable; scripts/ids.sh's bridge to crowdsec
-# matches on them.
+# 9002xxx the proxies. Keep them stable: the policy sids (9000001-9000003,
+# 9000004, and the 9001xxx set) are the ones deploy/crowdsec/scenarios/
+# stack-suricata.yaml turns into decisions. The proxy sids below are alert-only,
+# because their traffic exists on the loopback leg where no client address does.
 
 # ---------------------------------------------------------------------------
 # 9000xxx -- the public surface (nginx-proxy-manager on the host network)

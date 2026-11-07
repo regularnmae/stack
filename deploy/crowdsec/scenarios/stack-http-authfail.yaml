@@ -21,6 +21,8 @@ groupby: evt.Meta.source_ip
 capacity: 5
 leakspeed: 10s
 blackhole: 5m
+# The decision duration is the profile's (deploy/crowdsec/profiles.yaml: the
+# stock 4 h for NPM-derived rules); `blackhole` is only the re-trigger cooldown.
 labels:
   service: npm
   type: auth

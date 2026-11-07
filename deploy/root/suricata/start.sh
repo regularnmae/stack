@@ -25,6 +25,11 @@ CONF=/etc/suricata-stack
 
 mkdir -p "$RULES" /var/log/suricata
 
+# The enforcement feed (see the second eve-log output in suricata.yaml). CrowdSec
+# may be tailing it already; an empty file at sensor start is better than a
+# stat error, and `:` does not truncate a file the previous run left behind.
+[ -e /var/log/suricata/alerts.json ] || : > /var/log/suricata/alerts.json
+
 cp -f "$CONF/rules/local.rules" "$RULES/local.rules"
 
 # ET Open. --no-test/--no-reload because we are about to start the engine, not

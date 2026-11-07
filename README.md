@@ -1284,13 +1284,14 @@ while the request itself exists only in NPM's access log:
 | Engine | Sees | Runs as | Installed by |
 | --- | --- | --- | --- |
 | `suricata` | packets on `enp8s0` and `lo` | **rootful** (AF_PACKET needs `CAP_NET_RAW` in the init namespace) | `sudo ./bootstrap.sh` |
-| `crowdsec` | NPM's access logs → decisions | rootless | `./deploy.sh` |
+| `crowdsec` | NPM's access logs + Suricata's alert feed → decisions | rootless | `./deploy.sh` |
 
 That rootful unit is the one exception to "everything runs rootless", and it is
 why `bootstrap.sh` is a **two-pass** install: the sensor's config references the
 data dir, which does not exist until `./deploy.sh` has run. The first bootstrap
-prints a notice; re-running it after the first deploy installs the sensor. The
-rendered unit lives in `/etc/containers/systemd/`, its config in
+prints a notice; re-running it after the first deploy installs the sensor, and
+restarts it, so a changed `suricata.yaml` is actually applied instead of only
+rendered. The rendered unit lives in `/etc/containers/systemd/`, its config in
 `/etc/stack-ids/`, and `./verify.sh` compares every file the root tier renders
 against `deploy/root/`, warning per file when one has drifted.
 
@@ -1299,16 +1300,24 @@ against `deploy/root/`, warning per file when one has drifted.
 * **Suricata** sees the LAN NIC and the host loopback — the latter is where each
   MCP server's plaintext HTTP and the daemon RPC ports live. It cannot see the
   rootless container bridge (a rootful sensor cannot enter the user's network
-  namespace) and it cannot see inside TLS.
+  namespace), it cannot see inside TLS, and it has no client address on the
+  re-originated loopback leg NPM opens to each app: that request is
+  `127.0.0.1 -> 127.0.0.1`, which is why everything on `lo` is whitelisted
+  before a scenario sees it. Its external alerts are a decision source — a
+  second, alert-only `alerts.json` (not `eve.json`) is read by CrowdSec, which
+  bans the policy sids and three distinct ET severity 1/2 signatures.
 * **CrowdSec** sees every request NPM served, which is the whole attack surface
   of the public vhosts. It cannot attribute anything on the `.onion` vhosts: tor
   forwards to `host.containers.internal`, so NPM logs the host's own address for
-  every onion visitor.
+  every onion visitor. It also reads the sensor's alert feed; the two sources
+  meet in the same LAPI, and the bouncer still applies every decision.
 
-It is **detection then enforcement**: CrowdSec's decisions are applied to
-nftables by `stack-bouncer` (below). Nothing in the *packet* path is inline —
-enforcement happens at the kernel's input hook, with per-entry timeouts, so a
-sensor crash or a rules reload cannot be an outage.
+It is **detection then enforcement**: CrowdSec's decisions — from NPM's log and
+from the sensor's external alerts — are applied to nftables by `stack-bouncer`
+(below). Nothing in the *packet* path is inline — enforcement happens at the
+kernel's input hook, with per-entry timeouts, so a sensor crash cannot be an
+outage; a bad rules reload can only feed a wrong decision, which the bouncer's
+own refusals bound.
 
 It is also **local only**: `DISABLE_ONLINE_API=true` means no console
 enrolment, no community blocklist and no telemetry leaving the host. The cost is
@@ -1352,17 +1361,19 @@ Three properties worth knowing:
   DHCP change cannot produce a self-ban. Banning `192.168.1.112` would cut the
   `.onion` proxies, the status page and your own SSH session at once.
   It also refuses **`STACK_WAN_IP`** (`stack.conf`), which is *not* an address
-  the host holds: the router holds it. Every check that leaves this host —
-  Uptime-Kuma, agent-mcp, the MCP clients — resolves the public names and comes
-  back through the router's NAT loopback, so all of it arrives as that one
-  source IP, and `stack/http-authfail` bans five 401s in ten seconds. Three
-  from one client in one second is on this host's own log. The refusal is
-  deliberately at the bouncer and **not** in the whitelist: the decision still
-  exists, still shows in `cscli decisions`, still pages — only the drop is
-  skipped, so `audit/bouncer.status` reports `skipped=1` and `banned=0` means
-  "your own egress is tripping a rule", not a quiet host. `verify.sh` warns when
-  the declaration disagrees with the address NPM actually logs for your own
-  monitoring (a WAN change, or a CDN in front of the site).
+  the host holds: the router holds it. A LAN client that uses a public name
+  resolves it, leaves through the router and comes back through NAT loopback,
+  arriving as that one source IP, and `stack/http-authfail` bans five 401s in
+  ten seconds. Three from one client in one second is on this host's own log.
+  The Uptime-Kuma monitors no longer take that path — they resolve their vhosts
+  through the container's host gateway, except the one public canary — so this
+  should now be rare, but a LAN browser using the public name still looks like
+  it. The refusal is deliberately at the bouncer and **not** in the whitelist:
+  the decision still exists, still shows in `cscli decisions`, still pages —
+  only the drop is skipped, so `audit/bouncer.status` reports `skipped=1` and
+  `banned=0` means "your own egress is tripping a rule", not a quiet host.
+  `verify.sh` warns when the declaration disagrees with the address NPM actually
+  logs for the canary (a WAN change, or a CDN in front of the site).
 * **Fails open in the safe direction.** An unreachable LAPI or a non-JSON answer
   leaves the existing bans alone (it never reads "no decisions" as "unban
   everything"), and a failed `nft -f` rolls back atomically.
@@ -1442,9 +1453,12 @@ exists only to answer that kind of traffic — any request to it is worth a look
 ~650 MB RSS for Suricata with the full ET Open ruleset (refreshed at container
 start, best effort — a host without internet starts on the twelve local rules),
 ~150 MB for CrowdSec, and nothing measurable for the bouncer (one nft
-transaction a minute). EVE JSON rotates daily and is pruned at
-`IDS_RETENTION_DAYS` (14) by `/etc/tmpfiles.d/stack-ids.conf`; `$DATA_DIR/ids`
-is regenerable and stays out of the backup set.
+transaction a minute). Suricata only rotates a `filename` containing a strftime
+template, and ours is static, so `eve.json` does not rotate: it grows at
+~50 MB/day and nothing prunes it (the old tmpfiles rule could never apply under
+the user-owned data dir — `systemd-tmpfiles` refuses the path transition). The
+alert-only `alerts.json` CrowdSec tails is a few MB/day. `$DATA_DIR/ids` is
+regenerable and stays out of the backup set.
 
 ### Rate limiting (the onion's only defence)
 

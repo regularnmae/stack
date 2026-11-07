@@ -9,8 +9,9 @@
 #     today's list, whitelisted anyway),
 #   * a page's asset load (one index.html plus its bundles),
 #   * searxng's own image fetches.
-# A client that trips this is a flood, a scrape or a very broken loop, and a
-# 10-minute ban is proportionate.
+# A client that trips this is a flood, a scrape or a very broken loop, and the
+# profile's 4 h decision (`blackhole` is only the re-trigger cooldown) is
+# proportionate.
 type: leaky
 name: stack/http-flood
 description: "one client flooding the public vhosts"

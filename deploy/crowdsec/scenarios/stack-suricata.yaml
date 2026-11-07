@@ -1,0 +1,77 @@
+# Decisions from the packet tier.
+#
+# Suricata never drops a packet -- stack-bouncer still owns enforcement -- but
+# its external alerts are now a decision source, which is what gives the sensor
+# a function beyond forensics. Two rules, and the split is the whole safety
+# argument:
+#
+#   stack/suricata-policy
+#     A public source touching a port this host never publishes, or hitting the
+#     default vhost, is hostile by definition. The default vhost exists only to
+#     answer scanners (README, "The proxy tier"), and the 9001xxx rules fire
+#     only when something that must never be published becomes reachable. One
+#     alert is enough; there is no benign version of these.
+#
+#   stack/suricata-exploit
+#     ET exploit signatures, three *different* ones from one source. The sensor
+#     can only read HTTP payloads on plain port 80 (TLS is NPM's), so these are
+#     clients that sent an exploit before following the redirect -- scanners,
+#     not users. `distinct` is what keeps a single signature that happens to
+#     match once from banning anyone.
+#
+# What never reaches either rule:
+#   * private sources -- stack/whitelists in s02-enrich drops 127.0.0.0/8,
+#     10.89.0.0/24, 192.168.0.0/16 and 172.16.0.0/12 before scenarios run. That
+#     is the loopback leg NPM re-originates, where every request is 127.0.0.1
+#     and has no client identity at all;
+#   * the operator's own WAN address -- left out of the whitelist on purpose,
+#     so a decision exists and stack-bouncer records `skipped=` rather than
+#     dropping the host's shared egress. Uptime-Kuma no longer hairpins (see
+#     deploy/uptime-kuma.container), so this should be rare;
+#   * severity 3 -- that is the informational noise on lo.
+#
+# The ban length is not set here: CrowdSec takes it from the first matching
+# profile, and deploy/crowdsec/profiles.yaml gives these two 1 h (the stock
+# default is 4 h). `blackhole` is only the re-trigger cooldown. One hour is
+# proportionate for a scanner and keeps a false positive from costing a
+# legitimate public client an afternoon.
+type: trigger
+name: stack/suricata-policy
+description: "public source reached a port this host never publishes, or hit the default vhost"
+filter: "evt.Meta.log_type == 'suricata_alert' && evt.Meta.suricata_alert_signature_id in ['9000001', '9000002', '9000003', '9000004', '9001001', '9001002', '9001003', '9001004', '9001005', '9001006']"
+groupby: evt.Meta.source_ip
+blackhole: 5m
+labels:
+  service: suricata
+  type: policy
+  remediation: true
+  confidence: 3
+  spoofable: 1
+  classification:
+    - attack.T1595
+  behavior: "generic:scan"
+  intent: reconnaissance
+
+---
+# Three distinct ET exploit signatures from one public source. Capacity 2 with
+# `distinct` means the third different signature; leakspeed 60s is well inside a
+# scanner's run and well outside a single unlucky request.
+type: leaky
+name: stack/suricata-exploit
+description: "three distinct exploit signatures from one public source"
+filter: "evt.Meta.log_type == 'suricata_alert' && (evt.Meta.suricata_rule_severity == '1' || evt.Meta.suricata_rule_severity == '2')"
+distinct: evt.Meta.suricata_alert_signature_id
+groupby: evt.Meta.source_ip
+capacity: 2
+leakspeed: 60s
+blackhole: 5m
+labels:
+  service: suricata
+  type: exploit
+  remediation: true
+  confidence: 2
+  spoofable: 2
+  classification:
+    - attack.T1190
+  behavior: "generic:exploit"
+  intent: anomalous

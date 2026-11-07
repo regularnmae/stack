@@ -1,5 +1,7 @@
-# Acquisition for the nginx-proxy-manager access logs -- the stack's only
-# plaintext view of attacker-controlled requests.
+# Acquisition for the nginx-proxy-manager access logs -- the stack's
+# attributable, plaintext view of attacker-controlled requests (the plaintext
+# past TLS termination does not exist on the wire). Suricata's alert-only EVE
+# feed is the other acquisition, in suricata.yaml.
 #
 # NPM terminates TLS on :80/:443, so Suricata sees a handshake and this file
 # sees the request. Every vhost that NPM_Hosts declares writes its own

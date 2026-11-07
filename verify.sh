@@ -651,6 +651,25 @@ if [ "${KUMA_STATUS_SLUG+x}" = x ] && [ -n "$KUMA_STATUS_SLUG" ]; then
     esac
 fi
 
+# The monitors must resolve their vhosts to the host gateway, not the public
+# name: that resolution is what stopped seven checks a minute from leaving the
+# host and coming back as the WAN address (89,766 handshakes in eight days).
+# A warning, not a failure -- Uptime-Kuma is UI-configured for its own account,
+# and a hand-added monitor may still hairpin. Read the entry from /etc/hosts
+# because it is exactly what podman wrote from --add-host.
+if podman container exists uptime-kuma 2>/dev/null; then
+    kuma_host_ip=$(podman exec uptime-kuma awk -v h="$BOLTMESH_FRONTEND_HOST" \
+        '$2 == h { print $1; exit }' /etc/hosts 2>/dev/null || true)
+    case "$kuma_host_ip" in
+        169.254.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
+            pass "uptime-kuma resolves $BOLTMESH_FRONTEND_HOST through the host gateway ($kuma_host_ip)" ;;
+        "")
+            warn "uptime-kuma has no static entry for $BOLTMESH_FRONTEND_HOST (re-run deploy/install.sh)" ;;
+        *)
+            warn "uptime-kuma resolves $BOLTMESH_FRONTEND_HOST to $kuma_host_ip (expected the host gateway, not a public address)" ;;
+    esac
+fi
+
 # ---------------------------------------------------------------------------
 head2 "Backups"
 BACKUP_TIMER="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/backup.timer"
@@ -1019,6 +1038,39 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
     else
         warn "crowdsec parsed ${npm_parse_ok}/2 sample access log lines (parser or log_format changed)"
     fi
+    # The packet tier's half of the same chain: Suricata's EVE alert must reach
+    # a scenario, and a loopback-sourced one must be whitelisted before it can.
+    # The first sample is a public undeclared-Host alert -- the rule that
+    # actually bans the scanners in this host's log -- and the second is the
+    # same alert from 127.0.0.1, the NPM re-originated leg that has no client
+    # identity. A parser rename, an acquisition label change or a missing
+    # scenario fails here instead of silently disabling enforcement.
+    eve_sample='{"timestamp":"2026-11-07T12:00:00.000000+0000","event_type":"alert","in_iface":"enp8s0","src_ip":"198.51.100.7","dest_ip":"192.0.2.10","dest_port":80,"proto":"TCP","alert":{"signature_id":9000004,"rev":2,"signature":"STACK HTTP request to an undeclared Host","severity":1}}'
+    eve_ok=0
+    if explain=$(podman exec crowdsec cscli explain --type suricata-evelogs --log "$eve_sample" 2>/dev/null); then
+        printf '%s' "$explain" | grep -q 'stack/suricata-policy' && eve_ok=1
+    fi
+    if [ "$eve_ok" -eq 1 ]; then
+        pass "crowdsec turns a public Suricata alert into stack/suricata-policy"
+    else
+        warn "crowdsec did not match a Suricata EVE alert to stack/suricata-policy (parser, acquisition label or scenario changed)"
+    fi
+    eve_private=${eve_sample/198.51.100.7/127.0.0.1}
+    if explain=$(podman exec crowdsec cscli explain --type suricata-evelogs --log "$eve_private" 2>/dev/null); then
+        if printf '%s' "$explain" | grep -q 'stack/whitelists.*whitelisted'; then
+            pass "crowdsec whitelists a loopback Suricata alert"
+        else
+            bad "crowdsec does not whitelist a loopback Suricata alert (it would ban the host's own traffic)"
+        fi
+    fi
+    # The acquisition's file is root-owned; a container that cannot read it
+    # produces no decisions and no error anyone reads. The label is the real
+    # failure mode (a default_t file is unreadable), so prove the read.
+    if podman exec crowdsec sh -c 'test -r /ids/suricata/alerts.json' 2>/dev/null; then
+        pass "crowdsec can read Suricata's alert feed"
+    else
+        warn "crowdsec cannot read /ids/suricata/alerts.json (sensor not installed, or the file lost its container label)"
+    fi
     # The whitelist is the other half of detection, and it fails QUIETLY: its
     # expressions are plain string matches and the parser runs in s02-enrich,
     # before any scenario, so a prefix one octet too short reports the traffic as
@@ -1061,21 +1113,30 @@ else
 fi
 
 # The other half of not banning the operator: stack-bouncer refuses to ENFORCE a
-# ban on the host's own public address (STACK_WAN_IP, stack.conf), because every
-# check that leaves this host -- Uptime-Kuma, agent-mcp, the MCP clients -- comes
-# back through the router's NAT loopback with that one address as its source, and
-# a decision against it takes the whole public surface down. A stale declaration
-# is silently that self-lockout waiting to happen again, and an empty one is no
-# protection at all, so compare it with the address NPM actually logs for the
-# host's own monitoring: the Uptime-Kuma user agent is what identifies it (the
-# agent clients share the address, but poll too rarely to rely on).
+# ban on the host's own public address (STACK_WAN_IP, stack.conf), because
+# traffic that leaves this host and comes back through the router's NAT loopback
+# arrives with that one address as its source, and a decision against it takes
+# the whole public surface down. A stale declaration is silently that
+# self-lockout waiting to happen again, and an empty one is no protection at
+# all, so compare it with the address NPM actually logs for the host's own
+# monitoring: the Uptime-Kuma user agent is what identifies it (the agent
+# clients share the address, but poll too rarely to rely on).
+#
+# The monitors no longer hairpin -- deploy/uptime-kuma.container resolves every
+# vhost but MCP_HOST to the container's host gateway -- so MCP_HOST's monitor is
+# the only public Uptime-Kuma source left, and it is the canary this check
+# reads. Private sources are filtered out first: otherwise the internal
+# monitors (192.168.1.112) would be the top entry and the WAN address would look
+# unverified forever.
 npm_logs="$DATA_DIR/npm/data/logs"
 wan_seen=$(grep -h 'Uptime-Kuma/' "$npm_logs"/*_access.log 2>/dev/null \
-    | sed -n 's/.*\[Client \([^]]*\)\].*/\1/p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+    | sed -n 's/.*\[Client \([^]]*\)\].*/\1/p' \
+    | grep -vE '^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' \
+    | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
 if [ -z "${STACK_WAN_IP:-}" ]; then
     warn "no STACK_WAN_IP in stack.conf: a decision against the host's own public address (Uptime-Kuma, the MCP clients) will be enforced"
 elif [ -z "$wan_seen" ]; then
-    warn "STACK_WAN_IP=$STACK_WAN_IP is unverified (no Uptime-Kuma request in $npm_logs)"
+    warn "STACK_WAN_IP=$STACK_WAN_IP is unverified (no public Uptime-Kuma request in $npm_logs -- the MCP_HOST canary has not run, or its monitor was removed)"
 elif [ "$wan_seen" = "$STACK_WAN_IP" ]; then
     pass "stack-bouncer will not enforce a ban on the host's own public address ($STACK_WAN_IP)"
 else
@@ -1094,17 +1155,16 @@ root_want() { # src
     # root-tier drift -- and `&` silently mangles the path instead.
     sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
         -e "s|@CONFIG_DIR@|$(esc "$DATA_DIR/config")|g" \
-        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
-        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" "$1"
+        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" "$1"
 }
 
 # Everything install.sh --root renders from deploy/root/, as source:target[:opt].
-# Content only -- bootstrap owns the modes. Three kinds of file are absent on
+# Content only -- bootstrap owns the modes. Two kinds of file are absent on
 # purpose: the 0600 env files it writes from heredocs (audit.env, bouncer.env),
-# the tmpfiles rule it does the same way, and /etc/audit/rules.d/60-stack.rules,
-# which it writes 0640 into a 0750 directory -- an unprivileged sweep cannot read
-# it at all, and `auditctl -l` needs CAP_AUDIT_CONTROL, so the audit section
-# reads the report's verdict instead.
+# and /etc/audit/rules.d/60-stack.rules, which it writes 0640 into a 0750
+# directory -- an unprivileged sweep cannot read it at all, and `auditctl -l`
+# needs CAP_AUDIT_CONTROL, so the audit section reads the report's verdict
+# instead.
 # `opt` marks a target that is legitimately absent until there is a bouncer key
 # in secrets.env (the second bootstrap pass installs it): skip those silently
 # when missing, since the bouncer block above already reports its own state.

@@ -1,0 +1,28 @@
+# The packet tier's only input into a decision: Suricata's alert-only EVE feed.
+#
+# The sensor writes alerts.json next to eve.json (deploy/root/suricata/
+# suricata.yaml). eve.json itself is not read on purpose -- it is ~50 MB/day of
+# DNS/TLS/HTTP context for ~1,900 alerts/day, and making the engine parse all of
+# it to find the alerts would be the load the sensor exists to notice.
+#
+# `labels.type` is load-bearing twice over:
+#   * crowdsecurity/non-syslog copies it into evt.Parsed.program, and
+#     crowdsecurity/suricata-logs' EVE node filters on exactly
+#     `suricata-evelogs` -- the same value is what the PARSERS environment in
+#     deploy/crowdsec.container.in installs;
+#   * verify.sh replays a sample line with `cscli explain --type
+#     suricata-evelogs`, so a rename on either side fails the sweep instead of
+#     turning enforcement off quietly.
+#
+# `mode: tail` (also the default) starts at the end: a restart must not replay
+# two weeks of alerts into new decisions. The file is created by install.sh
+# --root and recreated by the sensor's start.sh if a restart finds it missing.
+# There is no tmpfiles rule: systemd-tmpfiles refuses a path that crosses the
+# user-owned data dir, and a fixed path that does not exist when CrowdSec starts
+# is not retried -- which is why creation happens at install time, not at boot.
+source: file
+filenames:
+  - /ids/suricata/alerts.json
+labels:
+  type: suricata-evelogs
+mode: tail

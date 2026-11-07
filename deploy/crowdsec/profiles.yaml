@@ -1,0 +1,44 @@
+# Decision profiles -- where the ban *duration* actually comes from.
+#
+# A scenario's `duration:` key is a no-op in CrowdSec 1.8: the engine turns an
+# alert into a decision through the first matching profile here. Measured on
+# this host: stack/suricata-policy's first live decision came out at 4 h even
+# though the scenario said 1 h, because the stock default_ip_remediation
+# profile (4 h) caught it first.
+#
+# So the stack declares its own profiles, with the Suricata set ahead of the
+# stock ones. The two stock profiles are reproduced verbatim below (they are
+# the image's /etc/crowdsec/profiles.yaml, and the entrypoint's `rsync
+# --ignore-existing` leaves a mounted file alone on first start): replacing
+# them with "only the stack profile" would stop IP bans for every NPM-derived
+# scenario, which is the failure this file exists to avoid.
+#
+# 1 h for the wire tier: a scanner is worth an hour, and a false positive on a
+# public client costs an afternoon at the stock 4 h. Everything NPM-derived
+# keeps the 4 h default -- those rules are calibrated on request behaviour and
+# are much less likely to be a one-off.
+name: stack_suricata_ban
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip" && (Alert.GetScenario() == "stack/suricata-policy" || Alert.GetScenario() == "stack/suricata-exploit")
+decisions:
+  - type: ban
+    duration: 1h
+on_success: break
+
+---
+name: default_ip_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+  - type: ban
+    duration: 4h
+on_success: break
+
+---
+name: default_range_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+  - type: ban
+    duration: 4h
+on_success: break

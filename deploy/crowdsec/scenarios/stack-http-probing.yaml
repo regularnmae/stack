@@ -19,6 +19,9 @@ groupby: evt.Meta.source_ip
 capacity: 10
 leakspeed: 10s
 blackhole: 5m
+# The decision duration is the profile's (deploy/crowdsec/profiles.yaml: the
+# stock 4 h); `blackhole` is only how long the bucket stays closed after it
+# fires.
 labels:
   service: npm
   type: scan

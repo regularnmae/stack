@@ -137,7 +137,12 @@ below states the rule, the doc says why it is the rule.
 ### Intrusion detection -- `docs/ids.md`
 
 - **Two engines, two privilege domains, neither redundant:** Suricata sees
-  packets and no TLS content, CrowdSec sees NPM's log and nothing on the wire.
+  packets and no TLS content, CrowdSec reads NPM's log and Suricata's alert-only
+  feed and nothing on the wire.
+- **Suricata bans only the external half:** `alerts.json` (never `eve.json`)
+  drives the policy sids plus three distinct ET severity 1/2 signatures. The
+  loopback leg has no client identity and is whitelisted; the sensor still never
+  drops a packet.
 - **Enforcement is ours** and refuses private space, every address the host
   holds, and `STACK_WAN_IP`. `CROWDSEC_BOUNCER_KEY` is never regenerated.
 - **The audit tier watches files only** -- directory watches record nothing on

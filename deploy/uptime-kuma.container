@@ -21,6 +21,20 @@ Network=npm-network.network
 # (which terminates TLS) stays the only way in for a client.
 PublishPort=127.0.0.1:8107:3001
 
+# The monitors resolve the public vhosts *here*, not on the internet. host-gateway
+# is pasta's 169.254.1.2 (the host's side of the container link), so a check
+# reaches nginx-proxy-manager directly: no trip through the router's NAT
+# loopback, no 93.177.140.197 as its source, and the certificate still validates
+# because the URL (and its SNI) is unchanged. Without this, seven monitors at
+# 60 s were the top source in both NPM's access log and Suricata's eve.json, all
+# wearing the operator's WAN address -- 89,766 handshakes in eight days.
+#
+# MCP_HOST is deliberately absent: its monitor is the one canary that still
+# leaves the host, and verify.sh reads that source address to notice a WAN
+# change. deploy/install.sh builds the list from stack.conf's *_HOST
+# declarations, so a host rename cannot leave a stale entry here.
+PodmanArgs=@KUMA_ADD_HOSTS@
+
 # kuma's embedded MariaDB, its own sqlite-era leftovers and the uploaded images.
 # The top level is written by container root (= the host user under rootless
 # podman), so install.sh only mkdirs it; mariadb/ and run/ inside are owned by
