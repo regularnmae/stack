@@ -13,9 +13,12 @@
 # changes NPM's log format breaks detection silently, which is why verify.sh
 # replays a sample line through the parser.
 #
-# The status appears twice (NPM logs both the client-facing and the
-# upstream-facing code); the client-facing one is the Meta.http_status, because
-# that is what the attacker was answered.
+# The status appears twice, in NPM's order: $upstream_status first, then $status.
+# The *second* is what the client was answered, so that is Meta.http_status. The
+# first is "-" whenever no upstream was contacted at all -- the 301 onto https, a
+# 499 where the client hung up first -- so it must accept that literal; an INT in
+# that slot dropped 13% of this host's real access log, and the dropped lines were
+# precisely the plain-HTTP reconnaissance (301) and the aborted scans (499).
 name: stack/npm-logs
 description: "nginx-proxy-manager access log (custom proxy format and combined)"
 filter: "evt.Line.Labels.type == 'npm'"
@@ -25,7 +28,7 @@ onsuccess: next_stage
 nodes:
   # ---- NPM proxy-host format -------------------------------------------
   - grok:
-      pattern: '^\[%{DATA:timestamp}\] - %{INT:status} %{INT:status_upstream} - %{WORD:method} %{WORD:scheme} %{IPORHOST:vhost} "%{DATA:request_uri}" \[Client %{IPORHOST:remote_addr}\] \[Length %{INT:body_bytes}\] \[Gzip %{DATA:gzip}\] \[Sent-to %{IPORHOST:upstream_addr}\] "%{DATA:http_user_agent}" "%{DATA:http_referer}"$'
+      pattern: '^\[%{DATA:timestamp}\] - (?:-|%{INT:status_upstream}) %{INT:status} - %{WORD:method} %{WORD:scheme} %{IPORHOST:vhost} "%{DATA:request_uri}" \[Client %{IPORHOST:remote_addr}\] \[Length %{INT:body_bytes}\] \[Gzip %{DATA:gzip}\] \[Sent-to %{IPORHOST:upstream_addr}\] "%{DATA:http_user_agent}" "%{DATA:http_referer}"$'
       apply_on: Line.Raw
     statics:
       - meta: log_type

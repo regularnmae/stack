@@ -87,10 +87,16 @@ README's "Intrusion detection".
   Two more traps: NPM writes a **custom log_format**, not `combined`, so the
   stock nginx parser matches nothing --
   `deploy/crowdsec/parsers/s01-parse/stack-npm.yaml` owns both shapes and
-  `verify.sh` replays a sample line through `cscli explain` on every sweep,
-  because a silent log-format change turns detection off; and the whitelist in
-  `s02-enrich/` protects the host's **own** address, which is what onion traffic
-  and Uptime-Kuma's self-checks look like in the log. A whitelist expression is a
+  `verify.sh` replays **both** of them through `cscli explain` on every sweep,
+  because a silent log-format change turns detection off. The second shape is the
+  trap inside the format itself: NPM logs `$upstream_status` *before* `$status`,
+  and the first is `-` whenever no upstream was contacted (the 301 onto https, a
+  499 on a client abort). Requiring an INT there dropped 13% of this host's real
+  access log and the dropped lines were exactly the plain-HTTP scans; the parser
+  accepts `-` and puts the **second** status in `Meta.http_status`. And the
+  whitelist in `s02-enrich/` protects the host's **own** address, which is what
+  onion traffic and Uptime-Kuma's self-checks look like in the log. A whitelist
+  expression is a
   **plain string prefix, not a network**: `startsWith '172.2'` covered
   172.2.0.0/16 and 172.200.0.0/14 as well as the intended 172.20.0.0/14, so
   ~4.4M public addresses were reported as `whitelisted` -- and because the

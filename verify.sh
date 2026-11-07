@@ -997,19 +997,27 @@ head2 "Intrusion detection"
 #   A host that has not re-run bootstrap simply has no sensor -- report that as a
 #   warning, not a failure, so an older host does not fail every sweep.
 if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container" ]; then
-    # The parser is the whole detection chain's front door. One replayed log line
-    # through cscli explain proves it still matches NPM's format -- a log-format
-    # change would otherwise disable detection silently.
-    sample='[30/Oct/2026:13:31:19 +0000] - 404 404 - GET https api.example.invalid "/probe" [Client 203.0.113.9] [Length 22] [Gzip -] [Sent-to 127.0.0.1] "verify/1.0" "-"'
-    if explain=$(podman exec crowdsec cscli explain --type npm --log "$sample" 2>/dev/null); then
+    # The parser is the whole detection chain's front door. Two replayed lines
+    # through cscli explain prove it still matches NPM's format -- a log-format
+    # change would otherwise disable detection silently. The second is the shape
+    # that used to be dropped: NPM logs $upstream_status before $status, and it
+    # is "-" whenever no upstream was contacted (the 301 onto https, a 499 on a
+    # client abort), which was 13% of this host's real traffic.
+    npm_parse_ok=0
+    for sample in \
+        '[30/Oct/2026:13:31:19 +0000] - 404 404 - GET https api.example.invalid "/probe" [Client 203.0.113.9] [Length 22] [Gzip -] [Sent-to 127.0.0.1] "verify/1.0" "-"' \
+        '[30/Oct/2026:13:31:19 +0000] - - 301 - GET http api.example.invalid "/" [Client 203.0.113.9] [Length 166] [Gzip -] [Sent-to 127.0.0.1] "verify/1.0" "-"'
+    do
+        explain=$(podman exec crowdsec cscli explain --type npm --log "$sample" 2>/dev/null) || continue
         if printf '%s' "$explain" | grep -q 'stack/npm-logs' \
            && printf '%s' "$explain" | grep -q 'parser success'; then
-            pass "crowdsec parses nginx-proxy-manager's log format"
-        else
-            warn "crowdsec did not parse a sample access log line (parser or log_format changed)"
+            npm_parse_ok=$((npm_parse_ok + 1))
         fi
+    done
+    if [ "$npm_parse_ok" -eq 2 ]; then
+        pass "crowdsec parses both nginx-proxy-manager log shapes"
     else
-        warn "could not ask crowdsec to explain a sample line"
+        warn "crowdsec parsed ${npm_parse_ok}/2 sample access log lines (parser or log_format changed)"
     fi
     # The whitelist is the other half of detection, and it fails QUIETLY: its
     # expressions are plain string matches and the parser runs in s02-enrich,
