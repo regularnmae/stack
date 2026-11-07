@@ -162,10 +162,13 @@ README's "Intrusion detection".
   acquisition does not retry a *fixed* path that is missing when the agent
   starts (it only adds a directory watch for glob patterns), which is why the
   file exists before either container starts. `mode: tail` means a restart does
-  not replay old alerts into new decisions. It is not rotated: Suricata only
-  rotates a `filename` containing a strftime template, and an alert-only file
-  grows at a few MB/day (unlike `eve.json`, which is ~50 MB/day and has never
-  rotated here -- a separate, open sizing issue).
+  not replay old alerts into new decisions. Both it and `eve.json` are rotated
+  daily by the host's logrotate (`deploy/root/logrotate-stack-ids`), which
+  renames, creates and SIGHUPs the sensor to reopen -- Suricata itself cannot
+  rotate a static `filename`. `create`, not `copytruncate`, because the sensor
+  holds the fd at its offset. The CrowdSec tailer's `ReOpen` follows the new
+  file, and `ids.sh`'s cursor carries the inode so a rotation cannot make it
+  skip the new file's beginning.
 - **A dead feed must not look healthy.** `verify.sh` replays a synthetic public
   EVE alert through `cscli explain` (expects `stack/suricata-policy`), replays
   the same alert from `127.0.0.1` (expects `whitelisted`), and proves the

@@ -1,0 +1,37 @@
+# logrotate config for the Suricata sensor's EVE files.
+#
+# Rendered by deploy/install.sh --root from this file (the @DATA_DIR@ and
+# @IDS_RETENTION_DAYS@ tokens) into /etc/logrotate.d/stack-ids, and driven by
+# the host's logrotate.timer. It exists because Suricata does NOT rotate a
+# static `filename`: `rotate-interval` only takes effect when the name contains
+# a strftime template, and ours are static so vector, scripts/ids.sh and
+# CrowdSec keep one stable path. The documented external mechanism is this one:
+# rename, create, then SIGHUP -- on SIGHUP Suricata closes every log file and
+# reopens it in append mode.
+#
+# `create`, never `copytruncate`: the sensor holds the fd at its current offset,
+# so truncating underneath it leaves a sparse file (the next write lands at the
+# old offset). Rotating by rename + a new file + HUP is safe.
+#
+# The chcon is load-bearing: the new file must be container_file_t, because
+# CrowdSec (alerts.json) and vector (eve.json) read these through a bind mount,
+# and a default_t file is unreadable by a container (measured). Rotated files
+# keep the label of the file they came from.
+#
+# Not `daily`-only by accident: 14 days is IDS_RETENTION_DAYS (stack.conf), and
+# at ~50 MB/day of EVE context that is the whole retention budget.
+@DATA_DIR@/ids/suricata/eve.json @DATA_DIR@/ids/suricata/alerts.json {
+    daily
+    rotate @IDS_RETENTION_DAYS@
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0644 root root
+    su root root
+    sharedscripts
+    postrotate
+        chcon -t container_file_t @DATA_DIR@/ids/suricata/eve.json @DATA_DIR@/ids/suricata/alerts.json 2>/dev/null || true
+        /usr/bin/podman kill --signal=HUP suricata 2>/dev/null || true
+    endscript
+}

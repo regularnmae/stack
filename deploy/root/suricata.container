@@ -50,9 +50,10 @@ AddCapability=SYS_NICE
 # EVE JSON, the alert-only feed CrowdSec tails, the engine log and
 # suricata-update's log. Root-owned because the container writes as root;
 # scripts/ids.sh only reads them (0644). Suricata only rotates a `filename`
-# containing a strftime template and ours is static, so eve.json does NOT
-# rotate -- nothing prunes it (deploy/install.sh --root explains why the
-# tmpfiles rule is gone). Outside BACKUP_PATHS: regenerable telemetry.
+# containing a strftime template and ours are static, so the host's logrotate
+# rotates them (deploy/root/logrotate-stack-ids, rendered to
+# /etc/logrotate.d/stack-ids) and SIGHUPs the sensor to reopen. Outside
+# BACKUP_PATHS: regenerable telemetry.
 Volume=@DATA_DIR@/ids/suricata:/var/log/suricata:z
 # /var/lib/suricata holds the ruleset suricata-update downloads (46 MB with ET
 # Open) and its cache. On the data disk, not in an anonymous volume, so a

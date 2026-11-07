@@ -1454,11 +1454,11 @@ exists only to answer that kind of traffic — any request to it is worth a look
 start, best effort — a host without internet starts on the twelve local rules),
 ~150 MB for CrowdSec, and nothing measurable for the bouncer (one nft
 transaction a minute). Suricata only rotates a `filename` containing a strftime
-template, and ours is static, so `eve.json` does not rotate: it grows at
-~50 MB/day and nothing prunes it (the old tmpfiles rule could never apply under
-the user-owned data dir — `systemd-tmpfiles` refuses the path transition). The
-alert-only `alerts.json` CrowdSec tails is a few MB/day. `$DATA_DIR/ids` is
-regenerable and stays out of the backup set.
+template, and ours are static, so the host's `logrotate` does it: a stack-owned
+`/etc/logrotate.d/stack-ids` renames `eve.json` and `alerts.json`, creates new
+files, and SIGHUPs the sensor to reopen them, keeping `IDS_RETENTION_DAYS` (14)
+compressed rotations. `eve.json` is ~50 MB/day, so that is the budget the data
+disk must cover. `$DATA_DIR/ids` is regenerable and stays out of the backup set.
 
 ### Rate limiting (the onion's only defence)
 

@@ -1155,7 +1155,8 @@ root_want() { # src
     # root-tier drift -- and `&` silently mangles the path instead.
     sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
         -e "s|@CONFIG_DIR@|$(esc "$DATA_DIR/config")|g" \
-        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" "$1"
+        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
+        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" "$1"
 }
 
 # Everything install.sh --root renders from deploy/root/, as source:target[:opt].
@@ -1175,6 +1176,7 @@ ROOT_FILES=(
     "deploy/root/suricata/disable.conf:/etc/stack-ids/suricata/disable.conf"
     "deploy/root/suricata/start.sh:/etc/stack-ids/suricata/start.sh"
     "deploy/root/suricata/rules/local.rules:/etc/stack-ids/suricata/rules/local.rules"
+    "deploy/root/logrotate-stack-ids:/etc/logrotate.d/stack-ids"
     "deploy/root/audit-report.sh:/etc/stack-ids/audit-report.sh"
     "deploy/root/stack-audit.service:/etc/systemd/system/stack-audit.service"
     "deploy/root/stack-audit.timer:/etc/systemd/system/stack-audit.timer"
@@ -1188,6 +1190,24 @@ if [ -f /etc/containers/systemd/suricata.container ]; then
         pass "suricata is active"
     else
         bad "suricata is not active (sudo systemctl status suricata)"
+    fi
+    # Rotation is the host logrotate's job (a static filename is never rotated
+    # by Suricata's rotate-interval). The file size is the signal that it
+    # stopped: a daily rotation keeps eve.json well under 100 MB, so 500 MB
+    # means ~a week of unrotated growth and the disk is the loser.
+    eve_file="$DATA_DIR/ids/suricata/eve.json"
+    if [ -s "$eve_file" ]; then
+        eve_mb=$(( $(stat -c %s "$eve_file" 2>/dev/null || echo 0) / 1048576 ))
+        if [ "$eve_mb" -gt 500 ]; then
+            warn "suricata eve.json is ${eve_mb} MB -- logrotate is not rotating it (systemctl status logrotate.timer)"
+        else
+            pass "suricata eve.json is ${eve_mb} MB (rotated by logrotate)"
+        fi
+    fi
+    if systemctl is-active --quiet logrotate.timer 2>/dev/null; then
+        pass "logrotate.timer is active (EVE rotation)"
+    else
+        warn "logrotate.timer is not active; eve.json and alerts.json will not rotate"
     fi
     # A rendered file that no longer matches the repo means someone edited
     # deploy/root/ without re-running bootstrap -- the root tier is then not the

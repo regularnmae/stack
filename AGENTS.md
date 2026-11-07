@@ -143,6 +143,10 @@ below states the rule, the doc says why it is the rule.
   drives the policy sids plus three distinct ET severity 1/2 signatures. The
   loopback leg has no client identity and is whitelisted; the sensor still never
   drops a packet.
+- **Its EVE files are rotated by the host, not by Suricata:** a static
+  `filename` ignores `rotate-interval`; `/etc/logrotate.d/stack-ids`
+  (`deploy/root/logrotate-stack-ids`) renames, creates and SIGHUPs, and the
+  stable path is what vector, `ids.sh` and CrowdSec follow.
 - **Enforcement is ours** and refuses private space, every address the host
   holds, and `STACK_WAN_IP`. `CROWDSEC_BOUNCER_KEY` is never regenerated.
 - **The audit tier watches files only** -- directory watches record nothing on

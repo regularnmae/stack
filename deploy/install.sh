@@ -220,6 +220,7 @@ root_render() { # src dest mode [data-dir]
     sed -e "s|@DATA_DIR@|$(esc "$4")|g" \
         -e "s|@CONFIG_DIR@|$(esc "$4/config")|g" \
         -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
+        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" \
         "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
     install -m "$3" "$tmp" "$2"
     rm -f "$tmp"
@@ -281,16 +282,15 @@ install_root_tier() {
         || warn "could not label $data/ids/suricata/alerts.json for containers"
 
     # There is deliberately no /etc/tmpfiles.d/stack-ids.conf any more, and any
-    # copy an earlier bootstrap wrote is removed below. The retention rule it
-    # carried could never work: every path under $DATA_DIR crosses the
-    # user-owned data dir before reaching the root-owned ids/suricata, and
-    # systemd-tmpfiles refuses to canonicalize that ("unsafe path transition"),
-    # so `--create` exited 73 on every bootstrap and pruned nothing. Rotation is
-    # moot too -- Suricata needs a strftime template in `filename`, and ours is
-    # static -- so the live files are uncapped: eve.json grows at ~50 MB/day and
-    # the alert-only alerts.json at a few MB/day. A real fix has to move the
-    # sensor's state out from under $DATA_DIR or add a root prune oneshot;
-    # until then this script creates the directory and the feed itself.
+    # copy an earlier bootstrap wrote is removed below. That rule could never
+    # work: every path under $DATA_DIR crosses the user-owned data dir before
+    # reaching the root-owned ids/suricata, and systemd-tmpfiles refuses to
+    # canonicalize that ("unsafe path transition"), so `--create` exited 73 on
+    # every bootstrap and pruned nothing. Rotation is the host logrotate's job
+    # instead (deploy/root/logrotate-stack-ids, rendered below): Suricata only
+    # rotates a `filename` containing a strftime template, and ours are static,
+    # so logrotate renames the live files, creates new ones and SIGHUPs the
+    # sensor to reopen them. This script creates the directory and the feed.
     rm -f /etc/tmpfiles.d/stack-ids.conf
 
     # The unit itself. Render, then let systemd regenerate suricata.service from
@@ -309,6 +309,23 @@ install_root_tier() {
     # manager under test.
     grep -qF "$data/ids/suricata" "$ROOT_UNIT_DIR/suricata.container" \
         || die "rendered $ROOT_UNIT_DIR/suricata.container does not reference $data/ids/suricata -- the substitution failed"
+
+    # Rotation and retention for the EVE files (see the header of
+    # deploy/root/logrotate-stack-ids): Suricata cannot rotate a static
+    # filename, so the host's daily logrotate renames the files, creates new
+    # ones and SIGHUPs the sensor to reopen them. Rendered here because the
+    # paths carry @DATA_DIR@ and the keep count is IDS_RETENTION_DAYS.
+    root_render "$DEPLOY_DIR/root/logrotate-stack-ids" /etc/logrotate.d/stack-ids 644 "$data"
+    grep -qF "$data/ids/suricata" /etc/logrotate.d/stack-ids \
+        || die "rendered /etc/logrotate.d/stack-ids does not reference $data/ids/suricata -- the substitution failed"
+    logrotate -d /etc/logrotate.d/stack-ids >/dev/null 2>&1 \
+        || warn "logrotate rejects /etc/logrotate.d/stack-ids; check it, the EVE files will not rotate"
+    if systemctl cat logrotate.timer >/dev/null 2>&1; then
+        systemctl enable --now logrotate.timer >/dev/null 2>&1 \
+            || warn "could not enable logrotate.timer; the EVE files will not rotate"
+    else
+        warn "logrotate.timer is not installed (sudo dnf install logrotate); the EVE files will not rotate"
+    fi
 
     # ------------------------------------------------------------------
     # auditd: watch the host-level surfaces nothing in this repo writes

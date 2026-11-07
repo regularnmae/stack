@@ -87,10 +87,12 @@ outputs:
       enabled: yes
       filetype: regular
       filename: eve.json
-      # Rotated by Suricata itself so nothing here needs to delete root-owned
-      # files. 14 days is scripts/ids.sh's retention too (it prunes the
-      # rotated files it can see, and warns if it cannot).
-      rotate-interval: 1d
+      # Rotated by the host's logrotate, not by Suricata: `rotate-interval`
+      # only works when `filename` contains a strftime template, and the stable
+      # name is what vector and scripts/ids.sh follow. See
+      # deploy/root/logrotate-stack-ids (rename, create, SIGHUP to reopen).
+      # (No `rotate-interval` key: a static filename is never rotated, and 0 is
+      # the compiled default.)
       # Local timestamps: an alert at 03:12 should read as 03:12 in the
       # operator's own timezone, next to the monitor's audit log.
       community-id: yes
@@ -126,11 +128,9 @@ outputs:
   # HTTP context and ~1,900 alerts/day, and making the engine parse all of it to
   # find the alerts would be the load the sensor exists to notice.
   #
-  # Deliberately NOT rotated. Suricata only rotates a `filename` that contains a
-  # strftime template (measured: eve.json's rotate-interval has never produced a
-  # rotated file on this host), and a date-named feed would break the fixed-path
-  # acquisition and be born with this root-owned directory's default_t label,
-  # which a container cannot read. One file, alert-only, a few MB/day.
+  # Rotated by the same logrotate config as eve.json. Suricata itself cannot
+  # rotate a static `filename` (it needs a strftime template), and a date-named
+  # feed would break the fixed-path acquisition. One stable path, alert-only.
   - eve-log:
       enabled: yes
       filetype: regular

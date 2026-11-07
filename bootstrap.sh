@@ -68,6 +68,12 @@ if ! command -v podman >/dev/null 2>&1; then
 else
     log "podman already installed ($(podman --version))"
 fi
+# Rotates Suricata's EVE files (a static filename is never rotated by
+# rotate-interval; deploy/root/logrotate-stack-ids does it and SIGHUPs the
+# sensor). The config is rendered by install.sh --root, the timer is the
+# distro's.
+command -v logrotate >/dev/null 2>&1 \
+    || { log "installing logrotate (Suricata EVE rotation)"; sudo dnf install -y logrotate; }
 command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y git; }
 # jq parses the nginx-proxy-manager admin API responses in scripts/npm-hosts.sh
 # and builds the monitor's alert payload. (net_curl exists so a host-side check

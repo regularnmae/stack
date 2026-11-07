@@ -123,17 +123,27 @@ say "crowdsec: $CROWDSEC_STATE, $DECISIONS decision(s)${NEWEST:+ (newest: $NEWES
 # A byte cursor, not a scan of the whole file: eve.json is the highest-volume
 # artefact in the stack (every HTTP/TLS/DNS record), and re-reading it every
 # five minutes to count a handful of alerts is how a monitor becomes the load it
-# is supposed to notice. A truncate -- or a rotation, if the filename ever
-# gains a strftime template -- shrinks the file, which the size-decreased check
-# catches by restarting from zero.
+# is supposed to notice. The cursor carries the inode as well as the offset:
+# logrotate (deploy/root/logrotate-stack-ids) renames the file and creates a new
+# one, and a same-size-or-larger new file would otherwise be read from the old
+# offset, skipping its beginning. A truncate still trips the size check.
 ALERTS=0
 LAST_ALERT=""
 if [ -s "$EVE" ]; then
     size=$(stat -c %s "$EVE" 2>/dev/null || echo 0)
+    ino=$(stat -c %i "$EVE" 2>/dev/null || echo "")
     off=0
-    [ -f "$CURSOR_FILE" ] && off=$(cat "$CURSOR_FILE" 2>/dev/null)
+    cur=""
+    [ -f "$CURSOR_FILE" ] && cur=$(cat "$CURSOR_FILE" 2>/dev/null)
+    case "$cur" in
+        *:*) cur_ino=${cur%%:*}; off=${cur#*:} ;;
+        # A cursor from before inode tracking: trust the offset, do not re-read
+        # the whole file once just because the format changed.
+        *)   cur_ino="$ino"; off="$cur" ;;
+    esac
     case "$off" in ''|*[!0-9]*) off=0 ;; esac
-    [ "$size" -ge "$off" ] || off=0
+    if [ -n "$ino" ] && [ "$cur_ino" != "$ino" ]; then off=0; fi
+    if [ "$size" -lt "$off" ]; then off=0; fi
     if [ "$size" -gt "$off" ]; then
         # -R + fromjson? so a torn final line (an unfinished write) is skipped
         # instead of failing the whole stream. The cursor advances whenever the
@@ -155,7 +165,7 @@ if [ -s "$EVE" ]; then
             ALERTS="${ALERTS:-0}"
             LAST_ALERT="${LAST_ALERT:-}"
             case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
-            printf '%s\n' "$size" > "$CURSOR_FILE"
+            printf '%s:%s\n' "$ino" "$size" > "$CURSOR_FILE"
         fi
     fi
 fi

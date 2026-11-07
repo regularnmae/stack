@@ -252,8 +252,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   **two-pass** install -- the sensor's unit and config reference `@DATA_DIR@`,
   so the first run (before any data dir exists) only prints a notice and the
   rerun after the first `./deploy.sh` installs it. Everything it installs is
-  root-owned: the unit in `/etc/containers/systemd/` and the config in
-  `/etc/stack-ids/`. That unit is mode
+  root-owned: the unit in `/etc/containers/systemd/`, the config in
+  `/etc/stack-ids/`, the logrotate rule in `/etc/logrotate.d/`, and the
+  bouncer/audit units in `/etc/systemd/system/`. That unit is mode
   0644 (not the 0600 the user units get) because `verify.sh` diffs it against
   `deploy/root/` to catch drift and it carries no secret -- the secret-bearing
   templates are the *user* units. Nothing

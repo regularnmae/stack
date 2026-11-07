@@ -17,9 +17,10 @@
 # `mode: tail` (also the default) starts at the end: a restart must not replay
 # two weeks of alerts into new decisions. The file is created by install.sh
 # --root and recreated by the sensor's start.sh if a restart finds it missing.
-# There is no tmpfiles rule: systemd-tmpfiles refuses a path that crosses the
-# user-owned data dir, and a fixed path that does not exist when CrowdSec starts
-# is not retried -- which is why creation happens at install time, not at boot.
+# It is rotated daily by the host logrotate (deploy/root/logrotate-stack-ids);
+# the tailer's ReOpen follows the new file at the same path. There is no
+# tmpfiles rule -- systemd-tmpfiles refuses a path that crosses the user-owned
+# data dir -- which is why creation happens at install time, not at boot.
 source: file
 filenames:
   - /ids/suricata/alerts.json
