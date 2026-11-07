@@ -140,5 +140,13 @@ jobs:
           for f in "${files[@]}"; do
             bash -n "$f"
           done
+      # The Python core behind the two reconciler wrappers (scripts/stackctl/),
+      # offline: frame codec, packet dispatch, declaration parsing, payload
+      # construction, and full reconciles against fake NPM and fake socket.io
+      # kuma servers. The bash/Python duration parsers are cross-checked
+      # against one shared fixture file (tests/fixtures/durations.txt), which
+      # the shell-helper step below reads from the other side.
+      - name: stackctl python tests
+        run: python3 tests/test_stackctl.py
       - name: shared shell helper tests
         run: tests/test-lib.sh

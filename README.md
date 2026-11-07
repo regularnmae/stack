@@ -208,8 +208,8 @@ stale image). It also records the unit definitions it applied in
 `$DATA_DIR/audit/units.applied`, while `deploy/install.sh` records what it
 rendered in `units.rendered` — so running the installer by hand shows up as
 drift (`./verify.sh` fails naming the units) instead of being swallowed by the
-next deploy. The five images built here — the two explorers, `kuma-ctl`,
-`netcheck` and `tor` — are rebuilt when their Containerfile changed and left
+next deploy. The four images built here — the two explorers, `netcheck`
+and `tor` — are rebuilt when their Containerfile changed and left
 alone otherwise: the digest of that file is baked into the image as a label, so
 a merged base-image bump reaches the host on the next deploy instead of needing
 a hand rebuild (`--only` forces one anyway). Common flags:
@@ -1544,12 +1544,15 @@ more; whether the index behind it is current is what `verify.sh --deep` and
 `scripts/monitor.sh` read (above).
 
 Uptime-Kuma has no REST write API, so the reconciler speaks its socket.io
-API from the `kuma-ctl` image (built by `deploy/install.sh` from `kuma-ctl/`,
-like `tor` and `netcheck`). The admin login lives in
+API directly: `scripts/kuma-monitors.sh` feeds the declarations to a
+stdlib-only Python client (`scripts/stackctl/kuma.py` over `socketio.py`/
+`ws.py`), which reaches kuma through its loopback publish
+(`127.0.0.1:8107`). The `kuma-ctl` Node image that used to carry the client is
+retired. The admin login lives in
 `$DATA_DIR/config/uptime-kuma/api.env` (mode 600, seeded empty — fill in what
 the setup wizard asked for and re-run `./deploy.sh --only kuma-monitors`); the
 reconciler self-skips until it is filled in. The login never reaches a command
-line: it travels to the container through the environment. The page's
+line: the Python core reads the file itself. The page's
 **notifications** stay UI-configured — kuma embeds Apprise, so its targets are
 chosen once in its own settings. That is the *status page's* channel, not the
 alerting path: the stack's own alerts go monitor → Alertmanager → mail (above),

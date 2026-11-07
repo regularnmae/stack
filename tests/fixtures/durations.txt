@@ -1,0 +1,29 @@
+# Shared fixtures for the Go-duration parser: tests/test-lib.sh (bash dur_ms)
+# and tests/test_stackctl.py (stackctl.duration.dur_ms) both read this file,
+# which is the whole point -- the two implementations exist on either side of a
+# language boundary and must never disagree (scripts/metrics.sh's cpu_seconds
+# and lib.sh's wait_healthy key off the same numbers).
+#
+# Format: <input><TAB><expected-milliseconds>; "#" lines are comments and the
+# literal token <empty> stands for the empty string.
+2h30m0.5s	9000500
+500ms	500
+4.5s	4500
+1m30.5s	90500
+2.5h	9000000
+1.5m	90000
+08m	480000
+3h59m59.7s	14399700
+47m45.158824s	2865158
+30s	30000
+1h	3600000
+1m	60000
+999ms	999
+1.0005s	1000
+0s	0
+<empty>	0
+abc	0
+10	0
+ms	0
+5s3	5000
+1h2m3s4ms	3723004

@@ -112,7 +112,7 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Local images"
-# These five are built here, not pulled, so a healthy container says nothing
+# These four are built here, not pulled, so a healthy container says nothing
 # about whether its image still matches its Containerfile -- a merged base-image
 # bump (Renovate's dockerfile manager) changes only that file. deploy.sh and
 # install.sh rebuild on the label mismatch (scripts/lib.sh's image_is_current);
@@ -121,7 +121,6 @@ head2 "Local images"
 local_images=(
     "btc-explorer|$BTC_EXPLORER_IMAGE|btc-explorer"
     "xmr-explorer|$XMR_EXPLORER_IMAGE|xmr-explorer"
-    "kuma-ctl|$KUMA_CTL_IMAGE|kuma-ctl"
     "netcheck|$NETCHECK_IMAGE|netcheck"
     "tor|$TOR_IMAGE|tor"
 )

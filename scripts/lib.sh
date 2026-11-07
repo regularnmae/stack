@@ -488,11 +488,11 @@ units_baseline() {
 }
 
 # --- locally-built images --------------------------------------------------
-# The images this repo builds itself (btc-explorer, xmr-explorer, kuma-ctl,
-# netcheck, tor) are described completely by their Containerfile: the base image
+# The images this repo builds itself (btc-explorer, xmr-explorer, netcheck,
+# tor) are described completely by their Containerfile: the base image
 # is digest-pinned in `FROM`, every upstream pin is an `ARG` in the same file,
-# and none of them COPYs anything out of its build context (the one sibling
-# file, kuma-ctl/monitors.mjs, is bind-mounted at run time on purpose). So the
+# and none of them COPYs anything out of its build context (each directory is
+# that one file). So the
 # hash of that file *is* the image's build identity. Baking it in as a label
 # lets a later deploy answer "is this image the one this Containerfile
 # describes?" without rebuilding to find out -- which is what makes a merged

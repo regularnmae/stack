@@ -170,7 +170,8 @@ below states the rule, the doc says why it is the rule.
 ### The proxy tier -- `docs/proxy.md`
 
 - **`uptime-kuma` is UI-configured for its own account, declared for everything
-  else**, through the `kuma-ctl` image; notifications stay UI-configured.
+  else**, by `scripts/kuma-monitors.sh` (a stdlib Python socket.io client —
+  kuma has no REST write API); notifications stay UI-configured.
 - **Rate limiting is per ingress:** clearweb by `$binary_remote_addr`, the onion
   zone *global* (every `.onion` visitor is the host's own address), and the MCP
   host gets `limit_conn` only.

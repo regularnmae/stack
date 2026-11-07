@@ -151,7 +151,7 @@ export RESTIC_REPOSITORY RESTIC_PASSWORD RESTIC_CACHE_DIR
 # driver only controls whether podman also journals a copy. Without it every
 # monitor and verify sweep wrote the whole snapshot table into the journal --
 # 161 lines every five minutes -- which the log store then indexed: the same
-# one-shot-container noise kuma-ctl and the apprise probe already avoid.
+# one-shot-container noise the apprise probe already avoids.
 common=(
     --rm
     --log-driver=none

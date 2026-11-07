@@ -1028,7 +1028,7 @@ log "wrote $CONFIG_DIR/logs/vector/vector.toml"
 mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
 
 # ---------------------------------------------------------------------------
-# 3. the images built here: netcheck, kuma-ctl, tor
+# 3. the images built here: netcheck, tor
 # ---------------------------------------------------------------------------
 # None of these is pulled, so "is it built?" is the wrong question: a base-image
 # bump rewrites only that image's Containerfile (Renovate's dockerfile manager),
@@ -1065,14 +1065,6 @@ ensure_local_image() { # image build-context
 # network for nginx-proxy-manager, which binds 127.0.0.1:81 there.
 if command -v podman >/dev/null 2>&1; then
     ensure_local_image "$NETCHECK_IMAGE" "$REPO_DIR/netcheck"
-fi
-
-# kuma-ctl: the socket.io client scripts/kuma-monitors.sh runs (kuma has no REST
-# write API). The reconcile script is bind-mounted on every run, so a change to
-# kuma-ctl/monitors.mjs does not need a rebuild -- only the pinned
-# node/socket.io-client base does.
-if command -v podman >/dev/null 2>&1; then
-    ensure_local_image "$KUMA_CTL_IMAGE" "$REPO_DIR/kuma-ctl"
 fi
 
 # ---------------------------------------------------------------------------

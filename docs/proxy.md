@@ -28,15 +28,21 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   **embedded MariaDB** (`UPTIME_KUMA_ENABLE_EMBEDDED_MARIADB=1`,
   `db-config.json` says `embedded-mariadb`; the sqlite-era `kuma.db` is a 0-byte
   leftover) — and its monitors are
-  `KUMA_MONITORS` in `stack.conf`, reconciled by `scripts/kuma-monitors.sh`
-  through the `kuma-ctl` image because kuma has no REST write API. The admin
+  `KUMA_MONITORS` in `stack.conf`, reconciled by `scripts/kuma-monitors.sh` —
+  a stdlib Python socket.io client (`scripts/stackctl/kuma.py` over
+  `socketio.py`/`ws.py`), because kuma has no REST write API. The `kuma-ctl`
+  Node image that used to carry the client is retired: no image build, no
+  container and no bind mount stand between the declaration and the server,
+  and the reconciler reaches kuma through its loopback publish
+  (`127.0.0.1:8107`, the unit's `PublishPort=`) rather than by container name
+  on `npm-network`. The admin
   login the setup wizard creates lives in `config/uptime-kuma/api.env` (UI-first
   like `npm/api.env`), and the reconciler, `deploy.sh` and `verify.sh` self-skip
   until it is filled in. The declaration format and every socket.io payload
   trap (positional events, the `info` handshake, the status-code array) are in
-  `scripts/kuma-monitors.sh` and `kuma-ctl/monitors.mjs` — don't reimplement the
-  reconcile as curl. Note v2 answers `/` with a **302 to `/dashboard`**, so a
-  probe must follow redirects. Notifications stay UI-configured.
+  `scripts/kuma-monitors.sh` and `scripts/stackctl/kuma.py` — don't reimplement
+  the reconcile as curl. Note v2 answers `/` with a **302 to `/dashboard`**, so
+  a probe must follow redirects. Notifications stay UI-configured.
 
 ## Rate limiting is per ingress
 
@@ -115,13 +121,18 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 - **Every proxy host is declared, not hand-clicked:** `NPM_HOSTS` in `stack.conf`
   is the whole public surface, and `scripts/npm-hosts.sh` reconciles it through
   NPM's admin API on `127.0.0.1:81` (update in place by `domain_names`, else
-  create, plus a Let's Encrypt certificate per host). It needs the admin login in
-  `config/npm/api.env` and `jq` on the host (bootstrap), and self-skips when the
+  create, plus a Let's Encrypt certificate per host). The reconciler itself is
+  Python (`scripts/stackctl/npm.py`, fed the declarations over stdin by the
+  wrapper): it talks to the loopback admin API with urllib, so it needs neither
+  a netcheck transport nor `jq`, and a credential held in the process's memory
+  never reaches an argv. It needs the admin login in
+  `config/npm/api.env` and self-skips when the
   login is absent. `--prune` is the only destructive mode. The `mcp` flag is the
   one exception to "one forward": one location per `MCP_HOSTS` entry
   (`/prefix:container:port`), each rewritten onto the container's `/mcp`, with
-  the streaming settings an SSE transport needs — the script's header owns that
-  payload. `verify.sh` re-checks the path through NPM's `:80` (following the
+  the streaming settings an SSE transport needs — `scripts/stackctl/npm.py`
+  owns that payload. `verify.sh` re-checks the path through NPM's `:80`
+  (following the
   force-SSL redirect) with `--connect-to` onto `127.0.0.1`, so the certificate
   still validates. BTCPay's admin UI is gated by its own login (2FA expected),
   and its API by the store-scoped key the backend carries; no daemon RPC has a

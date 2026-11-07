@@ -224,7 +224,7 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   changed; a changed `Image=` otherwise arrives only via
   `restart_changed_units`. The Containerfile is the whole recipe — base digest,
   upstream `ARG` pins, and deliberately no `COPY` out of the build context
-  (`kuma-ctl/monitors.mjs` is bind-mounted at run time), which is why the hash is
+  (each build directory is that one file), which is why the hash is
   the Containerfile's and not the directory's.
 
 ## The app tier, shared mounts, and the root tier
@@ -317,8 +317,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   first in `start_infra`, after `refresh_image_unit` because install.sh rebuilds
   the image in place (a plain `start` on an active unit keeps the old bits), and
   `ensure_netcheck` covers every `--only` branch (the monitor's verify sweep,
-  npm-hosts, kuma-monitors all probe). `kuma-ctl` is still a one-shot
-  `podman run` and keeps `--log-driver=none`: the driver only
+  npm-hosts, kuma-monitors all probe). One-shot `podman run`s elsewhere keep
+  `--log-driver=none`: the driver only
   controls persistence, so their stdout still reaches the caller's command
   substitution while the journal stays clean. `wait_healthy` treats a container
   with no healthcheck as "up" -- `victoria-logs` is distroless and the netcheck

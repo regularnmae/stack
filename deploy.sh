@@ -1072,7 +1072,7 @@ if [ -n "$ONLY" ]; then
     elif [ "$ONLY" = kuma-monitors ]; then
         # Reconcile the status page's monitors after a KUMA_MONITORS change, or
         # after filling in $DATA_DIR/config/uptime-kuma/api.env. Touches no
-        # container, but reaches uptime-kuma by name, so the network stays up.
+        # container; the reconciler reaches uptime-kuma on its loopback publish.
         sync_units
         kuma_monitors
     elif [ "$ONLY" = agent-skills ]; then

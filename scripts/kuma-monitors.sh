@@ -24,12 +24,22 @@
 # The page every declared monitor is published on is
 # KUMA_STATUS_SLUG/KUMA_STATUS_TITLE/KUMA_STATUS_GROUP.
 #
-# Uptime-Kuma has no REST write API, so the work runs as a socket.io client in
-# the kuma-ctl image (built by deploy/install.sh from kuma-ctl/), reached by
-# container name on npm-network. The admin login lives in
-# $DATA_DIR/config/uptime-kuma/api.env (mode 600, seeded by deploy/install.sh;
-# fill it in with the login the setup wizard asked for) and is passed to the
-# container through the environment, never a command line `ps` can read.
+# Uptime-Kuma has no REST write API -- its management surface is socket.io.
+# The client is scripts/stackctl/kuma.py (socketio.py over ws.py, stdlib
+# only), fed the declarations over stdin (scripts/stackctl/decl.py). The
+# kuma-ctl Node image this script used to `podman run` is retired: no image
+# build, no container and no bind mount stand between the declaration and the
+# server any more. Kuma is reached through its loopback publish -- the
+# PublishPort=127.0.0.1:8107:3001 of deploy/uptime-kuma.container, which is
+# what the KUMA_URL default below mirrors; move the publish and the default
+# moves with it. Proving the publish (rather than the container name on
+# npm-network) is deliberate: it is the same surface nginx-proxy-manager
+# forwards the dashboard through.
+#
+# The admin login lives in $DATA_DIR/config/uptime-kuma/api.env (mode 600,
+# seeded by deploy/install.sh; fill it in with the login the setup wizard
+# asked for). The Python core reads that file itself -- no credential reaches
+# an argv or a container env `ps` can read.
 #
 # Idempotent and UI-preserving: missing monitors are created, monitors whose
 # *declared* fields changed are updated in place (UI-tuned interval, retries
@@ -56,10 +66,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# jq composes the payload for the container's environment (the declaration
-# itself is plain shell); bootstrap.sh installs it, like for npm-hosts.sh.
-command -v jq >/dev/null 2>&1 \
-    || die "jq is required. Install it: sudo dnf install -y jq"
+command -v python3 >/dev/null 2>&1 \
+    || die "python3 is required to run the reconciler (bootstrap.sh installs it)"
 
 if [ "${KUMA_MONITORS+x}" != x ] || [ "${#KUMA_MONITORS[@]}" -eq 0 ]; then
     die "KUMA_MONITORS is empty; set it in stack.conf"
@@ -77,100 +85,35 @@ if [ -z "$KUMA_USERNAME" ] || [ -z "$KUMA_PASSWORD" ]; then
     exit 0
 fi
 
-KUMA_CTL_IMAGE="${KUMA_CTL_IMAGE:-localhost/kuma-ctl:local}"
-if ! podman image exists "$KUMA_CTL_IMAGE" 2>/dev/null; then
-    die "$KUMA_CTL_IMAGE is not built. Re-run ./deploy.sh (deploy/install.sh builds it from kuma-ctl/), or: podman build -t $KUMA_CTL_IMAGE $REPO_DIR/kuma-ctl/"
-fi
+# The loopback publish of deploy/uptime-kuma.container (see the header).
+KUMA_URL="${KUMA_URL:-http://127.0.0.1:8107}"
 
-# --- declaration -> payload -------------------------------------------------
-# Every entry becomes a normalized monitor object. Numbers must be verifiably
-# numbers before they reach --argjson; codes are trimmed and split on commas.
-# Two shapes exist because kuma has two check types behind one monitor table:
-# http(s) is a URL with accepted status codes, tcp:// is hostname+port and no
-# codes at all.
-monitors_json="[]"
-for entry in "${KUMA_MONITORS[@]}"; do
-    IFS='|' read -r mname murl mcodes minterval mretries <<<"$entry"
-    if [ -z "$mname" ] || [ -z "$murl" ]; then
-        die "bad KUMA_MONITORS entry: $entry (want \"name|url[|codes[|interval[|retries]]]\")"
-    fi
-    case "$murl" in
-        http://*|https://*)
-            mcodes="${mcodes:-200-299}"
-            printf '%s' "$mcodes" | grep -qE '^[0-9]{3}-[0-9]{3}(,[0-9]{3}-[0-9]{3})*$' \
-                || die "bad accepted status codes in KUMA_MONITORS entry: $entry (want ranges like 200-299,400-499)"
-            ;;
-        tcp://*)
-            [ -z "$mcodes" ] \
-                || die "a tcp:// monitor accepts no status codes: $entry (leave that field empty)"
-            ;;
-        *) die "bad monitor URL in KUMA_MONITORS entry: $entry (want scheme://..., or tcp://host:port)" ;;
-    esac
-    minterval="${minterval:-60}"
-    mretries="${mretries:-2}"
-    case "$minterval" in ''|*[!0-9]*) die "bad interval in KUMA_MONITORS entry: $entry (seconds)" ;; esac
-    case "$mretries"  in ''|*[!0-9]*) die "bad retries in KUMA_MONITORS entry: $entry (attempts)" ;; esac
-    if [ "${murl#tcp://}" != "$murl" ]; then
-        mtarget="${murl#tcp://}"
-        mhost="${mtarget%:*}"
-        mport="${mtarget##*:}"
-        if [ -z "$mhost" ] || [ "$mport" = "$mtarget" ]; then
-            die "bad tcp:// target in KUMA_MONITORS entry: $entry (want tcp://host:port)"
-        fi
-        case "$mport" in ''|*[!0-9]*) die "bad port in KUMA_MONITORS entry: $entry (1-65535)" ;; esac
-        { [ "$mport" -ge 1 ] && [ "$mport" -le 65535 ]; } \
-            || die "bad port in KUMA_MONITORS entry: $entry (1-65535)"
-        monitors_json=$(printf '%s' "$monitors_json" | jq -c \
-            --arg name "$mname" --arg host "$mhost" --argjson port "$mport" \
-            --argjson interval "$minterval" --argjson retries "$mretries" \
-            '. + [{name: $name, type: "port", hostname: $host, port: $port,
-                   interval: $interval, retryInterval: $interval, maxretries: $retries}]')
-    else
-        monitors_json=$(printf '%s' "$monitors_json" | jq -c \
-            --arg name "$mname" --arg url "$murl" --arg codes "$mcodes" \
-            --argjson interval "$minterval" --argjson retries "$mretries" \
-            '. + [{name: $name, type: "http", url: $url,
-                   codes: ($codes | gsub(" "; "") | split(",")),
-                   interval: $interval, retryInterval: $interval, maxretries: $retries}]')
-    fi
-done
-
-status_json=""
 if [ -n "${KUMA_STATUS_SLUG:-}" ]; then
     KUMA_STATUS_TITLE="${KUMA_STATUS_TITLE:-BoltMesh services}"
     KUMA_STATUS_GROUP="${KUMA_STATUS_GROUP:-Public services}"
-    status_json=$(jq -nc --arg slug "$KUMA_STATUS_SLUG" --arg title "${KUMA_STATUS_TITLE}" \
-        --arg group "${KUMA_STATUS_GROUP}" '{slug: $slug, title: $title, group: $group}')
 else
     log "KUMA_STATUS_SLUG is empty in stack.conf; only the monitors will be reconciled"
 fi
 
-# --- reconcile inside the kuma-ctl container --------------------------------
-# The script is bind-mounted so the repo owns the runtime code; the login is
-# delivered through the environment -- `podman run -e` is not a command line
-# `ps` can read, the same rule `scripts/npm-hosts.sh` holds with its curl
-# config on stdin.
-runtime_args=(
-    --rm
-    # A one-shot probe, not a service: its output is read on the terminal, and
-    # keeping a copy in journald only adds noise to the log store.
-    --log-driver=none
-    --network npm-network
-    -e "KUMA_URL=${KUMA_URL:-http://uptime-kuma:3001}"
-    -e "KUMA_USERNAME=$KUMA_USERNAME"
-    -e "KUMA_PASSWORD=$KUMA_PASSWORD"
-    -e "KUMA_MONITORS_JSON=$monitors_json"
-    -e "KUMA_DRY_RUN=$DRY_RUN"
-    -e "KUMA_PRUNE=$PRUNE"
-    -v "$REPO_DIR/kuma-ctl/monitors.mjs:/kuma-ctl/monitors.mjs:ro,z"
-)
-[ -n "$status_json" ] && runtime_args+=(-e "KUMA_STATUS_JSON=$status_json")
-
-if [ -n "$status_json" ]; then
+if [ -n "${KUMA_STATUS_SLUG:-}" ]; then
     log "reconciling ${#KUMA_MONITORS[@]} monitor(s) + status page '$KUMA_STATUS_SLUG'"
 else
     log "reconciling ${#KUMA_MONITORS[@]} monitor(s)"
 fi
-podman run "${runtime_args[@]}" "$KUMA_CTL_IMAGE" node /kuma-ctl/monitors.mjs
+
+stream_decls() {
+    local entry
+    printf 'V\tKUMA_URL\t%s\n' "$KUMA_URL"
+    printf 'V\tCONFIG_DIR\t%s\n' "$CONFIG_DIR"
+    printf 'V\tDRY_RUN\t%s\n' "$DRY_RUN"
+    printf 'V\tPRUNE\t%s\n' "$PRUNE"
+    printf 'V\tKUMA_STATUS_SLUG\t%s\n' "${KUMA_STATUS_SLUG:-}"
+    printf 'V\tKUMA_STATUS_TITLE\t%s\n' "${KUMA_STATUS_TITLE:-}"
+    printf 'V\tKUMA_STATUS_GROUP\t%s\n' "${KUMA_STATUS_GROUP:-}"
+    for entry in "${KUMA_MONITORS[@]}"; do printf 'K\t%s\n' "$entry"; done
+}
+
+stream_decls \
+    | PYTHONPATH="$REPO_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 -m stackctl kuma-monitors
 
 log "done"
