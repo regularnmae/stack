@@ -717,9 +717,14 @@ status_write() { # path header result detail [KEY=VALUE ...]
     return 0
 }
 
-# The session id the last mcp_initialize was given, and the marker that -w uses
-# to put it after the response body rather than mixed into it.
+# The session id the last mcp_initialize was given, the protocol revision the
+# server actually agreed to, the handshake response body (for callers that want
+# to inspect it without capturing the function's stdout, which would run it in a
+# subshell and lose the two globals above), and the marker that -w uses to put
+# the session id after the response body rather than mixed into it.
 MCP_SESSION_ID=""
+MCP_NEGOTIATED_VERSION=""
+MCP_INIT_RESPONSE=""
 MCP_SID_MARKER='__mcp_session_id__'
 
 # MCP servers that are not on npm-network, as "<container>:<port>". One entry
@@ -768,18 +773,44 @@ mcp_curl() { # container curl-args...
 # implement. Named once because it is the one fact this hand-rolled client and
 # the real one disagree about silently when a revision lands -- a bump is this
 # line plus agent-skills', and tests/test-lib.sh asserts the body carries it.
+#
+# It is a request, not an agreement: the spec lets the server answer with an
+# older revision, and that answer is what every request after the handshake has
+# to name (MCP_NEGOTIATED_VERSION). verify.sh compares the two and warns when a
+# server has moved, which is the only way a bump here is noticed.
 MCP_PROTOCOL_VERSION='2025-06-18'
 MCP_INIT_BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"$MCP_PROTOCOL_VERSION\",\"capabilities\":{},\"clientInfo\":{\"name\":\"monitor\",\"version\":\"0\"}}}"
 
+# The notification the lifecycle requires once initialize has succeeded. A
+# notification has no id and the server answers 202 with no body, so this cannot
+# return anything useful; it is fire-and-forget on purpose (every server here
+# tolerates its absence, and a failed notification must not fail a probe that
+# already has a working session).
+#   mcp_initialized CONTAINER TOKEN [timeout]
+mcp_initialized() {
+    printf 'header = "Authorization: Bearer %s"\n' "$2" | \
+        mcp_curl "$1" -s -o /dev/null -m "${3:-20}" -K - \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            ${MCP_SESSION_ID:+-H "mcp-session-id: $MCP_SESSION_ID"} \
+            -H "MCP-Protocol-Version: ${MCP_NEGOTIATED_VERSION:-$MCP_PROTOCOL_VERSION}" \
+            -X POST "$(mcp_base "$1")/mcp" \
+            -d '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            2>/dev/null || true
+}
+
 # Authenticate against CONTAINER's MCP endpoint: do the initialize handshake,
-# print the response body and record the session id in MCP_SESSION_ID. Returns 1
-# when the server did not answer with a serverInfo result. The bearer token goes
-# in a curl config on stdin, so it never reaches the host's argv. CONTAINER is
-# the unit's container name; MCP_HOST_NETNS above decides where it is reached.
+# print the response body and record the session id in MCP_SESSION_ID and the
+# revision the server agreed to in MCP_NEGOTIATED_VERSION. Returns 1 when the
+# server did not answer with a serverInfo result. The bearer token goes in a
+# curl config on stdin, so it never reaches the host's argv. CONTAINER is the
+# unit's container name; MCP_HOST_NETNS above decides where it is reached.
 #   mcp_initialize CONTAINER TOKEN [timeout]
 mcp_initialize() {
     local c="$1" token="$2" t="${3:-20}" resp
     MCP_SESSION_ID=""
+    MCP_NEGOTIATED_VERSION=""
+    MCP_INIT_RESPONSE=""
     resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | \
         mcp_curl "$c" -s -m "$t" -K - \
             -H 'Content-Type: application/json' \
@@ -790,6 +821,14 @@ mcp_initialize() {
     MCP_SESSION_ID="${resp##*"$MCP_SID_MARKER"}"
     resp="${resp%%"$MCP_SID_MARKER"*}"
     printf '%s' "$resp" | grep -q '"serverInfo"' || return 1
+    # The answer names the revision the session will speak. A server that does
+    # not answer with one is assumed to have accepted ours.
+    MCP_NEGOTIATED_VERSION=$(mcp_protocol "$resp")
+    [ -n "$MCP_NEGOTIATED_VERSION" ] || MCP_NEGOTIATED_VERSION="$MCP_PROTOCOL_VERSION"
+    mcp_initialized "$c" "$token" "$t"
+    # verify.sh reads this for the drift check; nothing in this file does.
+    # shellcheck disable=SC2034
+    MCP_INIT_RESPONSE="$resp"
     printf '%s\n' "$resp"
 }
 
@@ -804,6 +843,7 @@ mcp_tool_call() {
             -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' \
             ${MCP_SESSION_ID:+-H "mcp-session-id: $MCP_SESSION_ID"} \
+            -H "MCP-Protocol-Version: ${MCP_NEGOTIATED_VERSION:-$MCP_PROTOCOL_VERSION}" \
             -X POST "$(mcp_base "$c")/mcp" -d "$call" 2>/dev/null
 }
 
@@ -818,6 +858,31 @@ mcp_call() {
     mcp_tool_call "$c" "$token" "$tool" "$args" "$t"
 }
 
+# The last JSON-RPC envelope in a response body: the body itself when it is
+# plain JSON, or the last `data:` line of the transport's SSE stream -- progress
+# notifications and pings may surround the result. Prints nothing when the body
+# carries no envelope.
+mcp_envelope() { # response-body -> the last result/error envelope
+    local body="$1"
+    case "$body" in
+        'data: '*|*$'\ndata: '*)
+            printf '%s\n' "$body" | sed -n 's/^data: //p' \
+                | jq -R -c 'fromjson? | select(type == "object" and (has("result") or has("error")))' 2>/dev/null \
+                | tail -n1 ;;
+        *) printf '%s' "$body" ;;
+    esac
+}
+
+# The protocol revision the server answered the handshake with. Empty when the
+# body is not a handshake (an error, or a transport that said nothing useful),
+# which mcp_initialize reads as "it accepted the one we sent".
+mcp_protocol() { # response-body -> negotiated protocolVersion
+    local doc
+    doc=$(mcp_envelope "$1")
+    [ -n "$doc" ] || return 0
+    printf '%s' "$doc" | jq -r '.result.protocolVersion // empty' 2>/dev/null || true
+}
+
 # Unpack the text document a tools/call returned. mcp_call prints the HTTP body
 # verbatim: either a plain JSON-RPC envelope, or an SSE stream ("event: message"
 # / "data: {...}") -- the streamable-HTTP transport answers the latter. The
@@ -827,16 +892,8 @@ mcp_call() {
 # or the body is not what the transport promises, so callers keep their existing
 # "empty means unavailable" branches.
 mcp_result_raw() { # response-body -> the tool's text content
-    local body="$1" doc
-    case "$body" in
-        'data: '*|*$'\ndata: '*)
-            # The streamable-HTTP transport's SSE form: one JSON-RPC envelope per
-            # data line, with progress notifications and pings around the result.
-            doc=$(printf '%s\n' "$body" | sed -n 's/^data: //p' \
-                | jq -R -c 'fromjson? | select(type == "object" and (has("result") or has("error")))' 2>/dev/null \
-                | tail -n1) ;;
-        *) doc="$body" ;;
-    esac
+    local doc
+    doc=$(mcp_envelope "$1")
     [ -n "$doc" ] || return 0
     printf '%s' "$doc" | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }

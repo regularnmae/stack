@@ -267,6 +267,19 @@ for e in "${MCP_PROBES[@]}"; do
 
     if mcp_initialize "$name" "$token" 15 >/dev/null; then
         pass "$name authenticated MCP handshake"
+        # The revision the server agreed to. A mismatch is not a failure -- a
+        # server legitimately negotiates down -- but it means this client's
+        # pinned MCP_PROTOCOL_VERSION is no longer what the server speaks, and
+        # nothing else in the stack would notice.
+        pv=$(mcp_protocol "$MCP_INIT_RESPONSE")
+        case "$pv" in
+            '')
+                warn "$name did not answer the handshake with a protocolVersion" ;;
+            "$MCP_PROTOCOL_VERSION")
+                pass "$name speaks MCP $pv" ;;
+            *)
+                warn "$name negotiated MCP $pv, but scripts/lib.sh sends $MCP_PROTOCOL_VERSION (bump it, and agent-skills' PROTOCOL_VERSION, together)" ;;
+        esac
     else
         bad "$name authenticated handshake failed"
     fi
@@ -359,6 +372,20 @@ head2 "Agent tooling"
 # is kept for --deep so the shallow sweep stays offline.
 AGENT_BIN="${AGENT_MCP_BIN:-$HOME/.local/bin/agent-mcp}"
 AGENT_DIR="$BUILD_DIR/${AGENT_SKILLS_REPO:-agent-skills}"
+# The revision agent-mcp sends is hand-maintained in scripts/lib.sh too
+# (MCP_PROTOCOL_VERSION): two clients of the same servers must name the same
+# one, so a bump that lands on one side only is drift. Read the constant,
+# never import the module.
+if [ -r "$AGENT_DIR/lib/mcp_http.py" ]; then
+    agent_proto=$(sed -n 's/^PROTOCOL_VERSION *= *"\(.*\)"/\1/p' "$AGENT_DIR/lib/mcp_http.py" | head -n1)
+    if [ -z "$agent_proto" ]; then
+        warn "could not read PROTOCOL_VERSION from $AGENT_DIR/lib/mcp_http.py"
+    elif [ "$agent_proto" = "$MCP_PROTOCOL_VERSION" ]; then
+        pass "agent-mcp and the host probes both speak MCP $agent_proto"
+    else
+        warn "agent-mcp speaks MCP $agent_proto but scripts/lib.sh sends $MCP_PROTOCOL_VERSION (bump both)"
+    fi
+fi
 if [ ! -x "$AGENT_BIN" ]; then
     warn "agent-mcp is not installed (./deploy.sh --only agent-skills)"
 else

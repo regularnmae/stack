@@ -65,6 +65,48 @@ assert_eq '"initialize"' \
     "$(printf '%s' "$MCP_INIT_BODY" | jq -c '.method')" \
     'MCP_INIT_BODY is the initialize method'
 
+# The negotiation: the server answers the handshake with the revision it will
+# speak, which is not necessarily the one asked for. verify.sh compares that
+# answer with MCP_PROTOCOL_VERSION, so the two shapes must both parse.
+assert_eq '2025-06-18' \
+    "$(mcp_protocol '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"x"}}}')" \
+    'mcp_protocol reads a plain handshake'
+assert_eq '2024-11-05' \
+    "$(mcp_protocol 'event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"x"}}}')" \
+    'mcp_protocol reads an SSE handshake'
+assert_eq "" "$(mcp_protocol '{"jsonrpc":"2.0","id":1,"error":{"code":-1}}')" \
+    'mcp_protocol prints nothing for an error envelope'
+
+# ... and the requests that follow name it. Stub mcp_curl and record its argv,
+# one per line: a header whose quoting broke would appear as two lines.
+mcp_curl() { # container curl-args...
+    local arg
+    printf '<%s>\n' "$@" >> "$TMP_DIR/curl.log"
+    for arg in "$@"; do
+        case "$arg" in
+            *'"method":"initialize"'*)
+                printf '%s\n%s%s\n' \
+                    '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"fake","version":"0"}}}' \
+                    "$MCP_SID_MARKER" 'sess-1'
+                return 0 ;;
+        esac
+    done
+}
+mcp_initialize fake-mcp token 5 >/dev/null
+assert_eq '2024-11-05' "$MCP_NEGOTIATED_VERSION" \
+    'initialize records the revision the server agreed to'
+assert_eq '2024-11-05' "$(mcp_protocol "$MCP_INIT_RESPONSE")" \
+    'initialize keeps the handshake body for the drift check'
+assert_eq 'sess-1' "$MCP_SESSION_ID" 'initialize records the session id'
+mcp_tool_call fake-mcp token some_tool '{}' 5 >/dev/null
+grep -qx '<MCP-Protocol-Version: 2024-11-05>' "$TMP_DIR/curl.log" \
+    || { printf 'FAIL: tools/call does not name the negotiated revision\n' >&2; exit 1; }
+grep -qx '<mcp-session-id: sess-1>' "$TMP_DIR/curl.log" \
+    || { printf 'FAIL: tools/call lost the session id\n' >&2; exit 1; }
+grep -q 'notifications/initialized' "$TMP_DIR/curl.log" \
+    || { printf 'FAIL: initialize did not send notifications/initialized\n' >&2; exit 1; }
+
 # The status-file contract: ok_epoch moves only on success and is carried
 # through a failure, which is what the monitor's age checks key on.
 status="$TMP_DIR/ids.status"
