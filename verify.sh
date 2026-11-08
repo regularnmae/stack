@@ -1168,6 +1168,7 @@ ROOT_FILES=(
     "deploy/root/stack-audit.service:/etc/systemd/system/stack-audit.service"
     "deploy/root/stack-audit.timer:/etc/systemd/system/stack-audit.timer"
     "deploy/root/bouncer.sh:/etc/stack-ids/bouncer.sh:opt"
+    "deploy/root/ipguard.py:/etc/stack-ids/ipguard.py:opt"
     "deploy/root/stack-bouncer.service:/etc/systemd/system/stack-bouncer.service:opt"
     "deploy/root/stack-bouncer.timer:/etc/systemd/system/stack-bouncer.timer:opt"
 )

@@ -4,8 +4,6 @@
 # Run: python3 tests/test_stackctl.py          (CI runs this verbatim)
 #
 # What is covered, and why each layer exists:
-#   * duration.py -- the SAME fixture file tests/test-lib.sh reads, so the
-#     bash and Python parsers cannot drift apart;
 #   * decl.py -- the declaration parsers and their verbatim error messages;
 #   * npm.py -- payload construction byte-for-byte (field order included,
 #     which is what made the golden diff against the bash original a real
@@ -41,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from stackctl import decl, duration, envfile, kuma, npm, socketio, ws  # noqa: E402
+from stackctl import decl, envfile, kuma, npm, socketio, ws  # noqa: E402
 from stackctl.ui import Fatal  # noqa: E402
 
 
@@ -61,25 +59,6 @@ def die_msg(fn, *args, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-
-
-class TestDuration(unittest.TestCase):
-    def test_shared_fixtures(self):
-        path = os.path.join(ROOT, "tests", "fixtures", "durations.txt")
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.rstrip("\n")
-                if not line or line.startswith("#"):
-                    continue
-                raw, _, want = line.partition("\t")
-                value = "" if raw == "<empty>" else raw
-                with self.subTest(dur=value):
-                    self.assertEqual(duration.dur_ms(value), int(want))
-
-    def test_dur_s_rounds_up(self):
-        self.assertEqual(duration.dur_s("4.5s"), 5)
-        self.assertEqual(duration.dur_s("500ms"), 1)
-        self.assertEqual(duration.dur_s("2s"), 2)
 
 
 class TestEnvfile(unittest.TestCase):

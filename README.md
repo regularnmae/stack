@@ -1350,7 +1350,8 @@ minute in one transaction — the LAPI's list is the truth — which also means
 There is no upstream bouncer image any more (`crowdsecurity/cs-firewall-bouncer`
 answers *access denied*), and the packaged one would be a second daemon outside
 this repo's control. CrowdSec keeps the hard half (decision lifecycle, TTLs,
-dedup); this is the plumbing, and it is ~120 lines you can read.
+dedup); this is the plumbing, in two small files you can read (`bouncer.sh` for
+the apply, `ipguard.py` for the address guard).
 
 ```sh
 sudo /etc/stack-ids/bouncer.sh --dry-run    # the rules it would apply, applied to nothing
@@ -1360,7 +1361,7 @@ systemctl stop stack-bouncer.timer          # the kill switch: detection keeps w
 
 Three properties worth knowing:
 
-* **Never bans the operator.** The script refuses private space, the podman
+* **Never bans the operator.** `ipguard.py` refuses private space, the podman
   network, and every address the host itself holds — checked at run time, so a
   DHCP change cannot produce a self-ban. Banning `192.168.1.112` would cut the
   `.onion` proxies, the status page and your own SSH session at once.
@@ -1380,7 +1381,10 @@ Three properties worth knowing:
   logs for the canary (a WAN change, or a CDN in front of the site).
 * **Fails open in the safe direction.** An unreachable LAPI or a non-JSON answer
   leaves the existing bans alone (it never reads "no decisions" as "unban
-  everything"), and a failed `nft -f` rolls back atomically.
+  everything"), and a failed `nft -f` rolls back atomically. The address guard
+  is the other direction on purpose: if it cannot classify (python3 missing, an
+  unparsable `STACK_WAN_IP`), nothing is applied and the status file says why —
+  guessing is how the operator gets banned.
 * **Its key is never regenerated.** `CROWDSEC_BOUNCER_KEY` in
   `config/stack/secrets.env` is registered into the LAPI by the crowdsec
   container at start; a new value leaves the old bouncer registered and

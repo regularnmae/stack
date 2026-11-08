@@ -12,13 +12,16 @@ README's "Intrusion detection".
 - **Enforcement is ours** (`deploy/root/bouncer.sh`), because no upstream bouncer
   image works, and it refuses private space, every address the host holds, and
   `STACK_WAN_IP` -- that last one is the operator's own shared egress.
-- **The bouncer's private-space table is exact, and replayed.** Its globs stand
-  in for CIDRs, so one wrong octet range silently exempts public addresses from
-  enforcement -- `100.1[0-2][0-9]` for CGNAT's `/10` also covered
-  `100.128.0.0/16` and `100.129.0.0/16`. `tests/test-bouncer.sh` extracts the
-  function from the template and asserts both directions on every boundary
-  (the same discipline `verify.sh` applies to `s02-enrich`'s whitelist). Change
-  a range and change that table with it.
+- **The bouncer's address guard is CIDR-exact, and replayed.**
+  `deploy/root/ipguard.py` classifies every decision with the stdlib
+  `ipaddress` module and installs beside the bouncer as
+  `/etc/stack-ids/ipguard.py`; `tests/test-ipguard.py` asserts both directions
+  on every boundary (the same discipline `verify.sh` applies to `s02-enrich`'s
+  whitelist). The glob table this replaced is the cautionary tale:
+  `100.1[0-2][0-9]` for CGNAT's `/10` also exempted `100.128.0.0/16` and
+  `100.129.0.0/16` from enforcement, and its `fe80:*` covered only part of
+  `fe80::/10`. A classifier failure is fail-closed: nothing is applied and
+  `bouncer.status` records why.
 - **`CROWDSEC_BOUNCER_KEY` is never regenerated.** The container registers that
   exact key at start.
 - **A whitelist expression is a plain string prefix, not a network.**
@@ -59,7 +62,7 @@ README's "Intrusion detection".
   regenerated (the container registers that exact key at start; a new one leaves
   a stale bouncer and a LAPI answering 403, i.e. silent non-enforcement), and it
   is the one secret appended to `secrets.env` rather than written by its heredoc,
-  because it has to exist on hosts deployed before it; (4) the script refuses
+  because it has to exist on hosts deployed before it; (4) `ipguard.py` refuses
   private space **and every address the host holds** -- `192.168.1.112` is what
   onion traffic and Uptime-Kuma look like, so banning it takes the onion
   services, the status page and the operator's own SSH session down together.

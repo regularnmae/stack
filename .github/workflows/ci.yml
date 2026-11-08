@@ -150,17 +150,20 @@ jobs:
       # The Python core behind the two reconciler wrappers (scripts/stackctl/),
       # offline: frame codec, packet dispatch, declaration parsing, payload
       # construction, and full reconciles against fake NPM and fake socket.io
-      # kuma servers. The bash/Python duration parsers are cross-checked
-      # against one shared fixture file (tests/fixtures/durations.txt), which
-      # the shell-helper step below reads from the other side.
+      # kuma servers. The two shell Go-duration parsers (scripts/lib.sh and
+      # deploy/root/bouncer.sh) are cross-checked against one shared fixture
+      # file (tests/fixtures/durations.txt) by the shell-helper steps below.
       - name: stackctl python tests
         run: python3 tests/test_stackctl.py
       - name: shared shell helper tests
         run: tests/test-lib.sh
       # deploy/root/bouncer.sh cannot source scripts/lib.sh (it runs as root and
-      # must not read the checkout), so it carries its own private-space table
-      # and its own Go-duration parser. Both decide whether a packet is dropped,
-      # and neither had a test; this replays a public and a private address on
-      # every boundary, plus the shared duration fixtures.
-      - name: bouncer parser tests
+      # must not read the checkout), so it carries its own Go-duration parser;
+      # this replays the shared duration fixtures and the timeout clamp.
+      - name: bouncer duration parser tests
         run: tests/test-bouncer.sh
+      # The guard that decides whether a ban is enforced (ipguard.py, installed
+      # beside the bouncer): every private boundary must skip, and the public
+      # space immediately outside it must ban.
+      - name: bouncer address guard tests
+        run: python3 tests/test-ipguard.py

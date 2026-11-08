@@ -20,4 +20,4 @@
 #   * behaviour is ported, not reimagined: the comments that explain a trap
 #     (kuma's login race, an ack's positional arity, NPM's rate-limit zones)
 #     travel with the code they protect.
-__all__ = ["decl", "duration", "envfile", "http", "kuma", "manifest", "npm", "socketio", "ui", "ws"]
+__all__ = ["decl", "envfile", "http", "kuma", "manifest", "npm", "socketio", "ui", "ws"]

@@ -280,7 +280,7 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   excluded on purpose: the 0600 env files (written from heredocs, no repo
   counterpart) and `60-stack.rules` (0640 in a 0750 directory,
   unreadable to an unprivileged sweep; the audit section reads the report's
-  verdict instead). The bouncer's three are marked `opt`, absent until the
+  verdict instead). The bouncer's four are marked `opt`, absent until the
   second bootstrap pass has a key, so they are skipped rather than warned about
   on a host that has not got one yet.
 

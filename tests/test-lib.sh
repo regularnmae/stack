@@ -23,10 +23,10 @@ assert_eq 5 "$(dur_s 4.5s)" 'duration rounds up'
 assert_eq '[["method^getinfo","method^listpeers"]]' \
     "$(rune_json getinfo listpeers)" 'rune restriction JSON'
 
-# The Go-duration parser has a second implementation in Python
-# (scripts/stackctl/duration.py); both are tested against the SAME fixture
-# file, so a fix on one side that forgets the other fails here rather than
-# silently splitting wait_healthy and the Python collectors.
+# The Go-duration parser has a second implementation in deploy/root/bouncer.sh
+# (dur_to_sec); both are tested against the SAME fixture file, so a fix on one
+# side that forgets the other fails here rather than silently splitting
+# wait_healthy and enforcement.
 while IFS=$'\t' read -r input want; do
     case "$input" in ''|\#*) continue ;; esac
     [ "$input" = '<empty>' ] && input=''

@@ -11,18 +11,25 @@
 #
 # Why not the upstream bouncer: docker.io/crowdsecurity/cs-firewall-bouncer is
 # gone ("requested access to the resource is denied"), and the packaged one is a
-# second daemon with its own config file, outside this repo. This is ~120 lines,
-# reads the same LAPI, and the whitelist is in one place -- which matters, because
-# the failure mode here is a ban on the operator's own monitoring.
+# second daemon with its own config file, outside this repo. This reads the same
+# LAPI and leaves the enforcement guard in one place (deploy/root/ipguard.py,
+# installed beside this script) -- which matters, because the failure mode here
+# is a ban on the operator's own monitoring.
 #
 # FAIL-OPEN, in the direction that matters: a failed or empty LAPI response
 # leaves the existing bans alone (never "no decisions = unban everything"), while
 # a failed nft apply leaves the previous ruleset in place. Losing enforcement is
 # worse than losing detection, but neither may take the site down.
+#
+# The address classifier is the one part that is not shell: private space is a
+# CIDR question, not a glob one, and python3 is already a bootstrap dependency.
+# A classifier failure is fail-closed too -- nothing is applied and the status
+# file says why.
 set -uo pipefail
 
 ENV_FILE=/etc/stack-ids/bouncer.env
 NFT=/usr/sbin/nft
+IPGUARD=${IPGUARD:-/etc/stack-ids/ipguard.py}
 TABLE=stack_bans
 SET_V4=banned_v4
 SET_V6=banned_v6
@@ -37,6 +44,13 @@ SET_V6=banned_v6
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+
+# A private stderr sink for the classifier and nft. /tmp/stack-bouncer.err was
+# a fixed, predictable path: an unprivileged user could pre-create it (or a
+# symlink) and root's `2>` would follow it. mktemp is O_EXCL, and the trap
+# removes it on every exit path.
+errlog=$(mktemp) || exit 1
+trap 'rm -f "$errlog"' EXIT
 
 STATUS="$DATA_DIR/audit/bouncer.status"
 mkdir -p "$DATA_DIR/audit"
@@ -66,50 +80,21 @@ lapi_get() { # host port path key -> body on stdout, non-zero on a non-200
 # ---------------------------------------------------------------------------
 # never ban these, whatever the LAPI says
 # ---------------------------------------------------------------------------
-# Three classes, all learned from this host's own logs:
-#   * private space -- 10.89.0.0/24 is the podman network, 192.168.0.0/16 the
-#     LAN, and the .onion proxies plus Uptime-Kuma's self-checks arrive from the
-#     host's own address (192.168.1.112). Banning any of it takes the onion
-#     services, the status page, or the operator's own session down -- all at
-#     once, including the SSH session doing the unbanning.
-#   * any address this host actually holds (checked at run time, so a DHCP change
-#     on the LAN cannot produce a self-ban).
-#   * the declared WAN address (STACK_WAN_IP, from bouncer.env). This one is NOT
-#     in OWN_IPS: the router holds it, not the host. Every check that leaves this
-#     host resolves the public names and comes back through the router's NAT
-#     loopback, so Uptime-Kuma, agent-mcp and the MCP clients all appear here as
-#     the operator's own egress -- one shared source IP, which is the whole
-#     problem: five 401s in ten seconds from one stale token would ban all of
-#     them together. Detection is untouched (the decision still exists, still
-#     pages, still shows in cscli); only enforcement skips it.
+# The classes -- private space, every address this host holds, and the declared
+# WAN address -- and the reasons each one is a self-inflicted outage live in
+# deploy/root/ipguard.py, which classifies every decision for this script. The
+# two inputs it cannot discover for itself are collected here: the host's own
+# addresses, and STACK_WAN_IP from bouncer.env.
+#
+# STACK_WAN_IP is NOT in OWN_IPS: the router holds it, not the host. Every check
+# that leaves this host resolves the public names and comes back through the
+# router's NAT loopback, so Uptime-Kuma, agent-mcp and the MCP clients all appear
+# here as the operator's own egress -- one shared source IP, which is the whole
+# problem: five 401s in ten seconds from one stale token would ban all of them
+# together. Detection is untouched (the decision still exists, still pages, still
+# shows in cscli); only enforcement skips it.
 own_ips() {
     ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' '
-}
-
-# Each IPv4 pattern is an exact octet range for the CIDR named beside it, and
-# every boundary is one glob character away from covering public space: this
-# file once carried `100.1[0-2][0-9]` for CGNAT's /10, which also matched
-# 100.128.0.0/16 and 100.129.0.0/16 -- two public ranges that would then never
-# be enforced against. stack-whitelists.yaml documents the same class of bug
-# (`startsWith '172.2'` widening to 172.200.0.0/14); the difference is that
-# file's ranges are replayed by verify.sh, and these are replayed by
-# tests/test-bouncer.sh. Change a range and change the test's table with it.
-is_internal() { # ip -> 0 when it must never be banned
-    local ip="$1"
-    [ -n "${STACK_WAN_IP:-}" ] && [ "$ip" = "$STACK_WAN_IP" ] && return 0
-    case "$ip" in
-        # 127.0.0.0/8, 10.0.0.0/8, 192.168.0.0/16, 169.254.0.0/16, 0.0.0.0
-        127.*|10.*|192.168.*|169.254.*|0.0.0.0) return 0 ;;
-        # 172.16.0.0/12: 172.16-19, 172.20-29, 172.30-31
-        172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
-        # 100.64.0.0/10: 100.64-69, 100.70-99, 100.100-119, 100.120-127
-        100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*) return 0 ;;
-        # ::1, fe80::/10 (written in full by both the kernel and the LAPI),
-        # fc00::/7 (unique-local)
-        ::1|fe80:*|fc*|fd*) return 0 ;;
-    esac
-    case " $OWN_IPS " in *" $ip "*) return 0 ;; esac
-    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -186,13 +171,23 @@ if ! printf '%s' "$body" | jq -e 'type == "array" or . == null' >/dev/null 2>&1;
     exit 1
 fi
 
-rules=$(mktemp) || exit 1
-# The addresses enforcement declined, one per line. The loop below runs in a
-# pipeline (a subshell), so a counter could not escape it -- and the count is
-# what makes the interesting state legible in the status file: `banned=0
-# skipped=1` means the LAPI is holding a decision about the operator's own
-# egress, which is a stale token or a broken loop somewhere, not a quiet host.
-skips=$(mktemp) || exit 1
+# Classify every decision in ONE process: the guard is a CIDR question, and a
+# failure here is fail-closed -- the status file records it and nothing is
+# applied, so a broken guard can never ban the operator. Each record is
+# TAB-separated: BAN<TAB>v4|v6<TAB>value<TAB>duration, or
+# SKIP<TAB>-<TAB>value<TAB>reason.
+classified=$(mktemp) || exit 1
+if ! printf '%s' "$body" \
+    | jq -r '(. // [])[] | "\(.value)\t\(.duration // "1h")"' 2>/dev/null \
+    | STACK_WAN_IP="${STACK_WAN_IP:-}" OWN_IPS="$OWN_IPS" \
+        python3 "$IPGUARD" > "$classified" 2>"$errlog"; then
+    detail=$(tail -3 "$errlog" 2>/dev/null | tr '\n' ' ')
+    rm -f "$classified"
+    write_status fail "address classification failed: ${detail:-unknown}" ""
+    exit 1
+fi
+
+rules=$(mktemp) || { rm -f "$classified"; exit 1; }
 {
     # The table is created once; `nft -f` MERGES a table declaration rather than
     # recreating it, so re-declaring the chain on every run would append a second
@@ -208,42 +203,45 @@ skips=$(mktemp) || exit 1
     # an element resets its timeout. One nft transaction, so the set is never
     # empty in between.
     printf 'flush set inet %s %s\nflush set inet %s %s\n' "$TABLE" "$SET_V4" "$TABLE" "$SET_V6"
-    printf '%s' "$body" | jq -r '(. // [])[] | "\(.value)\t\(.duration // "1h")"' 2>/dev/null \
-        | while IFS=$'\t' read -r ip dur; do
-            [ -n "$ip" ] || continue
-            if is_internal "$ip"; then
-                say "skip (internal): $ip"
-                printf '%s\n' "$ip" >> "$skips"
-                continue
-            fi
-            case "$ip" in
-                *:*) printf 'add element inet %s %s { %s timeout %ss }\n' "$TABLE" "$SET_V6" "$ip" "$(dur_to_sec "$dur")" ;;
-                *)   printf 'add element inet %s %s { %s timeout %ss }\n' "$TABLE" "$SET_V4" "$ip" "$(dur_to_sec "$dur")" ;;
-            esac
-        done
+    while IFS=$'\t' read -r kind family value extra; do
+        case "$kind" in
+            SKIP)
+                say "skip ($extra): $value"
+                ;;
+            BAN)
+                case "$family" in
+                    v4) family_set="$SET_V4" ;;
+                    v6) family_set="$SET_V6" ;;
+                    *)  continue ;;
+                esac
+                printf 'add element inet %s %s { %s timeout %ss }\n' \
+                    "$TABLE" "$family_set" "$value" "$(dur_to_sec "$extra")"
+                ;;
+        esac
+    done < "$classified"
 } > "$rules"
 
 banned=$(grep -c '^add element' "$rules" 2>/dev/null || true)
 case "$banned" in ''|*[!0-9]*) banned=0 ;; esac
-skipped=$(grep -c . "$skips" 2>/dev/null || true)
+skipped=$(grep -c '^SKIP' "$classified" 2>/dev/null || true)
 case "$skipped" in ''|*[!0-9]*) skipped=0 ;; esac
 
 if [ "$DRY_RUN" = 1 ]; then
     say "--- would apply ($banned ban(s), $skipped skipped):"
     cat "$rules"
-    rm -f "$rules" "$skips"
+    rm -f "$rules" "$classified"
     exit 0
 fi
 
-if ! "$NFT" -f "$rules" 2>/tmp/stack-bouncer.err; then
-    detail=$(tail -3 /tmp/stack-bouncer.err 2>/dev/null | tr '\n' ' ')
-    rm -f "$rules" "$skips"
+if ! "$NFT" -f "$rules" 2>"$errlog"; then
+    detail=$(tail -3 "$errlog" 2>/dev/null | tr '\n' ' ')
+    rm -f "$rules" "$classified"
     # The previous transaction is still in place: nft applies atomically, so a
     # failed apply changes nothing rather than emptying the set.
     write_status fail "nft apply failed: ${detail:-unknown}" ""
     exit 1
 fi
-rm -f "$rules" "$skips"
+rm -f "$rules" "$classified"
 
 write_status ok "" "$banned" "$skipped"
 exit 0

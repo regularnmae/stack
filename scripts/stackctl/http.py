@@ -74,14 +74,3 @@ def json_request(
         return status, json.loads(raw)
     except (ValueError, UnicodeDecodeError):
         return status, None
-
-
-def get_text(url: str, *, timeout: float = 15) -> Optional[str]:
-    """A plain GET's body as text, None on any failure (probe-shaped)."""
-    try:
-        status, _, raw = request("GET", url, timeout=timeout)
-    except HttpError:
-        return None
-    if status is None:
-        return None
-    return raw.decode("utf-8", "replace")

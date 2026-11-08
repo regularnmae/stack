@@ -384,6 +384,10 @@ install_root_tier() {
         warn "no CROWDSEC_BOUNCER_KEY in $data/config/stack/secrets.env yet; skipping the bouncer (re-run sudo ./bootstrap.sh after ./deploy.sh)"
     else
         root_render "$DEPLOY_DIR/root/bouncer.sh" "$ROOT_CONFIG_DIR/bouncer.sh" 755 "$data"
+        # The bouncer's address guard: CIDR classification in stdlib python, so
+        # the private-space rules are exact rather than globs. Root-owned beside
+        # the script; 0644 and no secret, it is only code.
+        root_render "$DEPLOY_DIR/root/ipguard.py" "$ROOT_CONFIG_DIR/ipguard.py" 644 "$data"
         # Root-owned 0600, deliberately not $DATA_DIR/config: this key reads every
         # decision, and root must not take instructions from a file the stack user
         # can write.
