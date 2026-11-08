@@ -574,7 +574,7 @@ SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 TOR_DIR="$DATA_DIR/tor"
 
 # write_secret (a secret-carrying env file: atomic, mode 600) is scripts/lib.sh's
-# write_env_file; deploy.sh writes the BTCPay env files with the same one, so
+# write_env_file; configure.sh writes the BTCPay env files with the same one, so
 # the two halves of the stack no longer have a umask copy and a mktemp copy.
 
 # Echo 0 (true) when the file is missing and the caller should write it, so a
@@ -937,7 +937,8 @@ stage_btcpay_plugin() {
     fi
     # The container keeps its already-loaded assemblies mapped, so replacing the
     # directory under a running BTCPay is safe; deploy.sh restarts it when the
-    # DLL is newer than the container (btcpay_plugin_newer).
+    # DLL is newer than the container (btcpay_plugin_newer) and configure.sh
+    # runs the bootstrap.
     rm -rf "$dir"
     chmod 755 "$stage"
     mv "$stage" "$dir" || { warn "could not move the BTCPay Monero plugin into $dir"; rm -rf "$stage"; return 0; }
@@ -1288,14 +1289,15 @@ fi
 # btcpay-mcp: the bearer token clients present, and the upstream wiring. The
 # token is seed-once like every other server's. The key is NOT seeded from a
 # copy: it is minted by scripts/btcpay_bootstrap.py into
-# config/btcpay/bootstrap.env, and deploy.sh's write_btcpay_mcp_env() rewrites
-# this file from that state after every bootstrap. Seeding the key here would
-# leave a rotated secret split across two files (the same rule as crowdsec's
-# lapi.env). This seed only gives the unit a URL before the first bootstrap.
+# config/btcpay/bootstrap.env, and configure.sh's write_btcpay_mcp_env()
+# rewrites this file from that state after every bootstrap. Seeding the key
+# here would leave a rotated secret split across two files (the same rule as
+# crowdsec's lapi.env). This seed only gives the unit a URL before the first
+# bootstrap.
 BTCPAY_MCP_ENV="$CONFIG_DIR/btcpay-mcp"
 seed_token_env btcpay-mcp BTCPAY_MCP_TOKEN
 seed_env "$BTCPAY_MCP_ENV/upstream.env" "btcpay-mcp upstream env" <<EOF
-# The BTCPay instance this server reads. deploy.sh rewrites this file from
+# The BTCPay instance this server reads. configure.sh rewrites this file from
 # config/btcpay/bootstrap.env (URL, the read-only BTCPAY_MCP_KEY, store id and
 # the public origin) after every bootstrap; do not hand-edit it.
 BTCPAY_URL=http://btcpay:49392
@@ -1396,7 +1398,7 @@ EOF
 # The app reads one flat environment, so the split here is by who owns each
 # value: install.sh generates the database and the signing keys, the operator
 # fills in the third-party credentials, and btcpay/backend.env is written by
-# deploy.sh after the bootstrap has provisioned the store.
+# configure.sh after the bootstrap has provisioned the store.
 BOLT_DB="$CONFIG_DIR/boltmesh"
 
 if ensure_secret "$BOLT_DB/db.env" "boltmesh db env"; then
@@ -1586,10 +1588,11 @@ fi
 # backs it up. scripts/spend-audit.sh seeds its own baselines on the first run.
 mkdir -p "$DATA_DIR/audit"
 
-# The runes need a running lightningd. install.sh is re-run by deploy.sh once
-# the daemon is up, so this is best-effort here and self-heals on re-run. Both
-# the proof and the mint/retry loop live in scripts/lib.sh (cln_rune_usable /
-# cln_mint_rune) because scripts/rotate.sh mints the same runes on a rotation.
+# The runes need a running lightningd. install.sh is re-run by ./configure.sh
+# once the daemon is up, so this is best-effort here and self-heals on re-run.
+# Both the proof and the mint/retry loop live in scripts/lib.sh
+# (cln_rune_usable / cln_mint_rune) because scripts/rotate.sh mints the same
+# runes on a rotation.
 
 read_rune=""
 spend_rune=""
@@ -1651,7 +1654,7 @@ fi
 # ---------------------------------------------------------------------------
 # BTCPay config. The bootstrap owns the store/keys/webhook and writes them back
 # into bootstrap.env; backend.env is the four-value contract the backend reads
-# and is written after a successful bootstrap (deploy.sh), not here.
+# and is written after a successful bootstrap (configure.sh), not here.
 # ---------------------------------------------------------------------------
 BTC_CONFIG="$CONFIG_DIR/btcpay"
 mkdir -p "$BTC_CONFIG"
@@ -1673,7 +1676,7 @@ EOF
 fi
 if [ ! -s "$BTC_CONFIG/backend.env" ]; then
     write_secret "$BTC_CONFIG/backend.env" <<EOF
-# Written by deploy.sh from $BTC_CONFIG/bootstrap.env after the bootstrap has
+# Written by configure.sh from $BTC_CONFIG/bootstrap.env after the bootstrap has
 # run. The backend/worker units read exactly these four values.
 EOF
     log "seeded $BTC_CONFIG/backend.env (filled in after the bootstrap)"
@@ -1773,9 +1776,9 @@ install -m 755 "$REPO_DIR/scripts/btcpay_bootstrap.py" "$DATA_DIR/bin/btcpay_boo
 #     reverted every unit edit since the first install;
 #   - cp -p keeps mode 600 -- several rendered units carry @PLACEHOLDER@ secrets;
 #   - it backs up only when this render actually changes the file, because
-#     deploy.sh runs install.sh twice per deploy (the CLN runes need a running
-#     node). An unconditional backup would have the second run record the file
-#     the first run just wrote, i.e. destroy the rollback it exists for.
+#     ./configure.sh re-runs install.sh (the CLN runes need a running node).
+#     An unconditional backup would have the second run record the file the
+#     first run just wrote, i.e. destroy the rollback it exists for.
 render_unit_backedup() { # src target
     local prev="" label
     if [ -e "$2" ] && [ ! -L "$2" ]; then
@@ -1909,7 +1912,8 @@ Done. Everything the stack owns lives under:
     the postgres dump into a throwaway cluster every month (verdict in
     $DATA_DIR/audit/backup-verify-db.status)
 
-Next:  ./deploy.sh         # build images, start everything, verify
+Next:  ./deploy.sh         # build images, start/restart everything
+       ./configure.sh      # wait, then mint runes / wallets / BTCPay state / migrations
 The two explorers are built by ./deploy.sh from btc-explorer/ and xmr-explorer/
   (not pulled): BTC RPC Explorer (Node) and MoneroBlock (Go, RPC-only). Both are
   small local builds. They are served at https://$BTC_EXPLORER_HOST and

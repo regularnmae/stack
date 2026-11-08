@@ -21,15 +21,15 @@ this before touching `config/btcpay/`, `btcpay-wallet.sh`, the bootstrap, or the
 ## The view-only Monero wallet
 
 - **The BTCPay Monero wallet is view-only and optional at first.** `deploy.sh`
-  starts `monero-wallet-btcpay` (no wallet file yet), then
-  `scripts/btcpay-wallet.sh` imports it only when
+  starts `monero-wallet-btcpay` (no wallet file yet); `./configure.sh` then runs
+  `scripts/btcpay-wallet.sh`, which imports it only when
   `config/btcpay/xmr-wallet.env` has an address and view key. The bootstrap
   leaves XMR-CHAIN disabled while the wallet RPC has no wallet open. The one
   import that must not run is a restore height **above monerod's current
   height**: Monero answers "Blocks start before blockchain offset", the wallet
   RPC stalls in a refresh loop, and the plugin's wallet load times out — so
   `btcpay-wallet.sh` compares the two and skips until the daemon catches up.
-  The env can be filled at any time; re-run `./deploy.sh --only btcpay` once
+  The env can be filled at any time; re-run `./configure.sh --only btcpay` once
   the chain is current.
 
 ## The plugin is a file
@@ -58,10 +58,10 @@ this before touching `config/btcpay/`, `btcpay-wallet.sh`, the bootstrap, or the
   `config/btcpay/bootstrap.env`; it is never the `unrestricted` admin key and
   never the backend's write-capable runtime key. The key is scoped
   (`perm:<storeId>`) when BTCPay accepts that form; the four permissions are
-  the boundary either way. `deploy.sh`'s `write_btcpay_mcp_env()` rewrites
+  the boundary either way. `configure.sh`'s `write_btcpay_mcp_env()` rewrites
   `config/btcpay-mcp/upstream.env` from that state on every run, so a re-minted
   key never leaves a stale copy, and it restarts a running `btcpay-mcp` when
-  the content changed (an `--only btcpay` run never reaches `deploy_apps`).
+  the content changed.
   The minting step is deliberately best-effort: a key problem leaves the MCP
   reporting `unconfigured`, never the store, webhook or backend key unmade.
   `GET /api/v1/server/info` needs `unrestricted` and is not exposed, and

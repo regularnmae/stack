@@ -52,8 +52,8 @@ Exec=-storageDataPath=/victoria-logs-data -retentionPeriod=@LOGS_RETENTION@ -ret
 # podman runs a string health command through the container's /bin/sh, so any
 # probe would fail. The functional check is outside the unit -- verify.sh and
 # the monitor both ask the HTTP API a real LogsQL question, which is strictly
-# stronger than a liveness endpoint. deploy.sh's wait_healthy knows a
-# healthcheck-less container is "up" rather than waiting out its timeout.
+# stronger than a liveness endpoint. wait_healthy knows a healthcheck-less
+# container is "up" rather than waiting out its timeout.
 
 [Service]
 Restart=always

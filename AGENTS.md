@@ -24,7 +24,9 @@ uses `btcpayserver/monero` on purpose — its entrypoint binds `0.0.0.0` only wi
 
 ```sh
 ./bootstrap.sh                      # bare host -> podman, linger, sysctl, firewall ports, dirs
-./deploy.sh                         # fetch repos, build, start, verify
+./deploy.sh                         # fetch repos, build, start/restart (never waits)
+./configure.sh                      # second step: waits for each service, then runes/
+                                    # wallet/BTCPay state/BoltMesh migrations
 ./deploy.sh --only <name>           # one service; --dry-run to plan
 ./deploy.sh --only backup           # run the backup job now
 ./deploy.sh --only db-dump          # refresh the two live-database dumps now
@@ -105,5 +107,5 @@ Not MCP servers, so absent from the table above; same contract with `boltmesh-la
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `boltmesh-frontend:80` | `127.0.0.1:8106` | `0.0.0.0:80`, `/` |
 
 `db.env`/`secrets.env` are generated, `app.env` is operator-editable (seeded from
-`BOLTMESH_*`) and `btcpay/backend.env` comes from `deploy.sh`. `APP_ENV=prod` keeps
+`BOLTMESH_*`) and `btcpay/backend.env` comes from `configure.sh`. `APP_ENV=prod` keeps
 the refresh cookie `Secure` + `SameSite=None` for the split hosting.

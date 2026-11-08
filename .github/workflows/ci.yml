@@ -143,6 +143,18 @@ jobs:
           for f in "${files[@]}"; do
             bash -n "$f"
           done
+      # The split is deliberate: deploy.sh deploys (units, images, start/
+      # restart) and ./configure.sh is the second step, the only place that
+      # waits for a service to answer. A health wait creeping back into the
+      # deploy turns every redeploy into a slow verification; fail here instead
+      # of in review.
+      - name: deploy.sh does not wait for health
+        run: |
+          if grep -nE 'wait_healthy|wait_cmd' deploy.sh; then
+            echo "::error::deploy.sh must not wait for health; that work belongs in configure.sh"
+            exit 1
+          fi
+          printf 'deploy.sh has no health wait\n'
       # deploy/services.toml is the single declaration of the public surface
       # (hostnames, MCP prefixes and ports, proxy hosts, onion services,
       # status-page monitors); this validates the file and cross-checks it

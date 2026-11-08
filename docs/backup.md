@@ -104,7 +104,7 @@ restore" and "Disaster recovery".
   from the snapshot, which is also why `scripts/backup.sh` reads
   `RESTIC_REPOSITORY`/`RESTIC_PASSWORD` from the environment first. The database
   comes back as a file (`postgres-dump/all.sql`): replay it into the empty
-  cluster the deploy started, then `./deploy.sh --only boltmesh` to
+  cluster the deploy started, then `./configure.sh --only boltmesh` to
   `alembic upgrade head` — the dump is as old as the snapshot, the code is not.
   The operator steps, the per-scenario runbooks and the post-recovery checklist
   are README's "Disaster recovery"; `scripts/backup.sh restore` writes the whole

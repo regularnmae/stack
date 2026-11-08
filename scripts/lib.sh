@@ -166,20 +166,21 @@ human_bytes() {
     LC_ALL=C numfmt --from=auto --to=none "${1%B}" 2>/dev/null
 }
 
-# Wait for a container's own healthcheck to report healthy. Shared by deploy.sh
-# (which starts the units) and scripts/rotate.sh (which restarts the ones a
-# rotated credential touches), so both wait the same way. Honours DRY_RUN when
-# the caller sets it, and returns non-zero after the timeout rather than dying:
-# the caller decides whether that is fatal.
+# Wait for a container's own healthcheck to report healthy. Shared by
+# configure.sh (the post-start step deploy.sh hands off to) and
+# scripts/rotate.sh (which restarts the ones a rotated credential touches), so
+# both wait the same way. Honours DRY_RUN when the caller sets it, and returns
+# non-zero after the timeout rather than dying: the caller decides whether that
+# is fatal.
 wait_healthy() { # container timeout
     local c="$1" t="${2:-180}" deadline st="" hp start_s floor st_result
     [ "${DRY_RUN:-0}" = 1 ] && return 0
 
     # A one-shot job (Type=oneshot) never reports "(healthy)" and never shows up
     # in `podman ps`: it *exits*. Waiting for "Up" burns the caller's whole
-    # timeout and then warns about a job that did its work -- which is what
-    # `./deploy.sh --only postgres-dump|btcpay-bootstrap` used to do (180 s of
-    # spin, then "container missing"). `systemctl restart` already blocked on
+    # timeout and then warns about a job that did its work -- which is what a
+    # postgres-dump or btcpay-bootstrap wait used to do (180 s of spin, then
+    # "container missing"). `systemctl restart` already blocked on
     # the job and failed loudly, so the only thing left to read is its result;
     # this also catches a job that systemd accepted and that exceeded
     # TimeoutStartSec, which is a failure however the unit reports it.

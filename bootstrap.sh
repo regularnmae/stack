@@ -317,6 +317,7 @@ Bootstrap complete.
 
 Next:
   $NEXT
+  ${NEXT%/*}/configure.sh   # second step: waits, then runes/wallet/BTCPay/migrations
 
 That asks where the stack keeps its data (default \$HOME/data). Point it at a
 separate disk to survive an OS reinstall.

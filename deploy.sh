@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-click deploy for the whole stack.
+# One-click deploy for the whole stack: units, images, start/restart.
 #
 #   ./deploy.sh                    # fetch repos, install, build every image,
 #                                  # start everything; restarts only what changed
@@ -11,18 +11,24 @@
 #                                  # --only xmr-explorer just one (and restarts it)
 #   ./deploy.sh --skip-apps        # infrastructure only (daemons, searxng, NPM)
 #   ./deploy.sh --skip-daemons     # everything except the chain nodes: no
-#                                  # bitcoind/monerod/lightningd/btcpay,
-#                                  # no wallets (for testing without a chain)
-#   ./deploy.sh --no-wallets       # do not prompt for the Monero/Bitcoin wallet
+#                                  # bitcoind/monerod/lightningd/btcpay
+#                                  # (for testing without a chain)
 #   ./deploy.sh --skip-agent-skills # do not link the agent skills / agent-mcp
 #                                  # into the operator's harnesses ($HOME)
 #   ./deploy.sh --dry-run          # print the plan; change nothing
 #
-# Ordering is load-bearing: the daemons come up before the MCP servers that
-# read them, and lightning-mcp's runes are created only once lightningd's RPC
-# answers. Chain sync takes hours to days; this script never waits for it --
-# when bitcoind is mid-sync it skips the lightningd wait, and you re-run the
-# script (idempotent) once the chain is current.
+# This script deploys; it does not verify. It never waits for a container's
+# health or for a daemon to sync: `./verify.sh` (and monitor.timer) own the
+# health verdict. Work that can only happen against a running service -- the
+# Bitcoin wallet, the CLN runes, the BTCPay databases/plugin wallet/bootstrap
+# and the BoltMesh migrations -- is the second step, `./configure.sh`:
+#
+#   ./deploy.sh && ./configure.sh
+#
+# Ordering is still load-bearing: the daemons are started before the MCP
+# servers that read them, and a changed definition is applied by the phase that
+# rebuilt its image. Chain sync takes hours to days; a service that is not
+# answering yet is configure.sh's problem, and a later run finishes it.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,9 +53,6 @@ APPLIED_UNITS=" "
 # unit that no phase applied keeps the baseline where it is.
 CHANGED_UNITS=""
 CHANGED_ACTIVE_UNITS=""
-# Units a phase has restarted but not yet waited on. The phase drains it with
-# wait_healthy_many once its builds are done, so the waits overlap.
-RESTART_QUEUE=()
 # The digest set this run last reconciled with the running containers, and
 # whether install.sh ran at all (the agent-skills branch runs no installer and
 # must not record a baseline it never applied). units_commit reads both.
@@ -80,32 +83,14 @@ export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
 GIT_CRED_HINT="git could not authenticate (it is not allowed to prompt). The $GITHUB_ORG_BOLTMESH repos are private: run 'ssh -T $GITHUB_SSH_HOST' -- it must greet you -- then re-run ./deploy.sh"
 ONLY=""
 DO_BOOTSTRAP=0
-DO_WALLETS=1
 DO_AGENT_SKILLS=1
 SKIP_APPS=0
 SKIP_DAEMONS=0
-
-BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
-# lightningd's bcli plugin starts with RPC while bitcoind is still loading its
-# wallet, and dies on the first timeout ("The Bitcoin backend died"). Require
-# wallet-level RPC before it depends on bitcoind; the chain RPC alone answers
-# long before that (getblockchaininfo is served mid-init).
-BITCOIND_WALLET_WAIT="${BITCOIND_WALLET_WAIT:-120}"
-MONEROD_WAIT="${MONEROD_WAIT:-300}"
-LIGHTNINGD_WAIT="${LIGHTNINGD_WAIT:-900}"
-POSTGRES_WAIT="${POSTGRES_WAIT:-180}"
-# A give-up bound, not a promise: wait_healthy raises it to the unit's own
-# StartPeriod + Interval when that is larger, so 60 s is enough for an MCP
-# server (10 s start period) and the deeper units (boltmesh-backend's 60 s start
-# period) still get their floor.
-APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-60}"
-BITCOIND_READY=0
 
 # The two blockchain explorers. Their images are built from this repo (not
 # pulled), so they are deployed like the app tier -- after the daemons they
 # read -- and only when their image is missing, unless --only forces a rebuild.
 EXPLORER_UNITS=(btc-explorer xmr-explorer)
-EXPLORER_WAIT="${EXPLORER_WAIT:-90}"
 
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
@@ -115,10 +100,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --bootstrap)   DO_BOOTSTRAP=1 ;;
         --only)        ONLY="${2:?--only needs a service name}"; shift ;;
-        --no-wallets)  DO_WALLETS=0 ;;
         --skip-agent-skills) DO_AGENT_SKILLS=0 ;;
         --skip-apps)   SKIP_APPS=1 ;;
-        --skip-daemons) SKIP_DAEMONS=1; DO_WALLETS=0 ;;
+        --skip-daemons) SKIP_DAEMONS=1 ;;
         --dry-run)     DRY_RUN=1 ;;
         -h|--help)     usage; exit 0 ;;
         *)             die "unknown argument: $1 (try --help)" ;;
@@ -255,12 +239,12 @@ units_commit() {
     local now unit pending=""
     [ "$DRY_RUN" = 0 ] || return 0
     [ "$UNITS_SYNCED" = 1 ] || return 0
-    # install.sh runs twice per full deploy (the second pass mints the CLN runes
-    # once lightningd answers), and anything that second render changed never
-    # went through restart_changed_units. Catch it up before recording, so the
-    # manifest never claims more than was applied. Every phase has run by now, so
-    # a changed unit still unapplied has no owner left: clear DEFER_UNITS and let
-    # the digest pass restart it.
+    # A render that happened after the digest pass (none does today; install.sh
+    # is also runnable by hand) can change a definition without going through
+    # restart_changed_units. Catch it up before recording, so the manifest never
+    # claims more than was applied. Every phase has run by now, so a changed
+    # unit still unapplied has no owner left: clear DEFER_UNITS and let the
+    # digest pass restart it.
     now=$(unit_digest)
     if [ "$now" != "$UNITS_APPLIED_DIGEST" ]; then
         DEFER_UNITS=""
@@ -293,9 +277,7 @@ units_commit() {
 # ---------------------------------------------------------------------------
 # The digest pass records the changed set once; every later phase asks these
 # instead of keeping its own copy. mark_* are idempotent because a unit can be
-# named by two rendered files (tor.container and the torrc digest) and because
-# restart_changed_units runs twice in a full deploy (the second install.sh mints
-# the CLN runes).
+# named by two rendered files (tor.container and the torrc digest).
 unit_was_changed() { unit_in_set "$1" "$CHANGED_UNITS"; }
 unit_applied() { unit_in_set "$1" "$APPLIED_UNITS"; }
 mark_changed() { unit_was_changed "$1" || CHANGED_UNITS="$CHANGED_UNITS$1 "; }
@@ -320,13 +302,12 @@ image_is_running() { # container image
 # phase that rebuilt an unchanged image would otherwise take every app down for
 # nothing; a unit the digest pass deferred is still restarted here, after the
 # build that produced its bits. An unchanged but stopped unit is started (a
-# no-op when it is already active). With wait=0 the unit is queued in
-# RESTART_QUEUE for settle_restarts, so a bulk phase waits on all of them at
-# once instead of one after another.
-restart_applied() { # unit image [timeout] [wait] [force]
-    local unit="$1" image="$2" t="${3:-$APP_HEALTH_WAIT}" wait="${4:-1}" force="${5:-0}"
-    # A phase earlier in this run may have restarted it already (btcpay-mcp's
-    # env rewrite, the digest pass): one restart per run.
+# no-op when it is already active). Nothing here waits for health: that is
+# ./verify.sh's (and monitor.timer's) job, not the deploy's.
+restart_applied() { # unit image [force]
+    local unit="$1" image="$2" force="${3:-0}"
+    # A phase earlier in this run may have restarted it already (the digest
+    # pass): one restart per run.
     if [ "$force" = 0 ] && unit_applied "$unit" \
         && systemctl --user is-active --quiet "$unit.service" 2>/dev/null \
         && image_is_running "$unit" "$image"; then
@@ -336,26 +317,10 @@ restart_applied() { # unit image [timeout] [wait] [force]
     if [ "$force" = 1 ] || unit_was_changed "$unit" || ! image_is_running "$unit" "$image"; then
         restart_unit "$unit" || { warn "$unit did not restart"; return 1; }
         mark_applied "$unit"
-        if [ "$wait" = 1 ]; then
-            wait_healthy "$unit" "$t" || warn "$unit did not report healthy"
-        else
-            RESTART_QUEUE+=("$unit")
-        fi
     else
         start_unit "$unit"
         log "$unit is unchanged; not restarting it"
     fi
-}
-
-# Drain RESTART_QUEUE with one batched health wait. Returns non-zero when any
-# unit failed, and always empties the queue so a later phase does not wait on
-# units it did not restart.
-settle_restarts() { # timeout
-    local t="$1" failed=0
-    [ "${#RESTART_QUEUE[@]}" -gt 0 ] || return 0
-    wait_healthy_many "$t" "${RESTART_QUEUE[@]}" || failed=1
-    RESTART_QUEUE=()
-    return "$failed"
 }
 
 # .container only, never *.network: a network cannot be restarted under the
@@ -367,7 +332,7 @@ settle_restarts() { # timeout
 # is skipped entirely: the phase that rebuilt its image restarts it.
 restart_changed_units() { # before-digest after-digest
     local before="$1" after="$2" unit
-    local -a changed=() to_restart=()
+    local -a changed=()
     [ -n "$before" ] && [ -n "$after" ] || return 0
     while IFS= read -r unit; do
         [ -n "$unit" ] && changed+=("$unit")
@@ -398,16 +363,10 @@ restart_changed_units() { # before-digest after-digest
         log "$unit.service changed; restarting it to pick up the new unit"
         if restart_unit "$unit"; then
             mark_applied "$unit"
-            to_restart+=("$unit")
         else
             warn "$unit did not restart; its new definition is not applied"
         fi
     done
-    # Restart them all first, then wait once. A serial wait per unit is what made
-    # a changed definition cost one StartPeriod + Interval after another.
-    [ "${#to_restart[@]}" -eq 0 ] \
-        || wait_healthy_many "$APP_HEALTH_WAIT" "${to_restart[@]}" \
-        || warn "one or more restarted units did not report healthy"
 }
 
 # ---------------------------------------------------------------------------
@@ -442,7 +401,6 @@ refresh_image_unit() { # container image -> restart when the container is older
     log "$name is running an older $image; restarting it"
     if restart_unit "$name"; then
         mark_applied "$name"
-        wait_healthy "$name" "$APP_HEALTH_WAIT" || true
     else
         warn "$name did not restart; it keeps the old image"
     fi
@@ -469,47 +427,6 @@ btcpay_plugin_newer() {
     [ "$mtime" -gt "$started" ]
 }
 
-wait_cmd() { # description timeout cmd...
-    local desc="$1" t="$2"; shift 2
-    local deadline
-    [ "$DRY_RUN" = 1 ] && return 0
-    deadline=$(( $(date +%s) + t ))
-    while :; do
-        if "$@" >/dev/null 2>&1; then log "$desc ready"; return 0; fi
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-            warn "$desc not ready after ${t}s"
-            return 1
-        fi
-        sleep 5
-    done
-}
-
-# Print the last lines of a container's log with an indent. Used when a wait
-# times out, so the deploy output shows *why* instead of just spinning.
-dump_tail() { # container [lines]
-    local c="$1" n="${2:-30}"
-    [ "$DRY_RUN" = 1 ] && return 0
-    warn "last $n log lines from $c:"
-    podman logs --tail "$n" "$c" 2>&1 | sed 's/^/  | /'
-}
-
-# True while bitcoind is in initial block download. CLN cannot finish starting
-# until it is caught up, so waiting on lightningd then is wasted time.
-bitcoind_syncing() {
-    [ "$DRY_RUN" = 1 ] && return 1
-    bitcoind_cli getblockchaininfo 2>/dev/null \
-        | jq -e '.initialblockdownload == true' >/dev/null 2>&1
-}
-
-# Wallet-level RPC answers *and* a wallet is loaded -- what lightningd's bcli
-# needs. Never `getwalletinfo` on its own: with two wallets loaded a node answers
-# -19 ("Wallet file not specified"), which says nothing about readiness and made
-# this wait burn its timeout on every deploy. listwallets answers either way, and
-# `[]` (nothing loaded) correctly reads as "not ready".
-bitcoind_wallet_ready() {
-    bitcoind_cli listwallets 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1
-}
-
 # Make sure the podman network exists before anything joins it. The quadlet
 # unit can be left "active (exited)" while the network itself is gone (e.g. the
 # network was removed by hand), and systemd will not re-run it, so a plain
@@ -530,8 +447,8 @@ ensure_network() {
 }
 
 # The `--only` branches run their checks (verify.sh inside the monitor sweep,
-# npm-hosts, kuma-monitors, the app health handshakes) through the two curl
-# clients, and never reach start_infra. Called at the end of sync_units -- after
+# npm-hosts, kuma-monitors) through the two curl clients, and never reach
+# start_infra. Called at the end of sync_units -- after
 # install.sh has had its chance to rebuild the image, and before the branch's own
 # work -- so `./deploy.sh --only monitor` on a freshly booted host finds them up.
 ensure_netcheck() {
@@ -581,6 +498,10 @@ start_infra() {
     if [ "$SKIP_DAEMONS" = 0 ]; then
         start_unit bitcoind
         start_unit monerod
+        # Fulcrum indexes from bitcoind's RPC and follows it through IBD: it
+        # retries the connection itself, so it is started here rather than
+        # gated on a wait. It opens its Electrum ports once caught up.
+        start_unit fulcrum
     fi
     start_unit valkey
     start_unit searxng
@@ -594,34 +515,7 @@ start_infra() {
 
     if [ "$SKIP_DAEMONS" = 1 ]; then
         log "skipping the chain daemons (--skip-daemons)"
-        return 0
     fi
-
-    # RPC-level readiness, not sync: getblockchaininfo answers while syncing.
-    if wait_cmd "bitcoind RPC" "$BITCOIND_WAIT" bitcoind_cli getblockchaininfo; then
-        BITCOIND_READY=1
-        # Fulcrum indexes from bitcoind's RPC and follows it through IBD, so it
-        # can be started now; it opens its Electrum ports only once caught up.
-        start_unit fulcrum
-        wait_healthy fulcrum 60 || warn "fulcrum is still starting; check: podman logs fulcrum"
-    else
-        warn "continuing without bitcoind RPC (it may still be starting)"
-    fi
-    wait_healthy monerod "$MONEROD_WAIT" || warn "continuing; monerod may still be syncing"
-}
-
-# ---------------------------------------------------------------------------
-# 4. wallets (the Bitcoin Core wallet; the BTCPay Monero wallet is view-only
-#    and is imported by start_btcpay once its address/view key are configured)
-# ---------------------------------------------------------------------------
-setup_wallets() {
-    if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping wallet setup (--skip-daemons)"; return 0; fi
-    [ "$DO_WALLETS" = 1 ] || { log "skipping wallet setup (--no-wallets)"; return 0; }
-    if [ "$DRY_RUN" = 1 ]; then
-        printf '  [dry-run] %s\n' "$REPO_DIR/scripts/wallets.sh"
-        return 0
-    fi
-    "$REPO_DIR/scripts/wallets.sh" || warn "Bitcoin wallet setup did not complete"
 }
 
 # ---------------------------------------------------------------------------
@@ -644,157 +538,39 @@ start_daemons() {
     else
         start_unit lightningd
     fi
-
-    if [ "$BITCOIND_READY" != 1 ]; then
-        warn "bitcoind RPC is not up; not waiting on lightningd"
-        warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
-    # CLN does not finish starting until bitcoind is caught up, so during
-    # initial block download the wait below would burn the whole timeout for
-    # nothing. Skip it and let a later re-run create the runes.
-    elif bitcoind_syncing; then
-        warn "bitcoind is still in initial block download; not waiting on lightningd"
-        warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
-    # bitcoind was observed to serve chain-level RPC while still loading its
-    # wallet; lightningd's bcli timed out on exactly that window and killed
-    # lightningd. Wait for wallet-level RPC before anything depends on it.
-    # getwalletinfo is the wrong probe: with more than one wallet loaded it
-    # answers -19 ("Wallet file not specified"), so the wait burned its whole
-    # timeout on a healthy node and then skipped the lightningd wait. listwallets
-    # is on the wallet path and names what is loaded.
-    elif ! wait_cmd "bitcoind wallet RPC" "$BITCOIND_WALLET_WAIT" bitcoind_wallet_ready; then
-        warn "bitcoind wallet RPC not up; not waiting on lightningd"
-        warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
-        dump_tail bitcoind 20
-    else
-        wait_cmd "lightningd RPC" "$LIGHTNINGD_WAIT" lightning_cli getinfo \
-            || { warn "lightningd RPC not up; runes are created on a later ./deploy.sh run"
-                 dump_tail lightningd 40; }
-    fi
-
-    # Re-run the installer now that lightningd may answer, to mint the runes.
-    # install.sh checks the node is reachable, so this is safe either way.
-    log "re-running installer to create CLN runes"
-    run "$REPO_DIR/deploy/install.sh"
+    # The CLN runes need a lightningd that answers. That wait and the installer
+    # re-run that mints them are ./configure.sh's job, not the deploy's.
 }
 
 # ---------------------------------------------------------------------------
 # 5b. BTCPay: the settlement tier the BoltMesh backend talks to
 # ---------------------------------------------------------------------------
-# The BTCPay/NBXplorer/Monero-wallet units are rendered by install.sh; this
-# function owns the parts that must happen in order: the btcpay role in the
-# existing Postgres cluster, the plugin wallet, the bootstrap (store/keys/
-# webhook) and the four-value env file the backend reads.
-ensure_btcpay_db() {
-    local pw
-    pw=$(env_value "$CONFIG_DIR/stack/secrets.env" BTCPAY_DB_PASSWORD)
-    [ -n "$pw" ] || { warn "no BTCPAY_DB_PASSWORD in $CONFIG_DIR/stack/secrets.env; run deploy/install.sh first"; return 1; }
-    # Roles and databases are idempotent. The password is hex from install.sh,
-    # so embedding it in the SQL is safe.
-    if ! podman exec postgres psql -U vpnuser -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='btcpay'" | grep -q 1; then
-        podman exec postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1             -c "CREATE ROLE btcpay LOGIN PASSWORD '$pw' CREATEDB" >/dev/null || return 1
-        log "created the btcpay Postgres role"
-    fi
-    local db
-    for db in btcpay nbxplorer; do
-        if ! podman exec postgres psql -U vpnuser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1; then
-            podman exec postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1                 -c "CREATE DATABASE $db OWNER btcpay" >/dev/null || return 1
-            log "created the $db database"
-        fi
-    done
-}
-
-write_btcpay_backend_env() {
-    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store secret
-    [ -s "$state" ] || { warn "no $state; the BTCPay bootstrap has not completed"; return 1; }
-    key=$(env_value "$state" BTCPAY_API_KEY)
-    store=$(env_value "$state" BTCPAY_STORE_ID)
-    secret=$(env_value "$state" BTCPAY_WEBHOOK_SECRET)
-    if [ -z "$key" ] || [ -z "$store" ] || [ -z "$secret" ]; then
-        warn "the BTCPay bootstrap state is incomplete; not writing the backend env"
-        return 1
-    fi
-    write_env_file "$CONFIG_DIR/btcpay/backend.env" <<EOF
-# Written by deploy.sh from btcpay/bootstrap.env. Do not hand-edit.
-BTCPAY_URL=http://btcpay:49392
-BTCPAY_API_KEY=$key
-BTCPAY_STORE_ID=$store
-BTCPAY_WEBHOOK_SECRET=$secret
-EOF
-    log "wrote $CONFIG_DIR/btcpay/backend.env (mode 600)"
-}
-
-# The read side of the same state: the store-scoped, read-only key
-# btcpay_bootstrap.py minted. It is rewritten every run (not seeded) so a
-# re-minted key cannot leave a stale copy in the unit's EnvironmentFile -- the
-# same reason crowdsec's lapi.env is derived from secrets.env. A change while
-# the unit is running is applied here, because `--only btcpay` never reaches
-# deploy_apps; a full deploy would also restart it after the rebuild.
-write_btcpay_mcp_env() {
-    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store envf tmp
-    [ -s "$state" ] || { warn "no $state; the BTCPay bootstrap has not completed"; return 1; }
-    key=$(env_value "$state" BTCPAY_MCP_KEY)
-    store=$(env_value "$state" BTCPAY_STORE_ID)
-    if [ -z "$key" ] || [ -z "$store" ]; then
-        warn "the BTCPay bootstrap has no read-only MCP key yet; btcpay-mcp will report unconfigured"
-        return 1
-    fi
-    envf="$CONFIG_DIR/btcpay-mcp/upstream.env"
-    mkdir -p "$(dirname "$envf")"
-    tmp=$(mktemp)
-    cat > "$tmp" <<EOF
-# Written by deploy.sh from btcpay/bootstrap.env. Do not hand-edit.
-BTCPAY_URL=http://btcpay:49392
-BTCPAY_PUBLIC_URL=https://$BTCPAY_HOST
-BTCPAY_API_KEY=$key
-BTCPAY_STORE_ID=$store
-EOF
-    if [ -s "$envf" ] && cmp -s "$tmp" "$envf"; then
-        rm -f "$tmp"
-        return 0
-    fi
-    install -m 600 "$tmp" "$envf"
-    rm -f "$tmp"
-    log "wrote $envf (mode 600)"
-    if systemctl --user is-active --quiet btcpay-mcp.service 2>/dev/null; then
-        log "btcpay-mcp's upstream env changed; restarting it"
-        if restart_unit btcpay-mcp; then
-            mark_applied btcpay-mcp
-            wait_healthy btcpay-mcp "$APP_HEALTH_WAIT" || warn "btcpay-mcp did not report healthy"
-        else
-            warn "btcpay-mcp did not restart; it keeps the old env"
-        fi
-    fi
-}
-
+# The BTCPay/NBXplorer/Monero-wallet units are rendered by install.sh. This
+# function only starts them, in dependency order. The work that needs them
+# answering -- the btcpay role and databases, the view-only plugin wallet, the
+# store bootstrap and the env files the backend and btcpay-mcp read -- is
+# ./configure.sh's job. A DB-less NBXplorer/BTCPay starts now and comes up on
+# its next systemd restart once configure.sh has created the databases.
 start_btcpay() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping BTCPay (--skip-daemons)"; return 0; fi
     if [ "$DRY_RUN" = 1 ]; then
         printf '  [dry-run] systemctl --user start postgres nbxplorer monero-wallet-btcpay btcpay\n'
-        printf '  [dry-run] %s/scripts/btcpay-wallet.sh && systemctl --user start btcpay-bootstrap\n' "$REPO_DIR"
         return 0
     fi
 
-    # BTCPay uses the existing Postgres cluster (separate databases), so the
-    # role/database step must follow postgres and precede NBXplorer.
-    start_unit postgres
-    wait_healthy postgres "${POSTGRES_WAIT:-180}" || { warn "postgres not healthy"; dump_tail postgres 20; return 1; }
-    ensure_btcpay_db || { warn "could not prepare the BTCPay databases"; return 1; }
-
-    start_unit nbxplorer || { warn "nbxplorer did not start"; dump_tail nbxplorer 30; return 1; }
-    wait_healthy nbxplorer 300 || { warn "nbxplorer did not become healthy"; dump_tail nbxplorer 30; return 1; }
-
+    start_unit postgres || warn "postgres did not start"
+    start_unit nbxplorer || warn "nbxplorer did not start"
     start_unit monero-wallet-btcpay || warn "monero-wallet-btcpay did not start"
-    wait_healthy monero-wallet-btcpay "${MONERO_WALLET_WAIT:-300}" || warn "monero-wallet-btcpay not healthy"
 
     local btcpay_active=0
     systemctl --user is-active --quiet btcpay.service 2>/dev/null && btcpay_active=1
-    start_unit btcpay || { warn "btcpay did not start"; dump_tail btcpay 40; return 1; }
+    start_unit btcpay || warn "btcpay did not start"
     # btcpay is deferred by the digest pass (its restart belongs here, after
-    # postgres/nbxplorer are up), so a changed unit is applied now rather than
-    # left on the old definition until the next run.
+    # postgres/nbxplorer are started), so a changed unit is applied now rather
+    # than left on the old definition until the next run.
     if [ "$btcpay_active" = 1 ] && unit_was_changed btcpay && ! unit_applied btcpay; then
         log "btcpay.service changed; restarting it to pick up the new unit"
-        restart_unit btcpay || { warn "btcpay did not restart"; dump_tail btcpay 40; return 1; }
+        restart_unit btcpay || warn "btcpay did not restart"
     fi
     mark_applied btcpay
     # A plugin bump is a file in the plugin directory, so no unit digest notices
@@ -803,35 +579,15 @@ start_btcpay() {
     # image. This covers `--only btcpay` too, which never reaches unit_digest.
     if btcpay_plugin_newer; then
         log "the BTCPay Monero plugin on disk is newer than the running container; restarting btcpay"
-        restart_unit btcpay || { warn "btcpay did not restart"; dump_tail btcpay 40; return 1; }
+        restart_unit btcpay || warn "btcpay did not restart"
     fi
-    wait_healthy btcpay 300 || { warn "btcpay did not become healthy"; dump_tail btcpay 40; return 1; }
-
-    # Import the view-only plugin wallet once the operator has supplied the
-    # address/view key; the script is a no-op otherwise (and restarts BTCPay
-    # itself when it does import, so wait again before the bootstrap -- but only
-    # then, not on every deploy).
-    local started_before started_after
-    started_before=$(podman inspect btcpay --format '{{.State.StartedAt}}' 2>/dev/null || true)
-    if "$REPO_DIR/scripts/btcpay-wallet.sh"; then
-        started_after=$(podman inspect btcpay --format '{{.State.StartedAt}}' 2>/dev/null || true)
-        if [ -n "$started_after" ] && [ "$started_after" != "$started_before" ]; then
-            wait_healthy btcpay 300 || true
-        fi
-    else
-        warn "the BTCPay Monero wallet was not imported; XMR-CHAIN will stay disabled"
-    fi
-
-    start_unit btcpay-bootstrap || warn "the BTCPay bootstrap did not complete; check: podman logs btcpay-bootstrap"
-    write_btcpay_backend_env || warn "BTCPay is up but the backend env was not written"
-    write_btcpay_mcp_env || warn "BTCPay is up but the btcpay-mcp env was not written"
 }
 
 # ---------------------------------------------------------------------------
 # 6. the application servers
 # ---------------------------------------------------------------------------
-deploy_app() { # repo [force] [wait]
-    local r="$1" force="${2:-0}" wait="${3:-1}"
+deploy_app() { # repo [force]
+    local r="$1" force="${2:-0}"
     local dir="$BUILD_DIR/$r"
     local image="localhost/$r:latest"
     [ -d "$dir" ] || { warn "$r is not cloned under $BUILD_DIR"; return 1; }
@@ -840,34 +596,23 @@ deploy_app() { # repo [force] [wait]
     log "building $image"
     run podman build -t "$image" "$dir" \
         || { warn "$r did not build; keeping the running image"; return 1; }
-    # The app images define no podman healthcheck (the app repos own their
-    # Containerfiles), but every unit here sets HealthCmd/HealthInterval: the
-    # MCP servers probe their own /mcp with an authenticated initialize, the
-    # BoltMesh tier its own /health. So podman's health status IS the readiness
-    # signal, and this never polls an app through nginx-proxy-manager.
+    # Every unit here sets HealthCmd/HealthInterval (the MCP servers probe their
+    # own /mcp with an authenticated initialize), but health is the verdict
+    # ./verify.sh and monitor.timer read -- the deploy does not wait for it.
     # A plain `--only <app>` forces the restart: the operator asked for it.
     if [ "$force" = 1 ]; then
         restart_unit "$r" || { warn "$r did not restart"; return 1; }
         mark_applied "$r"
-        if [ "$wait" = 1 ]; then
-            wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
-        else
-            RESTART_QUEUE+=("$r")
-        fi
     else
-        restart_applied "$r" "$image" "$APP_HEALTH_WAIT" "$wait" \
-            || return 1
+        restart_applied "$r" "$image" || return 1
     fi
 }
 
 deploy_apps() {
-    local r failed=0
-    RESTART_QUEUE=()
+    local r
     for r in "${APP_REPOS[@]}"; do
-        deploy_app "$r" 0 0 || failed=1
+        deploy_app "$r" || warn "$r did not deploy"
     done
-    settle_restarts "$APP_HEALTH_WAIT" || failed=1
-    [ "$failed" = 0 ] || warn "one or more app servers did not report healthy; see: podman ps -a"
 }
 
 # ---------------------------------------------------------------------------
@@ -916,26 +661,6 @@ build_boltmesh_frontend() {
         -t localhost/boltmesh-frontend:latest -f "$df" "$dir"
 }
 
-# The four env files the backend/worker read; passed to the one-off migration
-# container below. install.sh wrote them, so they exist by the time we run.
-boltmesh_env_args() {
-    printf '%s\n' \
-        "--env-file" "$CONFIG_DIR/boltmesh/db.env" \
-        "--env-file" "$CONFIG_DIR/boltmesh/secrets.env" \
-        "--env-file" "$CONFIG_DIR/boltmesh/app.env" \
-        "--env-file" "$CONFIG_DIR/btcpay/backend.env"
-}
-
-run_boltmesh_migrations() {
-    log "applying BoltMesh database migrations"
-    local -a envs=()
-    # shellcheck disable=SC2207
-    envs=($(boltmesh_env_args))
-    run podman run --rm --network npm-network \
-        "${envs[@]}" \
-        localhost/boltmesh-backend:latest alembic upgrade head
-}
-
 deploy_boltmesh() { # [force]
     local force="${1:-0}"
     # Failures warn and return 0, exactly like deploy_apps: the deploy brings up
@@ -951,25 +676,20 @@ deploy_boltmesh() { # [force]
         warn "the BoltMesh frontend image did not build; starting the API/worker anyway"
     fi
 
-    start_unit postgres || { warn "postgres did not start"; dump_tail postgres 20; return 0; }
-    wait_healthy postgres "${POSTGRES_WAIT:-180}" \
-        || { warn "postgres not healthy"; dump_tail postgres 20; return 0; }
-
-    # Migrations run before the API so it never serves against a missing schema.
-    run_boltmesh_migrations || warn "migrations failed; the API may not start cleanly"
+    start_unit postgres || warn "postgres did not start"
+    # The migrations are ./configure.sh's job: they need a postgres that
+    # answers, and deploy.sh does not wait. The API/worker are started here
+    # regardless, so a run that never reaches configure.sh serves against a
+    # missing schema.
 
     # Backend and worker share one image; the frontend has its own. Each unit is
-    # restarted only when its definition changed or its image is newer, then all
-    # of them are waited on together.
-    RESTART_QUEUE=()
-    restart_applied boltmesh-backend localhost/boltmesh-backend:latest "$APP_HEALTH_WAIT" 0 "$force" \
+    # restarted only when its definition changed or its image is newer.
+    restart_applied boltmesh-backend localhost/boltmesh-backend:latest "$force" \
         || warn "boltmesh-backend did not restart"
-    restart_applied boltmesh-worker localhost/boltmesh-backend:latest "$APP_HEALTH_WAIT" 0 "$force" \
+    restart_applied boltmesh-worker localhost/boltmesh-backend:latest "$force" \
         || warn "boltmesh-worker did not restart"
-    restart_applied boltmesh-frontend localhost/boltmesh-frontend:latest 60 0 "$force" \
+    restart_applied boltmesh-frontend localhost/boltmesh-frontend:latest "$force" \
         || warn "boltmesh-frontend did not restart"
-    settle_restarts "$APP_HEALTH_WAIT" \
-        || warn "one or more BoltMesh units did not report healthy; see: podman ps -a"
 }
 
 # ---------------------------------------------------------------------------
@@ -1019,42 +739,23 @@ deploy_explorers() {
 
     # Build first, then decide what needs a restart. An unchanged explorer is
     # started (a no-op when active) and left alone; only a changed unit or a
-    # rebuilt image costs an outage.
+    # rebuilt image costs an outage. xmr-explorer panics while monerod is still
+    # opening its LMDB, but its unit retries every RestartSec, so the deploy
+    # starts it and leaves the recovery to systemd (and the verdict to
+    # ./verify.sh) instead of waiting on monerod's restricted RPC.
     local name image
-    local -a to_restart=() restarted=()
     for name in "${EXPLORER_UNITS[@]}"; do
         build_explorer "$name" \
             || { warn "$name did not build; the other explorer continues"; continue; }
         image=$(explorer_image "$name") || continue
         if unit_was_changed "$name" || ! image_is_running "$name" "$image"; then
-            to_restart+=("$name")
+            restart_unit "$name" || { warn "$name did not restart"; continue; }
+            mark_applied "$name"
         else
             start_unit "$name"
             log "$name is unchanged; not restarting it"
         fi
     done
-
-    # xmr-explorer panics while monerod is still opening its LMDB and restarts
-    # itself every RestartSec; wait for the restricted RPC before bouncing it, so
-    # the deploy does not spend EXPLORER_WAIT on a container that cannot be
-    # healthy yet. Only when an explorer is actually being restarted and monerod
-    # is up: a stopped daemon is a different failure and the explorer will retry
-    # on its own.
-    if [ "${#to_restart[@]}" -gt 0 ] \
-        && systemctl --user is-active --quiet monerod.service 2>/dev/null; then
-        wait_cmd "monerod restricted RPC" 120 monerod_rpc get_height \
-            || warn "monerod restricted RPC is not answering; the explorers may retry for a while"
-    fi
-
-    RESTART_QUEUE=()
-    for name in "${to_restart[@]}"; do
-        restart_unit "$name" || { warn "$name did not restart"; continue; }
-        mark_applied "$name"
-        RESTART_QUEUE+=("$name")
-    done
-    restarted=("${RESTART_QUEUE[@]}")
-    settle_restarts "$EXPLORER_WAIT" \
-        || { for name in "${restarted[@]}"; do dump_tail "$name" 30; done; }
 }
 
 # ---------------------------------------------------------------------------
@@ -1121,7 +822,6 @@ sync_npm_network() {
     log "restarting nginx-proxy-manager: $why"
     if restart_unit nginx-proxy-manager; then
         mark_applied nginx-proxy-manager
-        wait_healthy nginx-proxy-manager 120 || warn "nginx-proxy-manager did not report healthy"
         # The unit question is settled: units_commit may now record NPM's
         # definition as applied.
         NPM_UNIT_CHANGED=0
@@ -1142,9 +842,9 @@ sync_npm_network() {
 #
 # No --from-opencode: servers.json reads each server's token straight from
 # $DATA_DIR/config/<server>/token.env, so seeding ~/.config/agent-skills/env
-# would only create a copy that goes stale on the next token rotation. The smoke
-# call is deliberately not fatal -- a skill is not infrastructure, and the deploy
-# must not fail because a client-side tool could not reach NPM.
+# would only create a copy that goes stale on the next token rotation. The
+# read-only handshake that proves the path through $MCP_HOST needs the stack to
+# be answering, so it lives in ./configure.sh, not here.
 agent_skills_dir() { printf '%s/%s' "$BUILD_DIR" "$AGENT_SKILLS_REPO"; }
 
 fetch_agent_skills() {
@@ -1159,15 +859,6 @@ install_agent_skills() {
 
     log "installing the agent skills and agent-mcp"
     run "$dir/install.sh" || { warn "$dir/install.sh failed"; return 1; }
-    if [ "$DRY_RUN" = 1 ]; then
-        printf '  [dry-run] agent-mcp bitcoin-node get_blockchain_info\n'
-        return 0
-    fi
-    if "$HOME/.local/bin/agent-mcp" bitcoin-node get_blockchain_info >/dev/null 2>&1; then
-        log "agent-mcp read the bitcoin node through $MCP_HOST"
-    else
-        warn "agent-mcp could not call bitcoin-node: check the token in $CONFIG_DIR/bitcoin-node-mcp/token.env and the $MCP_HOST proxy host (./verify.sh)"
-    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1206,7 +897,7 @@ if [ -n "$ONLY" ]; then
         sync_units
         # An explicit --only is a request to redeploy: force the restart even
         # when the image and the unit are unchanged.
-        deploy_app "$ONLY" 1 1
+        deploy_app "$ONLY" 1
     elif [ "$ONLY" = backup ]; then
         # A one-shot job: install.sh has just (re)enabled the timer; this also
         # runs it once now instead of waiting for the schedule.
@@ -1234,18 +925,22 @@ if [ -n "$ONLY" ]; then
         sync_units
         start_unit monitor
     elif [ "$ONLY" = btcpay ]; then
-        # btcpay's restart belongs after postgres and nbxplorer, so the digest
-        # pass leaves it to start_btcpay.
+        # btcpay's restart belongs after postgres and nbxplorer are started, so
+        # the digest pass leaves it to start_btcpay. The databases, plugin
+        # wallet, bootstrap and env files are ./configure.sh --only btcpay.
         DEFER_UNITS=" btcpay "
         sync_units
         start_btcpay
+        log "next: ./configure.sh --only btcpay  # databases, plugin wallet, bootstrap, envs"
     elif [ "$ONLY" = boltmesh ]; then
-        # The whole app tier: fetch, build, migrate, start. Individual members
-        # (postgres, boltmesh-backend/-worker/-frontend) fall through to the
-        # generic branch below, which restarts the one unit and waits.
+        # The whole app tier: fetch, build, start. Individual members (postgres,
+        # boltmesh-backend/-worker/-frontend) fall through to the generic branch
+        # below, which restarts the one unit. The migrations are ./configure.sh
+        # --only boltmesh (they need a ready postgres).
         DEFER_UNITS=" boltmesh-backend boltmesh-worker boltmesh-frontend "
         sync_units
         deploy_boltmesh 1
+        log "next: ./configure.sh --only boltmesh  # alembic upgrade head"
     elif [ "$ONLY" = explorers ]; then
         # Both explorer images, rebuilt even if they exist (their Containerfiles
         # are the only place their versions live). Deferred so the digest pass
@@ -1255,9 +950,8 @@ if [ -n "$ONLY" ]; then
         sync_units
         for name in "${EXPLORER_UNITS[@]}"; do
             build_explorer "$name" 1 || continue
-            restart_unit "$name"
+            restart_unit "$name" || { warn "$name did not restart"; continue; }
             mark_applied "$name"
-            wait_healthy "$name" "$EXPLORER_WAIT" || true
         done
     elif [ "$ONLY" = btc-explorer ] || [ "$ONLY" = xmr-explorer ]; then
         # One explorer: rebuild its image and restart only that unit. The
@@ -1265,9 +959,8 @@ if [ -n "$ONLY" ]; then
         DEFER_UNITS=" $ONLY "
         sync_units
         build_explorer "$ONLY" 1
-        restart_unit "$ONLY"
+        restart_unit "$ONLY" || warn "$ONLY did not restart"
         mark_applied "$ONLY"
-        wait_healthy "$ONLY" "$EXPLORER_WAIT" || true
     elif [ "$ONLY" = npm-hosts ]; then
         # Re-apply the proxy hosts after a manifest change, or after filling
         # in $DATA_DIR/config/npm/api.env. Touches no container of its own, but
@@ -1292,14 +985,13 @@ if [ -n "$ONLY" ]; then
     else
         sync_units
         # sync_units may already have restarted it because its rendered
-        # definition changed; a second restart is a second outage and a second
-        # health wait for one edit, so only restart when it did not.
+        # definition changed; a second restart is a second outage for one edit,
+        # so only restart when it did not.
         if unit_applied "$ONLY"; then
             log "$ONLY.service was restarted to pick up its new unit; not restarting it again"
         else
             restart_unit "$ONLY"
             mark_applied "$ONLY"
-            wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
         fi
     fi
     units_commit
@@ -1312,9 +1004,9 @@ fetch_repos
 # after its build, so the early digest pass leaves them alone: a unit that is
 # both changed and rebuilt would otherwise be restarted twice (once on the old
 # bits, once on the new). btcpay's restart belongs in start_btcpay, after
-# postgres and nbxplorer are up. Only units whose phase will actually run are
-# deferred -- with --skip-apps or --skip-daemons the digest pass applies their
-# unit changes as before.
+# postgres and nbxplorer are started. Only units whose phase will actually run
+# are deferred -- with --skip-apps or --skip-daemons the digest pass applies
+# their unit changes as before.
 DEFER_UNITS=" "
 [ "$SKIP_APPS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${APP_REPOS[*]} boltmesh-backend boltmesh-worker boltmesh-frontend "
 [ "$SKIP_DAEMONS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${EXPLORER_UNITS[*]} btcpay "
@@ -1325,7 +1017,6 @@ restart_changed_units "$units_before" "$units_after"
 UNITS_APPLIED_DIGEST="$units_after"
 UNITS_SYNCED=1
 start_infra
-setup_wallets
 start_daemons
 # A BTCPay failure is a tier failure, not a deploy failure: the rest of the
 # stack still deploys and ./verify.sh (or the monitor) names what is down. A
@@ -1340,8 +1031,6 @@ start_btcpay || warn "BTCPay did not come up; continuing -- run ./verify.sh"
 # monitors run after deploy_explorers so they see them up.
 configure_npm_hosts
 sync_npm_network
-# After the proxy hosts exist, because install_agent_skills proves the token path
-# with a real call through $MCP_HOST.
 if [ "$DO_AGENT_SKILLS" = 1 ]; then
     fetch_agent_skills
     install_agent_skills || true
@@ -1399,6 +1088,12 @@ The status page's monitors are reconciled once
   (scripts/kuma-monitors.sh applies every monitor in KUMA_MONITORS).
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
 bitcoind, monerod, fulcrum, lightningd, btcpay, nbxplorer and the BTCPay wallet.
+
+deploy.sh does not wait for health and does not do the work that needs a
+running service. Next:
+
+  ./configure.sh --skip-daemons  # BoltMesh migrations, agent-mcp handshake
+  ./verify.sh                    # container health, MCP handshakes, onion fetches
 EOF
 else
     cat <<EOF
@@ -1455,9 +1150,17 @@ Stack deployed.
                     <host> then http://127.0.0.1:9428/select/vmui
 
 Chain sync continues in the background (both daemons are full nodes, so the
-first sync downloads and validates the whole Bitcoin and Monero chains). Re-run
-./deploy.sh once the chains are current to finish anything that was waiting on
-them.
+first sync downloads and validates the whole Bitcoin and Monero chains).
+
+deploy.sh does not wait for health and does not do the work that needs a
+running service. Next, once the daemons answer:
+
+  ./configure.sh   # Bitcoin wallet, CLN runes, BTCPay databases/plugin
+                   # wallet/bootstrap and the BoltMesh migrations. It waits
+                   # (bounded) for each service, warns and moves on when one is
+                   # not up, and finishes anything the chain sync delayed on a
+                   # later run.
+  ./verify.sh      # container health, MCP handshakes, onion fetches
 EOF
 fi
 

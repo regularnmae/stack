@@ -190,12 +190,13 @@ git clone https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
 ./bootstrap.sh
 ./deploy.sh           # or: ./deploy.sh --bootstrap to do both in one step
+./configure.sh        # second step: runes, wallet, BTCPay state, migrations
 ```
 
 `bootstrap.sh` uses `sudo` for the privileged host setup (packages, linger, the
 sysctl, firewalld); `sudo` needs a terminal to prompt, so run it from an
-interactive shell (over SSH, `ssh -t`). `deploy.sh` and `verify.sh` never use
-`sudo`.
+interactive shell (over SSH, `ssh -t`). `deploy.sh`, `configure.sh` and
+`verify.sh` never use `sudo`.
 
 On the first run, `deploy.sh` asks **where the stack keeps its data** (default
 `$HOME/data`) and remembers the answer; point it at a separate disk to survive
@@ -215,12 +216,15 @@ and `tor` — are rebuilt when their Containerfile changed and left
 alone otherwise: the digest of that file is baked into the image as a label, so
 a merged base-image bump reaches the host on the next deploy instead of needing
 a hand rebuild (`--only` forces one anyway). `deploy.sh` does not run
-`verify.sh`: verification is the separate `./verify.sh` (or the monitor's
-sweep). Common flags:
+`verify.sh`, and it never waits for a container's health or for a chain to
+sync: verification is the separate `./verify.sh` (or the monitor's sweep), and
+the work that can only happen against a *running* stack is the second step,
+`./configure.sh` (Bitcoin wallet, CLN runes, BTCPay databases/plugin
+wallet/bootstrap, BoltMesh migrations). Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
-./deploy.sh --only boltmesh           # rebuild + migrate the whole BoltMesh tier
+./deploy.sh --only boltmesh           # rebuild/start the whole BoltMesh tier
 ./deploy.sh --only explorers          # rebuild both explorer images
 ./deploy.sh --only backup             # run the backup job now
 ./deploy.sh --only backup-verify      # run the restore drill now (weekly on a timer)
@@ -234,8 +238,11 @@ sweep). Common flags:
 ./deploy.sh --only agent-skills       # re-link the agent skills + agent-mcp
 ./deploy.sh --skip-apps               # infrastructure only (daemons, searxng, NPM)
 ./deploy.sh --skip-agent-skills       # leave the operator's harnesses untouched
-./deploy.sh --no-wallets              # skip the interactive wallet prompts
 ./deploy.sh --dry-run                 # print the plan, change nothing
+./configure.sh                        # wait for each service, then do the post-start work
+./configure.sh --only runes           # one section (wallet|runes|btcpay|boltmesh|agents)
+./configure.sh --skip-daemons         # no wallet/runes/BTCPay work
+./configure.sh --no-wallets           # skip the interactive wallet prompts
 ./verify.sh                           # container health, MCP handshakes, onion fetches
 ./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
 ./scripts/metrics.sh                  # one metrics collection (metrics.timer runs it)
@@ -251,14 +258,14 @@ and Monero chains. `fulcrum` starts indexing from `bitcoind`'s RPC as soon as it
 answers and follows the node through initial block download; it only accepts
 wallet connections once its own index has caught up (watch `podman logs fulcrum`).
 See [Full nodes and disk](#full-nodes-and-disk) for the disk budget.
-`deploy.sh` starts the containers and does **not** wait for sync — re-run it once
-the chains are current and anything that was waiting (notably the CLN runes)
-completes.
+`deploy.sh` starts the containers and does **not** wait for sync or health. Run
+`./configure.sh` after it (and again once the chains are current): it waits for
+the daemons, then mints the CLN runes, imports the wallets and bootstraps BTCPay.
 
 ### Wallets
 
 A bare host has a Bitcoin Core wallet, created by `scripts/wallets.sh`
-(prompted by `deploy.sh` when a TTY is present; skipped without one).
+(prompted by `./configure.sh` when a TTY is present; skipped without one).
 
 The BTCPay Monero wallet is different and is never generated on the payment
 server: `scripts/btcpay-wallet.sh` imports a **view-only** wallet into the
@@ -272,11 +279,11 @@ XMR_RESTORE_HEIGHT=<height>
 
 Keep the spend key offline (a hardware/offline wallet). Until these are filled
 in, XMR-CHAIN stays disabled and `btcpay-bootstrap` re-enables it on the next
-`./deploy.sh --only btcpay`. The import also refuses while monerod is below the
-restore height: a wallet cannot open above the daemon's height (Monero's
+`./configure.sh --only btcpay`. The import also refuses while monerod is below
+the restore height: a wallet cannot open above the daemon's height (Monero's
 "Blocks start before blockchain offset"), and the stalled refresh takes the
 plugin's wallet RPC down with it. The env can be filled at any time; re-run
-`./deploy.sh --only btcpay` once the chain is current. The plugin wallet is
+`./configure.sh --only btcpay` once the chain is current. The plugin wallet is
 internal-only and holds no spend key, so `monero-wallet-mcp` can read it but
 cannot move funds.
 
@@ -447,6 +454,7 @@ every token:
    cd ~/build/stack
    ./bootstrap.sh
    ./deploy.sh                 # answer the data-dir prompt with /data/stack
+   ./configure.sh              # runes, wallets, BTCPay state, migrations
    ./verify.sh --deep
    ```
 
@@ -585,7 +593,8 @@ data is in the backup set:
 systemctl --user stop lightningd btcpay nbxplorer monero-wallet-btcpay tor nginx-proxy-manager uptime-kuma
 ./scripts/backup.sh ls latest      # what the snapshot holds, before overwriting anything
 ./scripts/backup.sh restore latest # in place; add -y when there is no TTY
-./deploy.sh                        # adopts, re-renders, restarts, reconciles, verifies
+./deploy.sh                        # adopts, re-renders, restarts, reconciles
+./configure.sh                     # waits, then mints runes and writes the btcpay env
 # then replay the live databases (the next section) -- the servers are up but empty
 ./verify.sh --deep
 ```
@@ -700,13 +709,15 @@ first means every seed-once file is derived from the snapshot.
    directly.
 
 4. Deploy. This adopts the restored secrets (never overwriting an existing
-   file), seeds `bitcoin.conf`/`torrc` from them, builds the images, proves the
-   restored CLN runes with `checkrune` (minting new ones if the node does not
-   know them), writes `config/btcpay/backend.env` from the bootstrap state, and reconciles the
-   proxy hosts and the status page:
+   file), seeds `bitcoin.conf`/`torrc` from them, builds the images, and
+   reconciles the proxy hosts and the status page. `./configure.sh` then does
+   the work that needs the restored daemons up: it proves the restored CLN
+   runes with `checkrune` (minting new ones if the node does not know them) and
+   writes `config/btcpay/backend.env` from the bootstrap state.
 
    ```sh
    ./deploy.sh
+   ./configure.sh
    ```
 
 5. Replay the database. It comes back as a file, not a running server, and the
@@ -715,7 +726,8 @@ first means every seed-once file is derived from the snapshot.
    ```sh
    systemctl --user stop boltmesh-backend.service boltmesh-worker.service
    podman exec -i postgres psql -U vpnuser -d postgres < "$DATA_DIR/postgres-dump/all.sql"
-   ./deploy.sh --only boltmesh     # alembic upgrade head, then start the API + worker
+   ./configure.sh --only boltmesh  # alembic upgrade head
+   systemctl --user start boltmesh-backend.service boltmesh-worker.service
    ```
 
    The dump was taken with `pg_dumpall --clean --if-exists`, so it recreates the
@@ -795,11 +807,11 @@ What rotation cannot fix, and what to do instead:
   The wildcard `*.onion` proxy host keeps working, but clients holding the old
   address do not.
 - **`cln/` is gone**, `config/` restored: a new node identity. The runes in
-  `config/lightning-mcp/node.env` are dead; `./deploy.sh` proves them with
+  `config/lightning-mcp/node.env` are dead; `./configure.sh` proves them with
   `checkrune` and mints new ones, and the MCP servers restart with the new
   values. The channels are gone with the `hsm_secret` — CLN has no seed phrase,
   which is why `cln/` is the most valuable directory in the set.
-- **`btcpay/` is gone**, `config/` restored: re-run `./deploy.sh --only btcpay`.
+- **`btcpay/` is gone**, `config/` restored: re-run `./configure.sh --only btcpay`.
   The datadir's protection keys and the plugin are recreated, the store is in
   Postgres, and `scripts/btcpay-wallet.sh` re-imports the view-only wallet from
   the address/view key in `config/btcpay/xmr-wallet.env`.
@@ -1830,7 +1842,7 @@ fronts the stack's own `lightningd` (CLN) and the view-only Monero wallet:
 | --- | --- |
 | `DATABASE_URL`, `POSTGRES_*` | `$DATA_DIR/config/boltmesh/db.env` (generated) |
 | `SECRET_KEY`, `REFRESH_SECRET_KEY`, `NODE_SECRET_KEY`, `BOOTSTRAP_SECRET_PEPPER` | `$DATA_DIR/config/boltmesh/secrets.env` (generated) |
-| `BTCPAY_URL`, `BTCPAY_API_KEY`, `BTCPAY_STORE_ID`, `BTCPAY_WEBHOOK_SECRET` | `$DATA_DIR/config/btcpay/backend.env` — written by `deploy.sh` from the bootstrap state; the runtime key is store-scoped (invoice create/read/modify, store settings) |
+| `BTCPAY_URL`, `BTCPAY_API_KEY`, `BTCPAY_STORE_ID`, `BTCPAY_WEBHOOK_SECRET` | `$DATA_DIR/config/btcpay/backend.env` — written by `configure.sh` from the bootstrap state; the runtime key is store-scoped (invoice create/read/modify, store settings) |
 | URLs, CORS, OAuth, SMTP, `GITHUB_REPO`/`GITHUB_TOKEN` | `$DATA_DIR/config/boltmesh/app.env` — **operator-editable**, fill it in before first use |
 
 ### Before it works
@@ -2025,6 +2037,7 @@ flight, which would otherwise snapshot one side of a credential pair).
 stack/
   bootstrap.sh            # bare host -> podman, linger, sysctl, firewall ports, dirs
   deploy.sh               # the one-click orchestrator (asks for the data dir)
+  configure.sh            # the second step: waits, then the running-stack work
   verify.sh               # health + endpoint checks
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
   renovate.json           # Renovate policy (pinned images, git refs, actions)

@@ -90,7 +90,7 @@ setup_bitcoin() {
     fi
 
     # bitcoind serves chain RPC (getblockchaininfo) while it is still loading its
-    # wallets, and deploy.sh's wallet step runs in exactly that window. Without
+    # wallets, and configure.sh's wallet step runs in exactly that window. Without
     # this wait, listwallets is empty and the script prompts to create a wallet
     # that already exists -- then createwallet fails with "Database already
     # exists".

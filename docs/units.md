@@ -33,9 +33,10 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   (`flag_value`) → the daemon's config (`bitcoin_conf_value`) → generate. That
   order is what makes adoption on a running host a no-op; keep it.
 
-- **`deploy.sh` runs `install.sh` twice** — up front, then again after
-  `lightningd` is up, because the CLN runes need a running node. Don't collapse
-  them.
+- **`install.sh` runs twice per deploy cycle** — `deploy.sh` renders up front,
+  and `./configure.sh` re-runs it after `lightningd` is up, because the CLN
+  runes need a running node. Don't collapse them: the second render is the one
+  that can mint runes.
 
 - **A re-render alone does not change a running container** (systemd keeps the
   old one), so the host persists the answer to "which definition are the
@@ -76,11 +77,12 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   image and did nothing (the new client reached the containers one deploy
   later); and an app branch sets `DEFER_UNITS` so `restart_changed_units` leaves
   that unit alone — `deploy_app` restarts it after the build, and restarting it
-  twice is two outages for one edit. Waits are batched (`wait_healthy_many`): a
-  phase restarts all its changed units, then waits on them together, so a dozen
-  restarts no longer cost a StartPeriod + Interval each in series. `deploy.sh`
-  does not run `verify.sh`; verification is its own command (and the monitor's
-  sweep).
+  twice is two outages for one edit. `deploy.sh` does not wait for health at
+  all: it restarts what changed and returns, and `./verify.sh` (or the monitor's
+  sweep) is the verdict. The work that needs a service to be answering -- the
+  CLN runes, the wallets, the BTCPay databases/bootstrap and the BoltMesh
+  migrations -- is the second step, `./configure.sh`, which owns every bounded
+  wait (`wait_healthy`, `wait_cmd`).
 
 - **`scripts/rotate.sh` is the third writer of `units.applied`.** A rotation
   re-renders through `install.sh` (only `bitcoin-rpc` and `tor-control` bake a
@@ -94,11 +96,12 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   something.** It used to be written only if it did not already exist, so it
   was frozen at the host's first install while README's Rollback section
   presents it as the rollback path. The fix cannot be "always overwrite it":
-  `deploy.sh` runs `install.sh` twice per deploy (the CLN runes need a running
-  node), so the second run would back up the file the first run just wrote and
-  destroy the rollback. Hence the `cmp`: back up the old bytes only when the new
-  ones differ, always as one generation, always mode 600 (`cp -p` — several
-  rendered units carry `@PLACEHOLDER@` secrets).
+  `./configure.sh` re-runs `install.sh` to mint the CLN runes once the node
+  answers (the deploy itself renders once), so the second run would back up the
+  file the first run just wrote and destroy the rollback. Hence the `cmp`: back
+  up the old bytes only when the new ones differ, always as one generation,
+  always mode 600 (`cp -p` — several rendered units carry `@PLACEHOLDER@`
+  secrets).
 
 ## Units, mounts and runes
 
@@ -166,8 +169,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   And **`wait_healthy` raises a caller's timeout to the unit's
   `StartPeriod + Interval`**: podman runs no check during the start period, so a
   shorter wait reports "not healthy" about a service that never had a chance to
-  answer. Those are **Go duration strings and may be fractional**
-  (`HealthTimeout=7.5s` is legal), which is why `lib.sh`'s `dur_ms` parses each
+  answer. That is `./configure.sh`'s wait, not the deploy's. Durations are **Go
+  duration strings and may be fractional** (`HealthTimeout=7.5s` is legal),
+  which is why `lib.sh`'s `dur_ms` parses each
   component by its unit: the whole-second regex it replaced matched the digits
   *after* the dot, reading `2.5h` as `5h`, `1m30.5s` as 65 s and `500ms` as 500
   minutes — and `healthcheck-lint.sh` judges HC006 in ms for the same reason, so
@@ -177,8 +181,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   (`Type=oneshot`) is the other way a wait lies**:
   the job *exits* instead of reporting `(healthy)` and never appears in
   `podman ps`, so `wait_healthy` reads its terminal state instead
-  (`exited 0` = done) — before that, `./deploy.sh --only postgres-dump` spun
-  its whole 180 s and warned "container missing" about a job that had
+  (`exited 0` = done) — before that, waiting on a `postgres-dump`/`btcpay-bootstrap`
+  job spun its whole 180 s and warned "container missing" about a job that had
   succeeded. The ten MCP servers' `healthcheck.py` (authenticated `initialize`,
   SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
 
@@ -255,8 +259,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   and `npm/` read-only alongside `lightningd` and NPM, and two containers cannot
   share a path one labels private.
 
-- **`sudo` lives only in `bootstrap.sh`.** `deploy.sh`, `install.sh`, `verify.sh`
-  and the `scripts/` helpers never call it; an unprepared data dir is an error
+- **`sudo` lives only in `bootstrap.sh`.** `deploy.sh`, `configure.sh`,
+  `install.sh`, `verify.sh` and the `scripts/` helpers never call it; an
+  unprepared data dir is an error
   carrying the one-time commands, not a prompt. The one thing bootstrap uses it
   for beyond provisioning is the **root tier** (`deploy/install.sh --root`): the
   Suricata sensor, which cannot be rootless because AF_PACKET needs

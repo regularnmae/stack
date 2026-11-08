@@ -21,7 +21,7 @@ Network=npm-network.network
 # The bearer token clients must present, and the BTCPay URL/key/store this
 # server reads. Both live OUTSIDE this repo in
 # $DATA_DIR/config/btcpay-mcp/ (mode 600). upstream.env is rewritten by
-# deploy.sh from btcpay/bootstrap.env after the bootstrap mints the key.
+# configure.sh from btcpay/bootstrap.env after the bootstrap mints the key.
 EnvironmentFile=@CONFIG_DIR@/btcpay-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/btcpay-mcp/upstream.env
 

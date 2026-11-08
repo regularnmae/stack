@@ -115,9 +115,9 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   `container:8000` on `npm-network` through `net_curl` (exec'd into the
   long-lived `netcheck` container; `netcheck-host` is the same image on the host
   network for NPM's own admin API on `127.0.0.1:81`). The units set `HealthCmd=`/`HealthInterval=`, so podman
-  really does report `(healthy)` and `deploy.sh` waits with `wait_healthy`; the
-  MCP probe is an authenticated `initialize`, strictly stronger than a `/health`
-  GET.
+  really does report `(healthy)`: `./configure.sh` waits on it with
+  `wait_healthy`, and `./verify.sh` reads the state; the MCP probe is an
+  authenticated `initialize`, strictly stronger than a `/health` GET.
 
 ## Every proxy host is declared
 
