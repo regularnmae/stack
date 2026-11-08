@@ -133,8 +133,8 @@ container, no DNS and no certificate needed. See
 > is load-bearing: NPM's nginx resolves every upstream when it starts, so a saved
 > host still naming a container keeps its nginx down — and the admin UI on `81`
 > is served by that same nginx. A plain `./deploy.sh` also restarts every unit
-> whose rendered file changed (`searxng`, the daemons, the whole app tier), so it
-> is the only command needed. If NPM was restarted by hand first, park the
+> whose rendered file changed (`searxng`, the daemons, the app tier), so it is
+> the only command needed. If NPM was restarted by hand first, park the
 > generated configs (the database is the real source of truth; the next reconcile
 > rewrites them) and re-run:
 >
@@ -202,17 +202,21 @@ On the first run, `deploy.sh` asks **where the stack keeps its data** (default
 an OS reinstall. See [Where the data lives](#where-the-data-lives).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
-existing secret, leaves the running daemons alone, and rebuilds + restarts the
-ten MCP servers and the BoltMesh app tier (a plain start would keep running a
-stale image). It also records the unit definitions it applied in
-`$DATA_DIR/audit/units.applied`, while `deploy/install.sh` records what it
-rendered in `units.rendered` — so running the installer by hand shows up as
-drift (`./verify.sh` fails naming the units) instead of being swallowed by the
+existing secret, leaves the running daemons alone, and rebuilds the ten MCP
+servers and the BoltMesh app tier, but **restarts only what actually changed** —
+a unit whose rendered definition differs, or a container running an image older
+than the tag the build just produced. An unchanged image and unit means no
+outage, not a restart for its own sake. It also records the unit definitions it
+applied in `$DATA_DIR/audit/units.applied`, while `deploy/install.sh` records
+what it rendered in `units.rendered` — so running the installer by hand shows up
+as drift (`./verify.sh` fails naming the units) instead of being swallowed by the
 next deploy. The four images built here — the two explorers, `netcheck`
 and `tor` — are rebuilt when their Containerfile changed and left
 alone otherwise: the digest of that file is baked into the image as a label, so
 a merged base-image bump reaches the host on the next deploy instead of needing
-a hand rebuild (`--only` forces one anyway). Common flags:
+a hand rebuild (`--only` forces one anyway). `deploy.sh` does not run
+`verify.sh`: verification is the separate `./verify.sh` (or the monitor's
+sweep). Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service

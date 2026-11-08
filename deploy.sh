@@ -2,7 +2,7 @@
 # One-click deploy for the whole stack.
 #
 #   ./deploy.sh                    # fetch repos, install, build every image,
-#                                  # start everything, verify
+#                                  # start everything; restarts only what changed
 #   ./deploy.sh --bootstrap        # also provision a bare Rocky 10 host first
 #   ./deploy.sh --only <name>      # redeploy a single service (app or unit);
 #                                  # --only boltmesh rebuilds the whole app tier;
@@ -34,10 +34,22 @@ DRY_RUN=0
 QUADLET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
 # Set by restart_changed_units when nginx-proxy-manager's unit changed.
 NPM_UNIT_CHANGED=0
-# The units restart_changed_units actually restarted, space-delimited with a
-# leading space (" bitcoind tor "). A --only branch reads it so a unit whose
-# rendered definition changed is restarted once, not twice.
-RESTARTED_UNITS=" "
+# The units this run has actually restarted (or started from a new definition),
+# space-delimited with a leading space (" bitcoind tor "). A phase that restarts
+# its own unit records it here; units_commit compares it with the changed set so
+# the baseline never claims a restart that did not happen, and refresh_image_unit
+# skips a unit the digest pass just restarted.
+APPLIED_UNITS=" "
+# The unit stems whose rendered definition differs from the applied baseline,
+# and the subset that was active when the digest pass ran. The app phases consult
+# the first so a changed unit is restarted by the phase that owns it (after its
+# build) instead of twice; units_commit consults the second so an active changed
+# unit that no phase applied keeps the baseline where it is.
+CHANGED_UNITS=""
+CHANGED_ACTIVE_UNITS=""
+# Units a phase has restarted but not yet waited on. The phase drains it with
+# wait_healthy_many once its builds are done, so the waits overlap.
+RESTART_QUEUE=()
 # The digest set this run last reconciled with the running containers, and
 # whether install.sh ran at all (the agent-skills branch runs no installer and
 # must not record a baseline it never applied). units_commit reads both.
@@ -82,14 +94,18 @@ BITCOIND_WALLET_WAIT="${BITCOIND_WALLET_WAIT:-120}"
 MONEROD_WAIT="${MONEROD_WAIT:-300}"
 LIGHTNINGD_WAIT="${LIGHTNINGD_WAIT:-900}"
 POSTGRES_WAIT="${POSTGRES_WAIT:-180}"
-APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"
+# A give-up bound, not a promise: wait_healthy raises it to the unit's own
+# StartPeriod + Interval when that is larger, so 60 s is enough for an MCP
+# server (10 s start period) and the deeper units (boltmesh-backend's 60 s start
+# period) still get their floor.
+APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-60}"
 BITCOIND_READY=0
 
 # The two blockchain explorers. Their images are built from this repo (not
 # pulled), so they are deployed like the app tier -- after the daemons they
 # read -- and only when their image is missing, unless --only forces a rebuild.
 EXPLORER_UNITS=(btc-explorer xmr-explorer)
-EXPLORER_WAIT="${EXPLORER_WAIT:-180}"
+EXPLORER_WAIT="${EXPLORER_WAIT:-90}"
 
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
@@ -238,15 +254,18 @@ sync_units() {
 # advances past a restart that did not happen is exactly the silent-stale-config
 # bug this manifest exists to prevent.
 units_commit() {
-    local now
+    local now unit pending=""
     [ "$DRY_RUN" = 0 ] || return 0
     [ "$UNITS_SYNCED" = 1 ] || return 0
     # install.sh runs twice per full deploy (the second pass mints the CLN runes
     # once lightningd answers), and anything that second render changed never
     # went through restart_changed_units. Catch it up before recording, so the
-    # manifest never claims more than was applied.
+    # manifest never claims more than was applied. Every phase has run by now, so
+    # a changed unit still unapplied has no owner left: clear DEFER_UNITS and let
+    # the digest pass restart it.
     now=$(unit_digest)
     if [ "$now" != "$UNITS_APPLIED_DIGEST" ]; then
+        DEFER_UNITS=""
         restart_changed_units "$UNITS_APPLIED_DIGEST" "$now"
         UNITS_APPLIED_DIGEST="$now"
     fi
@@ -257,8 +276,88 @@ units_commit() {
         warn "not recording the applied-unit baseline: nginx-proxy-manager's unit is still unapplied"
         return 0
     fi
+    # A changed unit that was active when the digest pass ran had to be restarted
+    # to apply its definition. If no phase did that, the baseline must stay where
+    # it is -- recording it would hide the drift until the next restart.
+    for unit in $CHANGED_ACTIVE_UNITS; do
+        unit_applied "$unit" || pending="$pending$unit "
+    done
+    if [ -n "$pending" ]; then
+        warn "not recording the applied-unit baseline: still unapplied:$pending"
+        return 0
+    fi
     unit_digest_write "$DATA_DIR/audit/units.applied" "$UNITS_APPLIED_DIGEST"
     log "recorded the applied-unit baseline ($DATA_DIR/audit/units.applied)"
+}
+
+# ---------------------------------------------------------------------------
+# what changed, and what this run applied
+# ---------------------------------------------------------------------------
+# The digest pass records the changed set once; every later phase asks these
+# instead of keeping its own copy. mark_* are idempotent because a unit can be
+# named by two rendered files (tor.container and the torrc digest) and because
+# restart_changed_units runs twice in a full deploy (the second install.sh mints
+# the CLN runes).
+unit_was_changed() { unit_in_set "$1" "$CHANGED_UNITS"; }
+unit_applied() { unit_in_set "$1" "$APPLIED_UNITS"; }
+mark_changed() { unit_was_changed "$1" || CHANGED_UNITS="$CHANGED_UNITS$1 "; }
+mark_changed_active() {
+    unit_in_set "$1" "$CHANGED_ACTIVE_UNITS" || CHANGED_ACTIVE_UNITS="$CHANGED_ACTIVE_UNITS$1 "
+}
+mark_applied() { unit_applied "$1" || APPLIED_UNITS="$APPLIED_UNITS$1 "; }
+
+# Is the container running the image currently tagged IMAGE? refresh_image_unit
+# asks the same question; the app phases need it separately because they build
+# first and then decide whether a restart is needed at all.
+image_is_running() { # container image
+    local name="$1" image="$2" running current
+    podman container exists "$name" 2>/dev/null || return 1
+    running=$(podman inspect "$name" --format '{{.Image}}' 2>/dev/null || true)
+    current=$(podman image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)
+    [ -n "$running" ] && [ -n "$current" ] && [ "$running" = "$current" ]
+}
+
+# Restart a unit only when this run changed it: its rendered definition differs
+# from the baseline, or it runs an image older than the tag now points at. A
+# phase that rebuilt an unchanged image would otherwise take every app down for
+# nothing; a unit the digest pass deferred is still restarted here, after the
+# build that produced its bits. An unchanged but stopped unit is started (a
+# no-op when it is already active). With wait=0 the unit is queued in
+# RESTART_QUEUE for settle_restarts, so a bulk phase waits on all of them at
+# once instead of one after another.
+restart_applied() { # unit image [timeout] [wait] [force]
+    local unit="$1" image="$2" t="${3:-$APP_HEALTH_WAIT}" wait="${4:-1}" force="${5:-0}"
+    # A phase earlier in this run may have restarted it already (btcpay-mcp's
+    # env rewrite, the digest pass): one restart per run.
+    if [ "$force" = 0 ] && unit_applied "$unit" \
+        && systemctl --user is-active --quiet "$unit.service" 2>/dev/null \
+        && image_is_running "$unit" "$image"; then
+        log "$unit was already restarted this run; not restarting it again"
+        return 0
+    fi
+    if [ "$force" = 1 ] || unit_was_changed "$unit" || ! image_is_running "$unit" "$image"; then
+        restart_unit "$unit" || { warn "$unit did not restart"; return 1; }
+        mark_applied "$unit"
+        if [ "$wait" = 1 ]; then
+            wait_healthy "$unit" "$t" || warn "$unit did not report healthy"
+        else
+            RESTART_QUEUE+=("$unit")
+        fi
+    else
+        start_unit "$unit"
+        log "$unit is unchanged; not restarting it"
+    fi
+}
+
+# Drain RESTART_QUEUE with one batched health wait. Returns non-zero when any
+# unit failed, and always empties the queue so a later phase does not wait on
+# units it did not restart.
+settle_restarts() { # timeout
+    local t="$1" failed=0
+    [ "${#RESTART_QUEUE[@]}" -gt 0 ] || return 0
+    wait_healthy_many "$t" "${RESTART_QUEUE[@]}" || failed=1
+    RESTART_QUEUE=()
+    return "$failed"
 }
 
 # .container only, never *.network: a network cannot be restarted under the
@@ -267,35 +366,50 @@ units_commit() {
 # start_infra/start_daemons -- restarting it here would jump that order (e.g.
 # lightningd before bitcoind). nginx-proxy-manager is only flagged: its restart
 # has to follow the proxy-host rewrite (sync_npm_network). A unit in DEFER_UNITS
-# is skipped entirely: the branch that rebuilt its image restarts it.
+# is skipped entirely: the phase that rebuilt its image restarts it.
 restart_changed_units() { # before-digest after-digest
-    local before="$1" after="$2" unit restarted=" "
+    local before="$1" after="$2" unit
+    local -a changed=() to_restart=()
     [ -n "$before" ] && [ -n "$after" ] || return 0
     while IFS= read -r unit; do
-        [ -n "$unit" ] || continue
+        [ -n "$unit" ] && changed+=("$unit")
+    done < <(unit_digest_changed "$before" "$after")
+    for unit in "${changed[@]}"; do
+        mark_changed "$unit"
         if [ "$unit" = nginx-proxy-manager ]; then
             NPM_UNIT_CHANGED=1
+            systemctl --user is-active --quiet "$unit.service" 2>/dev/null \
+                && mark_changed_active "$unit"
             continue
         fi
         # DEFER_UNITS is set by a branch that rebuilds the unit's image and
         # restarts it itself (the `--only <app>` path, see deploy_app): a
         # restart here would be an outage with the old bits and a second one
-        # seconds later. Empty everywhere else.
-        case " ${DEFER_UNITS:-} " in *" $unit "*) continue ;; esac
+        # seconds later. The full deploy defers the app tier and the explorers
+        # for the same reason.
+        if unit_in_set "$unit" "${DEFER_UNITS:-}"; then
+            systemctl --user is-active --quiet "$unit.service" 2>/dev/null \
+                && mark_changed_active "$unit"
+            continue
+        fi
+        systemctl --user is-active --quiet "$unit.service" 2>/dev/null || continue
+        mark_changed_active "$unit"
         # A unit can be named by two rendered files (tor.container and the torrc
         # digest above, which both mean tor): restart it once.
-        case "$restarted" in *" $unit "*) continue ;; esac
-        systemctl --user is-active --quiet "$unit.service" 2>/dev/null || continue
-        restarted="$restarted$unit "
+        unit_applied "$unit" && continue
         log "$unit.service changed; restarting it to pick up the new unit"
-        restart_unit "$unit"
-        if [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$unit" 2>/dev/null)" = yes ]; then
-            wait_healthy "$unit" "$APP_HEALTH_WAIT" || warn "$unit did not report healthy"
+        if restart_unit "$unit"; then
+            mark_applied "$unit"
+            to_restart+=("$unit")
+        else
+            warn "$unit did not restart; its new definition is not applied"
         fi
-    done < <(unit_digest_changed "$before" "$after")
-    # For the --only branches: they restart their own unit next, and doing it
-    # twice is two outages and two health waits for one change.
-    RESTARTED_UNITS="$restarted"
+    done
+    # Restart them all first, then wait once. A serial wait per unit is what made
+    # a changed definition cost one StartPeriod + Interval after another.
+    [ "${#to_restart[@]}" -eq 0 ] \
+        || wait_healthy_many "$APP_HEALTH_WAIT" "${to_restart[@]}" \
+        || warn "one or more restarted units did not report healthy"
 }
 
 # ---------------------------------------------------------------------------
@@ -318,14 +432,21 @@ refresh_image_unit() { # container image -> restart when the container is older
     [ "$DRY_RUN" = 0 ] || return 0
     podman container exists "$name" 2>/dev/null || return 0
     systemctl --user is-active --quiet "$name.service" 2>/dev/null || return 0
+    # The digest pass may have restarted it already (its unit changed); a second
+    # restart is another outage for the same definition.
+    unit_applied "$name" && return 0
     running=$(podman inspect "$name" --format '{{.Image}}' 2>/dev/null || true)
     current=$(podman image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)
     if [ -z "$running" ] || [ -z "$current" ] || [ "$running" = "$current" ]; then
         return 0
     fi
     log "$name is running an older $image; restarting it"
-    restart_unit "$name"
-    wait_healthy "$name" "$APP_HEALTH_WAIT" || true
+    if restart_unit "$name"; then
+        mark_applied "$name"
+        wait_healthy "$name" "$APP_HEALTH_WAIT" || true
+    else
+        warn "$name did not restart; it keeps the old image"
+    fi
 }
 
 # BTCPay loads the Monero plugin assemblies at start and keeps the copy it
@@ -642,8 +763,12 @@ EOF
     log "wrote $envf (mode 600)"
     if systemctl --user is-active --quiet btcpay-mcp.service 2>/dev/null; then
         log "btcpay-mcp's upstream env changed; restarting it"
-        restart_unit btcpay-mcp
-        wait_healthy btcpay-mcp "$APP_HEALTH_WAIT" || warn "btcpay-mcp did not report healthy"
+        if restart_unit btcpay-mcp; then
+            mark_applied btcpay-mcp
+            wait_healthy btcpay-mcp "$APP_HEALTH_WAIT" || warn "btcpay-mcp did not report healthy"
+        else
+            warn "btcpay-mcp did not restart; it keeps the old env"
+        fi
     fi
 }
 
@@ -667,7 +792,17 @@ start_btcpay() {
     start_unit monero-wallet-btcpay || warn "monero-wallet-btcpay did not start"
     wait_healthy monero-wallet-btcpay "${MONERO_WALLET_WAIT:-300}" || warn "monero-wallet-btcpay not healthy"
 
+    local btcpay_active=0
+    systemctl --user is-active --quiet btcpay.service 2>/dev/null && btcpay_active=1
     start_unit btcpay || { warn "btcpay did not start"; dump_tail btcpay 40; return 1; }
+    # btcpay is deferred by the digest pass (its restart belongs here, after
+    # postgres/nbxplorer are up), so a changed unit is applied now rather than
+    # left on the old definition until the next run.
+    if [ "$btcpay_active" = 1 ] && unit_was_changed btcpay && ! unit_applied btcpay; then
+        log "btcpay.service changed; restarting it to pick up the new unit"
+        restart_unit btcpay || { warn "btcpay did not restart"; dump_tail btcpay 40; return 1; }
+    fi
+    mark_applied btcpay
     # A plugin bump is a file in the plugin directory, so no unit digest notices
     # it and `start` is a no-op on an already-active container: compare what is
     # loaded with what is on disk, the same call refresh_image_unit makes for an
@@ -680,9 +815,15 @@ start_btcpay() {
 
     # Import the view-only plugin wallet once the operator has supplied the
     # address/view key; the script is a no-op otherwise (and restarts BTCPay
-    # itself when it does import, so wait again before the bootstrap).
+    # itself when it does import, so wait again before the bootstrap -- but only
+    # then, not on every deploy).
+    local started_before started_after
+    started_before=$(podman inspect btcpay --format '{{.State.StartedAt}}' 2>/dev/null || true)
     if "$REPO_DIR/scripts/btcpay-wallet.sh"; then
-        wait_healthy btcpay 300 || true
+        started_after=$(podman inspect btcpay --format '{{.State.StartedAt}}' 2>/dev/null || true)
+        if [ -n "$started_after" ] && [ "$started_after" != "$started_before" ]; then
+            wait_healthy btcpay 300 || true
+        fi
     else
         warn "the BTCPay Monero wallet was not imported; XMR-CHAIN will stay disabled"
     fi
@@ -695,29 +836,43 @@ start_btcpay() {
 # ---------------------------------------------------------------------------
 # 6. the application servers
 # ---------------------------------------------------------------------------
-deploy_app() { # repo name
-    local r="$1"
+deploy_app() { # repo [force] [wait]
+    local r="$1" force="${2:-0}" wait="${3:-1}"
     local dir="$BUILD_DIR/$r"
     local image="localhost/$r:latest"
     [ -d "$dir" ] || { warn "$r is not cloned under $BUILD_DIR"; return 1; }
     [ -f "$dir/Containerfile" ] || { warn "$r has no Containerfile"; return 1; }
 
     log "building $image"
-    run podman build -t "$image" "$dir"
-    restart_unit "$r"
+    run podman build -t "$image" "$dir" \
+        || { warn "$r did not build; keeping the running image"; return 1; }
     # The app images define no podman healthcheck (the app repos own their
     # Containerfiles), but every unit here sets HealthCmd/HealthInterval: the
     # MCP servers probe their own /mcp with an authenticated initialize, the
     # BoltMesh tier its own /health. So podman's health status IS the readiness
     # signal, and this never polls an app through nginx-proxy-manager.
-    wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
+    # A plain `--only <app>` forces the restart: the operator asked for it.
+    if [ "$force" = 1 ]; then
+        restart_unit "$r" || { warn "$r did not restart"; return 1; }
+        mark_applied "$r"
+        if [ "$wait" = 1 ]; then
+            wait_healthy "$r" "$APP_HEALTH_WAIT" || { warn "$r did not report healthy"; return 1; }
+        else
+            RESTART_QUEUE+=("$r")
+        fi
+    else
+        restart_applied "$r" "$image" "$APP_HEALTH_WAIT" "$wait" \
+            || return 1
+    fi
 }
 
 deploy_apps() {
     local r failed=0
+    RESTART_QUEUE=()
     for r in "${APP_REPOS[@]}"; do
-        deploy_app "$r" || failed=1
+        deploy_app "$r" 0 0 || failed=1
     done
+    settle_restarts "$APP_HEALTH_WAIT" || failed=1
     [ "$failed" = 0 ] || warn "one or more app servers did not report healthy; see: podman ps -a"
 }
 
@@ -787,7 +942,8 @@ run_boltmesh_migrations() {
         localhost/boltmesh-backend:latest alembic upgrade head
 }
 
-deploy_boltmesh() {
+deploy_boltmesh() { # [force]
+    local force="${1:-0}"
     # Failures warn and return 0, exactly like deploy_apps: the deploy brings up
     # as much as it can and verify.sh reports what is actually broken, so one
     # bad build does not abort the rest of the run (or a --dry-run).
@@ -801,22 +957,25 @@ deploy_boltmesh() {
         warn "the BoltMesh frontend image did not build; starting the API/worker anyway"
     fi
 
-    start_unit postgres
+    start_unit postgres || { warn "postgres did not start"; dump_tail postgres 20; return 0; }
     wait_healthy postgres "${POSTGRES_WAIT:-180}" \
         || { warn "postgres not healthy"; dump_tail postgres 20; return 0; }
 
     # Migrations run before the API so it never serves against a missing schema.
     run_boltmesh_migrations || warn "migrations failed; the API may not start cleanly"
 
-    restart_unit boltmesh-backend
-    wait_healthy boltmesh-backend "$APP_HEALTH_WAIT" \
-        || { warn "boltmesh-backend did not report healthy"; dump_tail boltmesh-backend 40; }
-
-    restart_unit boltmesh-worker
-    wait_healthy boltmesh-worker "$APP_HEALTH_WAIT" || warn "boltmesh-worker not healthy"
-
-    restart_unit boltmesh-frontend
-    wait_healthy boltmesh-frontend 60 || warn "boltmesh-frontend not healthy"
+    # Backend and worker share one image; the frontend has its own. Each unit is
+    # restarted only when its definition changed or its image is newer, then all
+    # of them are waited on together.
+    RESTART_QUEUE=()
+    restart_applied boltmesh-backend localhost/boltmesh-backend:latest "$APP_HEALTH_WAIT" 0 "$force" \
+        || warn "boltmesh-backend did not restart"
+    restart_applied boltmesh-worker localhost/boltmesh-backend:latest "$APP_HEALTH_WAIT" 0 "$force" \
+        || warn "boltmesh-worker did not restart"
+    restart_applied boltmesh-frontend localhost/boltmesh-frontend:latest 60 0 "$force" \
+        || warn "boltmesh-frontend did not restart"
+    settle_restarts "$APP_HEALTH_WAIT" \
+        || warn "one or more BoltMesh units did not report healthy; see: podman ps -a"
 }
 
 # ---------------------------------------------------------------------------
@@ -828,13 +987,17 @@ deploy_boltmesh() {
 # they come after start_daemons; they are built only when the image is missing
 # (a rebuild is --only). Nothing here is secret: the BTC unit reads its RPC
 # credentials from an EnvironmentFile install.sh seeded.
+explorer_image() { # name -> the local image tag
+    case "$1" in
+        btc-explorer) printf '%s' "$BTC_EXPLORER_IMAGE" ;;
+        xmr-explorer) printf '%s' "$XMR_EXPLORER_IMAGE" ;;
+        *) return 1 ;;
+    esac
+}
+
 build_explorer() { # name [force]
     local name="$1" force="${2:-0}" dir="$REPO_DIR/$1" image
-    case "$name" in
-        btc-explorer) image="$BTC_EXPLORER_IMAGE" ;;
-        xmr-explorer) image="$XMR_EXPLORER_IMAGE" ;;
-        *) warn "unknown explorer: $name"; return 1 ;;
-    esac
+    image=$(explorer_image "$name") || { warn "unknown explorer: $name"; return 1; }
     [ -f "$dir/Containerfile" ] || { warn "$name has no Containerfile"; return 1; }
     # "exists" is not enough: a digest bump changes only the Containerfile, so
     # an unlabelled or label-mismatched image is the old bits under the same
@@ -859,14 +1022,46 @@ deploy_explorers() {
         log "skipping the blockchain explorers (--skip-daemons)"
         return 0
     fi
-    local name
+
+    # Build first, then decide what needs a restart. An unchanged explorer is
+    # started (a no-op when active) and left alone; only a changed unit or a
+    # rebuilt image costs an outage.
+    local name image
+    local -a to_restart=() restarted=()
     for name in "${EXPLORER_UNITS[@]}"; do
         build_explorer "$name" \
             || { warn "$name did not build; the other explorer continues"; continue; }
-        restart_unit "$name"
-        wait_healthy "$name" "$EXPLORER_WAIT" \
-            || { warn "$name did not report healthy"; dump_tail "$name" 30; }
+        image=$(explorer_image "$name") || continue
+        if unit_was_changed "$name" || ! image_is_running "$name" "$image"; then
+            to_restart+=("$name")
+        else
+            start_unit "$name"
+            log "$name is unchanged; not restarting it"
+        fi
     done
+
+    # xmr-explorer panics while monerod is still opening its LMDB and restarts
+    # itself every RestartSec; wait for the restricted RPC before bouncing it, so
+    # the deploy does not spend EXPLORER_WAIT on a container that cannot be
+    # healthy yet. Only when an explorer is actually being restarted and monerod
+    # is up: a stopped daemon is a different failure and the explorer will retry
+    # on its own.
+    if [ "${#to_restart[@]}" -gt 0 ] \
+        && systemctl --user is-active --quiet monerod.service 2>/dev/null; then
+        wait_cmd "monerod restricted RPC" 120 \
+            podman exec monerod curl -fsS -m 5 http://127.0.0.1:18089/get_height \
+            || warn "monerod restricted RPC is not answering; the explorers may retry for a while"
+    fi
+
+    RESTART_QUEUE=()
+    for name in "${to_restart[@]}"; do
+        restart_unit "$name" || { warn "$name did not restart"; continue; }
+        mark_applied "$name"
+        RESTART_QUEUE+=("$name")
+    done
+    restarted=("${RESTART_QUEUE[@]}")
+    settle_restarts "$EXPLORER_WAIT" \
+        || { for name in "${restarted[@]}"; do dump_tail "$name" 30; done; }
 }
 
 # ---------------------------------------------------------------------------
@@ -921,6 +1116,7 @@ sync_npm_network() {
     if [ -z "$got" ]; then
         # Not running: whenever it starts, it starts on the new unit.
         NPM_UNIT_CHANGED=0
+        mark_applied nginx-proxy-manager
         return 0
     fi
     if [ "$got" != "$want" ]; then why="its unit asks for '$want', not '$got'"
@@ -930,11 +1126,15 @@ sync_npm_network() {
         return 0
     fi
     log "restarting nginx-proxy-manager: $why"
-    restart_unit nginx-proxy-manager
-    wait_healthy nginx-proxy-manager 120 || warn "nginx-proxy-manager did not report healthy"
-    # The unit question is settled (restarted, or it will start on the new one):
-    # units_commit may now record NPM's definition as applied.
-    NPM_UNIT_CHANGED=0
+    if restart_unit nginx-proxy-manager; then
+        mark_applied nginx-proxy-manager
+        wait_healthy nginx-proxy-manager 120 || warn "nginx-proxy-manager did not report healthy"
+        # The unit question is settled: units_commit may now record NPM's
+        # definition as applied.
+        NPM_UNIT_CHANGED=0
+    else
+        warn "nginx-proxy-manager did not restart; its new unit is not applied"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1211,9 @@ if [ -n "$ONLY" ]; then
         DEFER_UNITS=" $ONLY "
         fetch_repos "$ONLY"
         sync_units
-        deploy_app "$ONLY"
+        # An explicit --only is a request to redeploy: force the restart even
+        # when the image and the unit are unchanged.
+        deploy_app "$ONLY" 1 1
     elif [ "$ONLY" = backup ]; then
         # A one-shot job: install.sh has just (re)enabled the timer; this also
         # runs it once now instead of waiting for the schedule.
@@ -1039,29 +1241,39 @@ if [ -n "$ONLY" ]; then
         sync_units
         start_unit monitor
     elif [ "$ONLY" = btcpay ]; then
+        # btcpay's restart belongs after postgres and nbxplorer, so the digest
+        # pass leaves it to start_btcpay.
+        DEFER_UNITS=" btcpay "
         sync_units
         start_btcpay
     elif [ "$ONLY" = boltmesh ]; then
         # The whole app tier: fetch, build, migrate, start. Individual members
         # (postgres, boltmesh-backend/-worker/-frontend) fall through to the
         # generic branch below, which restarts the one unit and waits.
+        DEFER_UNITS=" boltmesh-backend boltmesh-worker boltmesh-frontend "
         sync_units
-        deploy_boltmesh
+        deploy_boltmesh 1
     elif [ "$ONLY" = explorers ]; then
         # Both explorer images, rebuilt even if they exist (their Containerfiles
-        # are the only place their versions live).
+        # are the only place their versions live). Deferred so the digest pass
+        # does not restart them once with the old image before this branch
+        # rebuilds and restarts them.
+        DEFER_UNITS=" ${EXPLORER_UNITS[*]} "
         sync_units
         for name in "${EXPLORER_UNITS[@]}"; do
             build_explorer "$name" 1 || continue
             restart_unit "$name"
+            mark_applied "$name"
             wait_healthy "$name" "$EXPLORER_WAIT" || true
         done
     elif [ "$ONLY" = btc-explorer ] || [ "$ONLY" = xmr-explorer ]; then
         # One explorer: rebuild its image and restart only that unit. The
         # generic branch below would skip the build and keep the old image.
+        DEFER_UNITS=" $ONLY "
         sync_units
         build_explorer "$ONLY" 1
         restart_unit "$ONLY"
+        mark_applied "$ONLY"
         wait_healthy "$ONLY" "$EXPLORER_WAIT" || true
     elif [ "$ONLY" = npm-hosts ]; then
         # Re-apply the proxy hosts after a manifest change, or after filling
@@ -1089,13 +1301,13 @@ if [ -n "$ONLY" ]; then
         # sync_units may already have restarted it because its rendered
         # definition changed; a second restart is a second outage and a second
         # health wait for one edit, so only restart when it did not.
-        case "$RESTARTED_UNITS" in
-            *" $ONLY "*)
-                log "$ONLY.service was restarted to pick up its new unit; not restarting it again" ;;
-            *)
-                restart_unit "$ONLY"
-                wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true ;;
-        esac
+        if unit_applied "$ONLY"; then
+            log "$ONLY.service was restarted to pick up its new unit; not restarting it again"
+        else
+            restart_unit "$ONLY"
+            mark_applied "$ONLY"
+            wait_healthy "$ONLY" "$APP_HEALTH_WAIT" || true
+        fi
     fi
     units_commit
     log "done (--only $ONLY)"
@@ -1103,6 +1315,16 @@ if [ -n "$ONLY" ]; then
 fi
 
 fetch_repos
+# The app tier and the explorers are restarted by the phase that owns them,
+# after its build, so the early digest pass leaves them alone: a unit that is
+# both changed and rebuilt would otherwise be restarted twice (once on the old
+# bits, once on the new). btcpay's restart belongs in start_btcpay, after
+# postgres and nbxplorer are up. Only units whose phase will actually run are
+# deferred -- with --skip-apps or --skip-daemons the digest pass applies their
+# unit changes as before.
+DEFER_UNITS=" "
+[ "$SKIP_APPS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${APP_REPOS[*]} boltmesh-backend boltmesh-worker boltmesh-frontend "
+[ "$SKIP_DAEMONS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${EXPLORER_UNITS[*]} btcpay "
 units_before=$(units_baseline)
 install_units
 units_after=$(unit_digest)
@@ -1112,7 +1334,11 @@ UNITS_SYNCED=1
 start_infra
 setup_wallets
 start_daemons
-start_btcpay
+# A BTCPay failure is a tier failure, not a deploy failure: the rest of the
+# stack still deploys and ./verify.sh (or the monitor) names what is down. A
+# bare call would let `set -e` abort before units_commit and leave the baseline
+# stale, so the next run would restart everything again.
+start_btcpay || warn "BTCPay did not come up; continuing -- run ./verify.sh"
 [ "$SKIP_APPS" = 1 ] || deploy_apps
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
 # Configure the proxy hosts before the explorers: their images are local builds,
@@ -1132,21 +1358,17 @@ fi
 deploy_explorers
 kuma_monitors
 note_firewall
-# Record the definitions this deploy applied. Before verify.sh on purpose: the
-# manifest says which unit files the containers were started from, not whether
-# the stack is healthy, and a failing verify must not withhold it -- otherwise
-# every re-run would bounce units that are already current.
+# Record the definitions this deploy applied. The manifest says which unit files
+# the containers were started from, not whether the stack is healthy: health is
+# ./verify.sh's and the monitor's job, and a tier that warns must not withhold
+# the baseline -- otherwise every re-run would bounce units that are already
+# current.
 units_commit
 
 if [ "$DRY_RUN" = 1 ]; then
     log "dry run complete; nothing was changed"
     exit 0
 fi
-
-log "running verification"
-verify_args=()
-if [ "$SKIP_DAEMONS" = 1 ]; then verify_args+=(--no-nodes); fi
-"$REPO_DIR/verify.sh" ${verify_args[@]+"${verify_args[@]}"} || warn "verification reported problems"
 
 if [ "$DO_AGENT_SKILLS" = 1 ]; then
     agent_skills_summary="agent-mcp + eleven read-only skills in \$HOME"

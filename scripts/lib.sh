@@ -257,6 +257,29 @@ wait_healthy() { # container timeout
     done
 }
 
+# Wait for several containers at once. wait_healthy is the right shape for one
+# unit, but a deploy that restarted a dozen of them paid one StartPeriod +
+# Interval after another -- the checks are independent, so run them in parallel
+# and return one verdict. Each unit still gets wait_healthy's own floor (its
+# StartPeriod + Interval raises the caller's timeout) and its own log line; the
+# caller decides whether a failure is fatal.
+#   wait_healthy_many TIMEOUT container...
+wait_healthy_many() { # timeout container...
+    local t="$1"; shift
+    local -a pids=()
+    local c p failed=0
+    [ "$#" -gt 0 ] || return 0
+    [ "${DRY_RUN:-0}" = 1 ] && return 0
+    for c in "$@"; do
+        wait_healthy "$c" "$t" &
+        pids+=("$!")
+    done
+    for p in "${pids[@]}"; do
+        wait "$p" || failed=1
+    done
+    return "$failed"
+}
+
 # A CLN rune restriction: one alternatives group naming method prefixes, in the
 # JSON shape `createrune` wants (an array of groups, each an array of
 # alternatives). Declared once in stack.conf (CLN_READ_METHODS and friends) so
@@ -490,6 +513,17 @@ unit_digest() {
     if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
         sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 " vector.unit" }'
     fi
+}
+
+# Is a unit in a space-delimited set of unit stems (" bitcoind tor ")? The
+# shape DEFER_UNITS/APPLIED_UNITS/CHANGED_UNITS use, kept in one place so a
+# substring like "tor" never matches "tor-control".
+unit_in_set() { # unit set
+    [ -n "${1:-}" ] || return 1
+    case " ${2:-} " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
 }
 
 # The unit stems whose digest differs between two digest sets, one per line.

@@ -46,15 +46,23 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `unit_digest_changed`, shared with `install.sh` and `verify.sh` so render and
   compare cannot drift apart) and restarts exactly the units whose definition
   changed — never ones that are inactive, since those are started later in
-  order. This is what makes **a hand `deploy/install.sh` visible drift instead
-  of a swallowed signal**: it advances `units.rendered`, `verify.sh` fails
-  naming the units (and the monitor pages through it), and the next deploy
-  restarts them. Do not go back to digesting the files either side of the
-  installer: that compares the render with itself. `units.applied` advances only
-  on success — `set -e` stops a failed deploy before `units_commit`, so the
-  baseline never records a restart that did not happen and the next run repeats
-  it. The first deploy on a host without a baseline adopts the render on disk
-  once, with a warning (drift older than that run is unknowable).
+  order. The digest pass records the changed set once (`CHANGED_UNITS`, and
+  `CHANGED_ACTIVE_UNITS` for the ones that were running), and the app tier and
+  the explorers are in `DEFER_UNITS`: their own phase restarts them after its
+  build, so a unit that is both changed and rebuilt is restarted once, not twice
+  (once on the old bits, once on the new). `restart_applied` is the phase-side
+  gate: it restarts only when `unit_was_changed` or the container's image id
+  differs from the tag's, and starts an unchanged stopped unit instead. This is
+  what makes **a hand `deploy/install.sh` visible drift instead of a swallowed
+  signal**: it advances `units.rendered`, `verify.sh` fails naming the units
+  (and the monitor pages through it), and the next deploy restarts them. Do not
+  go back to digesting the files either side of the installer: that compares the
+  render with itself. `units.applied` advances only after every changed active
+  unit was applied (`APPLIED_UNITS`); a tier that warns does not abort the
+  deploy, but a changed unit no phase restarted keeps the baseline where it is,
+  so the next run repeats it rather than hiding it. The first deploy on a host
+  without a baseline adopts the render on disk once, with a warning (drift older
+  than that run is unknowable).
   `nginx-proxy-manager` is only flagged by the restart pass: its restart is
   deferred to `sync_npm_network`, after the proxy hosts are rewritten
   (`deploy.sh` says why the order is load-bearing), and `units_commit` refuses
@@ -68,7 +76,11 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   image and did nothing (the new client reached the containers one deploy
   later); and an app branch sets `DEFER_UNITS` so `restart_changed_units` leaves
   that unit alone — `deploy_app` restarts it after the build, and restarting it
-  twice is two outages for one edit.
+  twice is two outages for one edit. Waits are batched (`wait_healthy_many`): a
+  phase restarts all its changed units, then waits on them together, so a dozen
+  restarts no longer cost a StartPeriod + Interval each in series. `deploy.sh`
+  does not run `verify.sh`; verification is its own command (and the monitor's
+  sweep).
 
 - **`scripts/rotate.sh` is the third writer of `units.applied`.** A rotation
   re-renders through `install.sh` (only `bitcoin-rpc` and `tor-control` bake a

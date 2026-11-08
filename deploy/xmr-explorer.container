@@ -45,6 +45,14 @@ HealthOnFailure=kill
 
 [Service]
 Restart=always
+# MoneroBlock panics on its first RPC poll while monerod is still opening its
+# LMDB ("connect: connection refused"), and the default RestartSec of ~1s turned
+# that into five starts in eight seconds -- which also tripped systemd's default
+# start limit (5 starts / 10s) and left the explorer failed until someone
+# restarted it. Thirty seconds outlives the start limit window and gives monerod
+# time to open the restricted RPC; deploy_explorers waits for that port before
+# it bounces the explorer.
+RestartSec=30s
 TimeoutStartSec=300
 
 [Install]

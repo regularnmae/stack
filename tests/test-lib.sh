@@ -92,4 +92,20 @@ before=$(unit_digest)
 printf 'changed\n' > "$TMP_DIR/quadlet/b.container"
 assert_eq b "$(unit_digest_changed "$before" "$(unit_digest)")" 'unit digest identifies changed unit'
 
+# The space-delimited unit sets deploy.sh passes around: an exact stem, never a
+# substring (tor must not match tor-control), and the empty set matches nothing.
+if ! unit_in_set tor " bitcoind tor "; then
+    printf 'FAIL: unit_in_set exact stem\n' >&2
+    exit 1
+fi
+if unit_in_set tor " tor-control "; then
+    printf 'FAIL: unit_in_set matched a substring\n' >&2
+    exit 1
+fi
+if unit_in_set "" " tor "; then
+    printf 'FAIL: unit_in_set matched an empty unit\n' >&2
+    exit 1
+fi
+assert_eq 0 "$(wait_healthy_many 1; echo $?)" 'wait_healthy_many with no containers'
+
 printf 'shared shell helper tests: ok\n'
