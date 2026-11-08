@@ -16,13 +16,20 @@
 # live in that file). This wrapper owns only the CLI and the data dir.
 #
 # Uptime-Kuma has no REST write API -- its management surface is socket.io.
-# The client is scripts/stackctl/kuma.py (socketio.py over ws.py, stdlib
-# only), which loads the manifest directly and reaches kuma through its
-# loopback publish -- the loopback_port of [uptime_kuma] there, which mirrors
-# the PublishPort= of deploy/uptime-kuma.container. Proving the publish
-# (rather than the container name on npm-network) is deliberate: it is the
-# same surface nginx-proxy-manager forwards the dashboard through. Set
-# KUMA_URL in the environment to override it.
+# The client is scripts/stackctl/kuma.py (uptime-kuma-api2, the v2 continuation
+# of the Python wrapper, pinned in scripts/stackctl/requirements.txt), which
+# loads the manifest directly and reaches kuma through its loopback publish --
+# the loopback_port of [uptime_kuma] there, which mirrors the PublishPort= of
+# deploy/uptime-kuma.container. Proving the publish (rather than the container
+# name on npm-network) is deliberate: it is the same surface
+# nginx-proxy-manager forwards the dashboard through. Set KUMA_URL in the
+# environment to override it.
+#
+# The venv that carries the library is $REPO_DIR/.venv, built by
+# deploy/install.sh from requirements.txt; scripts/lib.sh's stackctl_wrapper
+# execs its interpreter and says so when it is missing. The rest of
+# scripts/stackctl/ stays stdlib (kuma.py imports the client lazily), so
+# load_manifest still runs on the bare python3.
 #
 # The admin login lives in $DATA_DIR/config/uptime-kuma/api.env (mode 600,
 # seeded by deploy/install.sh; fill it in with the login the setup wizard

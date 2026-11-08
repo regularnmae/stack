@@ -1,0 +1,31 @@
+# The host-side Python core's one dependency: Uptime-Kuma's socket.io API.
+#
+# scripts/stackctl/kuma.py reconciles the status page's monitors through
+# uptime-kuma-api2, the v2 continuation of lucasheld/uptime-kuma-api (kuma has
+# no REST write API; `uptime-kuma:2` is what deploy/uptime-kuma.container
+# runs). It brings python-socketio and its websocket transport, which is the
+# whole reason this file exists -- the rest of scripts/stackctl/ is stdlib.
+#
+# This is a FREEZE, not a wish list: deploy/install.sh builds
+# $REPO_DIR/.venv from it with `pip install -r` (and the reconciler wrappers in
+# scripts/ exec that venv's interpreter). Renovate watches it through the
+# pip_requirements manager -- the "python dependencies" group in renovate.json
+# -- so a bump is one reviewable PR, exactly like an image tag.
+#
+# Refresh it in a throwaway venv after bumping uptime-kuma-api2:
+#   python3 -m venv /tmp/v && /tmp/v/bin/pip install uptime-kuma-api2==<new>
+#   /tmp/v/bin/pip freeze | grep -v '^uptime-kuma-api2=='
+bidict==0.24.1
+certifi==2026.10.23
+charset-normalizer==3.5.2
+h11==0.16.0
+idna==3.20
+packaging==26.3
+python-engineio==4.15.1
+python-socketio==5.18.1
+requests==2.34.2
+simple-websocket==1.1.0
+uptime-kuma-api2==2.9.0
+urllib3==2.8.0
+websocket-client==1.9.2
+wsproto==1.3.2

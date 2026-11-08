@@ -1565,9 +1565,10 @@ more; whether the index behind it is current is what `verify.sh --deep` and
 `scripts/monitor.sh` read (above).
 
 Uptime-Kuma has no REST write API, so the reconciler speaks its socket.io
-API directly: `scripts/kuma-monitors.sh` feeds the declarations to a
-stdlib-only Python client (`scripts/stackctl/kuma.py` over `socketio.py`/
-`ws.py`), which reaches kuma through its loopback publish
+API directly: `scripts/kuma-monitors.sh` feeds the declarations to a Python
+client (`scripts/stackctl/kuma.py` over `uptime-kuma-api2`, pinned in
+`scripts/stackctl/requirements.txt` and installed into `$REPO_DIR/.venv` by
+`deploy/install.sh`), which reaches kuma through its loopback publish
 (`127.0.0.1:8107`). The `kuma-ctl` Node image that used to carry the client is
 retired. The admin login lives in
 `$DATA_DIR/config/uptime-kuma/api.env` (mode 600, seeded empty — fill in what

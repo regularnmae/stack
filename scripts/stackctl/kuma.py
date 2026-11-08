@@ -1,11 +1,24 @@
 # Uptime-Kuma's monitor + status-page reconciler -- the Python core of
-# scripts/kuma-monitors.sh, and a port of the kuma-ctl image's monitors.mjs
-# (retired with this file: kuma has no REST write API, its management surface
-# is socket.io, and the Node image existed only to bring a socket.io client).
-# The transport is socketio.py over ws.py; the declarations arrive over stdin
-# (decl.py) exactly as the bash wrapper validated and normalized them before.
+# scripts/kuma-monitors.sh.
 #
-# The three rules that keep a reconcile from fighting the UI (from the mjs):
+# The transport is uptime-kuma-api2 (the v2 continuation of uptime-kuma-api),
+# which brings python-socketio and its websocket transport. It replaced the
+# hand-rolled ws.py + socketio.py pair, and the kuma-ctl Node image before them
+# -- kuma has no REST write API, its management surface is socket.io, and all
+# three existed only to speak it. What the library already knows, and what the
+# comments below no longer have to: it waits for kuma to register its handlers
+# before anything is sent, it merges `getMonitor` into an edit (so the
+# UI-tuned fields are carried, never rewritten), it knows which fields a given
+# kuma version accepts, it defaults accepted_statuscodes -- the `.every()`
+# trap, which fires before the handler looks at the monitor's type -- and it
+# sends the raw arrays the handler stringifies.
+#
+# It is imported in KumaClient.__init__, NOT at module import: the stdlib-only
+# `manifest` command shares this package with the reconcilers and runs on the
+# bare interpreter (load_manifest, install.sh, verify.sh, CI). See
+# requirements.txt and deploy/install.sh's venv step.
+#
+# The three rules that keep a reconcile from fighting the UI (unchanged):
 #   * a monitor is only touched when a *declared* field changed (url + accepted
 #     status codes, or hostname + port for a port monitor) -- the UI-tuned ones
 #     (interval, retries with their drift, notifications it got attached to)
@@ -14,27 +27,6 @@
 #     while it is empty; a page that already carries monitors belongs to the
 #     UI, layout and all;
 #   * --prune is the only destructive mode (mirrors scripts/npm-hosts.sh).
-#
-# Protocol traps, all verified against kuma 2.5.x by the mjs and carried over:
-#   * handler ARITY is positional: login({username,password}); add(monitor);
-#     editMonitor(monitor); deleteMonitor(id); getStatusPage(slug);
-#     addStatusPage(title, slug) -- ONE object instead of two args lands in
-#     `title` and puts the ack callback into `slug`'s slot, the handler throws
-#     server-side, and the client waits out its full timeout;
-#     saveStatusPage(slug, config, imgDataUrl, publicGroupList), where
-#     imgDataUrl must be a STRING (the handler calls .startsWith() on it);
-#   * kuma registers its socket handlers only after an `await sendInfo()`, so
-#     a login emitted the instant the connection opens can be dropped -- wait
-#     for the server's `info` push first (socketio.py buffers pushes, so the
-#     race the mjs solved by attaching its listener early cannot recur), and
-#     retry a timed-out login once;
-#   * the `add` handler .every()s accepted_statuscodes BEFORE it looks at the
-#     monitor's type, so a port monitor missing that array crashes the handler
-#     server-side: ["200-299"] (what kuma's own form submits for a port
-#     monitor) is sent either way. conditions, kafkaProducerBrokers,
-#     kafkaProducerSaslOptions and rabbitmqNodes are JSON.stringified by the
-#     handler directly, so they must arrive as raw arrays -- a string in means
-#     a double-encoded string in the database.
 from __future__ import annotations
 
 import json
@@ -43,7 +35,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from . import decl, envfile, http, manifest, socketio
+from . import decl, envfile, manifest
 from .ui import die, log
 
 
@@ -52,6 +44,7 @@ def say(msg: str) -> None:
     monitors.mjs printed with console.log. The "==> "-prefixed log() lines are
     this module's bookends (and the wrapper's die/usage paths)."""
     print(msg, flush=True)
+
 
 # A monitor is only touched when a *declared* field changed; interval and
 # retries belong to the UI once the monitor exists.
@@ -71,18 +64,36 @@ def declared_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
 
 
 def edit_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
-    # For an edit the UI-tuned monitor is carried over: only what the
-    # declaration owns is overridden, so an http monitor's method, body and
-    # headers stay whatever the UI set. A port monitor carries no codes, so
-    # accepted_statuscodes is left exactly as the list push had it.
+    # Only what the declaration owns: uptime-kuma-api merges the rest of the
+    # stored monitor back in (getMonitor + update), so the UI's method, body,
+    # headers, interval and notifications survive an edit untouched. A port
+    # monitor carries no codes, so accepted_statuscodes is left as it is.
     if m.type == "port":
         return {"type": "port", "hostname": m.hostname, "port": m.port,
                 "url": f"tcp://{m.hostname}:{m.port}"}
     return {"url": m.url, "accepted_statuscodes": m.codes}
 
 
+def add_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
+    """The whole new-monitor payload (an add has no stored state to carry).
+
+    accepted_statuscodes is explicit even for a port monitor: kuma's `add`
+    handler .every()s the array before it looks at the type, and the library's
+    default would already cover it -- spelling it out keeps the trap visible
+    beside the declaration that triggers it."""
+    fields = {
+        "name": m.name,
+        **declared_fields(m),
+        "interval": m.interval,
+        "retryInterval": m.retry_interval,
+        "maxretries": m.maxretries,
+        "accepted_statuscodes": m.codes or ["200-299"],
+    }
+    return fields
+
+
 def normalized_codes(m: Any) -> List[str]:
-    # The list push carries accepted_statuscodes as an array (the DB's _json
+    # The monitor list carries accepted_statuscodes as an array (the DB's _json
     # string only exists on older payloads).
     codes = m.get("accepted_statuscodes") if isinstance(m, dict) else None
     if not (isinstance(codes, list) and codes):
@@ -91,20 +102,6 @@ def normalized_codes(m: Any) -> List[str]:
         except (ValueError, AttributeError, TypeError):
             codes = []
     return sorted(str(c) for c in codes) if isinstance(codes, list) else []
-
-
-def raw_array(val: Any) -> List[Any]:
-    """Decode a DB JSON string into the raw array the server-side handlers
-    stringify back; arrays pass through, anything unrecoverable becomes []."""
-    if isinstance(val, list):
-        return val
-    if isinstance(val, str):
-        try:
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, list) else []
-        except ValueError:
-            return []
-    return []
 
 
 def differs(existing: Dict[str, Any], m: decl.KumaMonitor) -> bool:
@@ -120,16 +117,67 @@ def differs(existing: Dict[str, Any], m: decl.KumaMonitor) -> bool:
         or normalized_codes(existing) != sorted(m.codes)
 
 
-def _login(client: socketio.SocketIOClient, username: str, password: str) -> Any:
-    # Two attempts: the info-wait in reconcile() is the primary defense
-    # against the dropped-login race, but a future kuma moving its `await`
-    # could drop a login again. A dropped login TIMES OUT instead of erroring,
-    # so a short retry is safe and cheap.
+class KumaClient:
+    """uptime-kuma-api2 behind the handful of calls a reconcile makes.
+
+    One adapter, not a wrapper: every method is the library call with the same
+    name, so the shapes reconcile reads (`get_monitors` -> list of the server's
+    own monitor objects, `get_status_page` -> the stored config) stay the
+    library's. Its two exception classes are exposed as `errors` (any of them is
+    a reconcile failure) and `timeout_error` (the one worth a login retry), so
+    this module needs no import of the library at load time."""
+
+    def __init__(self, base_url: str, timeout: float = 20) -> None:
+        from uptime_kuma_api import Timeout, UptimeKumaApi, UptimeKumaException
+
+        self._api = UptimeKumaApi(base_url, timeout=timeout)
+        self.errors = (Timeout, UptimeKumaException)
+        self.timeout_error = Timeout
+
+    def login(self, username: str, password: str) -> Any:
+        return self._api.login(username, password)
+
+    def monitors(self) -> List[Dict[str, Any]]:
+        return self._api.get_monitors()
+
+    def add_monitor(self, **fields: Any) -> Any:
+        return self._api.add_monitor(**fields)
+
+    def edit_monitor(self, id_: Any, **fields: Any) -> Any:
+        return self._api.edit_monitor(id_, **fields)
+
+    def delete_monitor(self, id_: Any) -> Any:
+        return self._api.delete_monitor(id_)
+
+    def status_page(self, slug: str) -> Optional[Dict[str, Any]]:
+        """The page's stored config, or None when no page carries that slug.
+
+        The library raises when the server answers ok:false, which is how kuma
+        says "no such page"; a page that exists comes back as the config the
+        status-page editor reads, `publicGroupList` included."""
+        try:
+            page = self._api.get_status_page(slug)
+        except self.errors[1]:
+            return None
+        return page if isinstance(page, dict) else None
+
+    def add_status_page(self, slug: str, title: str) -> Any:
+        return self._api.add_status_page(slug, title)
+
+    def save_status_page(self, slug: str, **fields: Any) -> Any:
+        return self._api.save_status_page(slug, **fields)
+
+    def close(self) -> None:
+        self._api.disconnect()
+
+
+def _login(api: Any, username: str, password: str) -> Any:
+    # Two attempts: the library waits for kuma's handlers, but a dropped login
+    # TIMES OUT instead of erroring, so a short retry is safe and cheap.
     for attempt in (1, 2):
         try:
-            return client.emit_ack("login", [{"username": username, "password": password}],
-                                   timeout=20)
-        except TimeoutError:
+            return api.login(username, password)
+        except api.timeout_error as e:
             if attempt == 2:
                 raise
             say(f"login attempt {attempt} timed out (dropped by the server); retrying")
@@ -137,7 +185,11 @@ def _login(client: socketio.SocketIOClient, username: str, password: str) -> Any
     return None
 
 
-def reconcile(d: decl.Decls) -> int:
+def reconcile(d: decl.Decls, client_factory: Any = None) -> int:
+    """Load the declarations, connect, reconcile, disconnect.
+
+    `client_factory` exists for the offline tests: it is called with the base
+    URL and must return something shaped like KumaClient."""
     # The declarations come from the service manifest, not the stdin pipe:
     # deploy/services.toml is the one home of the monitors and the page
     # (manifest.py loads and validates), and it also names kuma's loopback
@@ -173,68 +225,31 @@ def reconcile(d: decl.Decls) -> int:
     else:
         log(f"reconciling {len(monitors)} monitor(s) + status page '{page.slug}'")
 
-    client = socketio.SocketIOClient(base_url, timeout=20)
+    api = (client_factory or KumaClient)(base_url)
     try:
         try:
-            client.connect()
-        except socketio.SocketIOError as e:
-            die(str(e))
-
-        # The server's `info` push is the proof that kuma finished registering
-        # its socket handlers; sending anything before it risks a dropped
-        # event (see the module header).
-        if client.wait_event("info", 20) is None:
-            die(client.error or
-                "the server never sent its `info` event (kuma did not finish "
-                "registering its handlers); is this uptime-kuma v2?")
-
-        try:
-            login = _login(client, username, password)
-        except (TimeoutError, socketio.SocketIOError) as e:
+            login = _login(api, username, password)
+        except api.errors as e:
             die(f"login: {e}")
-        if not (isinstance(login, dict) and login.get("ok")):
-            msg = login.get("msg") if isinstance(login, dict) else None
-            die(f"login failed: {msg or 'no answer from the server'}")
-
-        # The `monitorList` push lands once after login; wait up to 15s. An
-        # *empty* list still counts as arrived -- a fresh instance has no
-        # monitors, and the server will never push another one.
-        pushed = client.wait_event("monitorList", 15)
-        monitor_list: Dict[str, Any] = pushed[0] if pushed and isinstance(pushed[0], dict) else {}
-
-        by_name: Dict[str, Dict[str, Any]] = {}
-        for m in monitor_list.values():
-            if isinstance(m, dict) and m.get("name"):
-                by_name[m["name"]] = m
-        declared_names = {m.name for m in monitors}
-        resolved_ids: List[Any] = []  # per declared monitor, in order; status page members
+        if not isinstance(login, dict):
+            die("login failed: no answer from the server")
 
         try:
+            monitor_list = api.monitors()
+            by_name: Dict[str, Dict[str, Any]] = {}
+            for m in monitor_list:
+                if isinstance(m, dict) and m.get("name"):
+                    by_name[m["name"]] = m
+            declared_names = {m.name for m in monitors}
+            resolved_ids: List[Any] = []  # per declared monitor, in order; status page members
+
             for m in monitors:
                 existing = by_name.get(m.name)
                 if existing is None:
                     if dry_run:
                         say(f'[dry-run] would create monitor "{m.name}" ({m.describe()})')
                         continue
-                    res = client.emit_ack("add", [{
-                        "name": m.name,
-                        **declared_fields(m),
-                        "interval": m.interval,
-                        "retryInterval": m.retry_interval,
-                        "maxretries": m.maxretries,
-                        "resendInterval": 0,
-                        # A port monitor has no codes to accept by definition;
-                        # ["200-299"] is what kuma's own form submits for it,
-                        # and the handler .every()s the array before it looks
-                        # at the type at all (module header).
-                        "accepted_statuscodes": m.codes or ["200-299"],
-                        "notificationIDList": {},
-                        "conditions": [],
-                        "kafkaProducerBrokers": [],
-                        "kafkaProducerSaslOptions": [],
-                        "rabbitmqNodes": [],
-                        "active": True,
-                    }])
+                    res = api.add_monitor(**add_fields(m))
                     if not (isinstance(res, dict) and res.get("monitorID")):
                         msg = res.get("msg") if isinstance(res, dict) else None
                         die(f'could not create monitor "{m.name}": {msg or "no monitorID"}')
@@ -246,32 +261,19 @@ def reconcile(d: decl.Decls) -> int:
                     if dry_run:
                         say(f'[dry-run] would update monitor "{m.name}" (id {existing.get("id")})')
                         continue
-                    # Carry what exists, override the declared fields: the
-                    # UI's settings (interval, notifications, ...) survive
-                    # untouched. The list push's object is already in the
-                    # shape the edit handler reads -- only anything that still
-                    # arrives as a DB string has to be decoded (raw_array).
-                    carry = {k: v for k, v in existing.items()
-                             if k != "accepted_statuscodes_json"}
-                    payload = {
-                        **carry,
-                        **edit_fields(m),
-                        "conditions": raw_array(carry.get("conditions")),
-                        "kafkaProducerBrokers": raw_array(carry.get("kafkaProducerBrokers")),
-                        "kafkaProducerSaslOptions": raw_array(carry.get("kafkaProducerSaslOptions")),
-                        "rabbitmqNodes": raw_array(carry.get("rabbitmqNodes")),
-                    }
-                    res = client.emit_ack("editMonitor", [payload])
-                    if not (isinstance(res, dict) and res.get("ok")):
-                        msg = res.get("msg") if isinstance(res, dict) else None
-                        die(f'could not update monitor "{m.name}": {msg or "no ok"}')
+                    res = api.edit_monitor(existing.get("id"), **edit_fields(m))
+                    # The library raises on ok:false, so any dict answer is a
+                    # success; requiring monitorID here would fail on a kuma
+                    # whose edit ack omits it, and the id is one we already know.
+                    if not isinstance(res, dict):
+                        die(f'could not update monitor "{m.name}": no answer from the server')
                     say(f'updated monitor "{m.name}" (id {existing.get("id")})')
                 else:
                     say(f'monitor "{m.name}" unchanged (id {existing.get("id")})')
                 resolved_ids.append(existing.get("id"))
 
             if prune:
-                stale = [m for m in monitor_list.values()
+                stale = [m for m in monitor_list
                          if isinstance(m, dict) and m.get("name") not in declared_names]
                 if not stale:
                     say("nothing to prune")
@@ -279,100 +281,64 @@ def reconcile(d: decl.Decls) -> int:
                     if dry_run:
                         say(f'[dry-run] would delete monitor "{m.get("name")}" (id {m.get("id")})')
                         continue
-                    res = client.emit_ack("deleteMonitor", [m.get("id")])
-                    if not (isinstance(res, dict) and res.get("ok")):
-                        msg = res.get("msg") if isinstance(res, dict) else None
-                        die(f'could not delete monitor "{m.get("name")}" (id {m.get("id")}): '
-                            f'{msg or "no ok"}')
+                    api.delete_monitor(m.get("id"))
                     say(f'deleted monitor "{m.get("name")}" (id {m.get("id")}, not declared)')
 
             if page is not None and page.slug:
-                _status_page(client, base_url, page.slug, page.title, page.group,
+                _status_page(api, page.slug, page.title, page.group,
                              resolved_ids, dry_run)
-        except (TimeoutError, socketio.SocketIOError) as e:
+        except api.errors as e:
             die(str(e))
     finally:
-        client.close()
+        api.close()
     log("done")
     return 0
 
 
-def _status_page(client: socketio.SocketIOClient, base_url: str, slug: str,
-                 title: str, group: str, resolved_ids: List[Any],
-                 dry_run: bool) -> None:
+def _status_page(api: Any, slug: str, title: str, group: str,
+                 resolved_ids: List[Any], dry_run: bool) -> None:
     # The status page: created + filled only while it is empty -- a page that
-    # already carries monitors belongs to the UI, layout and all. Existence is
-    # checked through the authenticated `getStatusPage` event: kuma v2's public
-    # routes answer for any slug that exists, `published` or not, so a REST
-    # probe says nothing about what the page is.
-    page = client.emit_ack("getStatusPage", [slug], timeout=30)
-    page_exists = isinstance(page, dict) and page.get("ok") is True
+    # already carries monitors belongs to the UI, layout and all. Existence and
+    # content both come from the authenticated getStatusPage event the library
+    # exposes (kuma v2's public routes answer for any slug that exists,
+    # `published` or not, so a REST probe says nothing about what the page is).
+    page = api.status_page(slug)
+    groups = (page or {}).get("publicGroupList") or []
+    has_monitors = any(isinstance(g, dict) and g.get("monitorList") for g in groups)
 
-    # What a visitor would see, straight from the public data endpoint; the
-    # reconcile only fills a page with *nothing* on it, so unknown content
-    # counts as content (leave it alone).
-    has_monitors = False
-    content_known = False
-    if page_exists and not dry_run:
-        try:
-            status, body = http.json_request(
-                "GET", f"{base_url.rstrip('/')}/api/status-page/{slug}", timeout=15)
-        except http.HttpError:
-            status, body = None, None
-        if status is not None and 200 <= status < 300 and isinstance(body, dict):
-            groups = body.get("publicGroupList") or []
-            public_monitors = sum(len(g.get("monitorList") or [])
-                                  for g in groups if isinstance(g, dict))
-            has_monitors = public_monitors > 0
-            content_known = True
-
-    if page_exists and (not content_known or has_monitors):
+    if page is not None and has_monitors:
         say(f"status page '{slug}' exists and carries monitors; the layout stays with the UI")
-    elif dry_run:
-        if page_exists:
+        return
+    if dry_run:
+        if page is not None:
             say(f"[dry-run] would fill the (empty) status page '{slug}' "
                 f"with {len(resolved_ids)} monitor(s)")
         else:
             say(f"[dry-run] would create + publish status page '{slug}' "
                 f"with {len(resolved_ids)} monitor(s)")
-    else:
-        if not page_exists:
-            # TWO positional args -- see the arity trap in the module header.
-            created = client.emit_ack("addStatusPage", [title, slug], timeout=30)
-            ok = isinstance(created, dict) and created.get("ok")
-            msg = str(created.get("msg", "")) if isinstance(created, dict) else ""
-            if not ok and not re.search(r"unique|duplicate|exist", msg, re.IGNORECASE):
+        return
+
+    if page is None:
+        try:
+            api.add_status_page(slug, title)
+            say(f"created status page '{slug}'")
+        except api.errors[1] as e:
+            msg = str(e)
+            if not re.search(r"unique|duplicate|exist", msg, re.IGNORECASE):
                 die(f"could not create status page '{slug}': {msg or 'no ok'}")
-            if ok:
-                say(f"created status page '{slug}'")
-            else:
-                say(f"status page '{slug}' exists (created between the check and here); continuing")
-        # The save payload: start from what the server stored (a fresh page's
-        # defaults are its own), override only title + description, and keep
-        # its icon. imgDataUrl must be a string -- the handler calls
-        # .startsWith() on it and None throws.
-        page = client.emit_ack("getStatusPage", [slug], timeout=30)
-        cfg_stored = (page or {}).get("config") if isinstance(page, dict) else None
-        cfg: Dict[str, Any] = dict(cfg_stored or {})
-        cfg.update({
-            "description": (cfg_stored or {}).get("description", ""),
-            "title": title,
-            "slug": slug,
-            "published": True,
-        })
-        group_list: List[Dict[str, Any]] = []
-        if resolved_ids:
-            group_list = [{
-                "name": group or "Public services",
-                "weight": 0,
-                "monitorList": [{"id": i, "weight": 1} for i in resolved_ids],
-            }]
-        icon = str((cfg_stored or {}).get("icon") or "")
-        saved = client.emit_ack("saveStatusPage", [slug, cfg, icon, group_list], timeout=30)
-        if not (isinstance(saved, dict) and saved.get("ok")):
-            msg = saved.get("msg") if isinstance(saved, dict) else None
-            die(f"could not publish status page '{slug}': {msg or 'no ok'}")
-        say(f"published status page '{slug}' ({len(resolved_ids)} monitor(s))")
+            say(f"status page '{slug}' exists (created between the check and here); continuing")
+
+    # The save carries the declared monitor set only; the library merges the
+    # page's own stored config (description, icon, theme, ...) back in.
+    group_list: List[Dict[str, Any]] = []
+    if resolved_ids:
+        group_list = [{
+            "name": group or "Public services",
+            "weight": 0,
+            "monitorList": [{"id": i, "weight": 1} for i in resolved_ids],
+        }]
+    api.save_status_page(slug, title=title, published=True, publicGroupList=group_list)
+    say(f"published status page '{slug}' ({len(resolved_ids)} monitor(s))")
 
 
 def main(argv: List[str]) -> int:

@@ -1186,8 +1186,14 @@ stackctl_wrapper() { # module [NAME=value ...]
         esac
         shift
     done
-    command -v python3 >/dev/null 2>&1 \
-        || die "python3 is required to run the reconciler (bootstrap.sh installs it)"
+    # The reconcilers run on the venv install.sh builds from
+    # scripts/stackctl/requirements.txt (uptime-kuma-api2, because kuma.py
+    # speaks socket.io). A stale venv is install.sh's job, not this wrapper's:
+    # fail with the command that fixes it rather than pip-installing behind the
+    # operator's back.
+    python_bin="$REPO_DIR/.venv/bin/python"
+    [ -x "$python_bin" ] \
+        || die "the reconciler venv is missing: run ./deploy/install.sh (it builds $REPO_DIR/.venv from scripts/stackctl/requirements.txt)"
     resolve_data_dir
     py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     {
@@ -1200,6 +1206,6 @@ stackctl_wrapper() { # module [NAME=value ...]
             name=${arg%%=*} value=${arg#*=}
             printf 'V\t%s\t%s\n' "$name" "$value"
         done
-    } | PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}" python3 -m stackctl "$module"
+    } | PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}" "$python_bin" -m stackctl "$module"
 }
 

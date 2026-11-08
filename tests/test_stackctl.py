@@ -1,45 +1,40 @@
 #!/usr/bin/env python3
 # Offline tests for the Python core behind the bash wrappers (scripts/stackctl/).
 #
-# Run: python3 tests/test_stackctl.py          (CI runs this verbatim)
+# Run: .venv/bin/python tests/test_stackctl.py     (CI runs it from the venv;
+# the kuma tests only need the code, not the library -- the socket client sits
+# behind KumaClient and the tests drive a fake of it)
 #
 # What is covered, and why each layer exists:
 #   * decl.py -- the declaration parsers and their verbatim error messages;
 #   * npm.py -- payload construction byte-for-byte (field order included,
 #     which is what made the golden diff against the bash original a real
 #     check), plus a full reconcile against a fake NPM admin API;
-#   * ws.py / socketio.py -- the frame codec from fixtures (fragmentation,
-#     7/16/64-bit lengths, control frames, protocol violations), packet
-#     dispatch with no socket at all, and a scripted fake socket.io server
-#     (one port serving both the websocket upgrade and the REST status-page
-#     probe, like real kuma) driving the whole kuma reconcile offline.
+#   * kuma.py -- the declared fields that reach an add/edit, the UI-tuned
+#     fields that must not, prune, the status page's "only while empty" rule,
+#     and the login failure, all against a fake of the library client (the
+#     socket.io protocol itself is uptime-kuma-api2's to test).
 #
 # The live behaviour was additionally proven against the running stack before
 # this suite was written: both reconcilers' --dry-run output matched the bash
 # and Node originals byte for byte, and the kuma add/edit/prune write paths
 # were exercised against the live server and restored. That cannot run in CI;
 # this file is what keeps those semantics from regressing afterwards.
-import base64
 import contextlib
 import io
 import json
 import os
-import re
 import shlex
-import socket
-import struct
 import subprocess
 import sys
 import threading
-import time
 import unittest
-from hashlib import sha1
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from stackctl import decl, envfile, kuma, npm, socketio, ws  # noqa: E402
+from stackctl import decl, envfile, kuma, npm  # noqa: E402
 from stackctl.ui import Fatal  # noqa: E402
 
 
@@ -234,12 +229,6 @@ class TestKumaLogic(unittest.TestCase):
         self.assertEqual(kuma.normalized_codes({}), [])
         self.assertEqual(kuma.normalized_codes({"accepted_statuscodes": "junk"}), [])
 
-    def test_raw_array(self):
-        self.assertEqual(kuma.raw_array(["a"]), ["a"])
-        self.assertEqual(kuma.raw_array('["a","b"]'), ["a", "b"])
-        self.assertEqual(kuma.raw_array("not json"), [])
-        self.assertEqual(kuma.raw_array(None), [])
-
     def test_differs(self):
         http = decl.parse_kuma_monitor("n|https://x|200-299")
         self.assertFalse(kuma.differs({"type": "http", "url": "https://x",
@@ -256,139 +245,6 @@ class TestKumaLogic(unittest.TestCase):
         # an existing type of None reads as http, like the mjs's `?? "http"`
         self.assertFalse(kuma.differs({"url": "https://x",
                                        "accepted_statuscodes": ["200-299"]}, http))
-
-
-# ---------------------------------------------------------------------------
-
-
-class TestWsCodec(unittest.TestCase):
-    def test_encode_masked_round_trip(self):
-        payload = b'42["login",{"username":"u","password":"p"}]'
-        frame = ws.encode_frame(ws.OP_TEXT, payload, mask_key=b"\x01\x02\x03\x04")
-        # Client frames are always masked: the mask bit is set and the payload
-        # does not appear in the clear.
-        self.assertEqual(frame[1] & 0x80, 0x80)
-        self.assertNotIn(payload, frame)
-        # Demask (what a server does) and recover the payload.
-        head, mask, masked = frame[:2], frame[2:6], frame[6:]
-        clear = bytes(b ^ mask[i % 4] for i, b in enumerate(masked))
-        self.assertEqual(clear, payload)
-
-    def test_length_forms(self):
-        small = ws.encode_frame(ws.OP_TEXT, b"x" * 100, mask_key=b"abcd")
-        self.assertEqual(small[1] & 0x7F, 100)
-        medium = ws.encode_frame(ws.OP_TEXT, b"x" * 300, mask_key=b"abcd")
-        self.assertEqual(medium[1] & 0x7F, 126)
-        self.assertEqual(struct.unpack(">H", medium[2:4])[0], 300)
-        big = ws.encode_frame(ws.OP_TEXT, b"x" * 70000, mask_key=b"abcd")
-        self.assertEqual(big[1] & 0x7F, 127)
-        self.assertEqual(struct.unpack(">Q", big[2:10])[0], 70000)
-
-    def feed(self, frames):
-        dec = ws.FrameDecoder()
-        return dec, b"".join(frames)
-
-    def test_decode_whole_and_byte_at_a_time(self):
-        payload = b"0" + b"y" * 70000
-        frame = ws.encode_frame(ws.OP_TEXT, payload)  # unmasked = server style
-        for chunking in (lambda b: [b], lambda b: [bytes([x]) for x in b]):
-            dec = ws.FrameDecoder()
-            out = []
-            for chunk in chunking(frame):
-                out.extend(dec.feed(chunk))
-            self.assertEqual([(ws.OP_TEXT, payload)], out)
-
-    def test_fragmentation_with_interleaved_control(self):
-        # encode_frame always sets FIN; build the unmasked fragment headers by
-        # hand to exercise the decoder's assembly path (a real server sends
-        # FIN=0 first frames + continuation frames).
-        def raw(fin, opcode, payload):
-            head = bytearray()
-            head.append((0x80 if fin else 0x00) | opcode)
-            head.append(len(payload))
-            return bytes(head) + payload
-
-        dec = ws.FrameDecoder()
-        got = []
-        got += dec.feed(raw(False, ws.OP_TEXT, b"hello "))
-        got += dec.feed(ws.encode_frame(ws.OP_PING, b"pi"))  # control mid-fragment
-        got += dec.feed(raw(False, ws.OP_CONT, b"wor"))
-        got += dec.feed(raw(True, ws.OP_CONT, b"ld"))
-        self.assertEqual(got, [(ws.OP_PING, b"pi"), (ws.OP_TEXT, b"hello world")])
-
-    def test_protocol_violations(self):
-        dec = ws.FrameDecoder()
-        with self.assertRaises(ws.WebSocketError):
-            list(dec.feed(ws.encode_frame(ws.OP_TEXT, b"x", mask_key=b"abcd")))
-        dec2 = ws.FrameDecoder()
-        with self.assertRaises(ws.WebSocketError):
-            list(dec2.feed(bytes([0x80 | ws.OP_CONT, 3]) + b"abc"))
-
-    def test_close_stops_the_stream(self):
-        dec = ws.FrameDecoder()
-        out = list(dec.feed(ws.encode_frame(ws.OP_CLOSE, struct.pack(">H", 1000))))
-        self.assertEqual(out, [(ws.OP_CLOSE, struct.pack(">H", 1000))])
-        with self.assertRaises(ws.WebSocketError):
-            list(dec.feed(ws.encode_frame(ws.OP_TEXT, b"after")))
-
-
-class TestSocketIODispatch(unittest.TestCase):
-    def client(self):
-        c = socketio.SocketIOClient("http://fake")
-        c._reader = threading.Thread(target=lambda: None, daemon=True)  # not None
-        return c
-
-    def test_connect_and_pushes(self):
-        c = self.client()
-        c._dispatch("40{\"sid\":\"abc\"}")
-        self.assertTrue(c._connected.is_set())
-        c._dispatch("42[\"info\",{\"version\":\"2.5\"}]")
-        c._dispatch("42[\"monitorList\",{\"1\":{\"id\":1}}]")
-        self.assertEqual(c.wait_event("info", 0), [{"version": "2.5"}])
-        self.assertEqual(c.wait_event("monitorList", 0), [{"1": {"id": 1}}])
-        self.assertIsNone(c.wait_event("never-pushed", 0))
-
-    def test_ping_pong_and_acks(self):
-        c = self.client()
-        sent = []
-        c._ws = type("W", (), {"send_text": staticmethod(lambda t: sent.append(t))})()
-        c._dispatch("2")
-        self.assertEqual(sent, ["3"])
-        c._dispatch_sio("3[{\"ok\":true}]")
-        # an ACK with no id (or a bad body) is dropped, not fatal
-        c._dispatch_sio("9[{\"ok\":true}]")
-        c._dispatch_sio("3notjson")
-        # login emit -> ack round trip
-        ack = {}
-
-        def waiter():
-            ack["res"] = c.emit_ack("login", [{"username": "u"}], timeout=2)
-
-        threading.Thread(target=waiter, daemon=True).start()
-        packet = None
-        for _ in range(500):  # poll with yields: the waiter thread must run
-            packet = next((s for s in sent if s.startswith("42")), None)
-            if packet:
-                break
-            time.sleep(0.01)
-        self.assertIsNotNone(packet)  # skip the pong
-        m = re.match(r"42(\d+)(\[.*)", packet, re.DOTALL)
-        self.assertIsNotNone(m)
-        self.assertEqual(json.loads(m.group(2)), ["login", {"username": "u"}])
-        c._dispatch_sio(f"3{m.group(1)}" + '[{"ok":true,"token":"t"}]')  # 43<id>[...]
-        for _ in range(500):
-            if "res" in ack:
-                break
-            time.sleep(0.01)
-        self.assertEqual(ack.get("res"), {"ok": True, "token": "t"})
-
-    def test_connect_error_and_disconnect(self):
-        c = self.client()
-        c._dispatch_sio("4{\"message\":\"not v2\"}")
-        self.assertIn("not v2", c.error)
-        c2 = self.client()
-        c2._dispatch_sio("1")
-        self.assertIn("disconnected", c2.error)
 
 
 # ---------------------------------------------------------------------------
@@ -656,128 +512,71 @@ class TestNpmReconcile(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
 
 
-# ---------------------------------------------------------------------------
-# A fake Uptime-Kuma: one port that speaks both the socket.io websocket (a
-# manual hijack of the HTTP connection) and the public REST status-page
-# endpoint, scripted per test through `script`.
-GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+# A fake of uptime-kuma-api2's client, i.e. of what KumaClient exposes to a
+# reconcile: the monitors the server would list, the status page it stores, and
+# a record of every write. The socket.io protocol itself is the library's to
+# test; what this file pins down is the decisions -- which fields reach an add
+# or an edit, what prune deletes, when a page may be filled.
+class FakeKumaApi:
+    # KumaClient exposes the library's exception classes as attributes so
+    # reconcile can catch them without importing the library at module load; a
+    # fake has no library errors to raise.
+    errors = ()
+    timeout_error = TimeoutError
+
+    def __init__(self, monitors=None, page=None):
+        self._monitors = list(monitors or [])
+        self._page = page
+        self.calls = []
+        self.next_id = 10
+
+    def login(self, username, password):
+        self.calls.append(("login", username, password))
+        return {"token": "t"}
+
+    def monitors(self):
+        return [dict(m) for m in self._monitors]
+
+    def add_monitor(self, **fields):
+        self.calls.append(("add", fields))
+        self.next_id += 1
+        return {"monitorID": self.next_id, "msg": "Added Successfully."}
+
+    def edit_monitor(self, id_, **fields):
+        self.calls.append(("editMonitor", id_, fields))
+        return {"monitorID": id_, "msg": "Saved."}
+
+    def delete_monitor(self, id_):
+        self.calls.append(("deleteMonitor", id_))
+        return {}
+
+    def status_page(self, slug):
+        return self._page
+
+    def add_status_page(self, slug, title):
+        self.calls.append(("addStatusPage", slug, title))
+        return {"msg": "OK!"}
+
+    def save_status_page(self, slug, **fields):
+        self.calls.append(("saveStatusPage", slug, fields))
+        return {}
+
+    def close(self):
+        self.calls.append(("close",))
+
+    def writes(self):
+        return [c for c in self.calls if c[0] not in ("login", "close")]
 
 
-def server_send_frame(sock, text):
-    # Reuse the production codec, unmasked (server style): a hand-rolled
-    # header breaks the moment a payload crosses 125 bytes, because the
-    # length byte then carries the mask bit.
-    sock.sendall(ws.encode_frame(ws.OP_TEXT, text.encode()))
+class KumaFailure(Exception):
+    """Stands in for uptime_kuma_api.UptimeKumaException."""
 
 
-def server_read_frame(rfile):
-    b = rfile.read(2)
-    if not b or len(b) < 2:
-        return None
-    opcode = b[0] & 0x0F
-    masked = bool(b[1] & 0x80)
-    length = b[1] & 0x7F
-    pos = 2
-    if length == 126:
-        length = struct.unpack(">H", rfile.read(2))[0]
-    elif length == 127:
-        length = struct.unpack(">Q", rfile.read(8))[0]
-    mask = rfile.read(4) if masked else None
-    payload = rfile.read(length)
-    if masked and mask:
-        payload = bytes(x ^ mask[i % 4] for i, x in enumerate(payload))
-    return opcode, payload.decode("utf-8", "replace")
+class FailingKumaApi(FakeKumaApi):
+    errors = (KumaFailure,)
 
-
-class FakeKumaHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/socket.io/"):
-            key = self.headers.get("Sec-WebSocket-Key")
-            accept = base64.b64encode(sha1(key.encode() + GUID).digest()).decode()
-            self.connection.sendall((
-                "HTTP/1.1 101 Switching Protocols\r\n"
-                "Upgrade: websocket\r\n"
-                "Connection: Upgrade\r\n"
-                f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
-            self.close_connection = True
-            self.server.websocket_session(self.connection)
-            return
-        self.server.http_requests.append(self.path)
-        if self.path.startswith("/api/status-page/"):
-            self._json({"publicGroupList": self.server.status_groups})
-        else:
-            self._json({"error": "not found"}, 404)
-
-    def _json(self, obj, status=200):
-        body = json.dumps(obj).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *a):
-        pass
-
-
-class FakeKuma(ThreadingHTTPServer):
-    """script: dict event -> ack value; monitor_list: the object pushed after
-    login; status_groups: what the public REST endpoint reports."""
-
-    def __init__(self):
-        super().__init__(("127.0.0.1", 0), FakeKumaHandler)
-        self.events = []
-        self.http_requests = []
-        self.script = {}
-        self.monitor_list = {}
-        self.status_groups = []
-        self.pings_before_login = 1
-
-    def websocket_session(self, sock):
-        sock.settimeout(30)
-        rfile = sock.makefile("rb")
-        try:
-            server_send_frame(sock, '0{"sid":"s","pingInterval":25000,"pingTimeout":20000}')
-            got = server_read_frame(rfile)
-            assert got == (ws.OP_TEXT, "40"), f"expected namespace CONNECT, got {got}"
-            server_send_frame(sock, '40{"sid":"ns"}')
-            server_send_frame(sock, '42["info",{"version":"2.5.x"}]')
-            # A real server pings whenever its interval fires; prove the
-            # client answers from its read side before any reconcile step.
-            sock.sendall(bytes([0x80 | ws.OP_PING, 3]) + b"abc")
-            while True:
-                got = server_read_frame(rfile)
-                if got is None or got[1] == "41":
-                    break
-                if got[0] == ws.OP_PONG or got[1] == "3":
-                    self.ponged = True
-                    continue
-                if got[1] == "2":
-                    server_send_frame(sock, "3")
-                    continue
-                if not got[1].startswith("42"):
-                    continue
-                body = got[1][2:]
-                digits = ""
-                while body and body[0].isdigit():
-                    digits += body[0]
-                    body = body[1:]
-                data = json.loads(body)
-                event, args = data[0], data[1:]
-                self.events.append((event, args))
-                if event == "login" and args and args[0].get("username") == "BOOM":
-                    server_send_frame(sock, f"43{digits}" + '[{"ok":false,"msg":"bad"}]')
-                    continue
-                server_send_frame(sock, f"43{digits}" + json.dumps([self.script.get(event, {"ok": True})]))
-                if event == "login":
-                    server_send_frame(sock, "42[\"monitorList\"," + json.dumps(self.monitor_list) + "]")
-        except (OSError, AssertionError):
-            pass
-        finally:
-            try:
-                sock.close()
-            except OSError:
-                pass
+    def login(self, username, password):
+        raise KumaFailure("Incorrect username or password")
 
 
 class TestKumaReconcile(unittest.TestCase):
@@ -788,13 +587,8 @@ class TestKumaReconcile(unittest.TestCase):
         os.makedirs(os.path.join(self.config, "uptime-kuma"))
         with open(os.path.join(self.config, "uptime-kuma", "api.env"), "w") as f:
             f.write("KUMA_USERNAME=admin\nKUMA_PASSWORD=secret\n")
-        self.server = FakeKuma()
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.server.server_port}"
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -831,117 +625,145 @@ class TestKumaReconcile(unittest.TestCase):
 
     def decls(self, monitors, dry="0", prune="0", slug="stack"):
         lines = [f"V\tMANIFEST\t{self.write_manifest(monitors, slug)}",
-                 f"V\tKUMA_URL\t{self.url}",
                  f"V\tCONFIG_DIR\t{self.config}",
                  f"V\tDRY_RUN\t{dry}",
                  f"V\tPRUNE\t{prune}"]
         return decl.read_decls(io.StringIO("\n".join(lines) + "\n"))
 
-    def reconcile(self, d):
+    def reconcile(self, d, api):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = kuma.reconcile(d)
+            rc = kuma.reconcile(d, client_factory=lambda url: api)
         return rc, out.getvalue(), err.getvalue()
 
-    def events(self, name):
-        return [a for ev, a in self.server.events if ev == name]
-
     def test_all_unchanged_and_page_left_alone(self):
-        self.server.monitor_list = {
-            "1": {"id": 1, "name": "SearXNG", "type": "http", "url": "https://s",
-                  "accepted_statuscodes": ["200-299"], "notificationIDList": {"5": True}},
-            "2": {"id": 2, "name": "Fulcrum", "type": "port", "hostname": "h", "port": 50001},
-        }
-        self.server.status_groups = [{"monitorList": [{"id": 1}]}]  # page carries monitors
-        self.server.script = {"login": {"ok": True}, "getStatusPage": {"ok": True, "config": {}}}
-        d = self.decls(["SearXNG|https://s|200-299",
-                        "Fulcrum|tcp://h:50001"])
-        rc, out, _ = self.reconcile(d)
+        api = FakeKumaApi(
+            monitors=[
+                {"id": 1, "name": "SearXNG", "type": "http", "url": "https://s",
+                 "accepted_statuscodes": ["200-299"], "notificationIDList": {"5": True}},
+                {"id": 2, "name": "Fulcrum", "type": "port", "hostname": "h", "port": 50001},
+            ],
+            page={"id": 7, "publicGroupList": [{"monitorList": [{"id": 1}]}]},
+        )
+        rc, out, _ = self.reconcile(
+            self.decls(["SearXNG|https://s|200-299", "Fulcrum|tcp://h:50001"]), api)
         self.assertEqual(rc, 0)
         self.assertIn('monitor "SearXNG" unchanged (id 1)', out)
         self.assertIn('monitor "Fulcrum" unchanged (id 2)', out)
         self.assertIn("status page 'stack' exists and carries monitors; "
                       "the layout stays with the UI", out)
-        # no write events at all, the pong was answered, REST was probed
-        self.assertEqual(self.events("add"), [])
-        self.assertEqual(self.events("editMonitor"), [])
-        self.assertEqual(self.events("saveStatusPage"), [])
-        self.assertTrue(getattr(self.server, "ponged", False))
-        self.assertTrue(any(p == "/api/status-page/stack" for p in self.server.http_requests))
+        # nothing was written, and the credentials came from api.env
+        self.assertEqual(api.writes(), [])
+        self.assertEqual(api.calls[0], ("login", "admin", "secret"))
+        self.assertEqual(api.calls[-1], ("close",))
 
     def test_add_edit_and_dry_run(self):
-        self.server.monitor_list = {
-            "3": {"id": 3, "name": "SearXNG", "type": "http", "url": "https://old",
-                  "accepted_statuscodes": ["200-299"],
-                  "notificationIDList": {"9": True}, "interval": 300,
-                  "conditions": '["cond"]', "kafkaProducerBrokers": "junk"},
-        }
-        self.server.script = {"login": {"ok": True}, "add": {"ok": True, "monitorID": 11},
-                              "editMonitor": {"ok": True},
-                              "getStatusPage": {"ok": True, "config": {"icon": "x"}}}
-        d = self.decls(["SearXNG|https://new|200-299,400-499",
-                        "New port|tcp://p:50001"])
-        rc, out, _ = self.reconcile(d)
+        api = FakeKumaApi(monitors=[
+            {"id": 3, "name": "SearXNG", "type": "http", "url": "https://old",
+             "accepted_statuscodes": ["200-299"], "notificationIDList": {"9": True},
+             "interval": 300, "conditions": ["cond"]},
+        ])
+        rc, out, _ = self.reconcile(self.decls([
+            "SearXNG|https://new|200-299,400-499",
+            "New port|tcp://p:50001",
+            "New http|https://n|200-299",
+        ]), api)
         self.assertEqual(rc, 0)
         self.assertIn('updated monitor "SearXNG" (id 3)', out)
         self.assertIn('created monitor "New port" (id 11', out)
-        edit = self.events("editMonitor")[0][0]
-        # UI-tuned fields are carried over untouched, declared fields override,
-        # and DB-string fields are decoded back to raw arrays.
-        self.assertEqual(edit["notificationIDList"], {"9": True})
-        self.assertEqual(edit["interval"], 300)
-        self.assertEqual(edit["url"], "https://new")
-        self.assertEqual(edit["accepted_statuscodes"], ["200-299", "400-499"])
-        self.assertEqual(edit["conditions"], ["cond"])
-        self.assertEqual(edit["kafkaProducerBrokers"], [])
-        add = self.events("add")[0][0]
-        self.assertEqual(add["type"], "port")
-        self.assertEqual(add["hostname"], "p")
-        self.assertEqual(add["port"], 50001)
-        self.assertEqual(add["accepted_statuscodes"], ["200-299"])  # the .every() trap
-        self.assertEqual(add["interval"], 60)
-        self.assertTrue(add["active"])
+        self.assertIn('created monitor "New http" (id 12', out)
+
+        edits = [c for c in api.writes() if c[0] == "editMonitor"]
+        adds = [c for c in api.writes() if c[0] == "add"]
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(len(adds), 2)
+        edit, (add_port, add_http) = edits[0], adds
+        # EXACTLY the declared fields: the library merges the stored monitor
+        # back in, so the UI's notification list, interval and conditions are
+        # never rewritten by a reconcile.
+        self.assertEqual(edit, ("editMonitor", 3,
+                                {"url": "https://new",
+                                 "accepted_statuscodes": ["200-299", "400-499"]}))
+        fields = add_port[1]
+        self.assertEqual(fields["type"], "port")
+        self.assertEqual(fields["hostname"], "p")
+        self.assertEqual(fields["port"], 50001)
+        self.assertEqual(fields["url"], "tcp://p:50001")
+        self.assertEqual(fields["accepted_statuscodes"], ["200-299"])  # the .every() trap
+        self.assertEqual(fields["interval"], 60)
+        self.assertEqual(fields["retryInterval"], 60)
+        self.assertEqual(fields["maxretries"], 2)
+        fields = add_http[1]
+        self.assertEqual(fields["type"], "http")
+        self.assertEqual(fields["method"], "GET")
+        self.assertEqual(fields["url"], "https://n")
+        self.assertEqual(fields["accepted_statuscodes"], ["200-299"])
 
         # dry-run plans the same edits but writes nothing
-        self.server.events.clear()
-        d = self.decls(["SearXNG|https://newer|200-299",
-                        "New port|tcp://p:50001"], dry="1")
-        rc, out, _ = self.reconcile(d)
+        api = FakeKumaApi(monitors=[
+            {"id": 3, "name": "SearXNG", "type": "http", "url": "https://old",
+             "accepted_statuscodes": ["200-299"]},
+        ])
+        rc, out, _ = self.reconcile(self.decls([
+            "SearXNG|https://newer|200-299", "New port|tcp://p:50001"], dry="1"), api)
         self.assertIn("[dry-run] would update monitor", out)
-        self.assertEqual(self.events("add"), [])
-        self.assertEqual(self.events("editMonitor"), [])
+        self.assertIn("[dry-run] would create monitor", out)
+        self.assertEqual(api.writes(), [])
 
-    def test_prune_and_publish(self):
-        self.server.monitor_list = {
-            "1": {"id": 1, "name": "Keep", "type": "http", "url": "https://k",
-                  "accepted_statuscodes": ["200-299"]},
-            "9": {"id": 9, "name": "Stale", "type": "http", "url": "https://s",
-                  "accepted_statuscodes": ["200-299"]},
-        }
-        self.server.status_groups = []  # page exists but is empty -> we fill it
-        self.server.script = {"login": {"ok": True}, "getStatusPage": {"ok": True, "config": {"icon": "i"}},
-                              "deleteMonitor": {"ok": True}, "saveStatusPage": {"ok": True},
-                              "addStatusPage": {"ok": True}}
-        d = self.decls(["Keep|https://k|200-299"], prune="1")
-        rc, out, _ = self.reconcile(d)
+    def test_prune_and_fill_an_empty_page(self):
+        api = FakeKumaApi(
+            monitors=[
+                {"id": 1, "name": "Keep", "type": "http", "url": "https://k",
+                 "accepted_statuscodes": ["200-299"]},
+                {"id": 9, "name": "Stale", "type": "http", "url": "https://s",
+                 "accepted_statuscodes": ["200-299"]},
+            ],
+            page={"id": 7, "publicGroupList": []},  # exists but empty -> we fill it
+        )
+        rc, out, _ = self.reconcile(
+            self.decls(["Keep|https://k|200-299"], prune="1"), api)
         self.assertEqual(rc, 0)
         self.assertIn('deleted monitor "Stale" (id 9, not declared)', out)
         self.assertIn("published status page 'stack' (1 monitor(s))", out)
-        self.assertEqual(self.events("deleteMonitor"), [[9]])
-        save = self.events("saveStatusPage")[0]
-        self.assertEqual(save[0], "stack")
-        self.assertEqual(save[2], "i")            # imgDataUrl stays a string
-        self.assertEqual(save[3][0]["monitorList"], [{"id": 1, "weight": 1}])
-        self.assertEqual(save[1]["published"], True)
+        self.assertIn(("deleteMonitor", 9), api.calls)
+        self.assertNotIn("addStatusPage", [c[0] for c in api.calls])
+        save = [c for c in api.calls if c[0] == "saveStatusPage"][0]
+        self.assertEqual(save[1], "stack")
+        self.assertEqual(save[2]["title"], "Test services")
+        self.assertIs(save[2]["published"], True)
+        self.assertEqual(save[2]["publicGroupList"][0]["monitorList"],
+                         [{"id": 1, "weight": 1}])
+
+    def test_new_page_is_created_then_filled(self):
+        api = FakeKumaApi(
+            monitors=[{"id": 1, "name": "Keep", "type": "http", "url": "https://k",
+                       "accepted_statuscodes": ["200-299"]}],
+            page=None,
+        )
+        rc, out, _ = self.reconcile(self.decls(["Keep|https://k|200-299"]), api)
+        self.assertEqual(rc, 0)
+        self.assertIn("created status page 'stack'", out)
+        names = [c[0] for c in api.calls]
+        self.assertLess(names.index("addStatusPage"), names.index("saveStatusPage"))
+        self.assertEqual([c for c in api.calls if c[0] == "addStatusPage"][0],
+                         ("addStatusPage", "stack", "Test services"))
 
     def test_bad_login_dies(self):
-        self.server.script = {"login": {"ok": False, "msg": "Incorrect username or password"}}
+        api = FailingKumaApi()
         d = self.decls(["X|https://x"])
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(Fatal) as ctx:
-                kuma.reconcile(d)
+                kuma.reconcile(d, client_factory=lambda url: api)
         self.assertIn("Incorrect username", ctx.exception.msg)
+        self.assertEqual(api.calls[-1], ("close",))
 
+    def test_missing_credentials_self_skip(self):
+        os.remove(os.path.join(self.config, "uptime-kuma", "api.env"))
+        api = FakeKumaApi()
+        rc, out, _ = self.reconcile(self.decls(["X|https://x"]), api)
+        self.assertEqual(rc, 0)
+        self.assertIn("no Uptime-Kuma admin login", out)
+        self.assertEqual(api.calls, [])
 
 
 # ---------------------------------------------------------------------------

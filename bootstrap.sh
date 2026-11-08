@@ -93,10 +93,11 @@ command -v curl >/dev/null 2>&1 || { log "installing curl (monitor alert path)";
 # (rand_hex in scripts/lib.sh). Same reason for the separate check.
 command -v openssl >/dev/null 2>&1 || { log "installing openssl"; sudo dnf install -y openssl; }
 # python3 runs agent-mcp, the CLI behind the agent skills (the agent-skills
-# repo, installed by deploy.sh), and the stackctl reconcilers the npm-hosts /
-# kuma-monitors wrappers exec (scripts/stackctl/). Stdlib only, but a minimal
-# install has no interpreter, and then every skill call fails with "bad
-# interpreter".
+# repo, installed by deploy.sh), the stackctl declaration layer the npm-hosts /
+# kuma-monitors wrappers and load_manifest share (scripts/stackctl/), and the
+# venv deploy/install.sh builds for the two reconcilers. Stdlib only for the
+# bare interpreter, but a minimal install has no interpreter at all, and then
+# every skill call fails with "bad interpreter".
 command -v python3 >/dev/null 2>&1 || { log "installing python3 (agent-mcp)"; sudo dnf install -y python3; }
 
 # audit-rules provides auditctl/augenrules, which load the stack's audit rules

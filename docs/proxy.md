@@ -31,8 +31,10 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   leftover) — and its monitors are
   the `[kuma.monitor.*]` tables in `deploy/services.toml`, reconciled by
   `scripts/kuma-monitors.sh` —
-  a stdlib Python socket.io client (`scripts/stackctl/kuma.py` over
-  `socketio.py`/`ws.py`), because kuma has no REST write API. The `kuma-ctl`
+  a Python socket.io client (`scripts/stackctl/kuma.py` over
+  `uptime-kuma-api2`, pinned in `scripts/stackctl/requirements.txt` and
+  installed into `$REPO_DIR/.venv` by `deploy/install.sh`), because kuma has no
+  REST write API. The `kuma-ctl`
   Node image that used to carry the client is retired: no image build, no
   container and no bind mount stand between the declaration and the server,
   and the reconciler reaches kuma through its loopback publish
@@ -40,8 +42,7 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   on `npm-network`. The admin
   login the setup wizard creates lives in `config/uptime-kuma/api.env` (UI-first
   like `npm/api.env`), and the reconciler, `deploy.sh` and `verify.sh` self-skip
-  until it is filled in. The declaration format and every socket.io payload
-  trap (positional events, the `info` handshake, the status-code array) are in
+  until it is filled in. The declaration format and the reconcile rules are in
   `scripts/kuma-monitors.sh` and `scripts/stackctl/kuma.py` — don't reimplement
   the reconcile as curl. Note v2 answers `/` with a **302 to `/dashboard`**, so
   a probe must follow redirects. Notifications stay UI-configured.

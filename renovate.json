@@ -13,8 +13,10 @@
       "groupName": "container base images"
     },
     {
+      "description": "pep621 covers the app repos' pyproject.toml; pip_requirements is scripts/stackctl/requirements.txt, the host-side reconcilers' pinned freeze (uptime-kuma-api2) -- one PR bumps the whole set",
       "matchManagers": [
-        "pep621"
+        "pep621",
+        "pip_requirements"
       ],
       "groupName": "python dependencies"
     },

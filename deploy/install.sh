@@ -1696,7 +1696,41 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 7. units: render every one (they all reference the data or config dir)
+# 7. the Python venv the reconcilers run on
+# ---------------------------------------------------------------------------
+# scripts/stackctl/kuma.py speaks Uptime-Kuma's socket.io API through
+# uptime-kuma-api2, pinned in scripts/stackctl/requirements.txt, so the two
+# reconciler wrappers (npm-hosts, kuma-monitors) exec a venv. Everything else in
+# scripts/stackctl/ -- the `manifest` reader install.sh itself calls through
+# load_manifest, verify.sh and CI included -- stays stdlib and runs on the bare
+# interpreter; kuma.py imports the client lazily so that stays true.
+#
+# The venv is a build artifact of the checkout: .venv/ is gitignored and rebuilt
+# here from the pinned freeze, never edited by hand. The stamp makes an
+# unchanged requirements.txt a no-op (a deploy should not hit the network for
+# pip when nothing moved), and a changed one a reinstall.
+STACKCTL_VENV="$REPO_DIR/.venv"
+STACKCTL_REQS="$REPO_DIR/scripts/stackctl/requirements.txt"
+[ -r "$STACKCTL_REQS" ] || die "$STACKCTL_REQS is missing (the reconcilers need it)"
+STACKCTL_REQS_HASH=$(sha256sum "$STACKCTL_REQS" | cut -d' ' -f1)
+STACKCTL_REQS_STAMP="$STACKCTL_VENV/.requirements.sha256"
+if [ ! -x "$STACKCTL_VENV/bin/python" ]; then
+    log "creating $STACKCTL_VENV (the socket.io client behind kuma-monitors)"
+    rm -rf "$STACKCTL_VENV"
+    python3 -m venv "$STACKCTL_VENV" \
+        || die "could not create $STACKCTL_VENV (python3 -m venv); bootstrap.sh installs python3"
+fi
+if [ "$(cat "$STACKCTL_REQS_STAMP" 2>/dev/null || true)" != "$STACKCTL_REQS_HASH" ]; then
+    log "installing $STACKCTL_REQS into $STACKCTL_VENV"
+    mkdir -p "$STACKCTL_VENV"
+    "$STACKCTL_VENV/bin/python" -m pip install --disable-pip-version-check \
+        --quiet -r "$STACKCTL_REQS" \
+        || die "could not install $STACKCTL_REQS into $STACKCTL_VENV (pip needs network here, like a podman pull)"
+    printf '%s\n' "$STACKCTL_REQS_HASH" > "$STACKCTL_REQS_STAMP"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
 render_unit() {
     local src="$1" target="$2" tmp vol
@@ -1911,6 +1945,9 @@ Done. Everything the stack owns lives under:
     $DATA_DIR/audit/backup-verify.status), and backup-verify-db.timer replays
     the postgres dump into a throwaway cluster every month (verdict in
     $DATA_DIR/audit/backup-verify-db.status)
+  $REPO_DIR/.venv
+    the reconcilers' Python (uptime-kuma-api2 for kuma-monitors), rebuilt from
+    scripts/stackctl/requirements.txt whenever that pin changes (regenerable)
 
 Next:  ./deploy.sh         # build images, start/restart everything
        ./configure.sh      # wait, then mint runes / wallets / BTCPay state / migrations
