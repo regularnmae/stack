@@ -971,8 +971,9 @@ if [ -n "$ONLY" ]; then
         configure_npm_hosts
         sync_npm_network
     elif [ "$ONLY" = kuma-monitors ]; then
-        # Reconcile the status page's monitors after a KUMA_MONITORS change, or
-        # after filling in $DATA_DIR/config/uptime-kuma/api.env. Touches no
+        # Reconcile the status page's monitors after a change to the
+        # [kuma.monitor.*] tables, or after filling in
+        # $DATA_DIR/config/uptime-kuma/api.env. Touches no
         # container; the reconciler reaches uptime-kuma on its loopback publish.
         sync_units
         kuma_monitors
@@ -1085,7 +1086,8 @@ The MCP servers are served as https://$MCP_HOST/<prefix> once
   applies every proxy host in NPM_HOSTS).
 The status page's monitors are reconciled once
   $DATA_DIR/config/uptime-kuma/api.env has the Uptime-Kuma admin login
-  (scripts/kuma-monitors.sh applies every monitor in KUMA_MONITORS).
+  (scripts/kuma-monitors.sh applies every [kuma.monitor.*] in
+  deploy/services.toml).
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
 bitcoind, monerod, fulcrum, lightningd, btcpay, nbxplorer and the BTCPay wallet.
 

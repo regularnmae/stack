@@ -198,6 +198,11 @@ sysctl, firewalld); `sudo` needs a terminal to prompt, so run it from an
 interactive shell (over SSH, `ssh -t`). `deploy.sh`, `configure.sh` and
 `verify.sh` never use `sudo`.
 
+`deploy/install.sh` also builds `$REPO_DIR/.venv` from the pinned
+`scripts/stackctl/requirements.txt` — the reconcilers' socket.io client. It is
+a build artifact of the checkout, not state: delete it and the next
+`./deploy.sh` recreates it (and a pin change reinstalls it in place).
+
 On the first run, `deploy.sh` asks **where the stack keeps its data** (default
 `$HOME/data`) and remembers the answer; point it at a separate disk to survive
 an OS reinstall. See [Where the data lives](#where-the-data-lives).

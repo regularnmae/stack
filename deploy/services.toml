@@ -4,7 +4,7 @@
 # names it answers on, which loopback publishes nginx-proxy-manager forwards
 # to, the MCP path prefixes, the tor onion services, and the status page's
 # monitors. It replaced five parallel lists in stack.conf (MCP_HOSTS,
-# NPM_HOSTS, ONION_SERVICES, KUMA_MONITORS and the *_HOST scalars), each of
+# NPM_HOSTS, ONION_SERVICES, the monitor list and the *_HOST scalars), each of
 # which had to be edited in step with the others and with the table in
 # AGENTS.md -- the drift class the CI "service manifest" gate now checks.
 #
