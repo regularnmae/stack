@@ -1,5 +1,5 @@
 # Quadlet unit for BTC RPC Explorer, the Bitcoin explorer served at
-# $BTC_EXPLORER_HOST (NPM_HOSTS in stack.conf). It is stateless: the chain is
+# $BTC_EXPLORER_HOST (the [npm.*] tables of deploy/services.toml). It is stateless: the chain is
 # read from the stack's own bitcoind over RPC and address history from Fulcrum
 # over the Electrum protocol, so it adds no index and no data directory. Its
 # configuration (the RPC credentials and the Fulcrum endpoint) is a
@@ -24,7 +24,7 @@ Network=npm-network.network
 IP=10.89.0.243
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# on host 8108 (NPM_HOSTS in stack.conf). The firewall opens nothing for it, so
+# on host 8108 (the [npm.*] tables of deploy/services.toml). The firewall opens nothing for it, so
 # NPM (which terminates TLS) stays the only way in for a client.
 PublishPort=127.0.0.1:8108:3002
 

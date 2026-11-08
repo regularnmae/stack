@@ -3,7 +3,8 @@
 Everything between a client and a container: nginx-proxy-manager's host network,
 the declared host list, rate limits, the pinned subnet, and onion publishing.
 Read this before touching `deploy/nginx-proxy-manager.container`,
-`scripts/npm-hosts.sh`, `NPM_HOSTS`/`ONION_SERVICES`/`MCP_HOSTS`, or `torrc`.
+`scripts/npm-hosts.sh`, `deploy/services.toml` (the public surface's one
+declaration), or `torrc`.
 The operator narrative is README's "Proxy hosts", "Tor onion services" and
 "Status page".
 
@@ -28,7 +29,8 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   **embedded MariaDB** (`UPTIME_KUMA_ENABLE_EMBEDDED_MARIADB=1`,
   `db-config.json` says `embedded-mariadb`; the sqlite-era `kuma.db` is a 0-byte
   leftover) — and its monitors are
-  `KUMA_MONITORS` in `stack.conf`, reconciled by `scripts/kuma-monitors.sh` —
+  the `[kuma.monitor.*]` tables in `deploy/services.toml`, reconciled by
+  `scripts/kuma-monitors.sh` —
   a stdlib Python socket.io client (`scripts/stackctl/kuma.py` over
   `socketio.py`/`ws.py`), because kuma has no REST write API. The `kuma-ctl`
   Node image that used to carry the client is retired: no image build, no
@@ -82,8 +84,9 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 ## tor is the onion publisher
 
 - **`tor` is also the onion publisher, and the onion side does not go through NPM
-  the way the clearweb side does.** `ONION_SERVICES` in `stack.conf` is the
-  declaration; `install.sh` rewrites only the marked region at the end of
+  the way the clearweb side does.** The `[onion.*]` tables in
+  `deploy/services.toml` are the declaration (emitted to bash as
+  `ONION_SERVICES`); `install.sh` rewrites only the marked region at the end of
   `torrc` so the hash and the `SocksPolicy` are never touched, and `deploy.sh`'s
   `unit_digest` hashes `torrc` so a changed declaration restarts tor. The
   `.onion` address is key material, not config: it comes from
@@ -107,7 +110,7 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   explanation, including why podman 6's `pasta` forwarder would be the other way
   out. The price is that NPM cannot resolve a container name: every unit it
   fronts publishes on the host's **loopback** (`PublishPort=127.0.0.1:<port>:…`),
-  which is what `NPM_HOSTS`/`MCP_HOSTS` point at, and only 80/443/81 plus
+  which is what the manifest's `[npm.*]`/`[mcp.*]` entries point at, and only 80/443/81 plus
   Fulcrum's raw ports stay LAN-reachable. Host-side checks still read
   `container:8000` on `npm-network` through `net_curl` (exec'd into the
   long-lived `netcheck` container; `netcheck-host` is the same image on the host
@@ -118,8 +121,9 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 
 ## Every proxy host is declared
 
-- **Every proxy host is declared, not hand-clicked:** `NPM_HOSTS` in `stack.conf`
-  is the whole public surface, and `scripts/npm-hosts.sh` reconciles it through
+- **Every proxy host is declared, not hand-clicked:** the `[npm.*]` tables in
+  `deploy/services.toml` are the whole public surface, and `scripts/npm-hosts.sh`
+  reconciles them through
   NPM's admin API on `127.0.0.1:81` (update in place by `domain_names`, else
   create, plus a Let's Encrypt certificate per host). The reconciler itself is
   Python (`scripts/stackctl/npm.py`, fed the declarations over stdin by the
@@ -128,8 +132,8 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   never reaches an argv. It needs the admin login in
   `config/npm/api.env` and self-skips when the
   login is absent. `--prune` is the only destructive mode. The `mcp` flag is the
-  one exception to "one forward": one location per `MCP_HOSTS` entry
-  (`/prefix:container:port`), each rewritten onto the container's `/mcp`, with
+  one exception to "one forward": one location per `[mcp.*]` entry
+  (prefix, container and loopback port), each rewritten onto the container's `/mcp`, with
   the streaming settings an SSE transport needs — `scripts/stackctl/npm.py`
   owns that payload. `verify.sh` re-checks the path through NPM's `:80`
   (following the

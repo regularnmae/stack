@@ -169,6 +169,13 @@ below states the rule, the doc says why it is the rule.
 
 ### The proxy tier -- `docs/proxy.md`
 
+- **The public surface is declared once**, in `deploy/services.toml`: the
+  `*_HOST` names (each with its operator env override), the `[mcp.*]` prefixes,
+  the `[npm.*]` proxy hosts, the `[onion.*]` services and the `[kuma.monitor.*]`
+  monitors. `scripts/lib.sh`'s `load_manifest` re-emits the old shell names
+  (`MCP_HOSTS`, `ONION_SERVICES`, ...) for the bash callers, the Python
+  reconcilers read the file directly, and CI cross-checks it against the
+  interface table below -- never reintroduce a parallel list.
 - **`uptime-kuma` is UI-configured for its own account, declared for everything
   else**, by `scripts/kuma-monitors.sh` (a stdlib Python socket.io client —
   kuma has no REST write API); notifications stay UI-configured.
@@ -183,8 +190,9 @@ below states the rule, the doc says why it is the rule.
   gets no certificate and never `force-ssl`.
 - **nginx-proxy-manager runs on the host network**, so every fronted unit
   publishes on loopback and NPM cannot resolve a container name.
-- **Every proxy host is declared**, in `NPM_HOSTS`, reconciled by
-  `scripts/npm-hosts.sh`; `--prune` is the only destructive mode.
+- **Every proxy host is declared**, in `deploy/services.toml`
+  (`scripts/npm-hosts.sh` reconciles it); `--prune` is the only destructive
+  mode.
 
 ### The monitor and alerting -- `docs/alerting.md`
 
@@ -260,15 +268,17 @@ variable name changes, it changes on both sides at once.
 None of them is reachable from the LAN. NPM terminates TLS on :80/:443 (its own
 bind, on the host network) and is the sole path to every MCP server for a client;
 `NPM target` is the unit's loopback publish — `PublishPort=127.0.0.1:<port>:...`
-in that unit — which is what `NPM_HOSTS`/`MCP_HOSTS` point at, because NPM can no
+in that unit — which is what the manifest's `[npm.*]` forwards and `[mcp.*]`
+entries point at, because NPM can no
 longer resolve a container name. The host-side checks read the very same
 `<container>:8000` (`On npm-network`) through `net_curl`. `Bind + health` is the
 bind and health path *inside* the container, which is still `0.0.0.0` — the app's
 `MCP_HOST`/`MCP_PORT` contract is unchanged. For a client, the servers appear as
 one host with a path prefix each — `https://$MCP_HOST/<prefix>`, mapped onto the
 container's `/mcp` by the `mcp` proxy host `scripts/npm-hosts.sh` reconciles
-from `NPM_HOSTS`; each `MCP_HOSTS` entry is `/prefix:container:port` (the
-container names the `token.env`, the port is the loopback publish).
+from the manifest; each `[mcp.*]` entry is a `/prefix`, a container and a
+loopback port (the container names the `token.env`, the port is the publish),
+emitted to bash as the `MCP_HOSTS` triple `prefix:container:port`.
 
 **`crowdsec-mcp` is the one exception, and it is forced from upstream.**
 `crowdsec` runs on the host network because `stack-bouncer` (root, on the host)

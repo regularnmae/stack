@@ -34,7 +34,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import decl, envfile, http
+from . import decl, envfile, http, manifest
 from .ui import die, log, warn
 
 # Streaming settings for the MCP host, applied at server scope so every
@@ -217,6 +217,14 @@ def find_host_id(hosts: Any, domain: str) -> Optional[int]:
 
 
 def reconcile(d: decl.Decls) -> int:
+    # The declarations come from the service manifest, not the stdin pipe:
+    # deploy/services.toml is the one home of the proxy hosts, the MCP
+    # prefixes and the onion services (manifest.py loads and validates).
+    manifest_path = d.var("MANIFEST")
+    if not manifest_path:
+        die("the wrapper did not pass MANIFEST (the path to deploy/services.toml)")
+    mf = manifest.load(manifest_path)
+
     api_base = d.var("NPM_API", "http://127.0.0.1:81")
     data_dir = d.var("DATA_DIR")
     config_dir = d.var("CONFIG_DIR", os.path.join(data_dir, "config"))
@@ -229,8 +237,8 @@ def reconcile(d: decl.Decls) -> int:
     token = envfile.env_or_file("NPM_TOKEN", npm_env)
     request_cert = envfile.env_or_file("NPM_REQUEST_CERT", npm_env, "1") == "1"
 
-    if not d.npm_hosts:
-        die("NPM_HOSTS is empty; set it in stack.conf")
+    if not mf.npm:
+        die(f"no proxy hosts are declared in {manifest_path}")
 
     if not token and not (email and password):
         log(f"no nginx-proxy-manager API credentials in {npm_env}")
@@ -253,9 +261,9 @@ def reconcile(d: decl.Decls) -> int:
             "generated configs and re-run:\n"
             f"    mkdir -p /tmp/npm-proxy-host-parked && mv {data_dir}/npm/data/nginx/proxy_host/*.conf /tmp/npm-proxy-host-parked/")
 
-    hosts_decls = [decl.parse_npm_host(raw) for raw in d.npm_hosts]
-    mcp_hosts = [decl.parse_mcp_host(raw) for raw in d.mcp_hosts]
-    onions = [decl.parse_onion_service(raw) for raw in d.onion_services]
+    hosts_decls = mf.npm
+    mcp_hosts = mf.mcp
+    onions = mf.onion
 
     log(f"reconciling {len(hosts_decls)} proxy host(s) through {api_base}")
 

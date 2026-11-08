@@ -25,7 +25,7 @@ EnvironmentFile=@CONFIG_DIR@/lightning-mcp/spend.env
 Environment=LOG_LEVEL=WARNING
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# server on host 8104 (NPM_HOSTS in stack.conf) -- it can no longer resolve the
+# server on host 8104 (the [npm.*] tables of deploy/services.toml) -- it can no longer resolve the
 # container name. This is a money-moving surface, so the loopback bind is the
 # only host-visible port there is; NPM (TLS) plus the bearer and spend tokens are
 # still the only way in. The host-side checks read the container by name on

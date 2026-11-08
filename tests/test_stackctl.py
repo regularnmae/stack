@@ -27,8 +27,10 @@ import io
 import json
 import os
 import re
+import shlex
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -41,6 +43,11 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from stackctl import decl, duration, envfile, kuma, npm, socketio, ws  # noqa: E402
 from stackctl.ui import Fatal  # noqa: E402
+
+
+def shlex_quote(s):
+    import shlex
+    return shlex.quote(s)
 
 
 def die_msg(fn, *args, **kwargs):
@@ -120,7 +127,7 @@ class TestDecl(unittest.TestCase):
         self.assertEqual(h.flags, "a|b|c")
 
     def test_npm_host_errors(self):
-        self.assertIn("bad NPM_HOSTS entry",
+        self.assertIn("bad proxy-host declaration",
                       die_msg(decl.parse_npm_host, "only-one-field"))
         self.assertIn("bad forward scheme",
                       die_msg(decl.parse_npm_host, "d|ftp://x:1|"))
@@ -131,8 +138,8 @@ class TestDecl(unittest.TestCase):
         m = decl.parse_mcp_host("/searxng:searxng-mcp:8100")
         self.assertEqual((m.prefix, m.container, m.port),
                          ("/searxng", "searxng-mcp", "8100"))
-        self.assertIn("bad MCP_HOSTS entry", die_msg(decl.parse_mcp_host, "no-colons"))
-        self.assertIn("bad MCP_HOSTS entry",
+        self.assertIn("bad MCP endpoint declaration", die_msg(decl.parse_mcp_host, "no-colons"))
+        self.assertIn("bad MCP endpoint declaration",
                       die_msg(decl.parse_mcp_host, "/x:c:notaport"))
 
     def test_onion_service(self):
@@ -152,7 +159,7 @@ class TestDecl(unittest.TestCase):
         self.assertEqual((d.codes, d.interval, d.maxretries), (["200-299"], 60, 2))
 
     def test_kuma_errors(self):
-        self.assertIn("bad KUMA_MONITORS entry", die_msg(decl.parse_kuma_monitor, "name-only"))
+        self.assertIn("bad monitor declaration", die_msg(decl.parse_kuma_monitor, "name-only"))
         self.assertIn("bad accepted status codes",
                       die_msg(decl.parse_kuma_monitor, "n|https://x|200"))
         self.assertIn("accepts no status codes",
@@ -167,17 +174,15 @@ class TestDecl(unittest.TestCase):
         d = decl.read_decls(io.StringIO(
             "V\tDATA_DIR\t/data\n"
             "V\tDRY_RUN\t1\n"
-            "H\td|127.0.0.1:1|block\n"
-            "M\t/x:c:8100\n"
-            "O\tname|target|mirror|/|200\n"
-            "K\tn|https://x\n"))
+            "V\tMANIFEST\t/path/services.toml\n"))
         self.assertEqual(d.var("DATA_DIR"), "/data")
         self.assertTrue(d.flag("DRY_RUN"))
         self.assertFalse(d.flag("PRUNE"))
-        self.assertEqual(len(d.npm_hosts), 1)
-        self.assertEqual(len(d.mcp_hosts), 1)
-        self.assertEqual(len(d.onion_services), 1)
-        self.assertEqual(len(d.kuma_monitors), 1)
+        self.assertEqual(d.var("MANIFEST"), "/path/services.toml")
+        # The declaration arrays no longer travel this pipe (the manifest is
+        # their home); any other record kind is a wrapper bug.
+        self.assertIn("bad declaration line",
+                      die_msg(decl.read_decls, io.StringIO("H\tx|1\n")))
 
 
 # ---------------------------------------------------------------------------
@@ -526,8 +531,34 @@ class TestNpmReconcile(unittest.TestCase):
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_manifest(self, hosts_lines, mcp=()):
+        """Declarations are no longer streamed: the reconciler reads the
+        service manifest (deploy/services.toml's schema). The tests author the
+        old pipe-shaped entry as shorthand and expand it into the TOML tables
+        the manifest loader expects."""
+        blocks = []
+        for i, entry in enumerate(hosts_lines):
+            domain, forward, flags = entry.split("|", 2)
+            flag_list = json.dumps([f for f in flags.split(",") if f])
+            if domain == "*.onion":
+                blocks.append(f'[npm.h{i}]\ndomain = "*.onion"\n'
+                              f'forward = "{forward}"\nflags = {flag_list}\n')
+            else:
+                blocks.append(f'[host.h{i}]\ndomain = "{domain}"\n')
+                blocks.append(f'[npm.h{i}]\nhost = "h{i}"\n'
+                              f'forward = "{forward}"\nflags = {flag_list}\n')
+        for i, entry in enumerate(mcp):
+            prefix, container, port = entry[1:].split(":")
+            blocks.append(f'[mcp.m{i}]\nprefix = "/{prefix}"\n'
+                          f'container = "{container}"\nport = {port}\n')
+        path = os.path.join(self.tmp, "services.toml")
+        with open(path, "w") as f:
+            f.write("\n".join(blocks))
+        return path
 
     def decls(self, hosts_lines, mcp=(), dry="0", prune="0", request_cert=None):
         if request_cert is not None:
@@ -536,13 +567,12 @@ class TestNpmReconcile(unittest.TestCase):
             # reached the bash original -- not through the declaration stream.
             os.environ["NPM_REQUEST_CERT"] = request_cert
             self.addCleanup(os.environ.pop, "NPM_REQUEST_CERT", None)
-        lines = [f"V\tNPM_API\t{self.api}",
+        lines = [f"V\tMANIFEST\t{self.write_manifest(hosts_lines, mcp)}",
+                 f"V\tNPM_API\t{self.api}",
                  f"V\tDATA_DIR\t{self.tmp}",
                  f"V\tCONFIG_DIR\t{self.config}",
                  f"V\tDRY_RUN\t{dry}",
                  f"V\tPRUNE\t{prune}"]
-        lines += [f"H\t{h}" for h in hosts_lines]
-        lines += [f"M\t{m}" for m in mcp]
         return decl.read_decls(io.StringIO("\n".join(lines) + "\n"))
 
     def reconcile(self, d):
@@ -785,18 +815,47 @@ class TestKumaReconcile(unittest.TestCase):
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def write_manifest(self, monitors, slug="stack"):
+        """Expand the old pipe-shaped monitor entries into the manifest tables
+        ([host.*] per HTTP URL, [kuma.monitor.*], [kuma.page])."""
+        blocks = []
+        seen_hosts = {}
+        for i, entry in enumerate(monitors):
+            name, url, codes, interval, retries = (entry.split("|") + ["", "", "", ""])[:5]
+            extra = f'interval = {interval or 60}\nretries = {retries or 2}\n'
+            if url.startswith("tcp://"):
+                blocks.append(f'[kuma.monitor.m{i}]\nname = "{name}"\n'
+                              f'tcp = "{url[6:]}"\n{extra}')
+                continue
+            scheme, _, rest = url.partition("://")
+            hostpart, _, path = rest.partition("/")
+            path = "/" + path if path else ""
+            if hostpart not in seen_hosts:
+                key = f"k{i}"
+                seen_hosts[hostpart] = key
+                blocks.append(f'[host.{key}]\ndomain = "{hostpart}"\n')
+            codes_list = json.dumps(codes.split(",") if codes else ["200-299"])
+            blocks.append(f'[kuma.monitor.m{i}]\nname = "{name}"\n'
+                          f'host = "{seen_hosts[hostpart]}"\npath = "{path}"\n'
+                          f'codes = {codes_list}\n{extra}')
+        if slug:
+            blocks.append(f'[kuma.page]\nslug = "{slug}"\n'
+                          'title = "Test services"\ngroup = "Public"\n')
+        path = os.path.join(self.tmp, "services.toml")
+        with open(path, "w") as f:
+            f.write("\n".join(blocks))
+        return path
+
     def decls(self, monitors, dry="0", prune="0", slug="stack"):
-        lines = [f"V\tKUMA_URL\t{self.url}",
+        lines = [f"V\tMANIFEST\t{self.write_manifest(monitors, slug)}",
+                 f"V\tKUMA_URL\t{self.url}",
                  f"V\tCONFIG_DIR\t{self.config}",
                  f"V\tDRY_RUN\t{dry}",
-                 f"V\tPRUNE\t{prune}",
-                 f"V\tKUMA_STATUS_SLUG\t{slug}",
-                 "V\tKUMA_STATUS_TITLE\tTest services",
-                 "V\tKUMA_STATUS_GROUP\tPublic"]
-        lines += [f"K\t{m}" for m in monitors]
+                 f"V\tPRUNE\t{prune}"]
         return decl.read_decls(io.StringIO("\n".join(lines) + "\n"))
 
     def reconcile(self, d):
@@ -903,6 +962,171 @@ class TestKumaReconcile(unittest.TestCase):
             with self.assertRaises(Fatal) as ctx:
                 kuma.reconcile(d)
         self.assertIn("Incorrect username", ctx.exception.msg)
+
+
+
+# ---------------------------------------------------------------------------
+# deploy/services.toml: the loader, the shell emission and the CI gate. The
+# real manifest is exercised (not just fixtures) because it IS the declaration
+# of this host's public surface -- if it stops loading, every reconciler does.
+MANIFEST = os.path.join(ROOT, "deploy", "services.toml")
+AGENTS = os.path.join(ROOT, "AGENTS.md")
+
+
+class TestManifest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="stackctl-manifest-")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, name, text):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_real_manifest(self):
+        from stackctl import manifest
+        m = manifest.load(MANIFEST)
+        self.assertEqual(len(m.hosts), 8)
+        self.assertEqual(len(m.mcp), 10)
+        self.assertEqual(len(m.npm), 9)
+        self.assertEqual(len(m.onion), 5)
+        self.assertEqual(len(m.kuma_monitors), 8)
+        self.assertEqual(m.hosts["frontend"].domain, "boltmesh.net")
+        self.assertEqual(m.hosts["frontend"].env, "BOLTMESH_FRONTEND_HOST")
+        self.assertEqual(m.mcp[0].prefix, "/searxng")
+        self.assertEqual(m.mcp[0].port, "8100")
+        self.assertEqual(m.onion[2].name, "btc-explorer")   # HiddenServiceDir name
+        self.assertEqual(m.onion[2].rest, "/|200,401")
+        self.assertEqual(m.kuma_loopback, 8107)
+        self.assertEqual(m.kuma_page.slug, "stack")
+        fulcrum = [x for x in m.kuma_monitors if x.type == "port"][0]
+        self.assertEqual((fulcrum.hostname, fulcrum.port), ("host.containers.internal", 50001))
+
+    def test_env_override_keeps_the_stack_conf_contract(self):
+        from stackctl import manifest
+        os.environ["BOLTMESH_FRONTEND_HOST"] = "staging.example.net"
+        self.addCleanup(os.environ.pop, "BOLTMESH_FRONTEND_HOST", None)
+        m = manifest.load(MANIFEST)
+        self.assertEqual(m.hosts["frontend"].domain, "staging.example.net")
+        # ... and the composed entries follow the resolved domain.
+        self.assertTrue(any(n.domain == "staging.example.net" for n in m.npm))
+        self.assertTrue(any(o.mirrors == "staging.example.net" for o in m.onion))
+
+    def test_shell_emission_is_eval_safe_in_bash(self):
+        # The contract load_manifest relies on: bash evaluates the emission and
+        # gets the same variable names stack.conf used to define.
+        script = (
+            'set -euo pipefail; eval "$(PYTHONPATH=' + shlex_quote(ROOT + "/scripts")
+            + ' python3 -m stackctl manifest shell ' + shlex_quote(MANIFEST) + ')"; '
+            'printf "%s\\n" "${#MCP_HOSTS[@]}" "$MCP_HOST" "${#ONION_SERVICES[@]}" '
+            '"${#KUMA_ADD_HOST_HOSTS[@]}" "$KUMA_STATUS_SLUG" "${MCP_HOSTS[0]}" '
+            '"${ONION_SERVICES[2]}" "$BOLTMESH_FRONTEND_HOST"'
+        )
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                             check=True).stdout.splitlines()
+        self.assertEqual(out[0], "10")
+        self.assertEqual(out[1], "mcp.boltmesh.net")
+        self.assertEqual(out[2], "5")
+        self.assertEqual(out[3], "6")       # mcp + status opt out of --add-host
+        self.assertEqual(out[4], "stack")
+        self.assertEqual(out[5], "/searxng:searxng-mcp:8100")
+        self.assertEqual(out[6], "btc-explorer|10.89.0.243:3002|btc.boltmesh.net|/|200,401")
+        self.assertEqual(out[7], "boltmesh.net")
+
+    def test_real_manifest_agrees_with_agents_md(self):
+        from stackctl import manifest
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(manifest.check(MANIFEST, AGENTS), 0)
+
+    def test_agents_drift_is_caught(self):
+        from stackctl import manifest
+        text = open(AGENTS, encoding="utf-8").read()
+        # Remove the row of a declared server: the count gate must fire.
+        line = next(l for l in text.splitlines() if "`searxng-mcp`" in l and "127.0.0.1:8100" in l)
+        path = self.write("AGENTS.md", text.replace(line + "\n", ""))
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(Fatal) as ctx:
+                manifest.check(MANIFEST, path)
+        self.assertIn("row", ctx.exception.msg)
+
+    def test_validation_errors(self):
+        from stackctl import manifest
+        bad_port = self.write("bad-port.toml", """
+[host.a]
+domain = "a.example"
+[mcp.one]
+prefix = "/one"
+container = "one-mcp"
+port = 8100
+[mcp.two]
+prefix = "/two"
+container = "two-mcp"
+port = 8100
+""")
+        self.assertIn("both publish loopback port 8100",
+                      die_msg(manifest.load, bad_port))
+
+        unknown_host = self.write("unknown-host.toml", """
+[npm.x]
+host = "nope"
+forward = "127.0.0.1:8100"
+""")
+        self.assertIn("no [host.nope]", die_msg(manifest.load, unknown_host))
+
+        bad_flag = self.write("bad-flag.toml", """
+[host.a]
+domain = "a.example"
+[mcp.one]
+prefix = "/one"
+container = "one-mcp"
+port = 8100
+[npm.x]
+host = "a"
+forward = "127.0.0.1:8105"
+flags = ["mcp"]
+""")
+        self.assertIn("no [mcp.*] entry publishes", die_msg(manifest.load, bad_flag))
+
+        bad_toml = self.write("broken.toml", "[host.a\ndomain = \"x\"\n")
+        self.assertIn("does not parse", die_msg(manifest.load, bad_toml))
+
+        missing = os.path.join(self.tmp, "missing.toml")
+        self.assertIn("missing", die_msg(manifest.load, missing))
+
+    def test_minimal_manifest_check(self):
+        from stackctl import manifest
+        path = self.write("tiny.toml", """
+[host.mcp]
+domain = "mcp.example.net"
+env = "MCP_HOST"
+
+[mcp.one]
+prefix = "/one"
+container = "one-mcp"
+port = 8100
+
+[npm.one]
+host = "mcp"
+forward = "127.0.0.1:8100"
+flags = ["mcp"]
+
+[uptime_kuma]
+loopback_port = 8107
+""")
+        agents = self.write("AGENTS.md", "| Server | Container | ... | NPM target |\n"
+                            "| --- | --- | --- | --- |\n"
+                            "| `one-mcp` | `one-mcp` | ... | `127.0.0.1:8100` |\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(manifest.check(path, agents), 0)
+            m = manifest.load(path)
+        out = m.shell()
+        self.assertIn("MCP_HOST=mcp.example.net", out)
+        self.assertIn("MCP_HOSTS=(/one:one-mcp:8100)", out)
 
 
 if __name__ == "__main__":

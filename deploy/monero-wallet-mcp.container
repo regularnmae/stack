@@ -25,7 +25,7 @@ EnvironmentFile=@CONFIG_DIR@/monero-wallet-mcp/spend.env
 Environment=LOG_LEVEL=WARNING
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# server on host 8103 (NPM_HOSTS in stack.conf) -- it can no longer resolve the
+# server on host 8103 (the [npm.*] tables of deploy/services.toml) -- it can no longer resolve the
 # container name. The wallet it reads is BTCPay's view-only plugin wallet, so
 # even the spend-token tools cannot move funds; the loopback bind, NPM (TLS) and
 # the bearer token are still the only way in. The host-side checks read the

@@ -47,6 +47,9 @@ UNITS_APPLIED_DIGEST=""
 . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
+# The public surface (the *_HOST names, MCP_HOSTS, ONION_SERVICES) is declared
+# in deploy/services.toml; stack.conf keeps the non-registry knobs.
+load_manifest "$REPO_DIR"
 
 # Fallbacks for a manifest that predates the log block, so the summary below
 # still prints something true (install.sh carries the same defaults, and a
@@ -886,7 +889,7 @@ configure_npm_hosts() {
         || warn "the proxy hosts were not (re)configured; see scripts/npm-hosts.sh"
 }
 
-# The status page's monitors: declared in KUMA_MONITORS (stack.conf), reconciled
+# The status page's monitors: declared in deploy/services.toml, reconciled
 # into uptime-kuma by scripts/kuma-monitors.sh. Runs after the proxy hosts are
 # rewritten (the monitors probe the public URLs) and self-skips with a one-line
 # note while $DATA_DIR/config/uptime-kuma/api.env has no login -- like
@@ -1061,7 +1064,7 @@ if [ -n "$ONLY" ]; then
         restart_unit "$ONLY"
         wait_healthy "$ONLY" "$EXPLORER_WAIT" || true
     elif [ "$ONLY" = npm-hosts ]; then
-        # Re-apply the proxy hosts after a stack.conf change, or after filling
+        # Re-apply the proxy hosts after a manifest change, or after filling
         # in $DATA_DIR/config/npm/api.env. Touches no container of its own, but
         # this is the one branch that owns nginx-proxy-manager's deferred
         # restart -- rewrite the hosts first, then let sync_npm_network apply a
@@ -1203,8 +1206,8 @@ Stack deployed.
   Exposure:         nginx-proxy-manager (80/443/81) plus Fulcrum's Electrum
                     ports 50001 (TCP) / 50002 (SSL). NPM runs on the host
                     network, so it keeps clients' real addresses; everything it
-                    fronts is on the host's loopback (see NPM_HOSTS in
-                    stack.conf). Fulcrum is the one non-HTTP LAN surface
+                    fronts is on the host's loopback (see the [npm.*] tables in
+                    deploy/services.toml). Fulcrum is the one non-HTTP LAN surface
   Electrum:         point a Bitcoin wallet at this host on 50001 (TCP) or
                     50002 (SSL, self-signed). Fulcrum indexes alongside
                     bitcoind and accepts wallets once its index has caught up
@@ -1215,7 +1218,7 @@ Stack deployed.
                     stack.conf); the addresses are printed below once tor has
                     published them
   Status page:      uptime-kuma on https://$UPTIME_KUMA_HOST, its monitors
-                    declared in KUMA_MONITORS in stack.conf and reconciled
+                    declared in deploy/services.toml and reconciled
                     once $DATA_DIR/config/uptime-kuma/api.env has the login
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR;

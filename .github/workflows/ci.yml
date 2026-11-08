@@ -140,6 +140,13 @@ jobs:
           for f in "${files[@]}"; do
             bash -n "$f"
           done
+      # deploy/services.toml is the single declaration of the public surface
+      # (hostnames, MCP prefixes and ports, proxy hosts, onion services,
+      # status-page monitors); this validates the file and cross-checks it
+      # against the interface table in AGENTS.md, the hand-maintained contract
+      # with the app repos.
+      - name: service manifest agrees with AGENTS.md
+        run: PYTHONPATH=scripts python3 -m stackctl manifest check deploy/services.toml --agents AGENTS.md
       # The Python core behind the two reconciler wrappers (scripts/stackctl/),
       # offline: frame codec, packet dispatch, declaration parsing, payload
       # construction, and full reconciles against fake NPM and fake socket.io

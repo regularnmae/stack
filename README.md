@@ -98,8 +98,8 @@ name. The four containers behind onion services also pin their IPs
 `HiddenServicePort` target at startup, so a container *name* that does not exist
 yet would keep tor from starting at all. Every unit it proxies to therefore publishes its port on the **host's
 loopback** only — the `127.0.0.1:…` entries above, i.e.
-`PublishPort=127.0.0.1:…` in that unit — and `NPM_HOSTS`/`MCP_HOSTS` in
-`stack.conf` name `127.0.0.1`, not a container. A loopback bind is invisible to
+`PublishPort=127.0.0.1:…` in that unit — and the `[npm.*]`/`[mcp.*]` tables in
+`deploy/services.toml` name `127.0.0.1`, not a container. A loopback bind is invisible to
 the LAN, so NPM (which terminates TLS) plus each server's bearer token are still
 the one way in for a client. The host-side checks (`verify.sh`, the monitor) read
 the services by container name on `npm-network`, through `net_curl` in
@@ -110,8 +110,8 @@ is deliberately the exception: the monitor's alerts go to Alertmanager on
 `127.0.0.1:9093` and its dead-man's-switch heartbeat out to the internet with
 the **host's own curl** (`bootstrap.sh` installs it), because a container
 cannot be what reports a broken container runtime. The proxy
-hosts are declared in `NPM_HOSTS`
-(`stack.conf`) and reconciled from this repo by `scripts/npm-hosts.sh` — see
+hosts are declared in `deploy/services.toml`
+and reconciled from this repo by `scripts/npm-hosts.sh` — see
 [Proxy hosts (nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager). The hosts
 themselves live in NPM's database, not in this repo.
 
@@ -1101,10 +1101,10 @@ ssh -L 8428:127.0.0.1:8428 you@host      # then http://127.0.0.1:8428/vmui
 ```
 
 `vmui` has no authentication of its own, and every public host in this stack is
-declared in `NPM_HOSTS` and TLS-terminated — so the metrics store publishes on
+a declared proxy host and TLS-terminated — so the metrics store publishes on
 the host's **loopback only** and adds nothing to the firewall. If you want it on
-the LAN, put it behind `nginx-proxy-manager` with basic auth *and* declare it in
-`NPM_HOSTS`; don't publish it directly.
+the LAN, put it behind `nginx-proxy-manager` with basic auth *and* declare it as
+a proxy host; don't publish it directly.
 
 Three consequences worth knowing:
 
@@ -1215,7 +1215,7 @@ ssh -L 9428:127.0.0.1:9428 you@host      # then http://127.0.0.1:9428/select/vmu
 
 `victoria-logs` publishes on the host's **loopback only**: it has no
 authentication of its own, and every log line every container wrote is in it
-(including any token someone echoed). It is not in `NPM_HOSTS` and adds nothing
+(including any token someone echoed). It is not a proxy host and adds nothing
 to the firewall — if you ever want it on the LAN, put it behind NPM with basic
 auth *and* declare it, the same rule as `vmui`.
 
@@ -1226,7 +1226,7 @@ runs LogsQL over the same data with a bounded, read-only tool surface.
 The metrics side has the same arrangement: `victoriametrics-mcp` (`/metrics`
 on the MCP host, its own bearer token) runs PromQL over the store's read-only
 API, so `vmui` stays an SSH-tunnel view and the store stays out of
-`NPM_HOSTS`. Its `get_metrics_health` reads the same textfile heartbeat the
+the proxy tier. Its `get_metrics_health` reads the same textfile heartbeat the
 monitor does, so "the graph has a gap" and "the collector died" are
 distinguishable from an agent.
 
@@ -1425,7 +1425,7 @@ threshold is a self-inflicted outage on this host, not a false positive:
 * the onion proxies and Uptime-Kuma's self-checks are logged as the host's **own**
   address (`192.168.1.112` / the WAN IP), so banning it would take every onion
   service and the status page down at once;
-* Uptime-Kuma probes every monitor in `KUMA_MONITORS` once a minute, including a
+* Uptime-Kuma probes every declared monitor once a minute, including a
   permanent 401 on the token-gated ones;
 * the podman network (`10.89.0.0/24`) and the LAN are internal by definition.
 
@@ -1516,20 +1516,21 @@ Two things about it are worth knowing:
 ## Status page
 
 `uptime-kuma` serves a public status page on
-`https://status.boltmesh.net` (`UPTIME_KUMA_HOST` in `stack.conf`, proxied by
-nginx-proxy-manager like every public hostname). It complements the monitor
+`https://status.boltmesh.net` (`[host.status]` in `deploy/services.toml`,
+proxied by nginx-proxy-manager like every public hostname). It complements the monitor
 above, not replaces it: the monitor is the host-side, alert-only sweep that
 knows the tokens and the wallets, while the status page watches the public
 surface — the sites and the token-gated endpoints — and shows it to the world.
 
-The **monitors are declared, like the proxy hosts**: `KUMA_MONITORS` in
-`stack.conf` — `name | url [| accepted-status-codes [| interval [| retries ]]]`
-— is reconciled into Uptime-Kuma by `scripts/kuma-monitors.sh` (which
+The **monitors are declared, like the proxy hosts**: the `[kuma.monitor.*]`
+tables in `deploy/services.toml` — a `host` reference plus accepted status
+codes (or a `tcp` target for kuma's port monitor) — are reconciled into
+Uptime-Kuma by `scripts/kuma-monitors.sh` (which
 `./deploy.sh` runs after the proxy hosts): a missing monitor is created, one
 whose *declared* fields changed is updated in place, notifications and other
 UI-tuned settings an existing monitor has picked up are carried over
 untouched, and `--prune` is the only destructive mode. The script creates the
-status page (`KUMA_STATUS_SLUG`) with one group holding every declared
+status page (`[kuma.page]`) with one group holding every declared
 monitor — and only while the page has nothing on it yet: an existing page's
 layout is never rewritten, so rearranging it in the UI is safe.
 
@@ -1569,50 +1570,56 @@ Notes:
   copy of the live datadir.
 - `verify.sh` checks the dashboard through nginx-proxy-manager and by container
   name on `npm-network`, and probes the published page's public data endpoint.
-- The websockets it serves for its dashboard are why the proxy host carries the
-  `ws` flag in `NPM_HOSTS`.
+- The websockets it serves for its dashboard are why `[npm.status]` carries
+  the `ws` flag.
 
 ## Proxy hosts (nginx-proxy-manager)
 
 nginx-proxy-manager is the stack's only LAN-facing HTTP unit, so every public
 hostname is a proxy host in NPM. (Fulcrum's raw Electrum ports `50001`/`50002`
 are the deliberate non-HTTP exception; see [What runs](#what-runs).) They are
-declared in `NPM_HOSTS` in
-`stack.conf` — `domain | forward | flags` — and reconciled from this
+declared in the `[npm.*]` tables of `deploy/services.toml` — a `host`
+reference (or a literal `domain` for the `*.onion` wildcard), a `forward` and
+`flags` — and reconciled from this
 repo by `scripts/npm-hosts.sh` through the NPM admin API on `127.0.0.1:81` (NPM
 binds it on the host network): a host already serving the domain is updated in
 place, otherwise it is created, and a Let's Encrypt certificate is requested for
-any host that has none. `./deploy.sh` runs it after the app tier (so a fresh host
+any host that has none. The hostnames themselves are the `[host.*]` tables
+there, each with an operator env override (`BOLTMESH_FRONTEND_HOST`,
+`MCP_HOST`, ...). `./deploy.sh` runs it after the app tier (so a fresh host
 deploys before the admin login exists), and `./deploy.sh --only npm-hosts`
 re-applies it after a change.
 
-```sh
-NPM_HOSTS=(
-    "${BOLTMESH_FRONTEND_HOST}|127.0.0.1:8106|ws,block"
-    "${BOLTMESH_API_HOST}|127.0.0.1:8105|ws,block"
-    "${SEARXNG_HOST}|127.0.0.1:8082|ws,block"
-    "${BTCPAY_HOST}|127.0.0.1:49392|ws,force-ssl,block"
-    "${BTC_EXPLORER_HOST}|127.0.0.1:8108|force-ssl,block"
-    "${XMR_EXPLORER_HOST}|127.0.0.1:8109|force-ssl,block"
-    "${UPTIME_KUMA_HOST}|127.0.0.1:8107|ws,block"
-    "${MCP_HOST}|127.0.0.1:8100|mcp,force-ssl,http2"
-    # The onion side of the MCP surface. tor's mcp hidden service reaches NPM
-    # with the client's Host header, which nobody knows at install time, so the
-    # wildcard is the only possible domain -- and the only onion host that needs
-    # NPM at all. No force-ssl, no certificate: tor already encrypts.
-    "*.onion|127.0.0.1:8100|mcp"
-)
+```toml
+[npm.frontend]
+host = "frontend"                 # a [host.*] key: boltmesh.net
+forward = "127.0.0.1:8106"        # the boltmesh-frontend unit's loopback publish
+flags = ["ws", "block"]
+
+[npm.mcp_edge]
+host = "mcp"
+forward = "127.0.0.1:8100"
+flags = ["mcp", "force-ssl", "http2"]
+
+[npm.onion_wildcard]
+# The onion side of the MCP surface. tor's mcp hidden service reaches NPM
+# with the client's Host header, which nobody knows at install time, so the
+# wildcard is the only possible domain -- and the only onion host that needs
+# NPM at all. No force-ssl, no certificate: tor already encrypts.
+domain = "*.onion"
+forward = "127.0.0.1:8100"
+flags = ["mcp"]
 ```
 
-Each entry is `domain | forward | flags`, where `forward` is
-`[scheme://]host:port` (scheme defaults to `http`; `https` for an upstream that
-speaks TLS, if one is ever added) and `flags` is a comma-separated subset of
-`force-ssl` (redirect `:80` to `:443`), `http2`, `ws` (websocket upgrade),
-`block` (block common exploits) and `mcp`. The host is always `127.0.0.1`: it is
+Each entry has a `host` (a `[host.*]` key) or a literal `domain`, a `forward`
+of `[scheme://]host:port` (scheme defaults to `http`; `https` for an upstream
+that speaks TLS, if one is ever added) and a `flags` list: `force-ssl`
+(redirect `:80` to `:443`), `http2`, `ws` (websocket upgrade), `block` (block
+common exploits) and `mcp`. The forward host is always `127.0.0.1`: it is
 the loopback publish of the unit the host fronts — NPM runs on the host network
 and cannot resolve a container name. `--dry-run` prints the API payloads without
 changing anything, and `--prune` additionally **deletes** hosts and certificates
-that `NPM_HOSTS` does not declare — the only destructive mode.
+that the manifest does not declare — the only destructive mode.
 
 The credentials for the API are in `$DATA_DIR/config/npm/api.env` (mode 600,
 seeded by `deploy/install.sh`):
@@ -1642,8 +1649,9 @@ prefix** (`mcp` flag above):
 | `https://mcp.boltmesh.net/btcpay` | `127.0.0.1:8114` |
 
 Each prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
-client's URL. The host and the prefixes are `MCP_HOST`/`MCP_HOSTS` in
-`stack.conf`; each entry is `prefix:container:port`, where the port is that
+client's URL. The host is `[host.mcp]` and the prefixes are the `[mcp.*]`
+tables in `deploy/services.toml`; each entry carries `prefix`, `container` and
+`port`, where the port is that
 server's loopback publish (the container name is kept because it also names the
 `token.env` that is the prefix's credential). `crowdsec-mcp` is the one
 exception: it runs on the host network (its upstream LAPI is a loopback bind a
@@ -1699,7 +1707,7 @@ when the two disagree. The skills are read-only by construction, because the
 servers they call are.
 
 The path prefixes live in that registry rather than being derived from
-`MCP_HOSTS`, so moving one means editing both — `./verify.sh` fails on the
+the manifest, so moving one means editing both — `./verify.sh` fails on the
 drift. A harness that already has the native MCP tools (this host's OpenCode,
 via `~/.config/opencode/opencode.json`) should keep using them; each skill says
 so, and they exist for everything else.
@@ -1712,23 +1720,29 @@ client). There is no extra container and nothing to open in the firewall: a
 hidden service is made of a few lines in `torrc` and outbound connections, which
 the stack already makes.
 
-The declaration is `ONION_SERVICES` in `stack.conf`:
+The declaration is the `[onion.*]` tables in `deploy/services.toml`:
 
-```sh
-ONION_SERVICES=(
-    "boltmesh|10.89.0.241:80|${BOLTMESH_FRONTEND_HOST}|/|200"
-    "api|10.89.0.242:8000|${BOLTMESH_API_HOST}|/health|200"
-    "btc-explorer|10.89.0.243:3002|${BTC_EXPLORER_HOST}|/|200,401"
-    "xmr-explorer|10.89.0.244:31312|${XMR_EXPLORER_HOST}|/style.css|200"
-    "mcp|${ONION_NPM_TARGET}|${MCP_HOST}|/searxng|401"
-)
+```toml
+[onion.boltmesh]
+target = "10.89.0.241:80"       # the unit's pinned IP; tor validates it at start
+mirrors = "frontend"            # the public name this onion serves
+path = "/"                      # what verify.sh probes through it
+codes = [200]
+
+[onion.mcp]
+target = "host.containers.internal:80"   # through NPM's wildcard *.onion host
+mirrors = "mcp"
+path = "/searxng"
+codes = [401]
 ```
 
-`deploy/install.sh` renders it into a marked block at the end of
+`deploy/install.sh` renders the emitted `ONION_SERVICES` into a marked block at the end of
 `$DATA_DIR/tor/torrc` — the rest of that file (the control-password hash, the
 SOCKS policy) is still seeded once and never rewritten — and `./deploy.sh` hashes
-`torrc` alongside the units, so editing `ONION_SERVICES` and re-running it is all
-it takes to add, remove or retarget a service.
+`torrc` alongside the units, so editing the tables and re-running it is all
+it takes to add, remove or retarget a service. (The `[onion.*]` key is the
+`HiddenServiceDir` name under `$DATA_DIR/tor/onion/`: renaming it is a new
+onion address, not a rename.)
 
 The address itself is key material, not configuration: tor writes it to
 `$DATA_DIR/tor/onion/<name>/` (mounted at `/var/lib/tor/onion`, mode 700), which
@@ -1746,7 +1760,7 @@ cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
 ./deploy.sh --only tor                 # just re-read torrc
 ```
 
-| `ONION_SERVICES` name | Serves | Forwarded to |
+| `[onion.*]` name | Serves | Forwarded to |
 | --- | --- | --- |
 | `boltmesh` | the BoltMesh SPA | `http://<addr>.onion/` → `10.89.0.241:80` |
 | `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `10.89.0.242:8000` |
@@ -1817,13 +1831,13 @@ fronts the stack's own `lightningd` (CLN) and the view-only Monero wallet:
    GitHub **SSH** access before the first `./deploy.sh`: `ssh -T git@github.com`
    must greet you. Without it the clone fails fast with a clear error (git is
    not allowed to prompt).
-1. Point `boltmesh.net` and `api.boltmesh.net` at the host (`BOLTMESH_FRONTEND_HOST`
-   / `BOLTMESH_API_HOST` in `stack.conf`), and make `:80` reachable for the
+1. Point `boltmesh.net` and `api.boltmesh.net` at the host (`[host.frontend]`
+   / `[host.api]` in `deploy/services.toml`), and make `:80` reachable for the
    Let's Encrypt challenge.
 2. Fill in `$DATA_DIR/config/npm/api.env` with the NPM admin login and re-run
    `./deploy.sh --only npm-hosts`: the two hosts (`boltmesh.net` →
    `127.0.0.1:8106`, `api.boltmesh.net` → `127.0.0.1:8105`) come
-   from `NPM_HOSTS` in `stack.conf`, each with its own TLS certificate.
+   from the manifest's proxy hosts, each with its own TLS certificate.
 3. Fill in `$DATA_DIR/config/boltmesh/app.env` (OAuth client id/secret, SMTP,
    the agent `GITHUB_TOKEN`) and register
    `https://api.boltmesh.net/v1/auth/google/callback` and `…/github/callback`
@@ -1863,9 +1877,9 @@ under `$DATA_DIR/config/`, mode 600.
   explorer's bitcoind RPC credentials and its Fulcrum endpoint. The unit reads
   it with `EnvironmentFile=` (the explorer has no other configuration).
 - **`$DATA_DIR/config/npm/api.env`** holds the nginx-proxy-manager admin login
-  that `scripts/npm-hosts.sh` uses to reconcile every proxy host (`NPM_HOSTS`)
-  through the API on `81` (or an API token instead). The script sends the
-  password in a curl config on stdin, so it never reaches the host's argv.
+  that `scripts/npm-hosts.sh` uses to reconcile every proxy host
+  through the API on `81` (or an API token instead). The Python core reads the
+  file itself, so no credential ever reaches an argv that `ps` can read.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
 `lightningd`, `fulcrum` and `crowdsec` are *rendered* from
@@ -2023,7 +2037,7 @@ stack/
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   scripts/rotate.sh       # rotate one credential + every dependent service
   scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
-  scripts/kuma-monitors.sh # the status page's monitors (KUMA_MONITORS) + page, via socket.io
+  scripts/kuma-monitors.sh # the status page's monitors (deploy/services.toml) + page, via socket.io
   scripts/healthcheck-lint.sh # the healthcheck contract every unit is checked against
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs

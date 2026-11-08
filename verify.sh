@@ -28,11 +28,14 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
+# The public surface (the *_HOST names, MCP_HOSTS, ONION_SERVICES) is declared
+# in deploy/services.toml; stack.conf keeps the non-registry knobs.
+load_manifest "$REPO_DIR"
 # The tokens live under the data dir now, so resolving it is how we find them.
 resolve_data_dir
 
-# The public host the MCP servers are proxied under (path prefix per server).
-MCP_HOST="${MCP_HOST:-mcp.boltmesh.net}"
+# MCP_HOST (the [host.mcp] name) and the rest of the public surface come from
+# the service manifest via load_manifest, above.
 
 DEEP=0
 NO_NODES=0
@@ -306,7 +309,7 @@ head2 "MCP through nginx-proxy-manager"
 # serverInfo handshake with one; an unconfigured one (NPM's default host) does
 # neither, which is a warning rather than a failure until it is set up.
 if [ "${MCP_HOSTS+x}" != x ] || [ "${#MCP_HOSTS[@]}" -eq 0 ]; then
-    warn "MCP_HOSTS is not set in stack.conf; skipping the proxy checks"
+    warn "MCP_HOSTS is not declared in deploy/services.toml; skipping the proxy checks"
 else
     for pair in "${MCP_HOSTS[@]}"; do
         prefix="${pair%%:*}"; rest="${pair#*:}"; name="${rest%%:*}"
@@ -380,7 +383,7 @@ else
     fi
 
     # servers.json is the skills' copy of the public surface: one URL per
-    # MCP_HOSTS prefix. A prefix that moved in stack.conf and not here means a
+    # MCP_HOSTS prefix. A prefix that moved in the manifest and not here means a
     # skill calls a URL nginx-proxy-manager no longer serves, so compare the
     # resolved registry with the declaration -- using the CLI's own resolver,
     # never a second copy of the expansion rules. The host is compared
@@ -445,7 +448,7 @@ head2 "Onion services (tor)"
 # ONION_SERVICES).
 TOR_SOCKS="${TOR_SOCKS:-10.89.0.240:9050}"
 if [ "${ONION_SERVICES+x}" != x ] || [ "${#ONION_SERVICES[@]}" -eq 0 ]; then
-    warn "ONION_SERVICES is not set in stack.conf; skipping the onion checks"
+    warn "ONION_SERVICES is not declared in deploy/services.toml; skipping the onion checks"
 else
     for entry in "${ONION_SERVICES[@]}"; do
         IFS='|' read -r name _target mirrors path expect <<<"$entry"

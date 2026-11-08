@@ -1,0 +1,402 @@
+# deploy/services.toml -- the public surface, declared once.
+#
+# This file owns every cross-cutting registry fact the stack has: the DNS
+# names it answers on, which loopback publishes nginx-proxy-manager forwards
+# to, the MCP path prefixes, the tor onion services, and the status page's
+# monitors. It replaced five parallel lists in stack.conf (MCP_HOSTS,
+# NPM_HOSTS, ONION_SERVICES, KUMA_MONITORS and the *_HOST scalars), each of
+# which had to be edited in step with the others and with the table in
+# AGENTS.md -- the drift class the CI "service manifest" gate now checks.
+#
+# Who reads it:
+#   * scripts/npm-hosts.sh and scripts/kuma-monitors.sh -- their Python cores
+#     (scripts/stackctl/) load it directly; the bash wrappers only pass its
+#     path. `python3 -m stackctl manifest shell` re-emits the same variable
+#     names the bash callers always sourced from stack.conf (MCP_HOSTS,
+#     ONION_SERVICES, every *_HOST, ...), via scripts/lib.sh's load_manifest,
+#     so deploy.sh, verify.sh and deploy/install.sh are unchanged consumers.
+#   * `python3 -m stackctl manifest check` (CI) validates the file itself and
+#     cross-checks it against AGENTS.md's interface table.
+#
+# Operator overrides keep the old contract: every [host.*] carries an `env`
+# name, and a non-empty $<env> in the process environment wins over the
+# `domain` here -- exactly what stack.conf's `${VAR:-default}` did. Changing
+# a domain still needs its DNS record and a re-run of ./deploy.sh; no rebuild
+# is involved (the names are not baked into any image except the frontend's
+# VITE_API_URL, which deploy.sh rebuilds on a change).
+
+# ---------------------------------------------------------------------------
+# The DNS names this stack answers on. nginx-proxy-manager terminates TLS for
+# all of them; every one is a proxy host below except where noted.
+# ---------------------------------------------------------------------------
+
+[host.frontend]
+domain = "boltmesh.net"
+env = "BOLTMESH_FRONTEND_HOST"
+
+[host.api]
+domain = "api.boltmesh.net"
+env = "BOLTMESH_API_HOST"
+
+[host.search]
+domain = "search.boltmesh.net"
+env = "SEARXNG_HOST"
+
+[host.btcpay]
+# BTCPay's admin UI (and Greenfield API) through NPM. The backend still uses
+# http://btcpay:49392 internally; this host is for the operator and for the
+# AWS backend when it runs outside this host.
+domain = "btcpay.boltmesh.net"
+env = "BTCPAY_HOST"
+
+[host.btc_explorer]
+domain = "btc.boltmesh.net"
+env = "BTC_EXPLORER_HOST"
+
+[host.xmr_explorer]
+domain = "xmr.boltmesh.net"
+env = "XMR_EXPLORER_HOST"
+
+[host.status]
+# Uptime-Kuma's dashboard + status page. The dashboard is login-gated at the
+# root; the published status page(s) live under /status/<slug>. `ws` in its
+# npm entry below is for the dashboard's socket.io, not the status page.
+domain = "status.boltmesh.net"
+env = "UPTIME_KUMA_HOST"
+# kuma_add_host: whether deploy/install.sh renders --add-host=<domain>:host-
+# # gateway into the uptime-kuma unit, so its OWN monitors resolve this vhost
+# # on the host instead of hairpinning through the router (see the monitor
+# # entries at the bottom). The status page does not monitor itself, so it
+# # needs none.
+kuma_add_host = false
+
+[host.mcp]
+# The ten MCP servers, served behind ONE TLS hostname as path prefixes:
+# https://mcp.boltmesh.net/<prefix> -> 127.0.0.1:<port>/mcp. Every server
+# serves the streamable-HTTP transport at the SDK's default /mcp; the proxy
+# host maps each prefix onto it, so a client never sees /mcp.
+domain = "mcp.boltmesh.net"
+env = "MCP_HOST"
+# The one canary that still leaves the host: kuma's monitor for this name
+# resolves it on the internet, and verify.sh reads the source address NPM
+# logs for it to notice a WAN change (stack.conf's STACK_WAN_IP). An
+# --add-host would defeat that, so it is deliberately absent here.
+kuma_add_host = false
+
+# ---------------------------------------------------------------------------
+# The ten MCP servers, one entry per path prefix. `container` names the unit
+# -- and so whose token.env is that prefix's credential -- and `port` is the
+# unit's loopback publish (PublishPort=127.0.0.1:<port>:8000 in deploy/),
+# which is where NPM forwards to: it runs on the host network and cannot
+# resolve a container name. 8000 is the port the servers listen on inside
+# the container, the app repos' MCP_PORT default.
+#
+# crowdsec-mcp is the exception, and this file cannot show it from here: it
+# runs with Network=host (its upstream, the CrowdSec LAPI, is a loopback bind
+# a bridge container cannot reach), so `port` is the address the app itself
+# binds (MCP_HOST/MCP_PORT in deploy/crowdsec-mcp.container) rather than a
+# publish. For NPM the result is identical -- 127.0.0.1:<port> -- but
+# everything that probes the container goes through netcheck-host instead of
+# netcheck: scripts/lib.sh's MCP_HOST_NETNS is where that is declared.
+# ---------------------------------------------------------------------------
+
+[mcp.searxng]
+prefix = "/searxng"
+container = "searxng-mcp"
+port = 8100
+
+[mcp.bitcoin]
+prefix = "/bitcoin"
+container = "bitcoin-node-mcp"
+port = 8101
+
+[mcp.monero]
+prefix = "/monero"
+container = "monero-node-mcp"
+port = 8102
+
+[mcp.monero_wallet]
+prefix = "/monero-wallet"
+container = "monero-wallet-mcp"
+port = 8103
+
+[mcp.lightning]
+prefix = "/lightning"
+container = "lightning-mcp"
+port = 8104
+
+[mcp.fulcrum]
+prefix = "/fulcrum"
+container = "fulcrum-mcp"
+port = 8110
+
+[mcp.logs]
+prefix = "/logs"
+container = "victoria-logs-mcp"
+port = 8111
+
+[mcp.metrics]
+prefix = "/metrics"
+container = "victoriametrics-mcp"
+port = 8112
+
+[mcp.crowdsec]
+prefix = "/crowdsec"
+container = "crowdsec-mcp"
+port = 8113
+
+[mcp.btcpay]
+prefix = "/btcpay"
+container = "btcpay-mcp"
+port = 8114
+
+# ---------------------------------------------------------------------------
+# Every nginx-proxy-manager proxy host, reconciled by scripts/npm-hosts.sh
+# through NPM's admin API (there is no hand-clicked host any more). One
+# declaration covers creation, update and TLS.
+#
+#   host     a [host.*] key whose domain this vhost serves
+#   forward  where NPM proxies to: [scheme://]host:port, scheme defaulting to
+#            http (https would be for an upstream that speaks TLS, if one is
+#            ever added). Every forward names 127.0.0.1, never a container:
+#            NPM runs on the host network (deploy/nginx-proxy-manager.container
+#            -- that is what gives it clients' real addresses), so it cannot
+#            resolve a container name and every service it fronts publishes
+#            its port on the host's loopback. Each port is the PublishPort= of
+#            that service's unit.
+#   flags    force-ssl  redirect :80 to :443 (needs a certificate)
+#            http2      negotiate HTTP/2
+#            ws         allow websocket upgrade
+#            block      block common exploits
+#            mcp        serve the MCP servers instead of a single forward: one
+#                       location per [mcp.*] entry above, each rewritten onto
+#                       that container's /mcp, plus the streaming settings an
+#                       SSE transport needs
+#
+# clnrest serves CLN's own API to lightning-mcp only and is not an NPM host,
+# so it is gated by its rune rather than an MCP token. The Monero wallet RPC
+# is deliberately not proxied: BTCPay's plugin wallet is internal-only, and
+# the MCP is the supported way to read it.
+# ---------------------------------------------------------------------------
+
+[npm.frontend]
+host = "frontend"
+forward = "127.0.0.1:8106"
+flags = ["ws", "block"]
+
+[npm.api]
+host = "api"
+forward = "127.0.0.1:8105"
+flags = ["ws", "block"]
+
+[npm.search]
+host = "search"
+forward = "127.0.0.1:8082"
+flags = ["ws", "block"]
+
+[npm.btcpay]
+host = "btcpay"
+forward = "127.0.0.1:49392"
+flags = ["ws", "force-ssl", "block"]
+
+[npm.btc_explorer]
+host = "btc_explorer"
+forward = "127.0.0.1:8108"
+flags = ["force-ssl", "block"]
+
+[npm.xmr_explorer]
+host = "xmr_explorer"
+forward = "127.0.0.1:8109"
+flags = ["force-ssl", "block"]
+
+[npm.status]
+host = "status"
+forward = "127.0.0.1:8107"
+flags = ["ws", "block"]
+
+[npm.mcp_edge]
+# The MCP one's forward is only the default (root) target, which is not part
+# of the contract -- the [mcp.*] locations above are.
+host = "mcp"
+forward = "127.0.0.1:8100"
+flags = ["mcp", "force-ssl", "http2"]
+
+[npm.onion_wildcard]
+# The onion side of the MCP surface: tor's mcp hidden service reaches NPM
+# through the host gateway with the client's Host header, which is an address
+# nobody knows at install time. A wildcard is therefore the only possible
+# domain, and it is the only onion host that needs NPM at all (see the
+# [onion.*] entries). No force-ssl, no certificate: NPM is reached in plain
+# HTTP over the gateway and tor already provides the encryption.
+domain = "*.onion"
+forward = "127.0.0.1:8100"
+flags = ["mcp"]
+
+# ---------------------------------------------------------------------------
+# The tor onion services: the same public surface without DNS or Let's
+# Encrypt. `tor` already exists as lightningd's SOCKS proxy (and as CLN's own
+# onion client); these entries make it a hidden-service *publisher* too, from
+# the same container -- no new unit. deploy/install.sh renders them into a
+# marked block of $DATA_DIR/tor/torrc, so this table is the declaration: edit
+# it, re-run ./deploy.sh, and the block is rewritten (and tor restarted,
+# because deploy.sh digests torrc alongside the units).
+#
+#   name     the HiddenServiceDir under $DATA_DIR/tor/onion/<name> -- the KEY
+#            of the [onion.*] table, so a rename here is a rename of the
+#            directory and a NEW onion address; the address in its `hostname`
+#            file is stable for as long as those keys exist, which is why
+#            tor/ is in the backup set. The address is key material, never
+#            seeded anywhere.
+#   target   where tor forwards the onion's port 80. Use the container's
+#            pinned IP (the units set IP=): tor validates a
+#            HiddenServicePort target when it starts, and a *name* for a
+#            container that has not started yet is an unparseable address --
+#            which keeps tor from starting at all. The mcp entry is the
+#            exception: host.containers.internal always resolves.
+#   mirrors  the [host.*] key of the public hostname this onion serves
+#            (documentation; verify.sh uses path/codes to prove the same
+#            surface answers).
+#   path     the probe path verify.sh fetches through the onion
+#   codes    the accepted HTTP codes, so [200, 401] accepts a public or
+#            basic-auth-protected explorer.
+#
+# The frontend, the API and the two explorers are addressed by their pinned
+# IPs (10.89.0.241-.244; tor itself is .240): they are plain HTTP origins, so
+# tor reaches them as a peer on npm-network. The MCP host cannot be: it is
+# ten servers split by *path*, which only nginx-proxy-manager does, and NPM
+# is on the host network -- unreachable by container name, and a container's
+# view of "the host" (10.89.0.1) is refused. The one reachable name is
+# host.containers.internal (pasta's host gateway, added by podman), so the
+# onion goes through NPM's wildcard *.onion host above -- tor cannot rewrite
+# the Host header, so NPM cannot match a single .onion name.
+#
+# There is deliberately no TLS here: tor already encrypts and authenticates
+# the onion, a certificate would not validate for it, and NPM is reached in
+# plain HTTP through the gateway. The wildcard host therefore carries neither
+# force-ssl nor a certificate (scripts/npm-hosts.sh skips Let's Encrypt for
+# every .onion).
+# ---------------------------------------------------------------------------
+
+[onion.boltmesh]
+target = "10.89.0.241:80"
+mirrors = "frontend"
+path = "/"
+codes = [200]
+
+[onion.api]
+target = "10.89.0.242:8000"
+mirrors = "api"
+path = "/health"
+codes = [200]
+
+[onion.btc-explorer]
+target = "10.89.0.243:3002"
+mirrors = "btc_explorer"
+path = "/"
+codes = [200, 401]
+
+[onion.xmr-explorer]
+target = "10.89.0.244:31312"
+mirrors = "xmr_explorer"
+path = "/style.css"
+codes = [200]
+
+[onion.mcp]
+# Through NPM's wildcard *.onion host (see [npm.onion_wildcard]); mirrors the
+# MCP edge, probed at the searxng prefix, where a token gate answers 401.
+target = "host.containers.internal:80"
+mirrors = "mcp"
+path = "/searxng"
+codes = [401]
+
+# ---------------------------------------------------------------------------
+# Uptime-Kuma (status.boltmesh.net): the status page's monitors, declared.
+# Reconciled by scripts/kuma-monitors.sh (create missing, update changed,
+# --prune destructive) onto the page named by [kuma.page]. UI-tuned settings
+# on an existing monitor (notifications it picked up, tweaks) are preserved;
+# the page's layout is never rewritten once it exists. Notifications
+# themselves stay UI-configured (kuma embeds Apprise).
+#
+# The URLs stay public on purpose, but only [host.mcp]'s monitor actually
+# resolves one on the internet: deploy/install.sh renders
+# --add-host=<vhost>:host-gateway into the uptime-kuma unit for every host
+# with kuma_add_host = true, so the checks reach nginx-proxy-manager over the
+# container's host gateway instead of hairpinning through the router.
+#
+#   host     a [host.*] key: the monitor probes https://<domain><path>
+#   codes    comma-ranges of accepted status codes; a token-gated endpoint
+#            answers 401 without a token, which counts as up
+#   tcp      a tcp://host:port target declares kuma's TCP-port monitor
+#            instead of an HTTP one: no status code applies. Only Fulcrum
+#            needs it -- Electrum is raw TCP, so it cannot be probed as a
+#            URL. A port monitor proves the socket accepts a connection and
+#            nothing more; the index behind it is read by verify.sh --deep /
+#            scripts/monitor.sh (scripts/lib.sh's electrum_tip).
+#   interval / retries   the seconds between beats (default 60) and attempts
+#            before down (default 2)
+#
+# No tokens enter kuma's database: everything declared here checks the public
+# surface; the authenticated MCP handshakes stay in verify.sh/monitor.sh.
+# ---------------------------------------------------------------------------
+
+[kuma.monitor.site]
+name = "BoltMesh site"
+host = "frontend"
+codes = ["200-299"]
+
+[kuma.monitor.api]
+name = "BoltMesh API (/health)"
+host = "api"
+path = "/health"
+codes = ["200-299"]
+
+[kuma.monitor.search]
+name = "SearXNG"
+host = "search"
+codes = ["200-299"]
+
+[kuma.monitor.mcp_edge]
+name = "MCP edge (token-gated)"
+host = "mcp"
+codes = ["200-299", "400-499"]
+
+[kuma.monitor.btcpay]
+name = "BTCPay"
+host = "btcpay"
+path = "/api/v1/health"
+codes = ["200-299"]
+
+[kuma.monitor.btc_explorer]
+name = "BTC explorer"
+host = "btc_explorer"
+codes = ["200-299", "400-499"]
+
+[kuma.monitor.xmr_explorer]
+name = "Monero explorer"
+host = "xmr_explorer"
+path = "/style.css"
+codes = ["200-299"]
+
+[kuma.monitor.fulcrum]
+# The publish, not the container: Fulcrum's 50001 is the stack's one raw-TCP
+# LAN surface (stack.conf's FIREWALL_PORTS), and a container-name monitor
+# would stay green if that publish were ever lost. host.containers.internal
+# is pasta's gateway to this host, the same name the *.onion proxy host
+# forwards to.
+name = "Fulcrum (Electrum TCP)"
+tcp = "host.containers.internal:50001"
+interval = 60
+retries = 2
+
+[kuma.page]
+slug = "stack"
+title = "BoltMesh services"
+group = "Public services"
+
+[uptime_kuma]
+# The unit's loopback publish (PublishPort=127.0.0.1:8107:3001 in
+# deploy/uptime-kuma.container): the reconciler's default URL points here,
+# and a moved publish must move with it. Proving the publish (rather than the
+# container name on npm-network) is deliberate -- it is the same surface
+# nginx-proxy-manager forwards the dashboard through.
+loopback_port = 8107

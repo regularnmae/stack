@@ -43,14 +43,14 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from . import decl, envfile, http, socketio
-from .ui import die
+from . import decl, envfile, http, manifest, socketio
+from .ui import die, log
 
 
 def say(msg: str) -> None:
     """A reconcile-status line, bare on stdout -- exactly what the retired
     monitors.mjs printed with console.log. The "==> "-prefixed log() lines are
-    the bash wrapper's, and stay there."""
+    this module's bookends (and the wrapper's die/usage paths)."""
     print(msg, flush=True)
 
 # A monitor is only touched when a *declared* field changed; interval and
@@ -138,7 +138,15 @@ def _login(client: socketio.SocketIOClient, username: str, password: str) -> Any
 
 
 def reconcile(d: decl.Decls) -> int:
-    base_url = d.var("KUMA_URL", "http://127.0.0.1:8107")
+    # The declarations come from the service manifest, not the stdin pipe:
+    # deploy/services.toml is the one home of the monitors and the page
+    # (manifest.py loads and validates), and it also names kuma's loopback
+    # publish, which is the default URL below.
+    manifest_path = d.var("MANIFEST")
+    if not manifest_path:
+        die("the wrapper did not pass MANIFEST (the path to deploy/services.toml)")
+    mf = manifest.load(manifest_path)
+
     config_dir = d.var("CONFIG_DIR")
     dry_run = d.flag("DRY_RUN")
     prune = d.flag("PRUNE")
@@ -147,16 +155,23 @@ def reconcile(d: decl.Decls) -> int:
     username = envfile.env_or_file("KUMA_USERNAME", kuma_env)
     password = envfile.env_or_file("KUMA_PASSWORD", kuma_env)
     if not username or not password:
-        die("KUMA_USERNAME/KUMA_PASSWORD missing "
-            f"(fill in {kuma_env} -- the login the setup wizard asked for)")
+        # A fresh host deploys before the UI-first registration exists: this
+        # is a self-skip, not an error (deploy.sh only warns on it).
+        log(f"no Uptime-Kuma admin login in {kuma_env}")
+        log("fill in KUMA_USERNAME/KUMA_PASSWORD (the login the setup wizard asked for), then re-run")
+        return 0
 
-    monitors = [decl.parse_kuma_monitor(raw) for raw in d.kuma_monitors]
+    monitors = mf.kuma_monitors
     if not monitors:
-        die("KUMA_MONITORS is empty; set it in stack.conf")
+        die(f"no monitors are declared in {manifest_path}")
 
-    slug = d.var("KUMA_STATUS_SLUG")
-    title = d.var("KUMA_STATUS_TITLE") or "BoltMesh services"
-    group = d.var("KUMA_STATUS_GROUP") or "Public services"
+    page = mf.kuma_page
+    base_url = d.var("KUMA_URL") or f"http://127.0.0.1:{mf.kuma_loopback}"
+    if page is None or not page.slug:
+        log("KUMA_STATUS_SLUG is empty; only the monitors will be reconciled")
+        log(f"reconciling {len(monitors)} monitor(s)")
+    else:
+        log(f"reconciling {len(monitors)} monitor(s) + status page '{page.slug}'")
 
     client = socketio.SocketIOClient(base_url, timeout=20)
     try:
@@ -271,13 +286,14 @@ def reconcile(d: decl.Decls) -> int:
                             f'{msg or "no ok"}')
                     say(f'deleted monitor "{m.get("name")}" (id {m.get("id")}, not declared)')
 
-            if slug and title:
-                _status_page(client, base_url, slug, title, group,
+            if page is not None and page.slug:
+                _status_page(client, base_url, page.slug, page.title, page.group,
                              resolved_ids, dry_run)
         except (TimeoutError, socketio.SocketIOError) as e:
             die(str(e))
     finally:
         client.close()
+    log("done")
     return 0
 
 

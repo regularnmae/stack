@@ -5,7 +5,7 @@
 # its confidentiality -- the vhosts are TLS-terminated by nginx and the app is
 # behind a queue. The capacity is deliberately huge (300 requests in 10 s, i.e.
 # 30/s sustained) because anything tighter collides with:
-#   * uptime-kuma (one request/min per monitor in KUMA_MONITORS -- ~0.13/s with
+#   * uptime-kuma (one request/min per declared monitor -- ~0.13/s with
 #     today's list, whitelisted anyway),
 #   * a page's asset load (one index.html plus its bundles),
 #   * searxng's own image fetches.

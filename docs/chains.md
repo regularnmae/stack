@@ -93,7 +93,8 @@ daemon unit, `fulcrum`, or an explorer.
   (MoneroBlock) is **RPC-only**
   against monerod's restricted RPC, with no chain copy and no LMDB reader. Both
   are loopback-published, NPM-fronted with `force-ssl`, mirrored as onions,
-  declared in `KUMA_MONITORS`, and built by `deploy.sh` only when missing
+  declared as status-page monitors (`[kuma.monitor.*]`), and built by
+  `deploy.sh` only when missing
   (`--only btc-explorer|xmr-explorer|explorers` forces a rebuild). Neither has
   state in the backup set; `config/btc-explorer/btc-explorer.env` is the BTC
   RPC/Fulcrum wiring. `xmr-explorer` probes its static `/style.css`, not `/`,

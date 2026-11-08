@@ -8,12 +8,13 @@ from typing import Dict
 
 
 def main(argv) -> int:
-    from . import kuma, npm
+    from . import kuma, manifest, npm
     from .ui import Fatal
 
     commands: Dict[str, object] = {
         "npm-hosts": npm.main,
         "kuma-monitors": kuma.main,
+        "manifest": manifest.main,
     }
     cmd = argv[1] if len(argv) > 1 else ""
     handler = commands.get(cmd)

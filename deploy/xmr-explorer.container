@@ -1,5 +1,5 @@
 # Quadlet unit for MoneroBlock, the Monero explorer served at
-# $XMR_EXPLORER_HOST (NPM_HOSTS in stack.conf). It is read-only and stateless:
+# $XMR_EXPLORER_HOST (the [npm.*] tables of deploy/services.toml). It is read-only and stateless:
 # blocks, transactions and network info come from monerod's restricted RPC
 # (18089) -- there is no chain mount, no LMDB reader, and no local index. It has
 # no env file and no directory in the backup set.
@@ -21,7 +21,7 @@ Network=npm-network.network
 IP=10.89.0.244
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# on host 8109 (NPM_HOSTS in stack.conf). NPM terminates TLS and is the only
+# on host 8109 (the [npm.*] tables of deploy/services.toml). NPM terminates TLS and is the only
 # way in for a client.
 PublishPort=127.0.0.1:8109:31312
 

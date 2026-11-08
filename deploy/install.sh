@@ -39,6 +39,9 @@ USER_UNIT_DIR="$CONFIG_HOME/systemd/user"
 . "$REPO_DIR/scripts/lib.sh"
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
+# The public surface (the *_HOST names, MCP_HOSTS, ONION_SERVICES) is declared
+# in deploy/services.toml; stack.conf keeps the non-registry knobs.
+load_manifest "$REPO_DIR"
 # Where the backup job keeps its restic repository (mounted at /repo). Defined
 # in stack.conf; default here so install.sh works standalone too.
 STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
@@ -57,10 +60,13 @@ export STACK_BACKUP_DIR
 # verify.sh reads to notice a WAN change. Built from the declarations, so a
 # renamed vhost cannot leave a stale entry behind.
 kuma_add_hosts=""
-for _kuma_host in "$BOLTMESH_FRONTEND_HOST" "$BOLTMESH_API_HOST" "$SEARXNG_HOST" \
-                  "$BTCPAY_HOST" "$BTC_EXPLORER_HOST" "$XMR_EXPLORER_HOST"; do
-    [ -n "$_kuma_host" ] \
-        && kuma_add_hosts="${kuma_add_hosts:+$kuma_add_hosts }--add-host=$_kuma_host:host-gateway"
+# KUMA_ADD_HOST_HOSTS comes from the service manifest (load_manifest above):
+# every [host.*] that did not opt out with kuma_add_host = false. The
+# uptime-kuma unit resolves those vhosts on its host gateway, so its own
+# monitors reach nginx-proxy-manager directly instead of hairpinning through
+# the router (the WAN canary and the status page's own host are the opt-outs).
+for _kuma_host in "${KUMA_ADD_HOST_HOSTS[@]}"; do
+    kuma_add_hosts="${kuma_add_hosts:+$kuma_add_hosts }--add-host=$_kuma_host:host-gateway"
 done
 unset _kuma_host
 
@@ -929,7 +935,7 @@ mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 # this stays user-owned; only the directory has to exist for the :z mount.
 mkdir -p "$DATA_DIR/fulcrum"
 
-# The onion services' keys (ONION_SERVICES in stack.conf): mounted into tor at
+# The onion services' keys ([onion.*] in deploy/services.toml): mounted into tor at
 # /var/lib/tor/onion. Mode 700 here, because tor only checks the leaf
 # HiddenServiceDir it creates -- a world-listable parent leaks the service names
 # (not the keys). Written by tor as container root = the host user under rootless
@@ -1074,7 +1080,7 @@ if command -v podman >/dev/null 2>&1; then
     ensure_local_image "$TOR_IMAGE" "$REPO_DIR/tor"
 fi
 
-# The onion services, rendered from ONION_SERVICES in stack.conf. Tor's own
+# The onion services, rendered from ONION_SERVICES (deploy/services.toml). Tor's own
 # config is a hand-tuned file (the control-password hash is derived once and the
 # SocksPolicy is deliberate), so it is seeded once and never rewritten as a
 # whole. The hidden-service part is the exception: it is a *declaration*, so it
@@ -1580,7 +1586,7 @@ if ensure_secret "$MON_ENV" "monitoring env"; then
 fi
 
 # nginx-proxy-manager's admin API, for scripts/npm-hosts.sh: it reconciles every
-# proxy host the stack serves (NPM_HOSTS in stack.conf). The admin login
+# proxy host the stack serves ([npm.*] in deploy/services.toml). The admin login
 # (or a pre-created API token) is a secret, so the file is mode 600; empty means
 # the script logs a one-line skip rather than failing a deploy.
 NPM_ENV="$CONFIG_DIR/npm/api.env"
@@ -1588,7 +1594,7 @@ if ensure_secret "$NPM_ENV" "nginx-proxy-manager api env"; then
     write_secret "$NPM_ENV" <<'EOF'
 # Credentials for the nginx-proxy-manager admin API (port 81), used by
 # scripts/npm-hosts.sh to reconcile every proxy host the stack serves (declared
-# in NPM_HOSTS in stack.conf). See deploy/examples/npm/api.env.example.
+# in deploy/services.toml). See deploy/examples/npm/api.env.example.
 #
 # The admin login (as set on first access to the UI on port 81). Preferred: a
 # token minted from it is short-lived and refreshed on every run.
@@ -1607,7 +1613,7 @@ EOF
 fi
 
 # Uptime-Kuma's admin login, for scripts/kuma-monitors.sh: it reconciles the
-# status page's monitors (declared in KUMA_MONITORS in stack.conf) and creates
+# status page's monitors (declared in deploy/services.toml) and creates
 # + publishes the public status page. Same UI-first flow as npm/api.env: the
 # account is created on the setup wizard's first visit, the login is recorded
 # here, and the reconciler self-skips until it is filled in.
@@ -1616,7 +1622,7 @@ if ensure_secret "$KUMA_ENV" "uptime-kuma api env"; then
     write_secret "$KUMA_ENV" <<'EOF'
 # Credentials for the Uptime-Kuma admin account, used by
 # scripts/kuma-monitors.sh to reconcile the status page's monitors (declared
-# in KUMA_MONITORS in stack.conf) and create + publish the status page. See
+# in deploy/services.toml) and create + publish the status page. See
 # deploy/examples/kuma/api.env.example. Never committed.
 #
 # The username and password the setup wizard asked for on the first visit to
@@ -2006,7 +2012,7 @@ The MCP servers are served as https://$MCP_HOST/<prefix> once
   (scripts/npm-hosts.sh, which ./deploy.sh runs).
 The status page's monitors are reconciled by scripts/kuma-monitors.sh once
   $CONFIG_DIR/uptime-kuma/api.env has the login the setup wizard asked for;
-  the declaration is KUMA_MONITORS in stack.conf.
+  the declaration is deploy/services.toml.
 Keep a copy of RESTIC_PASSWORD ($BACKUP_ENV) off the data disk: it is the only
 key to the backups.
 EOF

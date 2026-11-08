@@ -13,7 +13,7 @@ Image=docker.io/searxng/searxng:2026.10.29-cff884f98
 Network=npm-network.network
 
 # Loopback only: nginx-proxy-manager runs on the host network, so host 8082 is
-# how it reaches SearXNG (NPM_HOSTS in stack.conf). 8082 rather than 8080
+# how it reaches SearXNG (the [npm.*] tables of deploy/services.toml). 8082 rather than 8080
 # because crowdsec's LAPI owns host 8080 -- that unit runs on the host network,
 # so its socket is the host's own and stack-bouncer reads it without a published
 # port (see deploy/crowdsec.container.in). Binding 127.0.0.1 keeps it off the

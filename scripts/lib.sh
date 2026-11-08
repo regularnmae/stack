@@ -758,3 +758,34 @@ ensure_data_dirs() {
     mkdir -p "$CONFIG_DIR" "$NPM_DIR/data" "$NPM_DIR/letsencrypt" \
         || die "could not create the data subdirectories under $DATA_DIR"
 }
+
+# --- the service manifest -----------------------------------------------------
+# deploy/services.toml is the ONE declaration of the public surface: the
+# *_HOST domain names, MCP_HOSTS, ONION_SERVICES, the proxy hosts and the
+# status page's monitors (npm-hosts.sh and kuma-monitors.sh reconcile it
+# through their Python cores, scripts/stackctl/). stack.conf no longer
+# carries those lists; this helper is how a bash caller gets them back under
+# the SAME variable names it always sourced, by eval'ing the shell emission
+# of `python3 -m stackctl manifest shell` -- NAME='value' lines and array
+# assignments, nothing else. python3 is a bootstrap dependency (agent-mcp
+# already needed it).
+#
+# The one thing it must never do is run inside stack.conf: bootstrap.sh
+# sources that file standalone (curl | bash, no checkout present), so
+# stack.conf stays plain data and the manifest load is each caller's own
+# explicit step, right after it sources stack.conf.
+#
+#   . "$REPO_DIR/stack.conf"; load_manifest     # then $MCP_HOSTS etc. exist
+load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
+    local repo="${1:-${REPO_DIR:-}}" script_dir out
+    [ -n "$repo" ] || die "load_manifest: no repository directory (REPO_DIR is unset)"
+    [ -f "$repo/deploy/services.toml" ] \
+        || die "load_manifest: $repo/deploy/services.toml is missing"
+    command -v python3 >/dev/null 2>&1 \
+        || die "load_manifest: python3 is required (bootstrap.sh installs it)"
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    out=$(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m stackctl manifest shell "$repo/deploy/services.toml") \
+        || die "load_manifest: could not read $repo/deploy/services.toml"
+    eval "$out"
+}
