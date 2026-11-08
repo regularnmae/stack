@@ -487,7 +487,7 @@ verify_bitcoin_rpc() {
     else
         warn "Fulcrum is not answering yet (its index may still be starting); check: podman logs fulcrum"
     fi
-    if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
+    if lightning_cli getinfo >/dev/null 2>&1; then
         log "lightningd's bcli is talking to bitcoind"
     else
         warn "lightningd is not answering; check: podman logs lightningd"
@@ -539,7 +539,7 @@ apply_bitcoin_rpc() {
 # ---------------------------------------------------------------------------
 verify_tor_control() {
     [ "$DRY_RUN" = 0 ] || return 0
-    if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
+    if lightning_cli getinfo >/dev/null 2>&1; then
         log "lightningd is up with the new Tor control password (statictor re-registered)"
     else
         die "lightningd is not answering; check: podman logs lightningd"
@@ -636,7 +636,7 @@ prune_orphan_runes() {
     say "blacklisting $(printf '%s\n' "$orphans" | wc -l) superseded stack rune(s): $(printf '%s\n' "$orphans" | cut -f1 | paste -sd, -)"
     while read -r id; do
         [ -n "$id" ] || continue
-        if quiet podman exec lightningd lightning-cli destroyrune "$id" "$id"; then
+        if quiet lightning_cli destroyrune "$id" "$id"; then
             say "blacklisted rune id $id"
         else
             warn "could not blacklist rune id $id; do it by hand: podman exec lightningd lightning-cli destroyrune $id $id"
@@ -1056,14 +1056,14 @@ apply_restic() {
 }
 
 # The newest restic snapshot's age in hours (empty when it cannot be read).
+# status_verdict's sibling in scripts/lib.sh owns the read, so the rotator and
+# scripts/monitor.sh cannot disagree about how old the last backup is.
 backup_age_h() {
-    command -v jq >/dev/null 2>&1 || return 1
-    local json latest s
-    json=$("$REPO_DIR/scripts/backup.sh" list --json 2>/dev/null) || return 1
-    latest=$(printf '%s' "$json" | jq -r 'map(.time) | max // empty' 2>/dev/null) || return 1
-    [ -n "$latest" ] || return 1
-    s=$(date -d "$latest" +%s 2>/dev/null) || return 1
-    printf '%s' $(( ($(date +%s) - s) / 3600 ))
+    local summary epoch
+    summary=$(restic_snapshot_summary) || return 1
+    epoch=${summary#*$'\t'}
+    [ -n "$epoch" ] || return 1
+    printf '%s' $(( ($(date +%s) - epoch) / 3600 ))
 }
 
 # ---------------------------------------------------------------------------

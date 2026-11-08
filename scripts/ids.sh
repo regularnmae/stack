@@ -87,7 +87,7 @@ if podman container exists crowdsec 2>/dev/null; then
     # "stack/http-probing ?" instead of the offending address. bouncer.sh is not
     # the other side of this: it reads /v1/decisions, which really is flat -- do
     # not "align" the two.
-    decisions_json=$(podman exec crowdsec cscli decisions list -o json 2>/dev/null || true)
+    decisions_json=$(cscli decisions list -o json 2>/dev/null || true)
     if [ -n "$decisions_json" ]; then
         # Distinct decisions, not nested rows: the same decision can come back
         # under two alert groups (the human table dedupes by

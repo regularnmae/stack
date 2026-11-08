@@ -573,15 +573,9 @@ SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 TOR_DIR="$DATA_DIR/tor"
 
-write_secret() {
-    local path="$1"
-    local old_umask
-    old_umask=$(umask)
-    umask 077
-    cat > "$path"
-    umask "$old_umask"
-    chmod 600 "$path"
-}
+# write_secret (a secret-carrying env file: atomic, mode 600) is scripts/lib.sh's
+# write_env_file; deploy.sh writes the BTCPay env files with the same one, so
+# the two halves of the stack no longer have a umask copy and a mktemp copy.
 
 # Echo 0 (true) when the file is missing and the caller should write it, so a
 # call site reads: if ensure_secret "$F" "token env"; then write_secret ...; fi
@@ -596,17 +590,7 @@ ensure_secret() {
 }
 
 new_or_reused_token() {
-    local container="$1" var="$2" val=""
-    if command -v podman >/dev/null 2>&1; then
-        val=$(podman exec "$container" printenv "$var" 2>/dev/null || true)
-    fi
-    if [ -n "$val" ]; then
-        printf '==> reused %s from the running %s\n' "$var" "$container" >&2
-    else
-        printf '==> generated a new %s -- update clients to match\n' "$var" >&2
-        val=$(rand_hex)
-    fi
-    printf '%s' "$val"
+    new_or_reused_env "$1" "$2" announce
 }
 
 # Like new_or_reused_token, but for a value nobody has to present (a JWT
@@ -614,16 +598,52 @@ new_or_reused_token() {
 # already carries so adopting a host keeps existing sessions and node tokens
 # valid, otherwise generate. Prints the value on stdout, never the reverse.
 new_or_reused_secret() {
-    local container="$1" var="$2" val=""
+    new_or_reused_env "$1" "$2" quiet
+}
+
+# The one body behind both: read the value the running container already has,
+# else generate one. A generated TOKEN has to be announced -- every client must
+# be updated to match -- while a generated secret is silent, because nobody
+# presents it.
+new_or_reused_env() { # container var announce|quiet
+    local container="$1" var="$2" mode="$3" val=""
     if command -v podman >/dev/null 2>&1; then
         val=$(podman exec "$container" printenv "$var" 2>/dev/null || true)
     fi
     if [ -n "$val" ]; then
         printf '==> reused %s from the running %s\n' "$var" "$container" >&2
     else
+        if [ "$mode" = announce ]; then
+            printf '==> generated a new %s -- update clients to match\n' "$var" >&2
+        fi
         val=$(rand_hex)
     fi
     printf '%s' "$val"
+}
+
+# Seed stdin into PATH when the file is missing, mode 600, with the one log line
+# every seed step used to spell out. A no-op when the file already exists: an
+# existing secret is never overwritten (see the header), so this is that rule in
+# one place instead of twenty.
+seed_env() { # path label
+    ensure_secret "$1" "$2" || return 0
+    write_secret "$1"
+    log "wrote $1 (mode 600)"
+}
+
+# The eight servers whose token.env is one seed-once bearer token: same file
+# shape, same log line, so the table is the whole difference between them. The
+# value is resolved INSIDE the missing-file branch -- a heredoc body would run
+# new_or_reused_token (and announce "a new token") on every install, even when
+# the file is being left alone.
+seed_token_env() { # container VAR
+    local container="$1" var="$2" token
+    ensure_secret "$CONFIG_DIR/$container/token.env" "$container token env" || return 0
+    token=$(new_or_reused_token "$container" "$var")
+    write_secret "$CONFIG_DIR/$container/token.env" <<EOF
+$var=$token
+EOF
+    log "wrote $CONFIG_DIR/$container/token.env (mode 600)"
 }
 
 # Hand paths to the image's in-container uid 1000 (host subuid, 525287 here).
@@ -1199,85 +1219,42 @@ fi
 # 6. per-application env files (under the data dir)
 # ---------------------------------------------------------------------------
 
-SEARXNG_ENV="$CONFIG_DIR/searxng-mcp/token.env"
-if ensure_secret "$SEARXNG_ENV" "searxng-mcp token env"; then
-    token=$(new_or_reused_token searxng-mcp SEARXNG_MCP_TOKEN)
-    write_secret "$SEARXNG_ENV" <<EOF
-SEARXNG_MCP_TOKEN=$token
-EOF
-    log "wrote $SEARXNG_ENV (mode 600)"
-fi
+seed_token_env searxng-mcp SEARXNG_MCP_TOKEN
 
 BTC_ENV="$CONFIG_DIR/bitcoin-node-mcp"
-if ensure_secret "$BTC_ENV/token.env" "bitcoin-node-mcp token env"; then
-    token=$(new_or_reused_token bitcoin-node-mcp BITCOIN_MCP_TOKEN)
-    write_secret "$BTC_ENV/token.env" <<EOF
-BITCOIN_MCP_TOKEN=$token
-EOF
-    log "wrote $BTC_ENV/token.env (mode 600)"
-fi
-if ensure_secret "$BTC_ENV/upstream.env" "bitcoin-node-mcp upstream env"; then
-    write_secret "$BTC_ENV/upstream.env" <<EOF
+seed_token_env bitcoin-node-mcp BITCOIN_MCP_TOKEN
+seed_env "$BTC_ENV/upstream.env" "bitcoin-node-mcp upstream env" <<EOF
 # Upstream credentials for the Bitcoin Core node this server reads. Derived
 # from the node secrets; the unit reads this via EnvironmentFile.
 BITCOIN_RPC_USER=$BITCOIN_RPC_USER
 BITCOIN_RPC_PASSWORD=$BITCOIN_RPC_PASSWORD
 EOF
-    log "wrote $BTC_ENV/upstream.env (mode 600)"
-fi
 
 FULCRUM_ENV="$CONFIG_DIR/fulcrum-mcp"
-if ensure_secret "$FULCRUM_ENV/token.env" "fulcrum-mcp token env"; then
-    token=$(new_or_reused_token fulcrum-mcp FULCRUM_MCP_TOKEN)
-    write_secret "$FULCRUM_ENV/token.env" <<EOF
-FULCRUM_MCP_TOKEN=$token
-EOF
-    log "wrote $FULCRUM_ENV/token.env (mode 600)"
-fi
-if ensure_secret "$FULCRUM_ENV/upstream.env" "fulcrum-mcp upstream env"; then
-    write_secret "$FULCRUM_ENV/upstream.env" <<EOF
+seed_token_env fulcrum-mcp FULCRUM_MCP_TOKEN
+seed_env "$FULCRUM_ENV/upstream.env" "fulcrum-mcp upstream env" <<EOF
 # The Electrum endpoint this server reads. Fulcrum is reachable only on
 # npm-network, and the Electrum protocol has no authentication of its own.
 FULCRUM_URL=tcp://fulcrum:50001
 EOF
-    log "wrote $FULCRUM_ENV/upstream.env (mode 600)"
-fi
 
 LOGS_ENV="$CONFIG_DIR/victoria-logs-mcp"
-if ensure_secret "$LOGS_ENV/token.env" "victoria-logs-mcp token env"; then
-    token=$(new_or_reused_token victoria-logs-mcp LOGS_MCP_TOKEN)
-    write_secret "$LOGS_ENV/token.env" <<EOF
-LOGS_MCP_TOKEN=$token
-EOF
-    log "wrote $LOGS_ENV/token.env (mode 600)"
-fi
-if ensure_secret "$LOGS_ENV/upstream.env" "victoria-logs-mcp upstream env"; then
-    write_secret "$LOGS_ENV/upstream.env" <<EOF
+seed_token_env victoria-logs-mcp LOGS_MCP_TOKEN
+seed_env "$LOGS_ENV/upstream.env" "victoria-logs-mcp upstream env" <<EOF
 # The log store this server reads. VictoriaLogs has no authentication of its
 # own: it is loopback-only on the host, and this MCP server is its
 # authenticated front door.
 VICTORIA_LOGS_URL=http://victoria-logs:9428
 EOF
-    log "wrote $LOGS_ENV/upstream.env (mode 600)"
-fi
 
 METRICS_ENV="$CONFIG_DIR/victoriametrics-mcp"
-if ensure_secret "$METRICS_ENV/token.env" "victoriametrics-mcp token env"; then
-    token=$(new_or_reused_token victoriametrics-mcp METRICS_MCP_TOKEN)
-    write_secret "$METRICS_ENV/token.env" <<EOF
-METRICS_MCP_TOKEN=$token
-EOF
-    log "wrote $METRICS_ENV/token.env (mode 600)"
-fi
-if ensure_secret "$METRICS_ENV/upstream.env" "victoriametrics-mcp upstream env"; then
-    write_secret "$METRICS_ENV/upstream.env" <<EOF
+seed_token_env victoriametrics-mcp METRICS_MCP_TOKEN
+seed_env "$METRICS_ENV/upstream.env" "victoriametrics-mcp upstream env" <<EOF
 # The metrics store this server reads. VictoriaMetrics has no authentication
 # of its own: it is loopback-only on the host, and this MCP server is its
 # authenticated front door.
 VICTORIA_METRICS_URL=http://victoriametrics:8428
 EOF
-    log "wrote $METRICS_ENV/upstream.env (mode 600)"
-fi
 
 # crowdsec-mcp: the bearer token clients present, and the bouncer key it reads
 # decisions with. The token is seed-once like every other server's; the key is
@@ -1286,13 +1263,7 @@ fi
 # "mcp" bouncer), so this file is rewritten whenever the two disagree. Seeding
 # it once would leave a rotated secret split across two files.
 CROWDSEC_ENV="$CONFIG_DIR/crowdsec-mcp"
-if ensure_secret "$CROWDSEC_ENV/token.env" "crowdsec-mcp token env"; then
-    token=$(new_or_reused_token crowdsec-mcp CROWDSEC_MCP_TOKEN)
-    write_secret "$CROWDSEC_ENV/token.env" <<EOF
-CROWDSEC_MCP_TOKEN=$token
-EOF
-    log "wrote $CROWDSEC_ENV/token.env (mode 600)"
-fi
+seed_token_env crowdsec-mcp CROWDSEC_MCP_TOKEN
 mkdir -p "$CROWDSEC_ENV"
 lapi_env="$CROWDSEC_ENV/lapi.env"
 lapi_tmp=$(mktemp)
@@ -1322,31 +1293,20 @@ fi
 # leave a rotated secret split across two files (the same rule as crowdsec's
 # lapi.env). This seed only gives the unit a URL before the first bootstrap.
 BTCPAY_MCP_ENV="$CONFIG_DIR/btcpay-mcp"
-if ensure_secret "$BTCPAY_MCP_ENV/token.env" "btcpay-mcp token env"; then
-    token=$(new_or_reused_token btcpay-mcp BTCPAY_MCP_TOKEN)
-    write_secret "$BTCPAY_MCP_ENV/token.env" <<EOF
-BTCPAY_MCP_TOKEN=$token
-EOF
-    log "wrote $BTCPAY_MCP_ENV/token.env (mode 600)"
-fi
-if ensure_secret "$BTCPAY_MCP_ENV/upstream.env" "btcpay-mcp upstream env"; then
-    write_secret "$BTCPAY_MCP_ENV/upstream.env" <<EOF
+seed_token_env btcpay-mcp BTCPAY_MCP_TOKEN
+seed_env "$BTCPAY_MCP_ENV/upstream.env" "btcpay-mcp upstream env" <<EOF
 # The BTCPay instance this server reads. deploy.sh rewrites this file from
 # config/btcpay/bootstrap.env (URL, the read-only BTCPAY_MCP_KEY, store id and
 # the public origin) after every bootstrap; do not hand-edit it.
 BTCPAY_URL=http://btcpay:49392
 EOF
-    log "wrote $BTCPAY_MCP_ENV/upstream.env (mode 600)"
-fi
 
 # BTC RPC Explorer's configuration. The app is configured entirely through the
 # environment (so the unit uses EnvironmentFile=, not a rendered Exec=), and it
 # needs the same bitcoind RPC credentials plus Fulcrum's Electrum endpoint. It
 # keeps no data of its own. Address history comes from Fulcrum; any txid
 # resolves through bitcoind's txindex (README: "Block explorers").
-BTCEXP_ENV="$CONFIG_DIR/btc-explorer"
-if ensure_secret "$BTCEXP_ENV/btc-explorer.env" "btc explorer env"; then
-    write_secret "$BTCEXP_ENV/btc-explorer.env" <<EOF
+seed_env "$CONFIG_DIR/btc-explorer/btc-explorer.env" "btc explorer env" <<EOF
 # BTC RPC Explorer (deploy/btc-explorer.container). Read via EnvironmentFile=.
 # The RPC password is a secret; the rest is wiring. Empty
 # BTCEXP_BASIC_AUTH_PASSWORD means the explorer is public (as served by NPM).
@@ -1371,25 +1331,14 @@ BTCEXP_RPC_ALLOWALL=false
 # Optional HTTP basic auth (any username, this password). Empty = public.
 BTCEXP_BASIC_AUTH_PASSWORD=
 EOF
-    log "wrote $BTCEXP_ENV/btc-explorer.env (mode 600)"
-fi
 
 XMR_ENV="$CONFIG_DIR/monero-node-mcp"
-if ensure_secret "$XMR_ENV/token.env" "monero-node-mcp token env"; then
-    token=$(new_or_reused_token monero-node-mcp MONERO_MCP_TOKEN)
-    write_secret "$XMR_ENV/token.env" <<EOF
-MONERO_MCP_TOKEN=$token
-EOF
-    log "wrote $XMR_ENV/token.env (mode 600)"
-fi
-if ensure_secret "$XMR_ENV/upstream.env" "monero-node-mcp upstream env"; then
-    write_secret "$XMR_ENV/upstream.env" <<EOF
+seed_token_env monero-node-mcp MONERO_MCP_TOKEN
+seed_env "$XMR_ENV/upstream.env" "monero-node-mcp upstream env" <<EOF
 # Empty unless monerod was started with --rpc-login.
 MONERO_RPC_USER=
 MONERO_RPC_PASSWORD=
 EOF
-    log "wrote $XMR_ENV/upstream.env (mode 600)"
-fi
 
 XMRW_ENV="$CONFIG_DIR/monero-wallet-mcp"
 if ensure_secret "$XMRW_ENV/token.env" "monero-wallet-mcp token env"; then
@@ -1412,8 +1361,7 @@ MONERO_WALLET_RPC_USER=
 MONERO_WALLET_RPC_PASSWORD=
 EOF
 log "wrote $XMRW_ENV/upstream.env (mode 600)"
-if ensure_secret "$XMRW_ENV/spend.env" "monero-wallet-mcp spend env"; then
-    write_secret "$XMRW_ENV/spend.env" <<EOF
+seed_env "$XMRW_ENV/spend.env" "monero-wallet-mcp spend env" <<EOF
 # Spending is OFF until you set ENABLE_SPENDING=1. With it on, both caps below
 # must be positive (in XMR) or the server refuses to start. MAINNET: real money.
 ENABLE_SPENDING=0
@@ -1422,8 +1370,6 @@ MAX_SPEND_PER_DAY=5
 # Optional comma-separated destination allowlist; empty allows any address.
 ALLOWED_DESTINATIONS=
 EOF
-    log "wrote $XMRW_ENV/spend.env (mode 600) with ENABLE_SPENDING=0"
-fi
 
 LN_ENV="$CONFIG_DIR/lightning-mcp"
 if ensure_secret "$LN_ENV/token.env" "lightning-mcp token env"; then
@@ -1436,16 +1382,13 @@ LIGHTNING_MCP_SPEND_TOKEN=$(rand_hex)
 EOF
     log "wrote $LN_ENV/token.env (mode 600) with a read and a spend token"
 fi
-if ensure_secret "$LN_ENV/spend.env" "lightning-mcp spend env"; then
-    write_secret "$LN_ENV/spend.env" <<EOF
+seed_env "$LN_ENV/spend.env" "lightning-mcp spend env" <<EOF
 # Spending (payments) is OFF until you set ENABLE_SPENDING=1. With it on, both
 # caps below must be positive (in satoshis) or the server refuses to start.
 ENABLE_SPENDING=0
 MAX_PAYMENT_PER_CALL_SATS=10000
 MAX_PAYMENT_PER_DAY_SATS=100000
 EOF
-    log "wrote $LN_ENV/spend.env (mode 600) with ENABLE_SPENDING=0"
-fi
 
 # ---------------------------------------------------------------------------
 # BoltMesh env files (under the data dir, like every other app's)
@@ -1661,7 +1604,7 @@ node_needs_write=0
 [ -s "$LN_ENV/node.env" ] || node_needs_write=1
 if command -v podman >/dev/null 2>&1 \
     && ! { cln_rune_usable "$read_rune" && cln_rune_usable "$spend_rune"; }; then
-    if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
+    if lightning_cli getinfo >/dev/null 2>&1; then
         log "creating runes on the node"
         new_read=$(cln_mint_rune "$READ_RESTRICTIONS" | cut -d' ' -f1 || true)
         new_spend=$(cln_mint_rune "$SPEND_RESTRICTIONS" | cut -d' ' -f1 || true)

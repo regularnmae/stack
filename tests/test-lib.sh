@@ -8,14 +8,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 # shellcheck source=../scripts/lib.sh
 source "$ROOT_DIR/scripts/lib.sh"
-
-assert_eq() {
-    local want="$1" got="$2" label="$3"
-    if [ "$want" != "$got" ]; then
-        printf 'FAIL: %s: expected %s, got %s\n' "$label" "$want" "$got" >&2
-        exit 1
-    fi
-}
+# shellcheck source=lib.sh
+source "$ROOT_DIR/tests/lib.sh"
 
 assert_eq 9000500 "$(dur_ms 2h30m0.5s)" 'fractional duration'
 assert_eq 500 "$(dur_ms 500ms)" 'millisecond duration'
@@ -119,6 +113,55 @@ status_write "$status" '# test' fail 'broken' 'alerts=4'
 assert_eq fail "$(env_value "$status" result)" 'status_write records a failure'
 assert_eq "$first_ok" "$(env_value "$status" ok_epoch)" \
     'status_write carries ok_epoch through a failure'
+
+# status_verdict is the read side, shared by scripts/monitor.sh and verify.sh.
+# The cases that matter are the ones a TAB-joined line could not carry: a skip
+# with no ok_epoch yet but a detail, and a failure with no detail at all.
+now=$(date +%s)
+sv="$TMP_DIR/verdict.status"
+printf 'result=ok\nok_epoch=%s\ndetail=fine\n' "$(( now - 100 ))" > "$sv"
+status_verdict "$sv"
+assert_eq ok "$STATUS_RESULT" 'status_verdict reads the result'
+assert_eq fine "$STATUS_DETAIL" 'status_verdict reads the detail'
+case "$STATUS_AGE_S" in
+    ''|*[!0-9]*) printf 'FAIL: status_verdict age is not a number: %s\n' "$STATUS_AGE_S" >&2; exit 1 ;;
+esac
+if [ "$STATUS_AGE_S" -lt 100 ] || [ "$STATUS_AGE_S" -ge 130 ]; then
+    printf 'FAIL: status_verdict age %s is not ~100s\n' "$STATUS_AGE_S" >&2
+    exit 1
+fi
+printf 'result=skip\nok_epoch=\ndetail=no disk space left\n' > "$sv"
+status_verdict "$sv"
+assert_eq '' "$STATUS_AGE_S" 'status_verdict leaves the age empty without a success'
+assert_eq 'no disk space left' "$STATUS_DETAIL" \
+    'status_verdict keeps a detail when the age is empty'
+printf 'result=fail\ndetail=\n' > "$sv"
+status_verdict "$sv"
+assert_eq fail "$STATUS_RESULT" 'status_verdict reads a bare failure'
+assert_eq '' "$STATUS_DETAIL" 'status_verdict leaves an empty detail empty'
+status_verdict "$TMP_DIR/does-not-exist.status"
+assert_eq '||' "$STATUS_RESULT|$STATUS_AGE_S|$STATUS_DETAIL" \
+    'status_verdict clears all three for a missing file'
+
+# restic_snapshot_summary: one read of `backup.sh list --json` for the monitor
+# and the rotator. A fake repository keeps this offline.
+mkdir -p "$TMP_DIR/repo/scripts"
+cat > "$TMP_DIR/repo/scripts/backup.sh" <<'SH'
+#!/usr/bin/env bash
+printf '[{"time":"2026-11-08T00:00:00Z"},{"time":"2026-11-07T00:00:00Z"}]\n'
+SH
+chmod +x "$TMP_DIR/repo/scripts/backup.sh"
+REPO_DIR="$TMP_DIR/repo"
+summary=$(restic_snapshot_summary)
+assert_eq 2 "${summary%%$'\t'*}" 'restic_snapshot_summary counts the snapshots'
+assert_eq "$(date -d 2026-11-08T00:00:00Z +%s)" "${summary#*$'\t'}" \
+    'restic_snapshot_summary takes the newest time'
+printf 'not json\n' > "$TMP_DIR/repo/scripts/backup.sh"
+if restic_snapshot_summary >/dev/null; then
+    printf 'FAIL: restic_snapshot_summary accepted a non-array answer\n' >&2
+    exit 1
+fi
+
 
 # write_atomic is the primitive behind prom_write, status_write and
 # unit_digest_write: stdin -> a hidden temp beside the target, the mode, then a

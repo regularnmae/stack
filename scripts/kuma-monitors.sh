@@ -41,30 +41,12 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
-DRY_RUN=0
-PRUNE=0
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --dry-run) DRY_RUN=1 ;;
-        --prune)   PRUNE=1 ;;
-        -h|--help) usage_header "$0"; exit 0 ;;
-        *)         die "unknown argument: $1 (try --help)" ;;
-    esac
-    shift
-done
-
-command -v python3 >/dev/null 2>&1 \
-    || die "python3 is required to run the reconciler (bootstrap.sh installs it)"
-
-resolve_data_dir
-
-{
-    printf 'V\tMANIFEST\t%s\n' "$REPO_DIR/deploy/services.toml"
-    printf 'V\tDATA_DIR\t%s\n' "$DATA_DIR"
-    printf 'V\tCONFIG_DIR\t%s\n' "$CONFIG_DIR"
-    printf 'V\tDRY_RUN\t%s\n' "$DRY_RUN"
-    printf 'V\tPRUNE\t%s\n' "$PRUNE"
-    # The manifest's [uptime_kuma] loopback_port is the default; $KUMA_URL
-    # (an environment override) wins when it is set.
-    [ -z "${KUMA_URL:-}" ] || printf 'V\tKUMA_URL\t%s\n' "$KUMA_URL"
-} | PYTHONPATH="$REPO_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 -m stackctl kuma-monitors
+# The manifest's [uptime_kuma] loopback_port is kuma.py's default; KUMA_URL (an
+# environment override) wins when it is set. The CLI, the data dir and the
+# declaration stream are lib.sh's stackctl_wrapper -- the same half
+# npm-hosts.sh uses.
+if [ -n "${KUMA_URL:-}" ]; then
+    stackctl_wrapper kuma-monitors "KUMA_URL=$KUMA_URL" "$@"
+else
+    stackctl_wrapper kuma-monitors "$@"
+fi

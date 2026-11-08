@@ -19,13 +19,8 @@ source "$ROOT_DIR/scripts/lib.sh"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-assert_eq() {
-    local want="$1" got="$2" label="$3"
-    if [ "$want" != "$got" ]; then
-        printf 'FAIL: %s: expected %s, got %s\n' "$label" "$want" "$got" >&2
-        exit 1
-    fi
-}
+# shellcheck source=lib.sh
+source "$ROOT_DIR/tests/lib.sh"
 
 HDR='# written by tests/test-status.sh'
 # time= and epoch= are the clock, and the two runs necessarily disagree on both.

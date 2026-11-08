@@ -570,7 +570,7 @@ if [ "$NO_NODES" = 1 ]; then
 else
     # One getblockchaininfo for the whole section: it is what decides whether a
     # silent 50001 is broken or just a first-run index that has not caught up.
-    btc_chain=$(podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null || true)
+    btc_chain=$(bitcoind_cli getblockchaininfo 2>/dev/null || true)
     btc_ibd=$(printf '%s' "$btc_chain" | jq -r 'if has("initialblockdownload") then .initialblockdownload else empty end' 2>/dev/null || true)
     btc_blocks=$(printf '%s' "$btc_chain" | jq -r '.blocks // empty' 2>/dev/null || true)
 
@@ -753,20 +753,17 @@ if [ "$DEEP" = 1 ]; then
     # measured from the last success, so a drill that keeps skipping is visible.
     VSTATUS="$DATA_DIR/audit/backup-verify.status"
     if [ -f "$VSTATUS" ]; then
-        vres=$(env_value "$VSTATUS" result)
-        vok=$(env_value "$VSTATUS" ok_epoch)
-        vdet=$(env_value "$VSTATUS" detail)
-        case "$vok" in
-            ''|*[!0-9]*) warn "backup restore drill has no recorded success yet" ;;
-            *)
-                vage=$(( ( $(date +%s) - vok ) / 3600 ))
-                if [ "$vres" = fail ]; then
-                    bad "last backup restore drill failed: ${vdet:-run scripts/backup.sh verify}"
-                else
-                    pass "last backup restore drill passed ${vage}h ago"
-                fi
-                ;;
-        esac
+        status_verdict "$VSTATUS"
+        if [ -z "$STATUS_AGE_S" ]; then
+            warn "backup restore drill has no recorded success yet"
+        else
+            vage=$(( STATUS_AGE_S / 3600 ))
+            if [ "$STATUS_RESULT" = fail ]; then
+                bad "last backup restore drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify}"
+            else
+                pass "last backup restore drill passed ${vage}h ago"
+            fi
+        fi
     else
         warn "no backup restore drill yet (expected until backup-verify.timer runs)"
     fi
@@ -775,20 +772,17 @@ if [ "$DEEP" = 1 ]; then
     # no repository lock) is visible rather than invisible.
     DBSTATUS="$DATA_DIR/audit/backup-verify-db.status"
     if [ -f "$DBSTATUS" ]; then
-        dres=$(env_value "$DBSTATUS" result)
-        dok=$(env_value "$DBSTATUS" ok_epoch)
-        ddet=$(env_value "$DBSTATUS" detail)
-        case "$dok" in
-            ''|*[!0-9]*) warn "database drill has no recorded success yet" ;;
-            *)
-                dage=$(( ( $(date +%s) - dok ) / 3600 ))
-                if [ "$dres" = fail ]; then
-                    bad "last database drill failed: ${ddet:-run scripts/backup.sh verify-db}"
-                else
-                    pass "last database drill passed ${dage}h ago"
-                fi
-                ;;
-        esac
+        status_verdict "$DBSTATUS"
+        if [ -z "$STATUS_AGE_S" ]; then
+            warn "database drill has no recorded success yet"
+        else
+            dage=$(( STATUS_AGE_S / 3600 ))
+            if [ "$STATUS_RESULT" = fail ]; then
+                bad "last database drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify-db}"
+            else
+                pass "last database drill passed ${dage}h ago"
+            fi
+        fi
     else
         warn "no database drill yet (expected until backup-verify-db.timer runs)"
     fi
@@ -1048,7 +1042,7 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
         '[30/Oct/2026:13:31:19 +0000] - 404 404 - GET https api.example.invalid "/probe" [Client 203.0.113.9] [Length 22] [Gzip -] [Sent-to 127.0.0.1] "verify/1.0" "-"' \
         '[30/Oct/2026:13:31:19 +0000] - - 301 - GET http api.example.invalid "/" [Client 203.0.113.9] [Length 166] [Gzip -] [Sent-to 127.0.0.1] "verify/1.0" "-"'
     do
-        explain=$(podman exec crowdsec cscli explain --type npm --log "$sample" 2>/dev/null) || continue
+        explain=$(cscli explain --type npm --log "$sample" 2>/dev/null) || continue
         if printf '%s' "$explain" | grep -q 'stack/npm-logs' \
            && printf '%s' "$explain" | grep -q 'parser success'; then
             npm_parse_ok=$((npm_parse_ok + 1))
@@ -1068,7 +1062,7 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
     # scenario fails here instead of silently disabling enforcement.
     eve_sample='{"timestamp":"2026-11-07T12:00:00.000000+0000","event_type":"alert","in_iface":"enp8s0","src_ip":"198.51.100.7","dest_ip":"192.0.2.10","dest_port":80,"proto":"TCP","alert":{"signature_id":9000004,"rev":2,"signature":"STACK HTTP request to an undeclared Host","severity":1}}'
     eve_ok=0
-    if explain=$(podman exec crowdsec cscli explain --type suricata-evelogs --log "$eve_sample" 2>/dev/null); then
+    if explain=$(cscli explain --type suricata-evelogs --log "$eve_sample" 2>/dev/null); then
         printf '%s' "$explain" | grep -q 'stack/suricata-policy' && eve_ok=1
     fi
     if [ "$eve_ok" -eq 1 ]; then
@@ -1077,7 +1071,7 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
         warn "crowdsec did not match a Suricata EVE alert to stack/suricata-policy (parser, acquisition label or scenario changed)"
     fi
     eve_private=${eve_sample/198.51.100.7/127.0.0.1}
-    if explain=$(podman exec crowdsec cscli explain --type suricata-evelogs --log "$eve_private" 2>/dev/null); then
+    if explain=$(cscli explain --type suricata-evelogs --log "$eve_private" 2>/dev/null); then
         if printf '%s' "$explain" | grep -q 'stack/whitelists.*whitelisted'; then
             pass "crowdsec whitelists a loopback Suricata alert"
         else
@@ -1114,7 +1108,7 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
         wl_want=${wl_rest##*|}
         wl_line=${sample/203.0.113.9/"$wl_ip"}
         wl_line=${wl_line/verify\/1.0/"$wl_ua"}
-        if ! explain=$(podman exec crowdsec cscli explain --type npm --log "$wl_line" 2>/dev/null); then
+        if ! explain=$(cscli explain --type npm --log "$wl_line" 2>/dev/null); then
             warn "could not ask crowdsec to explain a whitelist probe ($wl_ip)"
             continue
         fi

@@ -318,7 +318,7 @@ rune_json() { # prefix...
 # the alarm cannot disagree about what a stack rune is.
 cln_live_runes() { # -> unique_id<TAB>rune<TAB>methodset, per non-blacklisted rune
     local out
-    out=$(podman exec lightningd lightning-cli showrunes 2>/dev/null) || return 1
+    out=$(lightning_cli showrunes 2>/dev/null) || return 1
     printf '%s' "$out" | jq -r '
         .runes[]
         | select(.blacklisted|not)
@@ -366,8 +366,7 @@ cln_orphan_runes() { # keep-rune...
 # both judge usability the same way.
 cln_rune_usable() { # rune
     [ -n "$1" ] || return 1
-    podman exec lightningd lightning-cli -k checkrune rune="$1" method=getinfo \
-        >/dev/null 2>&1
+    lightning_cli -k checkrune rune="$1" method=getinfo >/dev/null 2>&1
 }
 
 # Mint one rune and prove it before handing it back. createrune can return a
@@ -381,7 +380,7 @@ cln_mint_rune() { # restriction-json -> "rune unique_id"
     command -v jq >/dev/null 2>&1 \
         || { warn "cln_mint_rune needs jq (bootstrap.sh installs it)"; return 1; }
     for ((tries = 1; tries <= 12; tries++)); do
-        out=$(podman exec lightningd lightning-cli createrune null "$restrictions" 2>/dev/null || true)
+        out=$(lightning_cli createrune null "$restrictions" 2>/dev/null || true)
         rune=$(printf '%s' "$out" | jq -r '.rune // empty' 2>/dev/null) || rune=""
         id=$(printf '%s' "$out" | jq -r '.unique_id // empty' 2>/dev/null) || id=""
         [ -n "$rune" ] && [ -n "$id" ] || return 1
@@ -410,6 +409,55 @@ bitcoind_conf_value() { # key
 # notice before the next restart. Never printed by either caller -- only compared.
 bitcoind_conf_password() {
     bitcoind_conf_value rpcpassword
+}
+
+# --- asking a daemon through its own client ---------------------------------
+# Every host-side script that puts a question to a daemon used to spell out the
+# transport itself: eleven copies of `podman exec bitcoind bitcoin-cli`, sixteen
+# of `podman exec lightningd lightning-cli`, five of `podman exec crowdsec
+# cscli`, four of `podman exec monerod curl`. The container name and the binary
+# are one fact each, so they are here: a rename is one edit, and a call site
+# reads as the question it asks.
+#
+# These wrap ONLY the transport. Each caller keeps its own error handling -- a
+# monitor read wants the empty answer, a rotation wants the failure -- so it
+# still redirects stderr or `|| true`s exactly as it did.
+bitcoind_cli() { # bitcoin-cli args...
+    # -datadir is redundant today (the lncm image runs with HOME=/data, so
+    # bitcoin-cli's default ~/.bitcoin IS /data/.bitcoin -- verified: both forms
+    # answer identically) but it pins the answer against an image change.
+    podman exec bitcoind bitcoin-cli -datadir=/data/.bitcoin "$@"
+}
+
+lightning_cli() { # lightning-cli args...
+    podman exec lightningd lightning-cli "$@"
+}
+
+# cscli inside the running container: the same binary the LAPI answers, with no
+# extra credential to hold on the host. `cscli explain` and `cscli decisions`
+# are the two uses (verify.sh, scripts/ids.sh).
+cscli() { # cscli args...
+    podman exec crowdsec cscli "$@"
+}
+
+# The monerod restricted RPC, read with the curl the image ships: the daemon has
+# no CLI, and net_curl is for npm-network peers, not a loopback inside another
+# container. METHOD is the path minus the leading slash (get_info, get_height).
+# The timeout is the caller's budget: a read can block while a --block-sync-size
+# batch holds the chain lock. Empty output (curl's -f) means "did not answer",
+# which is how the collectors keep a hole as a hole.
+monerod_rpc() { # method [timeout] -> the daemon's JSON, empty on failure
+    podman exec monerod curl -fsS -m "${2:-5}" "http://127.0.0.1:18089/$1"
+}
+
+# The same daemon's JSON-RPC endpoint (the unrestricted port), posted to rather
+# than GETed. scripts/btcpay-wallet.sh needs it with a two-minute budget: it
+# asks get_info while a sync batch may hold the chain lock.
+monerod_json_rpc() { # method [timeout] -> the daemon's JSON, empty on failure
+    podman exec monerod curl -s -m "${2:-120}" -X POST \
+        -H 'Content-Type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"$1\"}" \
+        http://127.0.0.1:18081/json_rpc
 }
 
 # --- the Electrum protocol (Fulcrum) ----------------------------------------
@@ -679,6 +727,22 @@ prom_write() {
     write_atomic "$1" 644 755
 }
 
+# stdin -> an env file that carries a secret (or a credential-bearing URL): the
+# one writer for both halves of the stack. install.sh seeds them and deploy.sh
+# rewrites two from the BTCPay bootstrap state, and those two used to differ --
+# umask+cat in one, mktemp+install in the other -- which is exactly the kind of
+# split where one side forgets the mode. Atomic, 0600, parent created.
+write_env_file() { # path
+    write_atomic "$1" 600
+}
+
+# install.sh's name for it. Kept because every seed site there reads as what it
+# is (a secret being written), and the rename would touch thirty call sites for
+# no behaviour.
+write_secret() { # path
+    write_env_file "$1"
+}
+
 # Write a status file: the one record a oneshot unit leaves for scripts/monitor.sh
 # and verify.sh to read. KEY=VALUE so env_value reads it, never sourced, written
 # atomically so a sweep never sees half a line. ok_epoch is the last SUCCESS and
@@ -715,6 +779,55 @@ status_write() { # path header result detail [KEY=VALUE ...]
         warn "could not write $path"
     fi
     return 0
+}
+
+# Read one of those status files, in one place. scripts/monitor.sh and verify.sh
+# both judge the oneshot jobs' verdicts (backup-verify.status, ids.status,
+# auditd.status, bouncer.status) with the same three steps -- read result and
+# detail, validate ok_epoch as a number, subtract it from now -- and both used to
+# spell them out at every site, seven copies in all. The judgement itself stays
+# with the caller: thresholds, wording and units (hours for the drills, minutes
+# for the IDS) are per-check, and only the read is common.
+#
+# Sets STATUS_RESULT, STATUS_AGE_S and STATUS_DETAIL rather than printing a line.
+# A delimiter-separated line cannot carry the empty fields this read exists for
+# (a failure with no detail, a skip before the first success): `read` collapses
+# runs of a whitespace IFS, so "skip<TAB><TAB>no disk" arrives shifted. The age
+# is empty when the file records no success yet, or when ok_epoch is not a
+# number (an older or damaged file). It is floored at 0: a host whose clock
+# stepped back reads as "just now", never as a negative age that passes every
+# threshold. A missing file leaves all three empty.
+# shellcheck disable=SC2034  # set for the caller to read after this returns
+status_verdict() { # file -> STATUS_RESULT, STATUS_AGE_S, STATUS_DETAIL
+    local ok
+    STATUS_RESULT=""; STATUS_AGE_S=""; STATUS_DETAIL=""
+    [ -f "$1" ] || return 0
+    STATUS_RESULT=$(env_value "$1" result)
+    STATUS_DETAIL=$(env_value "$1" detail)
+    ok=$(env_value "$1" ok_epoch)
+    case "$ok" in
+        ''|*[!0-9]*) ;;
+        *) STATUS_AGE_S=$(( $(date +%s) - ok ))
+           [ "$STATUS_AGE_S" -ge 0 ] || STATUS_AGE_S=0 ;;
+    esac
+}
+
+# How old the newest restic snapshot is, and how many there are -- one read of
+# `scripts/backup.sh list --json` for both callers. scripts/monitor.sh alerts on
+# the age and reports the count; scripts/rotate.sh refuses to rotate the restic
+# password unless a recent backup exists. Prints "count<TAB>newest-epoch",
+# with an empty epoch when no snapshot carries a time. Returns non-zero when the
+# repository cannot be listed AT ALL -- which is not "no snapshots yet", and the
+# callers tell the two apart.
+restic_snapshot_summary() { # -> "count<TAB>newest-epoch"
+    local backup="${REPO_DIR:-}/scripts/backup.sh" json latest count epoch=""
+    [ -n "${REPO_DIR:-}" ] || return 1
+    json=$("$backup" list --json 2>/dev/null) || return 1
+    printf '%s' "$json" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+    count=$(printf '%s' "$json" | jq 'length' 2>/dev/null) || return 1
+    latest=$(printf '%s' "$json" | jq -r 'map(.time) | max // empty' 2>/dev/null) || return 1
+    [ -z "$latest" ] || epoch=$(date -d "$latest" +%s 2>/dev/null || true)
+    printf '%s\t%s' "$count" "$epoch"
 }
 
 # The session id the last mcp_initialize was given, the protocol revision the
@@ -1044,3 +1157,48 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
         || die "load_manifest: could not read $repo/deploy/services.toml"
     eval "$out"
 }
+
+# The shared half of scripts/npm-hosts.sh and scripts/kuma-monitors.sh. Both own
+# only a CLI (--dry-run, --prune, --help), the data dir and one endpoint
+# override; everything else is their Python core in scripts/stackctl/, which
+# loads deploy/services.toml itself. So the wrapper's whole job is to resolve the
+# data dir, turn the one override they carry into a declaration record, and hand
+# the core its facts as V<TAB>NAME<TAB>value lines on stdin -- a scalar protocol
+# whose values can contain spaces but never a TAB (scripts/stackctl/decl.py).
+#
+# Extra facts are passed as NAME=value arguments, so a wrapper reads as the one
+# thing it adds:
+#   stackctl_wrapper npm-hosts "NPM_API=${NPM_API_URL:-http://127.0.0.1:81}"
+# One copy is also what keeps the two flags from drifting apart: a new option
+# cannot land in one wrapper and not the other.
+stackctl_wrapper() { # module [NAME=value ...]
+    local module="$1"; shift
+    local dry_run=0 prune=0 arg name value py
+    local -a pairs=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run) dry_run=1 ;;
+            --prune)   prune=1 ;;
+            -h|--help) usage_header "$0"; exit 0 ;;
+            *=*)       pairs+=("$1") ;;
+            *)         die "unknown argument: $1 (try --help)" ;;
+        esac
+        shift
+    done
+    command -v python3 >/dev/null 2>&1 \
+        || die "python3 is required to run the reconciler (bootstrap.sh installs it)"
+    resolve_data_dir
+    py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    {
+        printf 'V\tMANIFEST\t%s\n' "$REPO_DIR/deploy/services.toml"
+        printf 'V\tDATA_DIR\t%s\n' "$DATA_DIR"
+        printf 'V\tCONFIG_DIR\t%s\n' "$CONFIG_DIR"
+        printf 'V\tDRY_RUN\t%s\n' "$dry_run"
+        printf 'V\tPRUNE\t%s\n' "$prune"
+        for arg in ${pairs[@]+"${pairs[@]}"}; do
+            name=${arg%%=*} value=${arg#*=}
+            printf 'V\t%s\t%s\n' "$name" "$value"
+        done
+    } | PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}" python3 -m stackctl "$module"
+}
+

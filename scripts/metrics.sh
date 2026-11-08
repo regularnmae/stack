@@ -67,7 +67,7 @@ collector_error() { emit "stack_collector_error{collector=\"$1\"}" 1; }
 # "how far behind?" answerable over time. verificationprogress is a float.
 # ---------------------------------------------------------------------------
 btc=""
-if btc=$(podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null) && [ -n "$btc" ]; then
+if btc=$(bitcoind_cli getblockchaininfo 2>/dev/null) && [ -n "$btc" ]; then
     emit stack_btc_blocks "$(jq -r '.blocks' <<<"$btc")"
     emit stack_btc_headers "$(jq -r '.headers' <<<"$btc")"
     emit stack_btc_progress "$(jq -r '.verificationprogress' <<<"$btc")"
@@ -88,13 +88,13 @@ fi
 # zero peers is exactly the silent-stalling failure class CLN's check below
 # is about; during IBD zero peers means stalled, so the grace is not applied).
 # ---------------------------------------------------------------------------
-if mp=$(podman exec bitcoind bitcoin-cli getmempoolinfo 2>/dev/null) && [ -n "$mp" ]; then
+if mp=$(bitcoind_cli getmempoolinfo 2>/dev/null) && [ -n "$mp" ]; then
     emit stack_btc_mempool_bytes "$(jq -r '.bytes' <<<"$mp")"
     emit stack_btc_mempool_txs "$(jq -r '.size' <<<"$mp")"
 else
     collector_error bitcoind-mempool
 fi
-if peers=$(podman exec bitcoind bitcoin-cli getpeerinfo 2>/dev/null) && [ -n "$peers" ]; then
+if peers=$(bitcoind_cli getpeerinfo 2>/dev/null) && [ -n "$peers" ]; then
     emit stack_btc_peers "$(jq -r 'length' <<<"$peers")"
 else
     collector_error bitcoind-peers
@@ -138,12 +138,12 @@ fi
 # catches up; README "Full nodes and disk").
 # ---------------------------------------------------------------------------
 ln=""
-if ln=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) && [ -n "$ln" ]; then
+if ln=$(lightning_cli getinfo 2>/dev/null) && [ -n "$ln" ]; then
     emit stack_cln_rpc_up 1
     # Connected peers, not getinfo's num_peers: that one is documented as "the
     # total count of peers, connected or with channels", so it stays >= 1 for a
     # node whose only peer is offline and the series would read as healthy.
-    lpeers=$(podman exec lightningd lightning-cli listpeers 2>/dev/null || echo '{"peers":[]}')
+    lpeers=$(lightning_cli listpeers 2>/dev/null || echo '{"peers":[]}')
     emit stack_cln_peers \
         "$(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null || echo 0)"
     # Present only while the condition holds, so test for the key rather than
@@ -153,7 +153,7 @@ if ln=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) && [ -n "$ln" 
     # The node's own channels, with each peer's connection state: listchannels is
     # the gossip table and has no connectivity field (see scripts/monitor.sh), so
     # this reads listpeerchannels and counts only operational ones.
-    pchans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null || echo '{"channels":[]}')
+    pchans=$(lightning_cli listpeerchannels 2>/dev/null || echo '{"channels":[]}')
     emit stack_cln_channels_offline \
         "$(jq -r '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' <<<"$pchans" 2>/dev/null || echo 0)"
     say "lightningd $(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null || echo 0) connected peer(s)"
@@ -178,7 +178,7 @@ fi
 # scripts/monitor.sh is the one that says whether the RPC answers at all.
 # ---------------------------------------------------------------------------
 xnode=""
-if xnode=$(podman exec monerod curl -s -m 5 http://127.0.0.1:18089/get_height 2>/dev/null) \
+if xnode=$(monerod_rpc get_height 2>/dev/null) \
     && [ -n "$xnode" ] && jq -e '.height' <<<"$xnode" >/dev/null 2>&1; then
     emit stack_xmr_rpc_up 1
     emit stack_xmr_height "$(jq -r '.height' <<<"$xnode")"
@@ -188,7 +188,7 @@ if xnode=$(podman exec monerod curl -s -m 5 http://127.0.0.1:18089/get_height 2>
     # get_info does not answer within the same budget -- a hole keeps a wedge
     # visible, a zero would erase it. This is the daemon-side lag; the wallet's
     # lag below subtracts from `height`, the local tip.
-    if xinfo=$(podman exec monerod curl -s -m 5 http://127.0.0.1:18089/get_info 2>/dev/null) \
+    if xinfo=$(monerod_rpc get_info 2>/dev/null) \
         && jq -e '.height and .target_height and (.target_height >= .height)' <<<"$xinfo" >/dev/null 2>&1; then
         emit stack_xmr_lag "$(( $(jq -r '.target_height' <<<"$xinfo") - $(jq -r '.height' <<<"$xinfo") ))"
     fi

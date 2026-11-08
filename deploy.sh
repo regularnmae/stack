@@ -126,8 +126,6 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-in_list() { local needle="$1"; shift; local x; for x in "$@"; do [ "$x" = "$needle" ] && return 0; done; return 1; }
-
 # ---------------------------------------------------------------------------
 # 0. preflight
 # ---------------------------------------------------------------------------
@@ -428,18 +426,19 @@ restart_unit() { log "restarting $1.service"; run systemctl --user restart "$1.s
 # `start` alone is a no-op on an active unit, which is what would otherwise keep
 # the old bits forever.
 refresh_image_unit() { # container image -> restart when the container is older
-    local name="$1" image="$2" running current
+    local name="$1" image="$2"
     [ "$DRY_RUN" = 0 ] || return 0
     podman container exists "$name" 2>/dev/null || return 0
     systemctl --user is-active --quiet "$name.service" 2>/dev/null || return 0
     # The digest pass may have restarted it already (its unit changed); a second
     # restart is another outage for the same definition.
     unit_applied "$name" && return 0
-    running=$(podman inspect "$name" --format '{{.Image}}' 2>/dev/null || true)
-    current=$(podman image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)
-    if [ -z "$running" ] || [ -z "$current" ] || [ "$running" = "$current" ]; then
-        return 0
-    fi
+    # An unreadable image id is "cannot prove staleness", not "stale" --
+    # image_is_running reads it the other way, so the guard stays here.
+    [ -n "$(podman inspect "$name" --format '{{.Image}}' 2>/dev/null || true)" ] \
+        && [ -n "$(podman image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)" ] \
+        || return 0
+    image_is_running "$name" "$image" && return 0
     log "$name is running an older $image; restarting it"
     if restart_unit "$name"; then
         mark_applied "$name"
@@ -498,7 +497,7 @@ dump_tail() { # container [lines]
 # until it is caught up, so waiting on lightningd then is wasted time.
 bitcoind_syncing() {
     [ "$DRY_RUN" = 1 ] && return 1
-    podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null \
+    bitcoind_cli getblockchaininfo 2>/dev/null \
         | jq -e '.initialblockdownload == true' >/dev/null 2>&1
 }
 
@@ -508,7 +507,7 @@ bitcoind_syncing() {
 # this wait burn its timeout on every deploy. listwallets answers either way, and
 # `[]` (nothing loaded) correctly reads as "not ready".
 bitcoind_wallet_ready() {
-    podman exec bitcoind bitcoin-cli listwallets 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1
+    bitcoind_cli listwallets 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1
 }
 
 # Make sure the podman network exists before anything joins it. The quadlet
@@ -599,7 +598,7 @@ start_infra() {
     fi
 
     # RPC-level readiness, not sync: getblockchaininfo answers while syncing.
-    if wait_cmd "bitcoind RPC" "$BITCOIND_WAIT" podman exec bitcoind bitcoin-cli getblockchaininfo; then
+    if wait_cmd "bitcoind RPC" "$BITCOIND_WAIT" bitcoind_cli getblockchaininfo; then
         BITCOIND_READY=1
         # Fulcrum indexes from bitcoind's RPC and follows it through IBD, so it
         # can be started now; it opens its Electrum ports only once caught up.
@@ -667,7 +666,7 @@ start_daemons() {
         warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./deploy.sh run"
         dump_tail bitcoind 20
     else
-        wait_cmd "lightningd RPC" "$LIGHTNINGD_WAIT" podman exec lightningd lightning-cli getinfo \
+        wait_cmd "lightningd RPC" "$LIGHTNINGD_WAIT" lightning_cli getinfo \
             || { warn "lightningd RPC not up; runes are created on a later ./deploy.sh run"
                  dump_tail lightningd 40; }
     fi
@@ -714,18 +713,13 @@ write_btcpay_backend_env() {
         warn "the BTCPay bootstrap state is incomplete; not writing the backend env"
         return 1
     fi
-    local old_umask
-    old_umask=$(umask)
-    umask 077
-    cat > "$CONFIG_DIR/btcpay/backend.env" <<EOF
+    write_env_file "$CONFIG_DIR/btcpay/backend.env" <<EOF
 # Written by deploy.sh from btcpay/bootstrap.env. Do not hand-edit.
 BTCPAY_URL=http://btcpay:49392
 BTCPAY_API_KEY=$key
 BTCPAY_STORE_ID=$store
 BTCPAY_WEBHOOK_SECRET=$secret
 EOF
-    umask "$old_umask"
-    chmod 600 "$CONFIG_DIR/btcpay/backend.env"
     log "wrote $CONFIG_DIR/btcpay/backend.env (mode 600)"
 }
 
@@ -1048,8 +1042,7 @@ deploy_explorers() {
     # on its own.
     if [ "${#to_restart[@]}" -gt 0 ] \
         && systemctl --user is-active --quiet monerod.service 2>/dev/null; then
-        wait_cmd "monerod restricted RPC" 120 \
-            podman exec monerod curl -fsS -m 5 http://127.0.0.1:18089/get_height \
+        wait_cmd "monerod restricted RPC" 120 monerod_rpc get_height \
             || warn "monerod restricted RPC is not answering; the explorers may retry for a while"
     fi
 
@@ -1204,7 +1197,7 @@ if [ -n "$ONLY" ]; then
     # by sync_units, not here: install.sh rebuilds their image, so starting them
     # before it would compare against the old one.
     ensure_network
-    if in_list "$ONLY" "${APP_REPOS[@]}"; then
+    if unit_in_set "$ONLY" "${APP_REPOS[*]}"; then
         # deploy_app rebuilds the image and restarts the unit itself, so let
         # restart_changed_units leave this one alone rather than restart it
         # twice -- once with the old bits, once with the new.

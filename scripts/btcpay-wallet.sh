@@ -64,10 +64,7 @@ if [ "${restore_height:-0}" -gt 0 ] 2>/dev/null; then
     # end the script right here -- silently, since podman's stderr is discarded
     # -- and the warning below would never be reached. The condition context is
     # what lets an unreadable height fall through to it.
-    if ! daemon_height=$(podman exec monerod curl -s -m 120 -X POST \
-        -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' \
-        http://127.0.0.1:18081/json_rpc 2>/dev/null \
+    if ! daemon_height=$(monerod_json_rpc get_info 120 2>/dev/null \
         | jq -r '.result.height // empty' 2>/dev/null)
     then
         daemon_height=""

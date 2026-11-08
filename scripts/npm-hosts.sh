@@ -34,32 +34,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
-DRY_RUN=0
-PRUNE=0
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --dry-run) DRY_RUN=1 ;;
-        --prune)   PRUNE=1 ;;
-        -h|--help) usage_header "$0"; exit 0 ;;
-        *)         die "unknown argument: $1 (try --help)" ;;
-    esac
-    shift
-done
-
-command -v python3 >/dev/null 2>&1 \
-    || die "python3 is required to run the reconciler (bootstrap.sh installs it)"
-
-resolve_data_dir
-
 # nginx-proxy-manager is on the host network, so its own nginx owns :81 in the
 # host's namespace: the admin API is reached on the loopback.
 NPM_API="${NPM_API_URL:-http://127.0.0.1:81}"
 
-{
-    printf 'V\tMANIFEST\t%s\n' "$REPO_DIR/deploy/services.toml"
-    printf 'V\tDATA_DIR\t%s\n' "$DATA_DIR"
-    printf 'V\tCONFIG_DIR\t%s\n' "$CONFIG_DIR"
-    printf 'V\tNPM_API\t%s\n' "$NPM_API"
-    printf 'V\tDRY_RUN\t%s\n' "$DRY_RUN"
-    printf 'V\tPRUNE\t%s\n' "$PRUNE"
-} | PYTHONPATH="$REPO_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 -m stackctl npm-hosts
+# The CLI, the data dir and the declaration stream are lib.sh's
+# stackctl_wrapper -- the same half kuma-monitors.sh uses.
+stackctl_wrapper npm-hosts "NPM_API=$NPM_API" "$@"

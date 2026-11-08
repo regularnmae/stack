@@ -47,10 +47,11 @@ ask() { local p="$1" a; read -r -p "$p" a; printf '%s' "$a"; }
 # ---------------------------------------------------------------------------
 # Bitcoin
 # ---------------------------------------------------------------------------
-bitcoin_cli() { podman exec bitcoind bitcoin-cli -datadir=/data/.bitcoin "$@"; }
+# bitcoind_cli (scripts/lib.sh) is the stack's one bitcoind client; it pins the
+# datadir the same way this script used to.
 
 btc_wallet_loaded() {
-    bitcoin_cli listwallets 2>/dev/null \
+    bitcoind_cli listwallets 2>/dev/null \
         | jq -e --arg w "$BITCOIN_WALLET" 'index($w) != null' >/dev/null 2>&1
 }
 
@@ -59,7 +60,7 @@ btc_wallet_loaded() {
 # -- which is where this stack's older runs put it). listwalletdir does not
 # always report the latter, so check the filesystem too.
 btc_wallet_on_disk() {
-    bitcoin_cli listwalletdir 2>/dev/null \
+    bitcoind_cli listwalletdir 2>/dev/null \
         | jq -e --arg w "$BITCOIN_WALLET" '.wallets | map(.name) | index($w) != null' >/dev/null 2>&1 \
         || podman exec bitcoind test -f "/data/.bitcoin/$BITCOIN_WALLET/wallet.dat" 2>/dev/null \
         || podman exec bitcoind test -f "/data/.bitcoin/wallets/$BITCOIN_WALLET/wallet.dat" 2>/dev/null
@@ -72,12 +73,12 @@ btc_wallet_on_disk() {
 load_bitcoin_wallet() {
     local err=""
     btc_wallet_loaded && return 0
-    err=$(bitcoin_cli loadwallet "$BITCOIN_WALLET" 2>&1) || true
+    err=$(bitcoind_cli loadwallet "$BITCOIN_WALLET" 2>&1) || true
     btc_wallet_loaded && return 0
-    err=$(bitcoin_cli loadwallet "/data/.bitcoin/$BITCOIN_WALLET" 2>&1) || true
+    err=$(bitcoind_cli loadwallet "/data/.bitcoin/$BITCOIN_WALLET" 2>&1) || true
     btc_wallet_loaded && return 0
     warn "loadwallet '$BITCOIN_WALLET': ${err:-no output}"
-    warn "loaded wallets: $(bitcoin_cli listwallets 2>/dev/null | tr -d ' \n')"
+    warn "loaded wallets: $(bitcoind_cli listwallets 2>/dev/null | tr -d ' \n')"
     return 1
 }
 
@@ -95,7 +96,7 @@ setup_bitcoin() {
     # exists".
     local deadline
     deadline=$(( $(date +%s) + ${BITCOIND_WALLET_WAIT:-120} ))
-    until bitcoin_cli listwallets >/dev/null 2>&1; do
+    until bitcoind_cli listwallets >/dev/null 2>&1; do
         if [ "$(date +%s)" -ge "$deadline" ]; then
             warn "bitcoind wallet RPC did not answer; start it first (./deploy.sh) and re-run this script"
             return 1
@@ -122,7 +123,7 @@ setup_bitcoin() {
     case "$choice" in
         c|C)
             log "creating wallet '$BITCOIN_WALLET'"
-            if ! bitcoin_cli -named createwallet wallet_name="$BITCOIN_WALLET" descriptors=true load_on_startup=true; then
+            if ! bitcoind_cli -named createwallet wallet_name="$BITCOIN_WALLET" descriptors=true load_on_startup=true; then
                 # A directory can exist without listwalletdir reporting it (the
                 # older datadir-root layout). Load it rather than failing the
                 # whole wallet step for a wallet that is already there.
@@ -141,7 +142,7 @@ setup_bitcoin() {
             podman cp "$path" "bitcoind:/data/.bitcoin/restorewallet.dat"
             podman exec -u 0 bitcoind chown 1000:1000 /data/.bitcoin/restorewallet.dat >/dev/null 2>&1 || true
             log "restoring wallet '$BITCOIN_WALLET'"
-            bitcoin_cli -named restorewallet wallet_name="$BITCOIN_WALLET" wallet_backup_file=/data/.bitcoin/restorewallet.dat
+            bitcoind_cli -named restorewallet wallet_name="$BITCOIN_WALLET" wallet_backup_file=/data/.bitcoin/restorewallet.dat
             podman exec bitcoind rm -f /data/.bitcoin/restorewallet.dat >/dev/null 2>&1 || true
             ;;
         *)

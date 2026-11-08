@@ -93,10 +93,13 @@ jobs:
       # direction: a key scripts/monitor.sh starts reading that the example never
       # documents (five of them were in that state), which leaves a fresh host
       # unable to discover or tune it from the file its own installer wrote.
+      # The read side is monitor_var (scripts/monitor.sh), which is also what
+      # makes this grep complete: the key is now the call's argument, not the
+      # tail of an expansion that a hand-written variant could imitate.
       - name: monitor.env documents every key the sweep reads
         run: |
-          read_keys=$(grep -oE 'env_value "\$MONITOR_ENV" MONITOR_[A-Z_]+' scripts/monitor.sh \
-            | awk '{print $NF}' | sort -u)
+          read_keys=$(grep -oE 'monitor_var MONITOR_[A-Z_]+' scripts/monitor.sh \
+            | awk '{print $2}' | sort -u)
           declared=$(grep -oE '^MONITOR_[A-Z_]+=' deploy/examples/monitoring/monitor.env.example \
             | tr -d '=' | sort -u)
           missing=$(comm -23 <(printf '%s\n' "$read_keys") <(printf '%s\n' "$declared"))

@@ -75,18 +75,28 @@ MONITOR_ENV="$CONFIG_DIR/monitoring/monitor.env"
 AUDIT_LOG="$AUDIT_DIR/audit.log"
 
 # The unit passes these through EnvironmentFile; reading the file here too makes
-# a hand run behave the same. env_value never sources the file.
-MONITOR_PING_URL="${MONITOR_PING_URL:-$(env_value "$MONITOR_ENV" MONITOR_PING_URL)}"
-MONITOR_ALERTMANAGER_URL="${MONITOR_ALERTMANAGER_URL:-$(env_value "$MONITOR_ENV" MONITOR_ALERTMANAGER_URL)}"
+# a hand run behave the same. env_value never sources the file. The order is the
+# same at every key -- process environment, then the file, then the caller's
+# default -- so it lives in one helper instead of being re-expanded at each of
+# the twenty-six keys: the one that forgot the file read would alert differently
+# by hand than from the timer.
+monitor_var() { # NAME [default]
+    local v="${!1:-}"
+    [ -n "$v" ] || v=$(env_value "$MONITOR_ENV" "$1")
+    [ -n "$v" ] || v="${2:-}"
+    printf '%s' "$v"
+}
+MONITOR_PING_URL=$(monitor_var MONITOR_PING_URL)
+MONITOR_ALERTMANAGER_URL=$(monitor_var MONITOR_ALERTMANAGER_URL)
 # Default on: the container is part of the stack now, so a host that upgrades
 # gets alerting without an env edit. `off` is the explicit opt-out (an empty
 # value cannot mean it: env_value returns nothing for both "absent" and
 # "empty", which is why the sentinel is a word, not a blank).
 MONITOR_ALERTMANAGER_URL="${MONITOR_ALERTMANAGER_URL:-http://127.0.0.1:9093}"
-MONITOR_ALERT_FOR="${MONITOR_ALERT_FOR:-$(env_value "$MONITOR_ENV" MONITOR_ALERT_FOR)}"
-MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-$(env_value "$MONITOR_ENV" MONITOR_GRACE_SYNC)}"
+MONITOR_ALERT_FOR=$(monitor_var MONITOR_ALERT_FOR)
+MONITOR_GRACE_SYNC=$(monitor_var MONITOR_GRACE_SYNC)
 MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-1}"
-MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:-$(env_value "$MONITOR_ENV" MONITOR_VERIFY_ARGS)}"
+MONITOR_VERIFY_ARGS=$(monitor_var MONITOR_VERIFY_ARGS)
 MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:---deep}"
 # What every alert carries as its instance label: inhibition rules and a future
 # federated setup both key on it, and it is what makes "critical here mutes the
@@ -102,28 +112,28 @@ ALERT_FAILED_FILE="$AUDIT_DIR/alertmanager.failed"
 # EnvironmentFile when systemd runs it, then this file, then the default inside
 # num_or below -- so `scripts/monitor.sh` by hand alerts on exactly what the
 # timer would.
-MONITOR_DISK_FREE_PCT="${MONITOR_DISK_FREE_PCT:-$(env_value "$MONITOR_ENV" MONITOR_DISK_FREE_PCT)}"
-MONITOR_INODES_FREE_PCT="${MONITOR_INODES_FREE_PCT:-$(env_value "$MONITOR_ENV" MONITOR_INODES_FREE_PCT)}"
-MONITOR_IO_UTIL_PCT="${MONITOR_IO_UTIL_PCT:-$(env_value "$MONITOR_ENV" MONITOR_IO_UTIL_PCT)}"
-MONITOR_BACKUP_MAX_AGE_H="${MONITOR_BACKUP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_MAX_AGE_H)}"
-MONITOR_BACKUP_VERIFY_MAX_AGE_H="${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_VERIFY_MAX_AGE_H)}"
-MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H="${MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H)}"
-MONITOR_DUMP_MAX_AGE_H="${MONITOR_DUMP_MAX_AGE_H:-$(env_value "$MONITOR_ENV" MONITOR_DUMP_MAX_AGE_H)}"
-MONITOR_CERT_MIN_DAYS="${MONITOR_CERT_MIN_DAYS:-$(env_value "$MONITOR_ENV" MONITOR_CERT_MIN_DAYS)}"
-MONITOR_RESTART_MAX="${MONITOR_RESTART_MAX:-$(env_value "$MONITOR_ENV" MONITOR_RESTART_MAX)}"
-MONITOR_METRICS_MAX_AGE_S="${MONITOR_METRICS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_METRICS_MAX_AGE_S)}"
-MONITOR_LOGS_MAX_AGE_S="${MONITOR_LOGS_MAX_AGE_S:-$(env_value "$MONITOR_ENV" MONITOR_LOGS_MAX_AGE_S)}"
-MONITOR_FULCRUM_LAG_BLOCKS="${MONITOR_FULCRUM_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MONITOR_FULCRUM_LAG_BLOCKS)}"
+MONITOR_DISK_FREE_PCT=$(monitor_var MONITOR_DISK_FREE_PCT)
+MONITOR_INODES_FREE_PCT=$(monitor_var MONITOR_INODES_FREE_PCT)
+MONITOR_IO_UTIL_PCT=$(monitor_var MONITOR_IO_UTIL_PCT)
+MONITOR_BACKUP_MAX_AGE_H=$(monitor_var MONITOR_BACKUP_MAX_AGE_H)
+MONITOR_BACKUP_VERIFY_MAX_AGE_H=$(monitor_var MONITOR_BACKUP_VERIFY_MAX_AGE_H)
+MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H=$(monitor_var MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H)
+MONITOR_DUMP_MAX_AGE_H=$(monitor_var MONITOR_DUMP_MAX_AGE_H)
+MONITOR_CERT_MIN_DAYS=$(monitor_var MONITOR_CERT_MIN_DAYS)
+MONITOR_RESTART_MAX=$(monitor_var MONITOR_RESTART_MAX)
+MONITOR_METRICS_MAX_AGE_S=$(monitor_var MONITOR_METRICS_MAX_AGE_S)
+MONITOR_LOGS_MAX_AGE_S=$(monitor_var MONITOR_LOGS_MAX_AGE_S)
+MONITOR_FULCRUM_LAG_BLOCKS=$(monitor_var MONITOR_FULCRUM_LAG_BLOCKS)
 # The chain section (below) reads these before the host checks define theirs, so
 # they resolve here too, next to THRESH_FULCRUM_LAG which unblocks that order:
 # bitcoind's peer floor and mempool cap, and monerod's lag behind its target.
-MONITOR_BTC_MIN_PEERS="${MONITOR_BTC_MIN_PEERS:-$(env_value "$MONITOR_ENV" MONITOR_BTC_MIN_PEERS)}"
-MONITOR_MEMPOOL_MB="${MONITOR_MEMPOOL_MB:-$(env_value "$MONITOR_ENV" MONITOR_MEMPOOL_MB)}"
-MONITOR_XMR_LAG_BLOCKS="${MONITOR_XMR_LAG_BLOCKS:-$(env_value "$MONITOR_ENV" MONITOR_XMR_LAG_BLOCKS)}"
-MONITOR_IDS_MAX_AGE_MIN="${MONITOR_IDS_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_IDS_MAX_AGE_MIN)}"
-MONITOR_IDS_ALERT_WARN="${MONITOR_IDS_ALERT_WARN:-$(env_value "$MONITOR_ENV" MONITOR_IDS_ALERT_WARN)}"
-MONITOR_BOUNCER_MAX_AGE_MIN="${MONITOR_BOUNCER_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_BOUNCER_MAX_AGE_MIN)}"
-MONITOR_AUDIT_MAX_AGE_MIN="${MONITOR_AUDIT_MAX_AGE_MIN:-$(env_value "$MONITOR_ENV" MONITOR_AUDIT_MAX_AGE_MIN)}"
+MONITOR_BTC_MIN_PEERS=$(monitor_var MONITOR_BTC_MIN_PEERS)
+MONITOR_MEMPOOL_MB=$(monitor_var MONITOR_MEMPOOL_MB)
+MONITOR_XMR_LAG_BLOCKS=$(monitor_var MONITOR_XMR_LAG_BLOCKS)
+MONITOR_IDS_MAX_AGE_MIN=$(monitor_var MONITOR_IDS_MAX_AGE_MIN)
+MONITOR_IDS_ALERT_WARN=$(monitor_var MONITOR_IDS_ALERT_WARN)
+MONITOR_BOUNCER_MAX_AGE_MIN=$(monitor_var MONITOR_BOUNCER_MAX_AGE_MIN)
+MONITOR_AUDIT_MAX_AGE_MIN=$(monitor_var MONITOR_AUDIT_MAX_AGE_MIN)
 
 # Defaults live here, not only in monitor.env, so an older env file (one written
 # before these checks existed) still monitors. The helper and the one threshold
@@ -372,7 +382,7 @@ fi
 # ---------------------------------------------------------------------------
 head3 "chain daemons"
 
-info=$(podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null) || info=""
+info=$(bitcoind_cli getblockchaininfo 2>/dev/null) || info=""
 if [ -z "$info" ]; then
     fail "bitcoind RPC unreachable"
 else
@@ -391,7 +401,7 @@ else
     # floor defaults to 1, so any 0-peer read fails (the message below names the
     # floor); this deliberately looks past IBD, where a stalled download is the
     # same fault as a stalled tip.
-    json_peers=$(podman exec bitcoind bitcoin-cli getpeerinfo 2>/dev/null) || json_peers=""
+    json_peers=$(bitcoind_cli getpeerinfo 2>/dev/null) || json_peers=""
     n_peers=$(printf '%s' "$json_peers" | jq -r 'if type == "array" then length else empty end' 2>/dev/null) || n_peers=""
     if [ -z "$n_peers" ]; then
         soft "could not read bitcoind getpeerinfo; skipped the peer check"
@@ -402,7 +412,7 @@ else
     fi
     # The mempool cap: a warn only, since Core fills it well into a fee storm
     # before rejecting and the right response is "look at the fees", not a page.
-    mp=$(podman exec bitcoind bitcoin-cli getmempoolinfo 2>/dev/null) || mp=""
+    mp=$(bitcoind_cli getmempoolinfo 2>/dev/null) || mp=""
     mp_mb=$(printf '%s' "$mp" | jq -r 'if type == "object" then ((.bytes // 0) / 1048576 | floor) else empty end' 2>/dev/null) || mp_mb=""
     if [ -n "$mp_mb" ]; then
         if [ "$mp_mb" -ge "$THRESH_MEMPOOL_MB" ]; then
@@ -438,7 +448,7 @@ else
     fi
 fi
 
-lninfo=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) || lninfo=""
+lninfo=$(lightning_cli getinfo 2>/dev/null) || lninfo=""
 if [ -z "$lninfo" ]; then
     fail "lightningd RPC unreachable"
 else
@@ -460,7 +470,7 @@ else
     # only operational channels count (an ONCHAIN one is meant to be alone).
     # jq is a hard requirement of this script (checked at the top), so there is
     # no no-jq fallback here: a missing jq aborts the sweep before this point.
-    lpeers=$(podman exec lightningd lightning-cli listpeers 2>/dev/null) || lpeers=""
+    lpeers=$(lightning_cli listpeers 2>/dev/null) || lpeers=""
     npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
     if [ -z "$npeers" ]; then
         soft "could not read lightningd listpeers; skipped the peer check"
@@ -469,7 +479,7 @@ else
     else
         ok "lightningd has $npeers connected peer(s)"
     fi
-    chans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null) || chans=""
+    chans=$(lightning_cli listpeerchannels 2>/dev/null) || chans=""
     offline=$(printf '%s' "$chans" | jq -r \
         '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
         2>/dev/null) || offline=""
@@ -582,12 +592,12 @@ THRESH_LOGS_S=$(num_or "${MONITOR_LOGS_MAX_AGE_S:-}" 900)
 # The NIC's errs+drop columns, delta'd between sweeps like the restart counters:
 # a carrier dropping packets is invisible to every chain check (all of them
 # see is a slow sync) and to node-exporter's *counters* until someone looks.
-MONITOR_NET_DROP="${MONITOR_NET_DROP:-$(env_value "$MONITOR_ENV" MONITOR_NET_DROP)}"
+MONITOR_NET_DROP=$(monitor_var MONITOR_NET_DROP)
 THRESH_NET_DROP=$(num_or "${MONITOR_NET_DROP:-}" 100)
 # The hottest hwmon reading at sweep time; a warn, since this box is headless
 # and a one-off spike (a compile, a busy sweep) is noise, while a climbing
 # trend shows in the graphs node-exporter already exports from the same sysfs.
-MONITOR_TEMP_MAX="${MONITOR_TEMP_MAX:-$(env_value "$MONITOR_ENV" MONITOR_TEMP_MAX)}"
+MONITOR_TEMP_MAX=$(monitor_var MONITOR_TEMP_MAX)
 THRESH_TEMP_C=$(num_or "${MONITOR_TEMP_MAX:-}" 85)
 
 # df -P's Use% is rounded *up*, so 100-Use% is a floor: erring towards alarming.
@@ -702,23 +712,21 @@ fi
 
 # backup age: a timer that fires is not a repository that has a snapshot, and a
 # fire-and-forget backup is the failure you find out about on restore day.
-if bjson=$("$REPO_DIR/scripts/backup.sh" list --json 2>/dev/null) \
-    && printf '%s' "$bjson" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    backup_count=$(printf '%s' "$bjson" | jq 'length')
-    latest=$(printf '%s' "$bjson" | jq -r 'map(.time) | max // empty' 2>/dev/null)
-    if [ -n "$latest" ]; then
-        latest_s=$(date -d "$latest" +%s 2>/dev/null || echo "")
-        if [ -n "$latest_s" ]; then
-            backup_age_s=$(( $(date +%s) - latest_s ))
-            backup_age_h=$(( backup_age_s / 3600 ))
-            if [ "$backup_age_h" -gt "$THRESH_BACKUP_H" ]; then
-                fail "no restic snapshot for ${backup_age_h}h (threshold ${THRESH_BACKUP_H}h)"
-            else
-                ok "last backup ${backup_age_h}h ago ($backup_count snapshot(s))"
-            fi
+# restic_snapshot_summary (scripts/lib.sh) is the same read scripts/rotate.sh
+# makes before it will rotate the repository password.
+if bsummary=$(restic_snapshot_summary); then
+    IFS=$'\t' read -r backup_count backup_epoch <<< "$bsummary"
+    if [ -n "$backup_epoch" ]; then
+        backup_age_s=$(( $(date +%s) - backup_epoch ))
+        backup_age_h=$(( backup_age_s / 3600 ))
+        if [ "$backup_age_h" -gt "$THRESH_BACKUP_H" ]; then
+            fail "no restic snapshot for ${backup_age_h}h (threshold ${THRESH_BACKUP_H}h)"
+        else
+            ok "last backup ${backup_age_h}h ago ($backup_count snapshot(s))"
         fi
+    else
+        soft "no restic snapshot yet (expected until the first backup runs)"
     fi
-    [ -n "$backup_age_s" ] || soft "no restic snapshot yet (expected until the first backup runs)"
 else
     soft "could not list the restic repository (scripts/backup.sh list)"
 fi
@@ -763,21 +771,21 @@ esac
 # measured from the last SUCCESS, not the last run -- a drill that skips (no disk
 # space, an oversized set) must not look healthy just because the timer fired.
 VERIFY_STATUS_FILE="$AUDIT_DIR/backup-verify.status"
-if [ -f "$VERIFY_STATUS_FILE" ]; then
-    vres=$(env_value "$VERIFY_STATUS_FILE" result)
-    vok=$(num_or "$(env_value "$VERIFY_STATUS_FILE" ok_epoch)" "")
-    vdetail=$(env_value "$VERIFY_STATUS_FILE" detail)
-    if [ "$vres" = fail ]; then
-        fail "backup restore drill failed: ${vdetail:-run scripts/backup.sh verify}"
+if [ ! -f "$VERIFY_STATUS_FILE" ]; then
+    soft "no backup restore drill yet (expected until backup-verify.timer runs)"
+else
+    status_verdict "$VERIFY_STATUS_FILE"
+    if [ "$STATUS_RESULT" = fail ]; then
+        fail "backup restore drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify}"
         backup_verify_ok=0
-    elif [ -n "$vok" ]; then
-        backup_verify_age_s=$(( $(date +%s) - vok ))
+    elif [ -n "$STATUS_AGE_S" ]; then
+        backup_verify_age_s=$STATUS_AGE_S
         vage_h=$(( backup_verify_age_s / 3600 ))
         if [ "$vage_h" -gt "$THRESH_VERIFY_H" ]; then
-            fail "no successful backup restore drill for ${vage_h}h (threshold ${THRESH_VERIFY_H}h, last result ${vres:-?})"
+            fail "no successful backup restore drill for ${vage_h}h (threshold ${THRESH_VERIFY_H}h, last result ${STATUS_RESULT:-?})"
             backup_verify_ok=0
-        elif [ "$vres" = skip ]; then
-            soft "backup restore drill skipped: ${vdetail:-no detail} (last success ${vage_h}h ago)"
+        elif [ "$STATUS_RESULT" = skip ]; then
+            soft "backup restore drill skipped: ${STATUS_DETAIL:-no detail} (last success ${vage_h}h ago)"
             backup_verify_ok=1
         else
             ok "backup restore drill passed ${vage_h}h ago"
@@ -786,8 +794,6 @@ if [ -f "$VERIFY_STATUS_FILE" ]; then
     else
         soft "backup restore drill has no recorded success yet (expected until the first run)"
     fi
-else
-    soft "no backup restore drill yet (expected until backup-verify.timer runs)"
 fi
 
 # The database drill (scripts/backup.sh verify-db, run monthly by
@@ -798,21 +804,21 @@ fi
 # the other's age. A skip (no pull, no repository lock, not enough disk) carries
 # ok_epoch forward, so a run of skips fails on age instead of looking green.
 VERIFY_DB_STATUS_FILE="$AUDIT_DIR/backup-verify-db.status"
-if [ -f "$VERIFY_DB_STATUS_FILE" ]; then
-    vdres=$(env_value "$VERIFY_DB_STATUS_FILE" result)
-    vdok=$(num_or "$(env_value "$VERIFY_DB_STATUS_FILE" ok_epoch)" "")
-    vddetail=$(env_value "$VERIFY_DB_STATUS_FILE" detail)
-    if [ "$vdres" = fail ]; then
-        fail "backup database drill failed: ${vddetail:-run scripts/backup.sh verify-db}"
+if [ ! -f "$VERIFY_DB_STATUS_FILE" ]; then
+    soft "no backup database drill yet (expected until backup-verify-db.timer runs)"
+else
+    status_verdict "$VERIFY_DB_STATUS_FILE"
+    if [ "$STATUS_RESULT" = fail ]; then
+        fail "backup database drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify-db}"
         backup_verify_db_ok=0
-    elif [ -n "$vdok" ]; then
-        backup_verify_db_age_s=$(( $(date +%s) - vdok ))
+    elif [ -n "$STATUS_AGE_S" ]; then
+        backup_verify_db_age_s=$STATUS_AGE_S
         vdage_h=$(( backup_verify_db_age_s / 3600 ))
         if [ "$vdage_h" -gt "$THRESH_VERIFY_DB_H" ]; then
-            fail "no successful backup database drill for ${vdage_h}h (threshold ${THRESH_VERIFY_DB_H}h, last result ${vdres:-?})"
+            fail "no successful backup database drill for ${vdage_h}h (threshold ${THRESH_VERIFY_DB_H}h, last result ${STATUS_RESULT:-?})"
             backup_verify_db_ok=0
-        elif [ "$vdres" = skip ]; then
-            soft "backup database drill skipped: ${vddetail:-no detail} (last success ${vdage_h}h ago)"
+        elif [ "$STATUS_RESULT" = skip ]; then
+            soft "backup database drill skipped: ${STATUS_DETAIL:-no detail} (last success ${vdage_h}h ago)"
             backup_verify_db_ok=1
         else
             ok "backup database drill passed ${vdage_h}h ago"
@@ -821,8 +827,6 @@ if [ -f "$VERIFY_DB_STATUS_FILE" ]; then
     else
         soft "backup database drill has no recorded success yet (expected until the first run)"
     fi
-else
-    soft "no backup database drill yet (expected until backup-verify-db.timer runs)"
 fi
 
 # Certificate expiry: NPM renews by itself, and fails silently. One cert per
@@ -1041,21 +1045,18 @@ ids_up=0
 if [ ! -f "$IDS_STATUS_FILE" ]; then
     soft "no IDS status yet (deploy/ids.timer has not run; sudo ./bootstrap.sh installs the sensor)"
 else
-    ires=$(env_value "$IDS_STATUS_FILE" result)
-    iok=$(num_or "$(env_value "$IDS_STATUS_FILE" ok_epoch)" "")
-    idetail=$(env_value "$IDS_STATUS_FILE" detail)
+    status_verdict "$IDS_STATUS_FILE"
     ids_alerts=$(num_or "$(env_value "$IDS_STATUS_FILE" alerts)" 0)
     ids_decisions=$(num_or "$(env_value "$IDS_STATUS_FILE" decisions)" 0)
     isuri=$(env_value "$IDS_STATUS_FILE" suricata)
     icrowd=$(env_value "$IDS_STATUS_FILE" crowdsec)
-    if [ "$ires" = fail ]; then
-        fail "intrusion detection is degraded: ${idetail:-see $AUDIT_LOG}"
+    if [ "$STATUS_RESULT" = fail ]; then
+        fail "intrusion detection is degraded: ${STATUS_DETAIL:-see $AUDIT_LOG}"
         ids_up=0
-    elif [ -z "$iok" ]; then
+    elif [ -z "$STATUS_AGE_S" ]; then
         soft "IDS status has no ok_epoch yet"
     else
-        ids_age_s=$(( $(date +%s) - iok ))
-        ids_age_m=$(( ids_age_s / 60 ))
+        ids_age_m=$(( STATUS_AGE_S / 60 ))
         if [ "$ids_age_m" -gt "$THRESH_IDS_AGE_M" ]; then
             fail "the IDS has not reported for ${ids_age_m} min (ids.timer stopped, or ids.sh cannot read the sensor)"
         else
@@ -1081,16 +1082,14 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
     if [ ! -f "$AUDIT_STATUS_FILE" ]; then
         soft "no audit report yet (stack-audit.timer has not run)"
     else
-        ares=$(env_value "$AUDIT_STATUS_FILE" result)
-        aok=$(num_or "$(env_value "$AUDIT_STATUS_FILE" ok_epoch)" "")
-        adetail=$(env_value "$AUDIT_STATUS_FILE" detail)
+        status_verdict "$AUDIT_STATUS_FILE"
         audit_fim=$(num_or "$(env_value "$AUDIT_STATUS_FILE" fim)" 0)
-        if [ "$ares" = fail ]; then
-            fail "host-level configuration changed: ${adetail:-see $AUDIT_STATUS_FILE}"
-        elif [ -z "$aok" ]; then
+        if [ "$STATUS_RESULT" = fail ]; then
+            fail "host-level configuration changed: ${STATUS_DETAIL:-see $AUDIT_STATUS_FILE}"
+        elif [ -z "$STATUS_AGE_S" ]; then
             soft "the audit report has no ok_epoch yet"
         else
-            aage_m=$(( ($(date +%s) - aok) / 60 ))
+            aage_m=$(( STATUS_AGE_S / 60 ))
             if [ "$aage_m" -gt "$THRESH_AUDIT_AGE_M" ]; then
                 fail "the audit report has not run for ${aage_m} min (systemctl status stack-audit.timer)"
             else
@@ -1119,21 +1118,19 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
     if [ ! -f "$BOUNCER_STATUS_FILE" ]; then
         soft "no bouncer status yet (stack-bouncer.timer has not run)"
     else
-        bres=$(env_value "$BOUNCER_STATUS_FILE" result)
-        bok=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" ok_epoch)" "")
-        bdetail=$(env_value "$BOUNCER_STATUS_FILE" detail)
+        status_verdict "$BOUNCER_STATUS_FILE"
         bouncer_bans=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" banned)" 0)
         # Decisions enforcement declined because they name an address the
         # operator holds or their own public egress: a decision that exists and
         # is deliberately not applied. Worth a line, because "0 banned" next to
         # a live decision reads like a broken applier.
         bouncer_skipped=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" skipped)" 0)
-        if [ "$bres" = fail ]; then
-            fail "the bouncer is not applying decisions: ${bdetail:-see $AUDIT_DIR/bouncer.status}"
-        elif [ -z "$bok" ]; then
+        if [ "$STATUS_RESULT" = fail ]; then
+            fail "the bouncer is not applying decisions: ${STATUS_DETAIL:-see $AUDIT_DIR/bouncer.status}"
+        elif [ -z "$STATUS_AGE_S" ]; then
             soft "bouncer status has no ok_epoch yet"
         else
-            bage_m=$(( ($(date +%s) - bok) / 60 ))
+            bage_m=$(( STATUS_AGE_S / 60 ))
             if [ "$bage_m" -gt "$THRESH_BOUNCER_AGE_M" ]; then
                 fail "the bouncer has not applied decisions for ${bage_m} min (systemctl status stack-bouncer.timer)"
             else

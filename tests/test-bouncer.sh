@@ -17,13 +17,8 @@ BOUNCER="$ROOT_DIR/deploy/root/bouncer.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-assert_eq() {
-    local want="$1" got="$2" label="$3"
-    if [ "$want" != "$got" ]; then
-        printf 'FAIL: %s: expected %s, got %s\n' "$label" "$want" "$got" >&2
-        exit 1
-    fi
-}
+# shellcheck source=lib.sh
+source "$ROOT_DIR/tests/lib.sh"
 
 # Pull one function out of the template by its definition line, up to the
 # closing brace in column 0. Keeps this test from executing the script (which
