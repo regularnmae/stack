@@ -20,6 +20,14 @@ ENV_FILE=/etc/stack-ids/audit.env
 # shellcheck source=/dev/null
 . "$ENV_FILE"   # DATA_DIR
 
+# The status-file writer, installed beside this script by install.sh --root.
+if [ ! -r /etc/stack-ids/status.sh ]; then
+    printf 'ERROR: /etc/stack-ids/status.sh is missing; re-run sudo ./bootstrap.sh\n' >&2
+    exit 1
+fi
+# shellcheck source=status.sh
+. /etc/stack-ids/status.sh
+
 STATUS="$DATA_DIR/audit/auditd.status"
 CURSOR="$DATA_DIR/audit/auditd.cursor"
 # What ausearch/aureport read. Its absence is the ordinary state on a host whose
@@ -159,25 +167,11 @@ if [ -x /usr/sbin/auditctl ]; then
     fi
 fi
 
-prev_ok=""
-[ -f "$STATUS" ] && prev_ok=$(sed -n 's/^ok_epoch=//p' "$STATUS" | tail -1)
-case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
-if [ "$result" = ok ]; then ok_epoch="$now"; else ok_epoch="$prev_ok"; fi
-
-tmp=$(mktemp "$DATA_DIR/audit/.auditd.XXXXXX") || exit 1
-{
-    printf '# written by /etc/stack-ids/audit-report.sh (stack-audit.timer)\n'
-    printf 'time=%s\n' "$(date -Is)"
-    printf 'epoch=%s\n' "$now"
-    printf 'result=%s\n' "$result"
-    printf 'ok_epoch=%s\n' "$ok_epoch"
-    printf 'hard=%s\n' "$hard"
-    printf 'data=%s\n' "$data"
-    printf 'fim=%s\n' "$fim_changes"
-    printf 'audit=%s\n' "$audit_state"
-    printf 'read=%s\n' "$read_state"
-    printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
-} > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$STATUS"
+status_write "$STATUS" \
+    "# written by /etc/stack-ids/audit-report.sh (stack-audit.timer)" \
+    "$result" "$detail" \
+    "hard=$hard" "data=$data" "fim=$fim_changes" \
+    "audit=$audit_state" "read=$read_state"
 
 # Only advance the cursor on a clean read: a failed ausearch must re-examine the
 # same window next time rather than skip it. The evidence read (`ausearch`, only

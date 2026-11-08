@@ -11,7 +11,10 @@ README's "Intrusion detection".
   in its log; onion traffic exists only on the wire as ciphertext.
 - **Enforcement is ours** (`deploy/root/bouncer.sh`), because no upstream bouncer
   image works, and it refuses private space, every address the host holds, and
-  `STACK_WAN_IP` -- that last one is the operator's own shared egress.
+  `STACK_WAN_IP` -- that last one is the operator's own shared egress. Its status
+  file and `auditd.status` are written by one shared root-tier writer,
+  `/etc/stack-ids/status.sh` (`deploy/root/status.sh`), which is also
+  `scripts/lib.sh`'s contract: `tests/test-status.sh` runs both over one table.
 - **The bouncer's address guard is CIDR-exact, and replayed.**
   `deploy/root/ipguard.py` classifies every decision with the stdlib
   `ipaddress` module and installs beside the bouncer as

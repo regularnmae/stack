@@ -167,3 +167,9 @@ jobs:
       # space immediately outside it must ban.
       - name: bouncer address guard tests
         run: python3 tests/test-ipguard.py
+      # The status file scripts/monitor.sh reads is written by two files --
+      # scripts/lib.sh for the user tier and deploy/root/status.sh for root,
+      # which cannot source the checkout. This runs one table through both and
+      # diffs, so the two cannot drift.
+      - name: status writer tests
+        run: tests/test-status.sh

@@ -1165,6 +1165,7 @@ ROOT_FILES=(
     "deploy/root/suricata/rules/local.rules:/etc/stack-ids/suricata/rules/local.rules"
     "deploy/root/logrotate-stack-ids:/etc/logrotate.d/stack-ids"
     "deploy/root/audit-report.sh:/etc/stack-ids/audit-report.sh"
+    "deploy/root/status.sh:/etc/stack-ids/status.sh"
     "deploy/root/stack-audit.service:/etc/systemd/system/stack-audit.service"
     "deploy/root/stack-audit.timer:/etc/systemd/system/stack-audit.timer"
     "deploy/root/bouncer.sh:/etc/stack-ids/bouncer.sh:opt"

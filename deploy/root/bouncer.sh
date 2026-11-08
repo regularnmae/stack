@@ -42,6 +42,17 @@ SET_V6=banned_v6
 # shellcheck source=/dev/null
 . "$ENV_FILE"
 
+# The status-file writer, installed beside this script by install.sh --root. A
+# missing one is fatal rather than optional: without it this run cannot leave a
+# verdict, and the monitor's age check is what notices. Failing here (nothing is
+# applied) is the safe direction, exactly as an ipguard failure is.
+if [ ! -r /etc/stack-ids/status.sh ]; then
+    printf 'ERROR: /etc/stack-ids/status.sh is missing; re-run sudo ./bootstrap.sh\n' >&2
+    exit 1
+fi
+# shellcheck source=status.sh
+. /etc/stack-ids/status.sh
+
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
@@ -131,22 +142,9 @@ dur_to_sec() {
 }
 
 write_status() { # result detail banned [skipped]
-    local result="$1" detail="$2" banned="$3" skipped="${4:-0}" now prev_ok="" ok_epoch tmp
-    now=$(date +%s)
-    [ -f "$STATUS" ] && prev_ok=$(sed -n 's/^ok_epoch=//p' "$STATUS" | tail -1)
-    case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
-    if [ "$result" = ok ]; then ok_epoch="$now"; else ok_epoch="$prev_ok"; fi
-    tmp=$(mktemp "$DATA_DIR/audit/.bouncer.XXXXXX") || return 0
-    {
-        printf '# written by /etc/stack-ids/bouncer.sh (stack-bouncer.timer)\n'
-        printf 'time=%s\n' "$(date -Is)"
-        printf 'epoch=%s\n' "$now"
-        printf 'result=%s\n' "$result"
-        printf 'ok_epoch=%s\n' "$ok_epoch"
-        printf 'banned=%s\n' "$banned"
-        printf 'skipped=%s\n' "$skipped"
-        printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
-    } > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$STATUS"
+    status_write "$STATUS" \
+        "# written by /etc/stack-ids/bouncer.sh (stack-bouncer.timer)" \
+        "$1" "$2" "banned=$3" "skipped=${4:-0}"
 }
 
 # ---------------------------------------------------------------------------
