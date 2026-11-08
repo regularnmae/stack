@@ -54,6 +54,17 @@ assert_eq "" "$(mcp_result 'event: message
 data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"text":"ISO-8601: 2026-11-08T00:00:00+00:00","type":"text"}]}}')" \
     'mcp_result rejects non-JSON tool text'
 
+# The handshake body is built from MCP_PROTOCOL_VERSION, so the revision is one
+# named fact instead of a literal a sed can miss. The body must stay valid JSON
+# and carry that exact version -- the servers refuse an unknown revision, and
+# this client exists only because the probes may not go through agent-mcp.
+assert_eq "$MCP_PROTOCOL_VERSION" \
+    "$(printf '%s' "$MCP_INIT_BODY" | jq -r '.params.protocolVersion')" \
+    'MCP_INIT_BODY carries MCP_PROTOCOL_VERSION'
+assert_eq '"initialize"' \
+    "$(printf '%s' "$MCP_INIT_BODY" | jq -c '.method')" \
+    'MCP_INIT_BODY is the initialize method'
+
 # The status-file contract: ok_epoch moves only on success and is carried
 # through a failure, which is what the monitor's age checks key on.
 status="$TMP_DIR/ids.status"

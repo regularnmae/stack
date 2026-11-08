@@ -86,13 +86,26 @@ own_ips() {
     ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' '
 }
 
+# Each IPv4 pattern is an exact octet range for the CIDR named beside it, and
+# every boundary is one glob character away from covering public space: this
+# file once carried `100.1[0-2][0-9]` for CGNAT's /10, which also matched
+# 100.128.0.0/16 and 100.129.0.0/16 -- two public ranges that would then never
+# be enforced against. stack-whitelists.yaml documents the same class of bug
+# (`startsWith '172.2'` widening to 172.200.0.0/14); the difference is that
+# file's ranges are replayed by verify.sh, and these are replayed by
+# tests/test-bouncer.sh. Change a range and change the test's table with it.
 is_internal() { # ip -> 0 when it must never be banned
     local ip="$1"
     [ -n "${STACK_WAN_IP:-}" ] && [ "$ip" = "$STACK_WAN_IP" ] && return 0
     case "$ip" in
+        # 127.0.0.0/8, 10.0.0.0/8, 192.168.0.0/16, 169.254.0.0/16, 0.0.0.0
         127.*|10.*|192.168.*|169.254.*|0.0.0.0) return 0 ;;
+        # 172.16.0.0/12: 172.16-19, 172.20-29, 172.30-31
         172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
-        100.6[4-9].*|100.[7-9][0-9].*|100.1[0-2][0-9].*) return 0 ;;
+        # 100.64.0.0/10: 100.64-69, 100.70-99, 100.100-119, 100.120-127
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*) return 0 ;;
+        # ::1, fe80::/10 (written in full by both the kernel and the LAPI),
+        # fc00::/7 (unique-local)
         ::1|fe80:*|fc*|fd*) return 0 ;;
     esac
     case " $OWN_IPS " in *" $ip "*) return 0 ;; esac

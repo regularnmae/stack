@@ -12,6 +12,13 @@ README's "Intrusion detection".
 - **Enforcement is ours** (`deploy/root/bouncer.sh`), because no upstream bouncer
   image works, and it refuses private space, every address the host holds, and
   `STACK_WAN_IP` -- that last one is the operator's own shared egress.
+- **The bouncer's private-space table is exact, and replayed.** Its globs stand
+  in for CIDRs, so one wrong octet range silently exempts public addresses from
+  enforcement -- `100.1[0-2][0-9]` for CGNAT's `/10` also covered
+  `100.128.0.0/16` and `100.129.0.0/16`. `tests/test-bouncer.sh` extracts the
+  function from the template and asserts both directions on every boundary
+  (the same discipline `verify.sh` applies to `s02-enrich`'s whitelist). Change
+  a range and change that table with it.
 - **`CROWDSEC_BOUNCER_KEY` is never regenerated.** The container registers that
   exact key at start.
 - **A whitelist expression is a plain string prefix, not a network.**

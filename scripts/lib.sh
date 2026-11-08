@@ -51,9 +51,10 @@ rand_hex() {
 }
 
 # The image the host-side checks speak through: a curl client (see
-# netcheck/Containerfile), built by deploy/install.sh. It is a container rather
-# than a host package, so the host needs only podman for a check to reach a
-# service (the app images vary, and several carry no curl).
+# netcheck/Containerfile), built by deploy/install.sh. It is a container, not
+# the host's own curl, because a probe has to reach a service by its
+# npm-network container name, which only a client attached to that network can
+# resolve -- and because several app images carry no curl of their own.
 #
 # The checks EXEC into a long-lived container instead of starting a throwaway
 # one per probe. That is not tidiness: verify.sh makes dozens of probes in a
@@ -382,9 +383,11 @@ bitcoind_conf_password() {
 # and nginx-proxy-manager cannot front it, so this is the stack's one protocol
 # that needs a TCP client of its own.
 #
-# The client is bash's /dev/tcp. The host has no nc -- bootstrap.sh installs
-# podman, firewalld, git, openssl and jq and nothing else -- and `read -t` is the
-# whole timeout, so a probe costs no container start and no package. It runs in
+# The client is bash's /dev/tcp. There is no `nc` (bootstrap installs podman,
+# firewalld, git, openssl, jq, curl and python3 -- a curl cannot speak this
+# protocol, and pulling in netcat or socat for one newline-delimited exchange
+# is not worth a package), and `read -t` is the whole timeout, so a probe costs
+# no container start. It runs in
 # a subshell because a failed `exec` redirection can end a non-interactive shell:
 # a refused port has to cost the caller an empty string, never the sweep. TLS
 # goes through openssl, which is already a bootstrap dependency (scripts/monitor.sh
@@ -704,8 +707,13 @@ mcp_curl() { # container curl-args...
 }
 
 # The handshake every MCP streamable-HTTP session starts with. The version is
-# the protocol revision, not this stack's.
-MCP_INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"monitor","version":"0"}}}'
+# the protocol revision, not this stack's: it is what agent-mcp sends
+# (agent-skills' lib/mcp_http.py PROTOCOL_VERSION) and what the servers
+# implement. Named once because it is the one fact this hand-rolled client and
+# the real one disagree about silently when a revision lands -- a bump is this
+# line plus agent-skills', and tests/test-lib.sh asserts the body carries it.
+MCP_PROTOCOL_VERSION='2025-06-18'
+MCP_INIT_BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"$MCP_PROTOCOL_VERSION\",\"capabilities\":{},\"clientInfo\":{\"name\":\"monitor\",\"version\":\"0\"}}}"
 
 # Authenticate against CONTAINER's MCP endpoint: do the initialize handshake,
 # print the response body and record the session id in MCP_SESSION_ID. Returns 1

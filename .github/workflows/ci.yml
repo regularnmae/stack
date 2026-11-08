@@ -157,3 +157,10 @@ jobs:
         run: python3 tests/test_stackctl.py
       - name: shared shell helper tests
         run: tests/test-lib.sh
+      # deploy/root/bouncer.sh cannot source scripts/lib.sh (it runs as root and
+      # must not read the checkout), so it carries its own private-space table
+      # and its own Go-duration parser. Both decide whether a packet is dropped,
+      # and neither had a test; this replays a public and a private address on
+      # every boundary, plus the shared duration fixtures.
+      - name: bouncer parser tests
+        run: tests/test-bouncer.sh

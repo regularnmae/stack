@@ -8,10 +8,10 @@
 # must not get lost:
 #
 #   * NPM runs on the HOST network and its admin API is 127.0.0.1:81 there, so
-#     the host's own Python reaches it directly. The bash version needed
-#     net_curl_host (curl inside the netcheck-host container) only because the
-#     host was not guaranteed a curl; urllib removes that reason, not the
-#     network fact.
+#     the host's own Python reaches it directly. The bash version went through
+#     net_curl_host (curl inside the netcheck-host container) because at the
+#     time the host was not guaranteed a curl; bootstrap installs one now, and
+#     urllib removes the reason entirely -- not the network fact.
 #   * The API probe before any credential is used, so "NPM is not answering"
 #     never reads as "your password is wrong" -- and its die message carries
 #     the parked-configs rescue, because the failure it guards against is
