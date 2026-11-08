@@ -171,11 +171,13 @@ below states the rule, the doc says why it is the rule.
 
 - **The public surface is declared once**, in `deploy/services.toml`: the
   `*_HOST` names (each with its operator env override), the `[mcp.*]` prefixes,
-  the `[npm.*]` proxy hosts, the `[onion.*]` services and the `[kuma.monitor.*]`
-  monitors. `scripts/lib.sh`'s `load_manifest` re-emits the old shell names
-  (`MCP_HOSTS`, `ONION_SERVICES`, ...) for the bash callers, the Python
-  reconcilers read the file directly, and CI cross-checks it against the
-  interface table below -- never reintroduce a parallel list.
+  containers, ports and probe metadata (`MCP_PROBES`: the token variable and the
+  read-only tool `verify.sh` calls), the `[npm.*]` proxy hosts, the `[onion.*]`
+  services and the `[kuma.monitor.*]` monitors. `scripts/lib.sh`'s
+  `load_manifest` re-emits the old shell names (`MCP_HOSTS`, `ONION_SERVICES`,
+  ...) for the bash callers, the Python reconcilers read the file directly, and
+  CI cross-checks it against the interface table below -- never reintroduce a
+  parallel list.
 - **`uptime-kuma` is UI-configured for its own account, declared for everything
   else**, by `scripts/kuma-monitors.sh` (a stdlib Python socket.io client —
   kuma has no REST write API); notifications stay UI-configured.

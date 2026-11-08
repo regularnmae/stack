@@ -207,8 +207,7 @@ fi
 wtoken=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
 if [ -n "$wtoken" ] && [ -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
     wbody=$(mcp_call monero-wallet-mcp "$wtoken" get_height '{}' 8) || wbody=""
-    wh=$(printf '%s' "$wbody" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' \
-        | grep -oE '[0-9]+$' | head -n1)
+    wh=$(mcp_result "$wbody" | jq -r '.height // empty' 2>/dev/null)
     if [ -n "$wh" ]; then
         emit stack_xmr_wallet_height "$wh"
         if [ -n "${xnode:-}" ] && jq -e '.height' <<<"$xnode" >/dev/null 2>&1; then

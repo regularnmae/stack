@@ -50,7 +50,8 @@ ask() { local p="$1" a; read -r -p "$p" a; printf '%s' "$a"; }
 bitcoin_cli() { podman exec bitcoind bitcoin-cli -datadir=/data/.bitcoin "$@"; }
 
 btc_wallet_loaded() {
-    bitcoin_cli listwallets 2>/dev/null | grep -q "\"$BITCOIN_WALLET\""
+    bitcoin_cli listwallets 2>/dev/null \
+        | jq -e --arg w "$BITCOIN_WALLET" 'index($w) != null' >/dev/null 2>&1
 }
 
 # The wallet may live in the default wallets/ directory or, on a host that
@@ -58,7 +59,8 @@ btc_wallet_loaded() {
 # -- which is where this stack's older runs put it). listwalletdir does not
 # always report the latter, so check the filesystem too.
 btc_wallet_on_disk() {
-    bitcoin_cli listwalletdir 2>/dev/null | grep -q "\"name\": \"$BITCOIN_WALLET\"" \
+    bitcoin_cli listwalletdir 2>/dev/null \
+        | jq -e --arg w "$BITCOIN_WALLET" '.wallets | map(.name) | index($w) != null' >/dev/null 2>&1 \
         || podman exec bitcoind test -f "/data/.bitcoin/$BITCOIN_WALLET/wallet.dat" 2>/dev/null \
         || podman exec bitcoind test -f "/data/.bitcoin/wallets/$BITCOIN_WALLET/wallet.dat" 2>/dev/null
 }

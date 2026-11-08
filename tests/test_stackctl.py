@@ -1000,6 +1000,8 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(m.hosts["frontend"].env, "BOLTMESH_FRONTEND_HOST")
         self.assertEqual(m.mcp[0].prefix, "/searxng")
         self.assertEqual(m.mcp[0].port, "8100")
+        self.assertEqual(m.mcp[0].token_var, "SEARXNG_MCP_TOKEN")
+        self.assertEqual(m.mcp[0].probe_tool, "get_time")
         self.assertEqual(m.onion[2].name, "btc-explorer")   # HiddenServiceDir name
         self.assertEqual(m.onion[2].rest, "/|200,401")
         self.assertEqual(m.kuma_loopback, 8107)
@@ -1025,7 +1027,8 @@ class TestManifest(unittest.TestCase):
             + ' python3 -m stackctl manifest shell ' + shlex_quote(MANIFEST) + ')"; '
             'printf "%s\\n" "${#MCP_HOSTS[@]}" "$MCP_HOST" "${#ONION_SERVICES[@]}" '
             '"${#KUMA_ADD_HOST_HOSTS[@]}" "$KUMA_STATUS_SLUG" "${MCP_HOSTS[0]}" '
-            '"${ONION_SERVICES[2]}" "$BOLTMESH_FRONTEND_HOST"'
+            '"${ONION_SERVICES[2]}" "$BOLTMESH_FRONTEND_HOST" "${#MCP_PROBES[@]}" '
+            '"${MCP_PROBES[0]}"'
         )
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              check=True).stdout.splitlines()
@@ -1037,6 +1040,8 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(out[5], "/searxng:searxng-mcp:8100")
         self.assertEqual(out[6], "btc-explorer|10.89.0.243:3002|btc.boltmesh.net|/|200,401")
         self.assertEqual(out[7], "boltmesh.net")
+        self.assertEqual(out[8], "10")
+        self.assertEqual(out[9], 'searxng-mcp|SEARXNG_MCP_TOKEN|get_time|{"tz":"UTC"}|0')
 
     def test_real_manifest_agrees_with_agents_md(self):
         from stackctl import manifest
@@ -1098,6 +1103,43 @@ flags = ["mcp"]
         missing = os.path.join(self.tmp, "missing.toml")
         self.assertIn("missing", die_msg(manifest.load, missing))
 
+    def test_probe_fields_are_required_and_valid(self):
+        from stackctl import manifest
+        base = """
+[host.mcp]
+domain = "mcp.example.net"
+env = "MCP_HOST"
+
+[mcp.one]
+prefix = "/one"
+container = "one-mcp"
+port = 8100
+%s
+
+[npm.one]
+host = "mcp"
+forward = "127.0.0.1:8100"
+flags = ["mcp"]
+
+[uptime_kuma]
+loopback_port = 8107
+"""
+        agents = self.write("AGENTS.md", "| `one-mcp` | ... | `127.0.0.1:8100` |\n")
+
+        missing = self.write("missing-probe.toml", base % "")
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(Fatal) as ctx:
+                manifest.check(missing, agents)
+        self.assertIn("token_var", ctx.exception.msg)
+
+        bad_args = self.write("bad-args.toml", base % (
+            'token_var = "ONE_MCP_TOKEN"\nprobe_tool = "get_one"\n'
+            "probe_args = 'not json'"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(Fatal) as ctx:
+                manifest.check(bad_args, agents)
+        self.assertIn("not JSON", ctx.exception.msg)
+
     def test_minimal_manifest_check(self):
         from stackctl import manifest
         path = self.write("tiny.toml", """
@@ -1109,6 +1151,10 @@ env = "MCP_HOST"
 prefix = "/one"
 container = "one-mcp"
 port = 8100
+token_var = "ONE_MCP_TOKEN"
+probe_tool = "get_one"
+probe_args = '{}'
+needs_nodes = false
 
 [npm.one]
 host = "mcp"

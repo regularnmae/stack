@@ -192,30 +192,11 @@ esac
 result=ok
 [ -n "$problem" ] && result=fail
 
-now=$(date +%s)
-prev_ok=""
-[ -f "$STATUS_FILE" ] && prev_ok=$(env_value "$STATUS_FILE" ok_epoch)
-case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
-if [ "$result" = ok ]; then ok_epoch="$now"; else ok_epoch="$prev_ok"; fi
-
-tmp=$(mktemp "$AUDIT_DIR/.ids.XXXXXX") || die "could not write $STATUS_FILE"
-if {
-    printf '# written by scripts/ids.sh (deploy/ids.timer)\n'
-    printf 'time=%s\n' "$(date -Is)"
-    printf 'epoch=%s\n' "$now"
-    printf 'result=%s\n' "$result"
-    printf 'ok_epoch=%s\n' "$ok_epoch"
-    printf 'suricata=%s\n' "$SURICATA_STATE"
-    printf 'crowdsec=%s\n' "$CROWDSEC_STATE"
-    printf 'alerts=%s\n' "$ALERTS"
-    printf 'decisions=%s\n' "$DECISIONS"
-    printf 'detail=%s\n' "$(printf '%s' "$problem" | tr '\n' ' ')"
-} > "$tmp"; then
-    mv -f "$tmp" "$STATUS_FILE" || warn "could not write $STATUS_FILE"
-else
-    rm -f "$tmp"
-    warn "could not write $STATUS_FILE"
-fi
+status_write "$STATUS_FILE" \
+    "# written by scripts/ids.sh (deploy/ids.timer)" \
+    "$result" "$problem" \
+    "suricata=$SURICATA_STATE" "crowdsec=$CROWDSEC_STATE" \
+    "alerts=$ALERTS" "decisions=$DECISIONS"
 
 printf '%s result=%s suricata=%s crowdsec=%s alerts=%d decisions=%d%s\n' \
     "$(date -Is)" "$result" "$SURICATA_STATE" "$CROWDSEC_STATE" "$ALERTS" "$DECISIONS" \

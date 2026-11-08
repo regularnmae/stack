@@ -7,7 +7,8 @@
 #   * the Python reconcilers (npm.py, kuma.py) -- typed objects, directly;
 #   * the bash callers (deploy.sh, verify.sh, deploy/install.sh) -- through
 #     `manifest shell`, which emits the SAME variable names they always
-#     sourced from stack.conf, so scripts/lib.sh's load_manifest is a
+#     sourced from stack.conf (plus MCP_PROBES, verify.sh's probe table, which
+#     has no stack.conf predecessor), so scripts/lib.sh's load_manifest is a
 #     one-line addition per consumer and no caller's body changed. The
 #     emission is only NAME='value' lines and array assignments, and is
 #     eval-safe by construction (shlex.quote).
@@ -24,7 +25,9 @@
 # error messages name the composed entry so the offending line is obvious.
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import sys
 from typing import Any, Dict, List, Optional
@@ -69,12 +72,18 @@ class Manifest:
 
     # --- the emission the bash callers eval -------------------------------
     def shell(self) -> str:
+        _validate_probes(self)
         lines = []
         for host in self.hosts.values():
             lines.append(f"{host.env}={shlex.quote(host.domain)}")
         if self.mcp:
             entries = " ".join(shlex.quote(f"{m.prefix}:{m.container}:{m.port}") for m in self.mcp)
             lines.append(f"MCP_HOSTS=({entries})")
+            # verify.sh's probe table: container|token-var|tool|args|needs-nodes.
+            # The env file is the container's own token.env by convention, so it
+            # is not repeated here.
+            probes = " ".join(shlex.quote(_probe_entry(m)) for m in self.mcp)
+            lines.append(f"MCP_PROBES=({probes})")
         if self.onion:
             entries = " ".join(shlex.quote(o.raw) for o in self.onion)
             lines.append(f"ONION_SERVICES=({entries})")
@@ -99,6 +108,38 @@ def _table(data: dict, name: str) -> Dict[str, Any]:
     if not isinstance(table, dict):
         die(f"deploy/services.toml: [{name}] must be a table")
     return table
+
+
+def _probe_entry(e: decl.McpHost) -> str:
+    """One verify.sh probe record. `|` is the bash field separator, so the
+    fields must not contain one; probe_args is JSON and validated below."""
+    return "|".join((
+        e.container, e.token_var, e.probe_tool, e.probe_args,
+        "1" if e.needs_nodes else "0",
+    ))
+
+
+def _validate_probes(m: "Manifest") -> None:
+    """Every [mcp.*] must declare its probe: MCP_PROBES is consumed as a complete
+    table, and a server silently missing from it is exactly the drift this
+    manifest exists to prevent."""
+    for e in m.mcp:
+        where = f"[mcp.{e.container}]"
+        if not e.token_var:
+            die(f"deploy/services.toml: {where} needs token_var "
+                f"(the variable in its token.env)")
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", e.token_var):
+            die(f"deploy/services.toml: {where} token_var must be an env-var name")
+        if not e.probe_tool:
+            die(f"deploy/services.toml: {where} needs probe_tool")
+        if "|" in e.probe_args:
+            die(f"deploy/services.toml: {where} probe_args must not contain '|'")
+        try:
+            args = json.loads(e.probe_args)
+        except ValueError:
+            die(f"deploy/services.toml: {where} probe_args is not JSON")
+        if not isinstance(args, dict):
+            die(f"deploy/services.toml: {where} probe_args must be a JSON object")
 
 
 def _host(data: dict, key: str, hosts: Dict[str, Host], where: str) -> Host:
@@ -161,6 +202,15 @@ def load(path: str) -> Manifest:
             die(f"deploy/services.toml: [mcp.{key}] and [mcp.{seen_ports[entry.port]}] "
                 f"both publish loopback port {entry.port}")
         seen_ports[entry.port] = key
+        for field in ("token_var", "probe_tool", "probe_args"):
+            if not isinstance(table.get(field, ""), str):
+                die(f"deploy/services.toml: [mcp.{key}] {field} must be a string")
+        if not isinstance(table.get("needs_nodes", False), bool):
+            die(f"deploy/services.toml: [mcp.{key}] needs_nodes must be true or false")
+        entry.token_var = table.get("token_var", "")
+        entry.probe_tool = table.get("probe_tool", "")
+        entry.probe_args = table.get("probe_args", "{}")
+        entry.needs_nodes = table.get("needs_nodes", False)
         m.mcp.append(entry)
 
     # --- the proxy hosts -----------------------------------------------------
@@ -247,6 +297,7 @@ def load(path: str) -> Manifest:
 # --- the CI check -------------------------------------------------------------
 def check(path: str, agents_path: Optional[str] = None) -> int:
     m = load(path)
+    _validate_probes(m)
     print(f"manifest: {len(m.hosts)} host(s), {len(m.mcp)} mcp server(s), "
           f"{len(m.npm)} proxy host(s), {len(m.onion)} onion service(s), "
           f"{len(m.kuma_monitors)} monitor(s)")

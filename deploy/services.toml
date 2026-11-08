@@ -98,57 +98,104 @@ kuma_add_host = false
 # publish. For NPM the result is identical -- 127.0.0.1:<port> -- but
 # everything that probes the container goes through netcheck-host instead of
 # netcheck: scripts/lib.sh's MCP_HOST_NETNS is where that is declared.
+#
+# The probe fields are verify.sh's half of the same declaration: `token_var` is
+# the variable in $DATA_DIR/config/<container>/token.env, and `probe_tool` /
+# `probe_args` are the one read-only tool that proves the server reaches its
+# upstream. `needs_nodes` skips the deep call under verify.sh --no-nodes. The
+# manifest emits them as MCP_PROBES, so adding a server here adds its probe --
+# there is no second table in verify.sh to keep in step.
 # ---------------------------------------------------------------------------
 
 [mcp.searxng]
 prefix = "/searxng"
 container = "searxng-mcp"
 port = 8100
+token_var = "SEARXNG_MCP_TOKEN"
+probe_tool = "get_time"
+probe_args = '{"tz":"UTC"}'
+needs_nodes = false
 
 [mcp.bitcoin]
 prefix = "/bitcoin"
 container = "bitcoin-node-mcp"
 port = 8101
+token_var = "BITCOIN_MCP_TOKEN"
+probe_tool = "get_blockchain_info"
+probe_args = '{}'
+needs_nodes = true
 
 [mcp.monero]
 prefix = "/monero"
 container = "monero-node-mcp"
 port = 8102
+token_var = "MONERO_MCP_TOKEN"
+probe_tool = "get_info"
+probe_args = '{}'
+needs_nodes = true
 
 [mcp.monero_wallet]
 prefix = "/monero-wallet"
 container = "monero-wallet-mcp"
 port = 8103
+token_var = "MONERO_MCP_TOKEN"
+probe_tool = "get_balance"
+probe_args = '{}'
+needs_nodes = true
 
 [mcp.lightning]
 prefix = "/lightning"
 container = "lightning-mcp"
 port = 8104
+token_var = "LIGHTNING_MCP_TOKEN"
+probe_tool = "getinfo"
+probe_args = '{}'
+needs_nodes = true
 
 [mcp.fulcrum]
 prefix = "/fulcrum"
 container = "fulcrum-mcp"
 port = 8110
+token_var = "FULCRUM_MCP_TOKEN"
+probe_tool = "get_chain_tip"
+probe_args = '{}'
+needs_nodes = true
 
 [mcp.logs]
 prefix = "/logs"
 container = "victoria-logs-mcp"
 port = 8111
+token_var = "LOGS_MCP_TOKEN"
+probe_tool = "get_log_health"
+probe_args = '{}'
+needs_nodes = false
 
 [mcp.metrics]
 prefix = "/metrics"
 container = "victoriametrics-mcp"
 port = 8112
+token_var = "METRICS_MCP_TOKEN"
+probe_tool = "get_metrics_health"
+probe_args = '{}'
+needs_nodes = false
 
 [mcp.crowdsec]
 prefix = "/crowdsec"
 container = "crowdsec-mcp"
 port = 8113
+token_var = "CROWDSEC_MCP_TOKEN"
+probe_tool = "list_decisions"
+probe_args = '{}'
+needs_nodes = false
 
 [mcp.btcpay]
 prefix = "/btcpay"
 container = "btcpay-mcp"
 port = 8114
+token_var = "BTCPAY_MCP_TOKEN"
+probe_tool = "list_stores"
+probe_args = '{}'
+needs_nodes = true
 
 # ---------------------------------------------------------------------------
 # Every nginx-proxy-manager proxy host, reconciled by scripts/npm-hosts.sh

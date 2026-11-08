@@ -68,7 +68,7 @@ if [ "${restore_height:-0}" -gt 0 ] 2>/dev/null; then
         -H 'Content-Type: application/json' \
         -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' \
         http://127.0.0.1:18081/json_rpc 2>/dev/null \
-        | sed -n 's/.*"height"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+        | jq -r '.result.height // empty' 2>/dev/null)
     then
         daemon_height=""
     fi
@@ -94,7 +94,7 @@ json=$(printf '{"jsonrpc":"2.0","id":"0","method":"generate_from_keys","params":
 response=$(printf '%s' "$json" | podman exec -i "$WALLET_RPC" curl -s -m 120 \
     -H 'Content-Type: application/json' --data-binary @- \
     http://127.0.0.1:18083/json_rpc)
-if printf '%s' "$response" | grep -q '"error"'; then
+if printf '%s' "$response" | jq -e '.error' >/dev/null 2>&1; then
     warn "the wallet RPC refused the import: $response"
     exit 1
 fi

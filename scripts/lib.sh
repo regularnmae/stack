@@ -17,6 +17,20 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 # keeps the comparison honest.
 esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
 
+# The substitutions every deploy/root/ template gets. deploy/install.sh renders
+# the installed files and verify.sh re-renders them to compare, so this is one
+# list: a placeholder added on one side and not the other would make drifted
+# root-tier files look permanently dirty (or, worse, make a real edit compare
+# equal to itself). src and data-dir are arguments rather than globals because
+# install.sh's root pass may be given a data dir other than the user's.
+render_root_template() { # src data-dir
+    sed -e "s|@DATA_DIR@|$(esc "$2")|g" \
+        -e "s|@CONFIG_DIR@|$(esc "$2/config")|g" \
+        -e "s|@REPO_DIR@|$(esc "${REPO_DIR:-}")|g" \
+        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" \
+        "$1"
+}
+
 # Echo the value of KEY from a KEY=VALUE env/secrets file (first match). Reads
 # the file line by line and never sources it, and strips a trailing CR so a
 # CRLF file still parses. Prints nothing when the file or the key is absent.
@@ -311,14 +325,55 @@ cln_orphan_runes() { # keep-rune...
     done <<< "$live"
 }
 
-# The RPC password bitcoind's OWN bitcoin.conf carries (empty when the container
-# or the file cannot be read). Compared with secrets.env by scripts/rotate.sh
-# --status and scripts/monitor.sh: the two copies are the ones a half-applied
-# bitcoin-rpc rotation pulls apart, and nothing else would notice before the next
-# restart. Never printed by either caller -- only compared.
-bitcoind_conf_password() {
-    podman exec bitcoind sh -c 'sed -n "s/^rpcpassword=//p" /data/.bitcoin/bitcoin.conf' 2>/dev/null \
+# Prove a rune is accepted by the node (checkrune exits non-zero for a rune the
+# node refuses or has blacklisted). Shared by the installer and the rotator so
+# both judge usability the same way.
+cln_rune_usable() { # rune
+    [ -n "$1" ] || return 1
+    podman exec lightningd lightning-cli -k checkrune rune="$1" method=getinfo \
+        >/dev/null 2>&1
+}
+
+# Mint one rune and prove it before handing it back. createrune can return a
+# unique_id the node has already blacklisted, so the only safe shape is
+# mint -> checkrune -> retry; deploy/install.sh and scripts/rotate.sh both used
+# to carry their own copy of this loop. Prints "<rune> <unique_id>" (the shape
+# rotate.sh's caller reads), or nothing after 12 failures -- never an unproven
+# rune, which would leave lightning-mcp unable to read the node.
+cln_mint_rune() { # restriction-json -> "rune unique_id"
+    local restrictions="$1" out rune id tries
+    command -v jq >/dev/null 2>&1 \
+        || { warn "cln_mint_rune needs jq (bootstrap.sh installs it)"; return 1; }
+    for ((tries = 1; tries <= 12; tries++)); do
+        out=$(podman exec lightningd lightning-cli createrune null "$restrictions" 2>/dev/null || true)
+        rune=$(printf '%s' "$out" | jq -r '.rune // empty' 2>/dev/null) || rune=""
+        id=$(printf '%s' "$out" | jq -r '.unique_id // empty' 2>/dev/null) || id=""
+        [ -n "$rune" ] && [ -n "$id" ] || return 1
+        if cln_rune_usable "$rune"; then
+            printf '%s %s' "$rune" "$id"
+            return 0
+        fi
+        warn "new rune id $id was refused (already blacklisted?); retrying"
+    done
+    return 1
+}
+
+# One KEY from the bitcoind config inside the running container (empty when the
+# container or the file cannot be read). The key is a literal from stack.conf or
+# this repo, never user input. Sourcing the installed bitcoind container (not
+# the host copy) is what makes a half-applied rotation visible: this is the file
+# the daemon actually loaded.
+bitcoind_conf_value() { # key
+    podman exec bitcoind sh -c "sed -n 's/^$1=//p' /data/.bitcoin/bitcoin.conf" 2>/dev/null \
         | head -n1 || true
+}
+
+# The RPC password bitcoind's OWN bitcoin.conf carries. Compared with secrets.env
+# by scripts/rotate.sh --status and scripts/monitor.sh: the two copies are the
+# ones a half-applied bitcoin-rpc rotation pulls apart, and nothing else would
+# notice before the next restart. Never printed by either caller -- only compared.
+bitcoind_conf_password() {
+    bitcoind_conf_value rpcpassword
 }
 
 # --- the Electrum protocol (Fulcrum) ----------------------------------------
@@ -376,8 +431,7 @@ electrum_tip() { # port [tls] -> height, empty on failure
     else
         reply=$(electrum_call 127.0.0.1 "$port" "$req")
     fi
-    printf '%s' "$reply" | grep -oE '"height"[[:space:]]*:[[:space:]]*[0-9]+' \
-        | grep -oE '[0-9]+$' | head -n1
+    printf '%s' "$reply" | jq -r '.result.height // empty' 2>/dev/null || true
 }
 
 # --- rendered-unit digests -------------------------------------------------
@@ -562,6 +616,48 @@ prom_write() {
     mv -f "$tmp" "$target"
 }
 
+# Write a status file: the one record a oneshot unit leaves for scripts/monitor.sh
+# and verify.sh to read. KEY=VALUE so env_value reads it, never sourced, written
+# atomically so a sweep never sees half a line. ok_epoch is the last SUCCESS and
+# is carried forward by a failure or a skip: age checks key on it, so a job that
+# skips forever (no disk space, an oversized set, a registry that never answers)
+# cannot look healthy just because its timer fired. deploy/root/'s two scripts
+# still write this shape by hand because they run as root and cannot source the
+# checkout; this is the user-tier implementation the rest share.
+#
+# The caller supplies the file, the line naming the unit that scheduled it, its
+# own extra KEY=VALUE fields, and a detail (newlines flattened to one line).
+status_write() { # path header result detail [KEY=VALUE ...]
+    local path="$1" header="$2" result="$3" detail="$4"
+    shift 4
+    local now prev_ok="" ok_epoch tmp line dir
+    now=$(date +%s)
+    [ -f "$path" ] && prev_ok=$(env_value "$path" ok_epoch)
+    case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
+    if [ "$result" = ok ]; then ok_epoch="$now"; else ok_epoch="$prev_ok"; fi
+    dir=$(dirname "$path")
+    mkdir -p "$dir" || { warn "could not create $dir"; return 0; }
+    tmp=$(mktemp "$dir/.$(basename "$path").XXXXXX") \
+        || { warn "could not write $path"; return 0; }
+    if {
+        printf '%s\n' "$header"
+        printf 'time=%s\n' "$(date -Is)"
+        printf 'epoch=%s\n' "$now"
+        printf 'result=%s\n' "$result"
+        printf 'ok_epoch=%s\n' "$ok_epoch"
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
+        printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
+    } > "$tmp"; then
+        mv -f "$tmp" "$path" || { rm -f "$tmp"; warn "could not write $path"; }
+    else
+        rm -f "$tmp"
+        warn "could not write $path"
+    fi
+    return 0
+}
+
 # The session id the last mcp_initialize was given, and the marker that -w uses
 # to put it after the response body rather than mixed into it.
 MCP_SESSION_ID=""
@@ -656,6 +752,43 @@ mcp_call() {
     local c="$1" token="$2" tool="$3" args="$4" t="${5:-20}"
     mcp_initialize "$c" "$token" "$t" >/dev/null || return 1
     mcp_tool_call "$c" "$token" "$tool" "$args" "$t"
+}
+
+# Unpack the text document a tools/call returned. mcp_call prints the HTTP body
+# verbatim: either a plain JSON-RPC envelope, or an SSE stream ("event: message"
+# / "data: {...}") -- the streamable-HTTP transport answers the latter. The
+# tool's own result is a JSON *string* at .result.content[0].text (MCP's text
+# content), so this prints that text. The last result envelope wins: progress
+# notifications and pings may surround it. Prints nothing when the call failed
+# or the body is not what the transport promises, so callers keep their existing
+# "empty means unavailable" branches.
+mcp_result_raw() { # response-body -> the tool's text content
+    local body="$1" doc
+    case "$body" in
+        'data: '*|*$'\ndata: '*)
+            # The streamable-HTTP transport's SSE form: one JSON-RPC envelope per
+            # data line, with progress notifications and pings around the result.
+            doc=$(printf '%s\n' "$body" | sed -n 's/^data: //p' \
+                | jq -R -c 'fromjson? | select(type == "object" and (has("result") or has("error")))' 2>/dev/null \
+                | tail -n1) ;;
+        *) doc="$body" ;;
+    esac
+    [ -n "$doc" ] || return 0
+    printf '%s' "$doc" | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+}
+
+# The same, but only when the text is a JSON document -- what every caller that
+# runs its own jq filter wants. Some servers answer an RPC error as plain text
+# ("No wallet file (RPC error -13)"), and feeding that to jq would be noise, not
+# data. mcp_result_raw is for callers that only ask "did the tool answer?" (a
+# token proof, verify's deep call), where searxng's get_time legitimately
+# returns human-readable text.
+mcp_result() { # response-body -> the tool's text, when it is JSON
+    local text
+    text=$(mcp_result_raw "$1") || return 0
+    [ -n "$text" ] || return 0
+    printf '%s' "$text" | jq -e . >/dev/null 2>&1 || return 0
+    printf '%s' "$text"
 }
 
 # Print a script's leading comment block (shebang excluded) for --help. Stops at
@@ -767,8 +900,9 @@ ensure_data_dirs() {
 # carries those lists; this helper is how a bash caller gets them back under
 # the SAME variable names it always sourced, by eval'ing the shell emission
 # of `python3 -m stackctl manifest shell` -- NAME='value' lines and array
-# assignments, nothing else. python3 is a bootstrap dependency (agent-mcp
-# already needed it).
+# assignments, nothing else. MCP_PROBES (verify.sh's probe table) is the one
+# emission with no stack.conf predecessor. python3 is a bootstrap dependency
+# (agent-mcp already needed it).
 #
 # The one thing it must never do is run inside stack.conf: bootstrap.sh
 # sources that file standalone (curl | bash, no checkout present), so

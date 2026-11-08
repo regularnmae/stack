@@ -227,31 +227,25 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "MCP endpoints"
-# name|env-file|token-var|deep-tool|deep-args|needs-nodes
-# The name is the container name. scripts/lib.sh decides where it is reached:
-# by name on npm-network for every server but crowdsec-mcp, which runs on the
-# host network and is read through netcheck-host at 127.0.0.1:8113 (mcp_base /
-# mcp_curl). It also names the MCP_HOSTS entry whose loopback port
-# nginx-proxy-manager fronts.
-endpoints=(
-    "searxng-mcp|$CONFIG_DIR/searxng-mcp/token.env|SEARXNG_MCP_TOKEN|get_time|{\"tz\":\"UTC\"}|0"
-    "bitcoin-node-mcp|$CONFIG_DIR/bitcoin-node-mcp/token.env|BITCOIN_MCP_TOKEN|get_blockchain_info|{}|1"
-    "monero-node-mcp|$CONFIG_DIR/monero-node-mcp/token.env|MONERO_MCP_TOKEN|get_info|{}|1"
-    "monero-wallet-mcp|$CONFIG_DIR/monero-wallet-mcp/token.env|MONERO_MCP_TOKEN|get_balance|{}|1"
-    "lightning-mcp|$CONFIG_DIR/lightning-mcp/token.env|LIGHTNING_MCP_TOKEN|getinfo|{}|1"
-    "fulcrum-mcp|$CONFIG_DIR/fulcrum-mcp/token.env|FULCRUM_MCP_TOKEN|get_chain_tip|{}|1"
-    "victoria-logs-mcp|$CONFIG_DIR/victoria-logs-mcp/token.env|LOGS_MCP_TOKEN|get_log_health|{}|0"
-    "victoriametrics-mcp|$CONFIG_DIR/victoriametrics-mcp/token.env|METRICS_MCP_TOKEN|get_metrics_health|{}|0"
-    "crowdsec-mcp|$CONFIG_DIR/crowdsec-mcp/token.env|CROWDSEC_MCP_TOKEN|list_decisions|{}|0"
-    "btcpay-mcp|$CONFIG_DIR/btcpay-mcp/token.env|BTCPAY_MCP_TOKEN|list_stores|{}|1"
-)
+# name|token-var|deep-tool|deep-args|needs-nodes
+# The list is declared with each server in deploy/services.toml ([mcp.*]) and
+# emitted by the manifest as MCP_PROBES (scripts/lib.sh's load_manifest), so a
+# server added there is probed here without a second table to keep in step. The
+# token file is the container's own token.env by convention. The name is the
+# container name: scripts/lib.sh decides where it is reached -- by name on
+# npm-network for every server but crowdsec-mcp, which runs on the host network
+# and is read through netcheck-host at 127.0.0.1:8113 (mcp_base / mcp_curl). It
+# also names the MCP_HOSTS entry whose loopback port nginx-proxy-manager fronts.
+[ -n "${MCP_PROBES[*]:-}" ] \
+    || die "the manifest emitted no MCP_PROBES (run ./deploy.sh)"
 
 # The token each container's endpoint needs, keyed by container name, so the
 # through-nginx-proxy-manager section below can reuse it.
 declare -A EP_ENV=() EP_VAR=()
 
-for e in "${endpoints[@]}"; do
-    IFS='|' read -r name envfile var tool args needs_nodes <<<"$e"
+for e in "${MCP_PROBES[@]}"; do
+    IFS='|' read -r name var tool args needs_nodes <<<"$e"
+    envfile="$CONFIG_DIR/$name/token.env"
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"
 
@@ -291,7 +285,7 @@ for e in "${endpoints[@]}"; do
             resp=$(mcp_tool_call "$name" "$token" "$tool" "$args" 30 || true)
             if printf '%s' "$resp" | grep -q '"isError":true'; then
                 bad "$name deep call $tool returned an error"
-            elif printf '%s' "$resp" | grep -q '"result"'; then
+            elif [ -n "$(mcp_result_raw "$resp")" ]; then
                 pass "$name deep call $tool returned data"
             else
                 bad "$name deep call $tool: no result"
@@ -427,7 +421,7 @@ else
 
     if [ "$DEEP" = 1 ]; then
         if out=$("$AGENT_BIN" bitcoin-node get_blockchain_info 2>&1); then
-            pass "agent-mcp read the bitcoin node (chain $(printf '%s' "$out" | grep -o '"chain": "[a-z]*"' | cut -d'"' -f4))"
+            pass "agent-mcp read the bitcoin node (chain $(printf '%s' "$out" | jq -r '.chain // "?"'))"
         else
             bad "agent-mcp could not call bitcoin-node: $(printf '%s' "$out" | head -1)"
         fi
@@ -480,7 +474,7 @@ head2 "BoltMesh"
 # Read as a peer on npm-network; nginx-proxy-manager, on the host network,
 # reaches the same server through the unit's loopback publish.
 be_body=$(net_curl -s -m 10 "http://boltmesh-backend:8000/health" 2>/dev/null || true)
-if printf '%s' "$be_body" | grep -q '"status": *"healthy"'; then
+if printf '%s' "$be_body" | jq -e '.status == "healthy"' >/dev/null 2>&1; then
     pass "boltmesh-backend /health healthy"
 else
     bad "boltmesh-backend /health not healthy"
@@ -503,7 +497,7 @@ else
     btc_resp=$(net_curl -s -m 15 -w '\n%{http_code}' "http://btc-explorer:3002/api/blocks/tip" 2>/dev/null || true)
     btc_code="${btc_resp##*$'\n'}"
     btc_tip="${btc_resp%$'\n'*}"
-    btc_h=$(printf '%s' "$btc_tip" | grep -oE '"height":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
+    btc_h=$(printf '%s' "$btc_tip" | jq -r '.height // empty' 2>/dev/null || true)
     case "$btc_code" in
         401)
             warn "btc-explorer is behind basic auth; chain-height check skipped" ;;
@@ -550,10 +544,8 @@ else
     # One getblockchaininfo for the whole section: it is what decides whether a
     # silent 50001 is broken or just a first-run index that has not caught up.
     btc_chain=$(podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null || true)
-    btc_ibd=$(printf '%s' "$btc_chain" \
-        | grep -oE '"initialblockdownload":[[:space:]]*(true|false)' | grep -oE '(true|false)' | head -n1)
-    btc_blocks=$(printf '%s' "$btc_chain" \
-        | grep -oE '"blocks":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
+    btc_ibd=$(printf '%s' "$btc_chain" | jq -r 'if has("initialblockdownload") then .initialblockdownload else empty end' 2>/dev/null || true)
+    btc_blocks=$(printf '%s' "$btc_chain" | jq -r '.blocks // empty' 2>/dev/null || true)
 
     # server.version is the banner: it names the server and the protocol revision,
     # which is the cheapest proof that something is speaking Electrum rather than
@@ -568,8 +560,8 @@ else
             reply=$(electrum_call 127.0.0.1 "$port" "$req")
             label="50001 (TCP)"
         fi
-        if printf '%s' "$reply" | grep -q '"result"'; then
-            pass "fulcrum answers Electrum on $label: $(printf '%s' "$reply" | grep -oE 'Fulcrum[^"]*' | head -n1)"
+        if printf '%s' "$reply" | jq -e '.result' >/dev/null 2>&1; then
+            pass "fulcrum answers Electrum on $label: $(printf '%s' "$reply" | jq -r '.result | if type == "array" then .[0] else . end // empty' 2>/dev/null)"
         elif [ "$btc_ibd" = true ]; then
             warn "fulcrum does not answer on $label yet (bitcoind is in initial block download)"
         else
@@ -734,9 +726,9 @@ if [ "$DEEP" = 1 ]; then
     # measured from the last success, so a drill that keeps skipping is visible.
     VSTATUS="$DATA_DIR/audit/backup-verify.status"
     if [ -f "$VSTATUS" ]; then
-        vres=$(sed -n 's/^result=//p' "$VSTATUS" | head -n1)
-        vok=$(sed -n 's/^ok_epoch=//p' "$VSTATUS" | head -n1)
-        vdet=$(sed -n 's/^detail=//p' "$VSTATUS" | head -n1)
+        vres=$(env_value "$VSTATUS" result)
+        vok=$(env_value "$VSTATUS" ok_epoch)
+        vdet=$(env_value "$VSTATUS" detail)
         case "$vok" in
             ''|*[!0-9]*) warn "backup restore drill has no recorded success yet" ;;
             *)
@@ -756,9 +748,9 @@ if [ "$DEEP" = 1 ]; then
     # no repository lock) is visible rather than invisible.
     DBSTATUS="$DATA_DIR/audit/backup-verify-db.status"
     if [ -f "$DBSTATUS" ]; then
-        dres=$(sed -n 's/^result=//p' "$DBSTATUS" | head -n1)
-        dok=$(sed -n 's/^ok_epoch=//p' "$DBSTATUS" | head -n1)
-        ddet=$(sed -n 's/^detail=//p' "$DBSTATUS" | head -n1)
+        dres=$(env_value "$DBSTATUS" result)
+        dok=$(env_value "$DBSTATUS" ok_epoch)
+        ddet=$(env_value "$DBSTATUS" detail)
         case "$dok" in
             ''|*[!0-9]*) warn "database drill has no recorded success yet" ;;
             *)
@@ -874,7 +866,7 @@ if [ "$DEEP" = 1 ]; then
     # dashboard uses.
     q=$(net_curl -s -m 10 --get --data-urlencode 'query=stack_metrics_timestamp' \
         http://victoriametrics:8428/api/v1/query 2>/dev/null) || q=""
-    if printf '%s' "$q" | grep -q '"value"'; then
+    if printf '%s' "$q" | jq -e '.data.result | length > 0' >/dev/null 2>&1; then
         pass "victoriametrics answers a PromQL query"
     else
         warn "victoriametrics has no stack_metrics_timestamp series yet (first scrape?)"
@@ -1146,19 +1138,12 @@ else
 fi
 
 # Render a deploy/root/ file the way install.sh does, so a drift check compares
-# what bootstrap would write, not the literal template. Keep the substitution
-# list in step with root_render() in deploy/install.sh: if it falls behind, the
-# only consequence is a false drift warning (a placeholder left literal in the
-# comparison), never a false "matches".
+# what bootstrap would write, not the literal template. The substitution list
+# itself lives in scripts/lib.sh (render_root_template), which install.sh's
+# root_render also calls -- one list, so a new placeholder cannot make a
+# correctly installed file look permanently drifted.
 root_want() { # src
-    # The same substitutions deploy/install.sh --root makes, through the same
-    # esc() (scripts/lib.sh): unescaped, a data dir containing `|` makes sed
-    # fail and this function print nothing, which the caller reads as permanent
-    # root-tier drift -- and `&` silently mangles the path instead.
-    sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
-        -e "s|@CONFIG_DIR@|$(esc "$DATA_DIR/config")|g" \
-        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
-        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" "$1"
+    render_root_template "$1" "$DATA_DIR"
 }
 
 # Everything install.sh --root renders from deploy/root/, as source:target[:opt].

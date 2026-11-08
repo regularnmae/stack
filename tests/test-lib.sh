@@ -33,6 +33,46 @@ while IFS=$'\t' read -r input want; do
     assert_eq "$want" "$(dur_ms "$input")" "dur_ms fixture '$input'"
 done < "$ROOT_DIR/tests/fixtures/durations.txt"
 
+# mcp_result unwraps the two shapes mcp_call can print: a plain JSON-RPC body,
+# and the streamable-HTTP transport's SSE stream. The tool's payload is a JSON
+# string at .result.content[0].text, so the caller's jq filter runs on JSON.
+sse='event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"height\":42,\"synchronized\":false}"}]}}'
+assert_eq 42 "$(mcp_result "$sse" | jq -r '.height')" 'mcp_result unpacks SSE'
+assert_eq false "$(mcp_result "$sse" | jq -r '.synchronized')" 'mcp_result keeps false'
+plain='{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"ok\":true}"}]}}'
+assert_eq true "$(mcp_result "$plain" | jq -r '.ok')" 'mcp_result unpacks plain JSON'
+assert_eq "" "$(mcp_result '{"jsonrpc":"2.0","id":2,"error":{"code":-1}}')" \
+    'mcp_result prints nothing for an error envelope'
+assert_eq "" "$(mcp_result 'event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"text":"No wallet file (RPC error -13)","type":"text"}]}}')" \
+    'mcp_result prints nothing for non-JSON tool text'
+assert_eq 'ISO-8601: 2026-11-08T00:00:00+00:00' "$(mcp_result_raw 'event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"text":"ISO-8601: 2026-11-08T00:00:00+00:00","type":"text"}]}}')" \
+    'mcp_result_raw keeps non-JSON tool text (a token probe only needs an answer)'
+assert_eq "" "$(mcp_result 'event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"text":"ISO-8601: 2026-11-08T00:00:00+00:00","type":"text"}]}}')" \
+    'mcp_result rejects non-JSON tool text'
+
+# The status-file contract: ok_epoch moves only on success and is carried
+# through a failure, which is what the monitor's age checks key on.
+status="$TMP_DIR/ids.status"
+status_write "$status" '# test' ok 'all good' 'alerts=3'
+assert_eq ok "$(env_value "$status" result)" 'status_write records the result'
+assert_eq 'all good' "$(env_value "$status" detail)" 'status_write records the detail'
+assert_eq 3 "$(env_value "$status" alerts)" 'status_write records the caller fields'
+first_ok=$(env_value "$status" ok_epoch)
+status_write "$status" '# test' fail 'broken' 'alerts=4'
+assert_eq fail "$(env_value "$status" result)" 'status_write records a failure'
+assert_eq "$first_ok" "$(env_value "$status" ok_epoch)" \
+    'status_write carries ok_epoch through a failure'
+
+# One substitution list for the root tier, shared by install.sh and verify.sh.
+printf '@DATA_DIR@|@CONFIG_DIR@|@REPO_DIR@|@IDS_RETENTION_DAYS@\n' > "$TMP_DIR/root.tmpl"
+assert_eq '/d&|y|/d&|y/config|/r&|x|14' \
+    "$(REPO_DIR='/r&|x' IDS_RETENTION_DAYS=14 render_root_template "$TMP_DIR/root.tmpl" '/d&|y')" \
+    'render_root_template escapes sed metacharacters'
+
 mkdir -p "$TMP_DIR/quadlet" "$TMP_DIR/data"
 printf 'one\n' > "$TMP_DIR/quadlet/a.container"
 printf 'two\n' > "$TMP_DIR/quadlet/b.container"

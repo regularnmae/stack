@@ -223,11 +223,7 @@ root_render() { # src dest mode [data-dir]
     local tmp
     mkdir -p "$(dirname "$2")"
     tmp=$(mktemp)
-    sed -e "s|@DATA_DIR@|$(esc "$4")|g" \
-        -e "s|@CONFIG_DIR@|$(esc "$4/config")|g" \
-        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
-        -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" \
-        "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
+    render_root_template "$1" "$4" > "$tmp" || { rm -f "$tmp"; return 1; }
     install -m "$3" "$tmp" "$2"
     rm -f "$tmp"
 }
@@ -696,8 +692,7 @@ flag_value() {
 bitcoin_conf_value() {
     local key="$1" v=""
     if command -v podman >/dev/null 2>&1; then
-        v=$(podman exec bitcoind sh -c "grep -E '^$key=' /data/.bitcoin/bitcoin.conf" 2>/dev/null \
-            | head -n1 | cut -d= -f2- || true)
+        v=$(bitcoind_conf_value "$key")
     fi
     if [ -z "$v" ]; then
         v=$(sed -n "s/^$key=//p" "$DATA_DIR/bitcoin/bitcoin.conf" 2>/dev/null | head -n1 || true)
@@ -1641,31 +1636,9 @@ fi
 mkdir -p "$DATA_DIR/audit"
 
 # The runes need a running lightningd. install.sh is re-run by deploy.sh once
-# the daemon is up, so this is best-effort here and self-heals on re-run.
-rune_usable() {
-    [ -n "$1" ] || return 1
-    podman exec lightningd lightning-cli -k checkrune rune="$1" method=getinfo \
-        >/dev/null 2>&1
-}
-
-create_rune() {
-    local restrictions="$1" rune=""
-    for _ in $(seq 1 12); do
-        rune=$(podman exec lightningd lightning-cli createrune null "$restrictions" 2>/dev/null \
-            | grep -o '"rune": *"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/' || true)
-        [ -n "$rune" ] || return 0
-        if rune_usable "$rune"; then
-            printf '%s' "$rune"
-            return 0
-        fi
-        printf '==> created rune %s... was refused (blacklisted id?); retrying\n' \
-            "${rune:0:8}" >&2
-    done
-    # Never hand back an unproven rune: return empty so the caller keeps the
-    # existing node.env (or retries on a later run) instead of writing a rune
-    # the node will refuse.
-    printf '==> gave up creating a usable rune after 12 tries\n' >&2
-}
+# the daemon is up, so this is best-effort here and self-heals on re-run. Both
+# the proof and the mint/retry loop live in scripts/lib.sh (cln_rune_usable /
+# cln_mint_rune) because scripts/rotate.sh mints the same runes on a rotation.
 
 read_rune=""
 spend_rune=""
@@ -1679,11 +1652,11 @@ ca_cert=$(env_value "$LN_ENV/node.env" LIGHTNING_CA_CERT)
 node_needs_write=0
 [ -s "$LN_ENV/node.env" ] || node_needs_write=1
 if command -v podman >/dev/null 2>&1 \
-    && ! { rune_usable "$read_rune" && rune_usable "$spend_rune"; }; then
+    && ! { cln_rune_usable "$read_rune" && cln_rune_usable "$spend_rune"; }; then
     if podman exec lightningd lightning-cli getinfo >/dev/null 2>&1; then
         log "creating runes on the node"
-        new_read=$(create_rune "$READ_RESTRICTIONS")
-        new_spend=$(create_rune "$SPEND_RESTRICTIONS")
+        new_read=$(cln_mint_rune "$READ_RESTRICTIONS" | cut -d' ' -f1 || true)
+        new_spend=$(cln_mint_rune "$SPEND_RESTRICTIONS" | cut -d' ' -f1 || true)
         if [ -n "$new_read" ] && [ -n "$new_spend" ]; then
             read_rune="$new_read"
             spend_rune="$new_spend"

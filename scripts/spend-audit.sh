@@ -38,6 +38,8 @@ while [ $# -gt 0 ]; do
 done
 
 resolve_data_dir
+command -v jq >/dev/null 2>&1 \
+    || die "jq is required to read the MCP payloads (bootstrap.sh installs it)"
 AUDIT_DIR="$DATA_DIR/audit"
 mkdir -p "$AUDIT_DIR"
 BASELINE="$AUDIT_DIR/spend-baseline.tsv"
@@ -124,9 +126,7 @@ lightning_outgoing() {
     # which silently skips the activity half of the tripwire.
     body=$(mcp_call lightning-mcp "$token" listpays '{}' 60) || body=""
     [ -n "$body" ] || { note "lightning listpays unavailable"; return 0; }
-    printf '%s' "$body" \
-        | grep -oE 'payment_hash\\?":[[:space:]]*\\?"[0-9a-f]{64}' \
-        | grep -oE '[0-9a-f]{64}'
+    mcp_result "$body" | jq -r '.pays[]?.payment_hash // empty' 2>/dev/null
 }
 
 monero_outgoing() {
@@ -136,9 +136,7 @@ monero_outgoing() {
     body=$(mcp_call monero-wallet-mcp "$token" get_transfers \
         '{"incoming":false,"pool":false,"pending":false,"failed":false,"outgoing":true}' 60) || body=""
     [ -n "$body" ] || { note "monero get_transfers unavailable"; return 0; }
-    printf '%s' "$body" \
-        | grep -oE 'txid\\?":[[:space:]]*\\?"[0-9a-f]{64}' \
-        | grep -oE '[0-9a-f]{64}'
+    mcp_result "$body" | jq -r '.out[]?.txid // empty' 2>/dev/null
 }
 
 current=$({ lightning_outgoing; monero_outgoing; } | grep -v '^$' | sort -u)

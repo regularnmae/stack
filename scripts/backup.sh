@@ -278,47 +278,12 @@ replay_skip_detail=""
 replay_tables=""
 
 # The record scripts/monitor.sh alerts on (a failed oneshot unit is otherwise
-# just a line in `systemctl --user status`). KEY=VALUE so env_value can read it,
-# written atomically so a sweep never sees half a line. ok_epoch is the last
-# SUCCESS and is carried forward by a failure or a skip: the age check keys on
-# it, so a drill that skips forever (no disk space, an oversized set, a registry
-# that never answers) cannot look healthy just because the timer fired.
-#
-# One writer, two files: the caller supplies the file, the line naming the unit
-# that scheduled it, and its own extra KEY=VALUE fields. Carrying ok_epoch
-# forward is per-file, which is the whole reason the two drills do not share one.
-write_status_file() { # path header result detail [KEY=VALUE ...]
-    local path="$1" header="$2" result="$3" detail="$4"
-    shift 4
-    local now prev_ok="" ok_epoch tmp line
-    now=$(date +%s)
-    [ -f "$path" ] && prev_ok=$(env_value "$path" ok_epoch)
-    case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
-    if [ "$result" = ok ]; then ok_epoch="$now"; else ok_epoch="$prev_ok"; fi
-    mkdir -p "$DATA_DIR/audit"
-    tmp=$(mktemp "$DATA_DIR/audit/.backup-status.XXXXXX") \
-        || { warn "could not write $path"; return 0; }
-    if {
-        printf '%s\n' "$header"
-        printf 'time=%s\n' "$(date -Is)"
-        printf 'epoch=%s\n' "$now"
-        printf 'result=%s\n' "$result"
-        printf 'ok_epoch=%s\n' "$ok_epoch"
-        for line in "$@"; do
-            printf '%s\n' "$line"
-        done
-        printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
-    } > "$tmp"; then
-        mv -f "$tmp" "$path" || warn "could not write $path"
-    else
-        rm -f "$tmp"
-        warn "could not write $path"
-    fi
-}
-
+# just a line in `systemctl --user status`). scripts/lib.sh's status_write owns
+# the format -- KEY=VALUE, atomic, ok_epoch carried forward on failure/skip --
+# and these two wrappers are what keep each drill's verdict in its own file.
 write_verify_status() { # result detail [snapshot files bytes subset]
     local result="$1" detail="$2" snap="${3:-}" files="${4:-}" bytes="${5:-}" subset="${6:-}"
-    write_status_file "$VERIFY_STATUS" \
+    status_write "$VERIFY_STATUS" \
         "# written by scripts/backup.sh verify (deploy/backup-verify.timer)" \
         "$result" "$detail" \
         "snapshot=$snap" "files=$files" "bytes=$bytes" "subset=$subset"
@@ -326,7 +291,7 @@ write_verify_status() { # result detail [snapshot files bytes subset]
 
 write_verify_db_status() { # result detail [snapshot tables]
     local result="$1" detail="$2" snap="${3:-}" tables="${4:-}"
-    write_status_file "$VERIFY_DB_STATUS" \
+    status_write "$VERIFY_DB_STATUS" \
         "# written by scripts/backup.sh verify-db (deploy/backup-verify-db.timer)" \
         "$result" "$detail" \
         "snapshot=$snap" "tables=$tables"
@@ -888,7 +853,7 @@ case "$cmd" in
         fi
         stats=$(cat "$slog")
         rm -f "$slog"
-        size=$(printf '%s' "$stats" | sed -n 's/.*"total_size":\([0-9][0-9]*\).*/\1/p')
+        size=$(printf '%s' "$stats" | jq -r '.total_size // 0' 2>/dev/null || true)
         size="${size:-0}"
         if [ "$size" -gt $(( VERIFY_MAX_MB * 1024 * 1024 )) ]; then
             write_verify_status skip "restore is $(( size / 1048576 )) MiB, above BACKUP_VERIFY_MAX_MB=$VERIFY_MAX_MB" "$snap_id" "" "$size" "$subset"

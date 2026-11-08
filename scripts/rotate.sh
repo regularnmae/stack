@@ -443,7 +443,7 @@ mcp_ok() { # container token tool args
     local c="$1" token="$2" tool="$3" args="$4" body
     [ -n "$token" ] || return 1
     body=$(mcp_call "$c" "$token" "$tool" "$args" 30 2>/dev/null || true)
-    printf '%s' "$body" | grep -q '"result"'
+    [ -n "$(mcp_result_raw "$body")" ]
 }
 
 # What must be healthy before a target runs. Kept out of the apply functions so
@@ -506,7 +506,7 @@ apply_bitcoin_rpc() {
         [ -n "$user" ] || die "no BITCOIN_RPC_USER in $SECRETS_FILE; run deploy/install.sh first"
     fi
     if [ "$DRY_RUN" = 0 ]; then
-        rpcuser_old=$(podman exec bitcoind sh -c 'sed -n "s/^rpcuser=//p" /data/.bitcoin/bitcoin.conf' 2>/dev/null | head -n1 || true)
+        rpcuser_old=$(bitcoind_conf_value rpcuser)
     fi
     if [ -n "$rpcuser_old" ] && [ "$rpcuser_old" != "$user" ]; then
         edit_bitcoin_conf rpcuser "$user"
@@ -579,25 +579,14 @@ apply_tor_control() {
 # swap that had already destroyed the live rune would leave lightning-mcp unable
 # to read the node.
 mint_rune() { # restriction-json -> "rune unique_id"
-    local restrictions="$1" out rune id tries
     if [ "$DRY_RUN" = 1 ]; then
         printf 'dryrun 0'
         return 0
     fi
-    for ((tries = 1; tries <= 12; tries++)); do
-        out=$(podman exec lightningd lightning-cli createrune null "$restrictions" 2>/dev/null || true)
-        rune=$(printf '%s' "$out" | grep -o '"rune": *"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/' || true)
-        id=$(printf '%s' "$out" | grep -o '"unique_id": *"[0-9]*"' | head -n1 | grep -o '[0-9]*' || true)
-        [ -n "$rune" ] && [ -n "$id" ] || return 1
-        if podman exec lightningd lightning-cli -k checkrune rune="$rune" method=getinfo >/dev/null 2>&1; then
-            printf '%s %s' "$rune" "$id"
-            return 0
-        fi
-        # createrune can hand back a rune whose unique_id is already blacklisted;
-        # the next id works. install.sh retries the same way.
-        warn "new rune id $id was refused (already blacklisted?); retrying"
-    done
-    return 1
+    # The mint -> checkrune -> retry loop is scripts/lib.sh's cln_mint_rune,
+    # shared with deploy/install.sh so the installer and the rotator cannot
+    # disagree about what makes a rune usable.
+    cln_mint_rune "$1"
 }
 
 want_scope() { [ "$RUNE_SCOPE" = all ] || [ "$RUNE_SCOPE" = "$1" ]; }

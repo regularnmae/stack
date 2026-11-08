@@ -109,13 +109,22 @@ def parse_npm_host(raw: str) -> NpmHost:
 
 # --- MCP_HOSTS: "/prefix:container:loopback-port" ----------------------------
 class McpHost:
-    __slots__ = ("prefix", "container", "port", "raw")
+    __slots__ = ("prefix", "container", "port", "raw",
+                 "token_var", "probe_tool", "probe_args", "needs_nodes")
 
     def __init__(self, prefix, container, port, raw):
         self.prefix = prefix
         self.container = container
         self.port = port
         self.raw = raw
+        # Probe metadata lives in services.toml alongside the server; it is
+        # empty for hand-built McpHost objects (decl.py's own tests) and filled
+        # by manifest.py. Keeping the defaults here means the parser's contract
+        # is unchanged for callers that only need the routing facts.
+        self.token_var = ""
+        self.probe_tool = ""
+        self.probe_args = "{}"
+        self.needs_nodes = False
 
 
 def parse_mcp_host(raw: str) -> McpHost:

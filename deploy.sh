@@ -378,7 +378,7 @@ dump_tail() { # container [lines]
 bitcoind_syncing() {
     [ "$DRY_RUN" = 1 ] && return 1
     podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null \
-        | grep -q '"initialblockdownload": *true'
+        | jq -e '.initialblockdownload == true' >/dev/null 2>&1
 }
 
 # Wallet-level RPC answers *and* a wallet is loaded -- what lightningd's bcli
@@ -387,7 +387,7 @@ bitcoind_syncing() {
 # this wait burn its timeout on every deploy. listwallets answers either way, and
 # `[]` (nothing loaded) correctly reads as "not ready".
 bitcoind_wallet_ready() {
-    podman exec bitcoind bitcoin-cli listwallets 2>/dev/null | grep -q '"'
+    podman exec bitcoind bitcoin-cli listwallets 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1
 }
 
 # Make sure the podman network exists before anything joins it. The quadlet

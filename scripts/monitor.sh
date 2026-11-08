@@ -376,9 +376,9 @@ info=$(podman exec bitcoind bitcoin-cli getblockchaininfo 2>/dev/null) || info="
 if [ -z "$info" ]; then
     fail "bitcoind RPC unreachable"
 else
-    blocks=$(printf '%s' "$info" | grep -oE '"blocks":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
-    headers=$(printf '%s' "$info" | grep -oE '"headers":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
-    ibd=$(printf '%s' "$info" | grep -oE '"initialblockdownload":[[:space:]]*(true|false)' | grep -oE '(true|false)')
+    blocks=$(printf '%s' "$info" | jq -r '.blocks // empty' 2>/dev/null)
+    headers=$(printf '%s' "$info" | jq -r '.headers // empty' 2>/dev/null)
+    ibd=$(printf '%s' "$info" | jq -r 'if has("initialblockdownload") then .initialblockdownload else empty end' 2>/dev/null)
     if [ "$ibd" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
         ok "bitcoind is in initial block download (blocks=$blocks, not paged)"
     elif [ -n "$blocks" ] && [ -n "$headers" ] && [ "$((headers - blocks))" -gt 6 ]; then
@@ -442,7 +442,7 @@ lninfo=$(podman exec lightningd lightning-cli getinfo 2>/dev/null) || lninfo=""
 if [ -z "$lninfo" ]; then
     fail "lightningd RPC unreachable"
 else
-    if printf '%s' "$lninfo" | grep -qE '"warning_bitcoind_sync"'; then
+    if printf '%s' "$lninfo" | jq -e 'has("warning_bitcoind_sync")' >/dev/null 2>&1; then
         fail "lightningd reports warning_bitcoind_sync (its view of bitcoind is stale)"
     fi
     # Peers and channels both come from the node's own view, not from getinfo:
@@ -455,32 +455,30 @@ else
     # every channel the node knows) and its `active` is the channel_update's
     # enabled bit -- an operator setting that stays true while the peer is
     # offline. It has no connectivity field, so a `grep '"connected": false'`
-    # there matched nothing and the check passed every sweep. listpeerchannels
-    # is the node's own view, with peer_connected and a state; only operational
-    # channels count (an ONCHAIN one is meant to be alone).
-    if command -v jq >/dev/null 2>&1; then
-        lpeers=$(podman exec lightningd lightning-cli listpeers 2>/dev/null) || lpeers=""
-        npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
-        if [ -z "$npeers" ]; then
-            soft "could not read lightningd listpeers; skipped the peer check"
-        elif [ "$npeers" = 0 ]; then
-            soft "lightningd has no connected peers"
-        else
-            ok "lightningd has $npeers connected peer(s)"
-        fi
-        chans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null) || chans=""
-        offline=$(printf '%s' "$chans" | jq -r \
-            '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
-            2>/dev/null) || offline=""
-        if [ -z "$offline" ]; then
-            soft "could not read lightningd listpeerchannels; skipped the offline-channel check"
-        elif [ "$offline" -gt 0 ]; then
-            fail "$offline lightning channel(s) have their peer offline"
-        else
-            ok "no lightning channel with an offline peer"
-        fi
+    # there matched nothing and the check passed every sweep.
+    # listpeerchannels is the node's own view, with peer_connected and a state;
+    # only operational channels count (an ONCHAIN one is meant to be alone).
+    # jq is a hard requirement of this script (checked at the top), so there is
+    # no no-jq fallback here: a missing jq aborts the sweep before this point.
+    lpeers=$(podman exec lightningd lightning-cli listpeers 2>/dev/null) || lpeers=""
+    npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
+    if [ -z "$npeers" ]; then
+        soft "could not read lightningd listpeers; skipped the peer check"
+    elif [ "$npeers" = 0 ]; then
+        soft "lightningd has no connected peers"
     else
-        soft "jq missing; skipped the lightning peer and channel checks"
+        ok "lightningd has $npeers connected peer(s)"
+    fi
+    chans=$(podman exec lightningd lightning-cli listpeerchannels 2>/dev/null) || chans=""
+    offline=$(printf '%s' "$chans" | jq -r \
+        '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
+        2>/dev/null) || offline=""
+    if [ -z "$offline" ]; then
+        soft "could not read lightningd listpeerchannels; skipped the offline-channel check"
+    elif [ "$offline" -gt 0 ]; then
+        fail "$offline lightning channel(s) have their peer offline"
+    else
+        ok "no lightning channel with an offline peer"
     fi
 fi
 
@@ -503,8 +501,8 @@ sync=""
 xmrnode_token=$(env_value "$CONFIG_DIR/monero-node-mcp/token.env" MONERO_MCP_TOKEN)
 if [ -n "$xmrnode_token" ]; then
     node_body=$(mcp_call monero-node-mcp "$xmrnode_token" get_info '{}') || node_body=""
-    node_h=$(printf '%s' "$node_body" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
-    sync=$(printf '%s' "$node_body" | grep -oE '\\?"synchronized\\?":[[:space:]]*(true|false)' | grep -oE '(true|false)' | head -n1)
+    node_h=$(mcp_result "$node_body" | jq -r '.height // empty' 2>/dev/null)
+    sync=$(mcp_result "$node_body" | jq -r 'if has("synchronized") then .synchronized else empty end' 2>/dev/null)
     if [ -z "$node_h" ] && [ -z "$sync" ]; then
         if [ "$MONITOR_GRACE_SYNC" != 1 ]; then
             fail "monerod restricted RPC did not answer get_info (wedged handler, or the chain lock held; stack_xmr_rpc_up carries the history)"
@@ -519,7 +517,7 @@ if [ -n "$xmrnode_token" ]; then
         # A synchronized node sitting above the threshold is a fault: the RPC
         # surface (explorer, wallet-RPC) then answers, but serves a stale
         # chain. While not synchronized, the grace covers it as usual.
-        target_h=$(printf '%s' "$node_body" | grep -oE '\\?"target_height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
+        target_h=$(mcp_result "$node_body" | jq -r '.target_height // empty' 2>/dev/null)
         if [ -n "$node_h" ] && [ -n "$target_h" ] && [ "$target_h" -ge "$node_h" ]; then
             xlag=$(( target_h - node_h ))
             if [ "$sync" = true ] && [ "$xlag" -gt "$THRESH_XMR_LAG" ]; then
@@ -538,7 +536,7 @@ if [ -n "$xmrwallet_token" ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys"
     soft "the BTCPay view-only XMR wallet is not imported yet (config/btcpay/xmr-wallet.env); skipped the wallet height check"
 elif [ -n "$xmrwallet_token" ]; then
     w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
-    w_h=$(printf '%s' "$w_body" | grep -oE '\\?"height\\?":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -n1)
+    w_h=$(mcp_result "$w_body" | jq -r '.height // empty' 2>/dev/null)
     if [ -z "$w_h" ]; then
         # No answer at all is not "fine": the wallet RPC is down, wedged or (the
         # usual cause) rebuilding its cache, and nothing else notices -- the
@@ -658,27 +656,23 @@ fi
 #    comparison (method sets against stack.conf, not remembered ids) lives in
 #    scripts/lib.sh so scripts/rotate.sh's pruner and this check agree.
 if podman container exists lightningd 2>/dev/null; then
-    if command -v jq >/dev/null 2>&1; then
-        keep_runes=(
-            "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_RUNE)"
-            "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_SPEND_RUNE)"
-        )
-        if [ -z "${keep_runes[0]}" ] || [ -z "${keep_runes[1]}" ]; then
-            # Without the pair there is no declared end state to compare against,
-            # and every live rune would read as an orphan. verify.sh already
-            # fails on the MCP server this would break.
-            soft "lightning-mcp/node.env carries no rune pair; skipped the rune check"
-        elif orphan_runes=$(cln_orphan_runes "${keep_runes[@]}" 2>/dev/null); then
-            if [ -z "$orphan_runes" ]; then
-                ok "only the rune pair in lightning-mcp/node.env is live"
-            else
-                fail "$(printf '%s\n' "$orphan_runes" | wc -l) live CLN rune(s) the stack does not reference (id $(printf '%s\n' "$orphan_runes" | cut -f1 | paste -sd, -)); a runes rotation blacklists them"
-            fi
+    keep_runes=(
+        "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_RUNE)"
+        "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_SPEND_RUNE)"
+    )
+    if [ -z "${keep_runes[0]}" ] || [ -z "${keep_runes[1]}" ]; then
+        # Without the pair there is no declared end state to compare against,
+        # and every live rune would read as an orphan. verify.sh already
+        # fails on the MCP server this would break.
+        soft "lightning-mcp/node.env carries no rune pair; skipped the rune check"
+    elif orphan_runes=$(cln_orphan_runes "${keep_runes[@]}" 2>/dev/null); then
+        if [ -z "$orphan_runes" ]; then
+            ok "only the rune pair in lightning-mcp/node.env is live"
         else
-            soft "could not read lightningd showrunes; skipped the rune check"
+            fail "$(printf '%s\n' "$orphan_runes" | wc -l) live CLN rune(s) the stack does not reference (id $(printf '%s\n' "$orphan_runes" | cut -f1 | paste -sd, -)); a runes rotation blacklists them"
         fi
     else
-        soft "jq missing; skipped the rune check"
+        soft "could not read lightningd showrunes; skipped the rune check"
     fi
 else
     soft "lightningd is not running; skipped the rune check"
@@ -708,29 +702,25 @@ fi
 
 # backup age: a timer that fires is not a repository that has a snapshot, and a
 # fire-and-forget backup is the failure you find out about on restore day.
-if command -v jq >/dev/null 2>&1; then
-    if bjson=$("$REPO_DIR/scripts/backup.sh" list --json 2>/dev/null) \
-        && printf '%s' "$bjson" | jq -e 'type == "array"' >/dev/null 2>&1; then
-        backup_count=$(printf '%s' "$bjson" | jq 'length')
-        latest=$(printf '%s' "$bjson" | jq -r 'map(.time) | max // empty' 2>/dev/null)
-        if [ -n "$latest" ]; then
-            latest_s=$(date -d "$latest" +%s 2>/dev/null || echo "")
-            if [ -n "$latest_s" ]; then
-                backup_age_s=$(( $(date +%s) - latest_s ))
-                backup_age_h=$(( backup_age_s / 3600 ))
-                if [ "$backup_age_h" -gt "$THRESH_BACKUP_H" ]; then
-                    fail "no restic snapshot for ${backup_age_h}h (threshold ${THRESH_BACKUP_H}h)"
-                else
-                    ok "last backup ${backup_age_h}h ago ($backup_count snapshot(s))"
-                fi
+if bjson=$("$REPO_DIR/scripts/backup.sh" list --json 2>/dev/null) \
+    && printf '%s' "$bjson" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    backup_count=$(printf '%s' "$bjson" | jq 'length')
+    latest=$(printf '%s' "$bjson" | jq -r 'map(.time) | max // empty' 2>/dev/null)
+    if [ -n "$latest" ]; then
+        latest_s=$(date -d "$latest" +%s 2>/dev/null || echo "")
+        if [ -n "$latest_s" ]; then
+            backup_age_s=$(( $(date +%s) - latest_s ))
+            backup_age_h=$(( backup_age_s / 3600 ))
+            if [ "$backup_age_h" -gt "$THRESH_BACKUP_H" ]; then
+                fail "no restic snapshot for ${backup_age_h}h (threshold ${THRESH_BACKUP_H}h)"
+            else
+                ok "last backup ${backup_age_h}h ago ($backup_count snapshot(s))"
             fi
         fi
-        [ -n "$backup_age_s" ] || soft "no restic snapshot yet (expected until the first backup runs)"
-    else
-        soft "could not list the restic repository (scripts/backup.sh list)"
     fi
+    [ -n "$backup_age_s" ] || soft "no restic snapshot yet (expected until the first backup runs)"
 else
-    soft "jq missing; skipped the backup age check"
+    soft "could not list the restic repository (scripts/backup.sh list)"
 fi
 
 # The pre-backup database dumps: the live database files are in stack.conf's
