@@ -32,6 +32,14 @@ Network=npm-network.network
 # $USER fails, and chown -R would lock bitcoind out of its own chainstate.
 Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 
+# Stop gracefully, not at podman's 10 s default: SIGTERM makes bitcoind flush
+# its block index and chainstate, and a SIGKILL mid-flush is what turns the next
+# start into a verify or a reindex. `[Service] TimeoutStopSec` below must stay
+# above this value by at least 30 s -- systemd owns the cgroup and its own
+# deadline kills the daemon first otherwise. Measured here: "Shutdown: done" in
+# 3-5 s (docs/units.md, "A durable unit is stopped, not killed").
+StopTimeout=120
+
 # The lncm image ships no HEALTHCHECK, so without this podman reports
 # "Up (no health status)" and verify.sh can only warn.
 #
@@ -69,6 +77,7 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 TimeoutStartSec=300
+TimeoutStopSec=150s
 
 [Install]
 WantedBy=default.target

@@ -34,6 +34,16 @@ Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
 # (deploy/btcpay/monero-notify.sh) and deploy.
 Volume=@DATA_DIR@/bin/monero-notify.sh:/notify-block.sh:ro,z
 
+# Stop gracefully, not at podman's 10 s default. monerod's SIGTERM path closes
+# LMDB (`Deinitializing core...`); on this host that flush has never finished
+# inside 10 s, and on 2026-11-08 16:21 the SIGKILL itself took 34 s to be
+# honoured -- uninterruptible I/O on the rotational data disk, a 150 GB DB --
+# with the unit taking 44 s to stop. 300 s is the one value that is not a guess:
+# the full flush has never been observed to complete (docs/units.md, "A durable
+# unit is stopped, not killed"). `[Service] TimeoutStopSec` must stay above
+# this by 30 s, or systemd kills the cgroup first.
+StopTimeout=300
+
 # NOTE: Exec= replaces the image CMD, so the image's default flags
 # must be restated verbatim, with our additions appended.
 # (--non-interactive is prepended by the entrypoint itself.)
@@ -88,6 +98,7 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 TimeoutStartSec=300
+TimeoutStopSec=330s
 
 [Install]
 WantedBy=default.target

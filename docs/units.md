@@ -20,6 +20,10 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   unit active, so `NRestarts` never moves and the monitor cannot see the flap.
 - **`HealthCmd` proves the process, not the data path.** A probe that is red
   while recovering (IBD, sync, first index) belongs in `monitor.sh`.
+- **A durable unit is stopped, not killed.** `[Container] StopTimeout=` plus a
+  larger `[Service] TimeoutStopSec=` on every unit in `stack.conf`'s
+  `STATEFUL_UNITS`; Quadlet's 10 s default and systemd's 90 s default both
+  SIGKILL a daemon mid-flush. See "A durable unit is stopped, not killed".
 - **A container unit mounts only from `$DATA_DIR` (or a podman volume).** A bind
   source from the checkout breaks at the container's *next* start, not at
   deploy time.
@@ -203,6 +207,55 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   job spun its whole 180 s and warned "container missing" about a job that had
   succeeded. The ten MCP servers' `healthcheck.py` (authenticated `initialize`,
   SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
+
+## A durable unit is stopped, not killed
+
+- **Quadlet's stop path has two deadlines, and raising one alone changes
+  nothing.** Quadlet renders `ExecStop=/usr/bin/podman rm -v -f -i <name>`, and
+  the container carries podman's default `--stop-timeout` of **10 s**: SIGTERM
+  now, SIGKILL ten seconds later. Outside that, systemd's
+  `DefaultTimeoutStopSec` is **90 s** for the whole stop job. So
+  `StopTimeout=300` with the default systemd ceiling still ends in a SIGKILL at
+  90 s, and the daemon dies uncleanly anyway. The two knobs are not symmetric:
+  `[Container] StopTimeout=` is integer seconds and renders `--stop-timeout`;
+  `[Service] TimeoutStopSec=` is a systemd time span rendered verbatim (write
+  `150s`). `StopTimeout` in `[Service]` is an unknown systemd key, which systemd
+  logs and ignores -- it is not a typo that works. `TimeoutStopSec` must exceed
+  `StopTimeout` by at least 30 s: it covers `ExecStop` and `ExecStopPost`, and
+  systemd's kill is the last resort, not the plan.
+
+- **This is what put Fulcrum into its rebuild.** On 2026-11-08 23:47 the stop of
+  `fulcrum` hit the 10 s ceiling mid-flush and the next start logged "previous
+  run of Fulcrum may have shut down uncleanly, however undo info is missing from
+  the DB" -- the same message seven times since 10-31. Its clean stops on this
+  host measured 1.5 s, 6.7 s, 8.3 s and 9.2 s: one slow flush is all it takes.
+
+- **`monerod` is the case the ceiling exists for.** Its LMDB close
+  (`Deinitializing core...`) never finished inside 10 s here; on 11-08 16:21 the
+  SIGKILL itself took 34 s to be honoured (uninterruptible I/O on the rotational
+  data disk, a 150 GB DB) and the unit took 44 s to stop. `StopTimeout=300` on it
+  is the only value that is not a guess -- the full flush has never been observed
+  to complete. `bitcoind` (`Shutdown: done` in 3-5 s) and `postgres` (fast
+  shutdown plus checkpoint, ~2 s) are on the same disk and get 120 s and 60 s.
+
+- **The rest of the tier is not decoration.** `lightningd`, `nbxplorer`,
+  `btc-explorer` and `monero-node-mcp` were all SIGKILLed at 10 s during the
+  11-03 event, when a host-wide stop saturates the same disk for every unit at
+  once. The MCP servers lose nothing; the daemons are the ones that must be
+  allowed to finish.
+
+- **Declared once, in `stack.conf`'s `STATEFUL_UNITS`, and checked by
+  `healthcheck-lint.sh`'s HC010.** The lint requires each listed unit to carry
+  both keys with 30 s of headroom, and that every listed name is a real
+  template; a waiver needs an inline `# health-lint: HC010 <reason>`. Not every
+  `@DATA_DIR@` mount is on the list -- a search cache or a metrics history is
+  not state -- so a new daemon whose database must be closed cleanly has to be
+  added there.
+
+- **`HealthOnFailure=kill` bypasses all of it.** Podman's own health kill is not
+  a graceful stop, and no `StopTimeout` can make it one. That is why the probe
+  contract above matters: a probe that is red while recovering (IBD, monerod
+  sync, Fulcrum's first index) is a SIGKILL aimed at a durable daemon's data.
 
 ## Ownership and images
 

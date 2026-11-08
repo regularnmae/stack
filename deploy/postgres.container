@@ -25,6 +25,12 @@ Volume=@DATA_DIR@/postgres:/var/lib/postgresql:z
 # server ignores DATABASE_URL.
 EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 
+# Stop gracefully, not at podman's 10 s default: a fast shutdown runs a final
+# checkpoint, and a SIGKILL mid-checkpoint is WAL replay on the next start
+# (measured here: ~2 s, docs/units.md, "A durable unit is stopped, not killed").
+# `[Service] TimeoutStopSec` must stay above this by 30 s.
+StopTimeout=60
+
 # The image ships no HEALTHCHECK. Probe over TCP rather than the Unix socket so
 # the check is meaningful and needs no shell or environment expansion -- a
 # $VAR here would be expanded by the systemd generator, not the container.
@@ -43,6 +49,7 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 TimeoutStartSec=300
+TimeoutStopSec=90s
 
 [Install]
 WantedBy=default.target

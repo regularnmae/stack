@@ -58,6 +58,12 @@ Volume=@DATA_DIR@/nbxplorer:/nbxplorer:ro,z
 Volume=@DATA_DIR@/cln:/clightning:z
 Volume=@DATA_DIR@/btcpay/xmr-wallet:/xmr-wallet:z
 
+# Stop gracefully, not at podman's 10 s default: .NET flushes EF's pending
+# writes and the data-protection keys on SIGTERM, and this datadir also holds
+# the Monero plugin's wallet. `[Service] TimeoutStopSec` must stay above this by
+# 30 s (docs/units.md, "A durable unit is stopped, not killed").
+StopTimeout=60
+
 # The image ships no curl/wget; bash's /dev/tcp is the only bounded probe
 # available. It proves the HTTP listener is accepting connections; the deep
 # check is the backend's /health, which calls the Greenfield API.
@@ -71,6 +77,7 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 TimeoutStartSec=300
+TimeoutStopSec=90s
 
 [Install]
 WantedBy=default.target

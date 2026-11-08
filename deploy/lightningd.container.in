@@ -31,6 +31,14 @@ Volume=@DATA_DIR@/cln:/root/.lightning:z
 # Map host bitcoind directory into CLN
 Volume=@DATA_DIR@/bitcoin:/root/.bitcoin:z
 
+# Stop gracefully, not at podman's 10 s default: CLN commits its database and
+# gives the plugins a bounded time to exit on SIGTERM. The 2026-11-03 SIGKILL
+# here was the entrypoint outliving a dead lightningd, not a slow shutdown --
+# either way the container must be allowed to finish rather than be killed at
+# 10 s (docs/units.md, "A durable unit is stopped, not killed"). `[Service]
+# TimeoutStopSec` must stay above this by 30 s.
+StopTimeout=60
+
 # Exec arguments connecting to bitcoind and tor.
 # NOTE: --proxy expects an IP address (it does not accept a hostname) and
 # --always-use-proxy=true suppresses DNS lookups, so Tor must be addressed by
@@ -70,6 +78,7 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 TimeoutStartSec=300
+TimeoutStopSec=90s
 
 [Install]
 WantedBy=default.target

@@ -36,6 +36,14 @@
 #          (verify.sh runs on a host without the checkout, so it cannot source
 #          the installer), and a unit in one but not the other is a service
 #          nobody verifies.
+#   HC010  every unit in stack.conf's STATEFUL_UNITS sets [Container]
+#          StopTimeout= and [Service] TimeoutStopSec=, with at least 30 s of
+#          headroom on the systemd side. Podman's default is 10 s and systemd's
+#          is 90 s: either deadline SIGKILLs a daemon mid-flush, which is how
+#          Fulcrum lost its undo info and had to rebuild its index. The two
+#          knobs are not symmetric -- StopTimeout is integer seconds, and
+#          `StopTimeout` in [Service] is an unknown systemd key, not a typo that
+#          works.
 #
 # A rule can be waived for ONE unit with an inline comment carrying the code and
 # the reason, so the exemption lives beside the thing it is about:
@@ -68,6 +76,7 @@ done
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 HEALTHLESS_UNITS=("${HEALTHLESS_UNITS[@]:-}")
+STATEFUL_UNITS=("${STATEFUL_UNITS[@]:-}")
 
 fails=0 waivers=0
 bad() { printf '  FAIL %-22s [%s] %s\n' "$1" "$2" "$3"; fails=$((fails+1)); }
@@ -109,6 +118,15 @@ for entry in "${HEALTHLESS_UNITS[@]}"; do
     DECLARED_REASON["$name"]="$reason"
 done
 
+# Declared durable, by name. The value lives in each unit (a 150 GB LMDB and a
+# 2 s checkpoint do not share a number); this list is what says which units
+# must have one at all.
+declare -A STATEFUL=()
+for name in "${STATEFUL_UNITS[@]}"; do
+    [ -n "$name" ] || continue
+    STATEFUL["$name"]=1
+done
+
 printf 'Healthcheck contract (deploy/, %d templates)\n' "${#unit_files[@]}"
 
 # verify.sh's container inventory (both branches of its --no-nodes array).
@@ -142,6 +160,42 @@ for f in "${unit_files[@]}"; do
     if [ "$oneshot" != "oneshot" ] && [ "$root_tier" = 0 ] \
         && ! printf '%s\n' "$verify_units" | grep -qx "$name"; then
         bad "$name" HC009 "not in verify.sh's container inventory"
+    fi
+
+    # --- a durable unit is stopped, not killed ----------------------------
+    # Checked before the health/oneshot branches: a durable unit is never
+    # healthless, but hoisting it means the rule cannot be skipped by one that
+    # is (and the `continue`s below would).
+    if [ -n "${STATEFUL[$name]:-}" ]; then
+        stop_timeout=$(kv "$f" StopTimeout)
+        stop_sec=$(kv "$f" TimeoutStopSec)
+        why=""
+        case "$stop_timeout" in
+            '')  why="no [Container] StopTimeout" ;;
+            *[!0-9]*) why="StopTimeout=$stop_timeout is not whole seconds" ;;
+        esac
+        [ -n "$stop_sec" ] || why="${why:+$why; }no [Service] TimeoutStopSec"
+        if [ -z "$why" ]; then
+            # StopTimeout is seconds; TimeoutStopSec is a systemd time span, and
+            # dur_ms is the parser that reads both the same way as wait_healthy.
+            # systemd also accepts a bare number there, meaning seconds, so give
+            # it the unit dur_ms needs instead of reading it as 0.
+            case "$stop_sec" in
+                ''|*[!0-9]*) ;;
+                *) stop_sec="${stop_sec}s" ;;
+            esac
+            headroom=$(($(dur_ms "$stop_sec") - stop_timeout * 1000))
+            if [ "$headroom" -lt 0 ]; then
+                why="TimeoutStopSec=$stop_sec is below StopTimeout=${stop_timeout}s"
+            elif [ "$headroom" -lt 30000 ]; then
+                why="TimeoutStopSec=$stop_sec leaves $((headroom / 1000))s over StopTimeout=${stop_timeout}s (need 30s)"
+            fi
+        fi
+        if [ -n "$why" ]; then
+            w=$(waiver_for "$f" HC010)
+            if [ -n "$w" ]; then waived "$name" HC010 "$why" "$w"
+            else bad "$name" HC010 "$why"; fi
+        fi
     fi
 
     # --- healthless / oneshot ------------------------------------------------
@@ -267,6 +321,9 @@ done
 # --- the declaration must not name a unit that does not exist ---------------
 for name in "${!DECLARED[@]}"; do
     [ -n "${SEEN[$name]:-}" ] || bad "$name" HC003 "declared healthless but no such unit template"
+done
+for name in "${!STATEFUL[@]}"; do
+    [ -n "${SEEN[$name]:-}" ] || bad "$name" HC010 "declared durable but no such unit template"
 done
 
 printf '\n%d violation(s), %d waiver(s)\n' "$fails" "$waivers"

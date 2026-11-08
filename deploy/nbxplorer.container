@@ -31,6 +31,12 @@ Environment=NBXPLORER_COOKIEFILE=/datadir/.cookie
 
 Volume=@DATA_DIR@/nbxplorer:/datadir:z
 
+# Stop gracefully, not at podman's 10 s default: the indexer commits its
+# position and flushes EF before exiting, and it was SIGKILLed at 10 s during
+# the 2026-11-03 host-wide stop (docs/units.md, "A durable unit is stopped, not
+# killed"). `[Service] TimeoutStopSec` must stay above this by 30 s.
+StopTimeout=60
+
 HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:32838/health
 HealthInterval=60s
 HealthTimeout=10s
@@ -41,6 +47,7 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 TimeoutStartSec=300
+TimeoutStopSec=90s
 
 [Install]
 WantedBy=default.target
