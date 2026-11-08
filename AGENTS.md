@@ -16,9 +16,12 @@ unit is rendered** by `install.sh` from `deploy/*.container[.in]`, substituting
 `@DATA_DIR@`/`@CONFIG_DIR@` (plain user units also `@REPO_DIR@`); `lightningd`,
 `fulcrum` and `crowdsec` additionally substitute `@PLACEHOLDERS@` from
 `config/stack/secrets.env`. Rendered units are mode 600, never committed, never
-symlinks: never move a secret onto a committed `.container`. The BTCPay wallet
-uses `btcpayserver/monero` on purpose — its entrypoint binds `0.0.0.0` only with
-`--rpc-login` on argv, and the plugin hardcodes empty credentials.
+symlinks: never move a secret onto a committed `.container`. Env files are
+rendered the same way from `deploy/env/<app>/<file>.env.in`, which carry
+`@PLACEHOLDER@`s and never a value: never paste a real token into one. The
+BTCPay wallet uses `btcpayserver/monero` on purpose — its entrypoint binds
+`0.0.0.0` only with `--rpc-login` on argv, and the plugin hardcodes empty
+credentials.
 
 ## Commands
 

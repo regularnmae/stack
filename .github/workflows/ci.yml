@@ -88,6 +88,31 @@ jobs:
             exit 1
           fi
           printf 'no container template references @REPO_DIR@\n'
+      # deploy/env/<app>/<file>.env.in is the shape of every env file install.sh
+      # seeds. Two failures are silent until a deploy runs: a template renamed
+      # without its call site (install.sh would die mid-install), and a real
+      # credential pasted into a committed template -- the rule is a
+      # @PLACEHOLDER@, never a value. Both are cheap to catch from the checkout.
+      - name: env templates exist and carry no secret
+        run: |
+          mapfile -t files < <(git ls-files 'deploy/env/*.env.in')
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no deploy/env templates found"; exit 1; }
+          fail=0
+          while IFS= read -r ref; do
+            [ -f "$ref" ] || { echo "::error::install.sh references a missing template: $ref"; fail=1; }
+          done < <(grep -oE '\$DEPLOY_DIR/env/[A-Za-z0-9_./-]+\.env\.in' deploy/install.sh \
+            | sed 's|^\$DEPLOY_DIR/|deploy/|' | sort -u)
+          while IFS= read -r rel; do
+            [ -f "deploy/env/$rel.in" ] || { echo "::error::SEED_ENV_TEMPLATES names a missing template: deploy/env/$rel.in"; fail=1; }
+          done < <(sed -n '/^SEED_ENV_TEMPLATES=(/,/^)/p' deploy/install.sh \
+            | grep -oE '"[^"]+\.env"' | tr -d '"')
+          if hits=$(grep -nE '^[A-Z_]+=[0-9a-fA-F]{32,}$' "${files[@]}"); then
+            echo "::error::a deploy/env template carries a literal secret -- use a @PLACEHOLDER@:"
+            printf '%s\n' "$hits"
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+          printf '%d env templates, all referenced, none carry a secret\n' "${#files[@]}"
       # deploy/install.sh seeds monitor.env from the example, so the file a fresh
       # host gets and the documentation cannot drift. This catches the other
       # direction: a key scripts/monitor.sh starts reading that the example never

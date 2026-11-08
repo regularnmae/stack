@@ -698,6 +698,104 @@ backup_excludes() {
     printf '%s' "${out% }"
 }
 
+# ---------------------------------------------------------------------------
+# the one template render
+# ---------------------------------------------------------------------------
+# Every template -- a unit or an env file -- goes through this substitution
+# list. The caller owns the output file: render_unit installs it, and the two
+# env writers below apply their own policy (seed-once / write-if-changed). The
+# root tier has its own list (lib.sh's render_root_template, which verify.sh
+# re-renders against), so a placeholder shared with it must be added on both
+# sides. Values that only some templates use are `${x:-}` because this list is
+# evaluated for every template, including the ones that do not mention them.
+render_to() { # src out
+    local src="$1" out="$2" vol
+    sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
+        -e "s|@CONFIG_DIR@|$(esc "$CONFIG_DIR")|g" \
+        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
+        -e "s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g" \
+        -e "s|@BACKUP_PATHS@|$(esc "$(backup_restic_paths)")|g" \
+        -e "s|@BACKUP_EXCLUDES@|$(esc "$(backup_excludes)")|g" \
+        -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
+        -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
+        -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
+        -e "s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g" \
+        -e "s|@BTCPAY_HOST@|$(esc "$BTCPAY_HOST")|g" \
+        -e "s|@KUMA_ADD_HOSTS@|$(esc "$kuma_add_hosts")|g" \
+        -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
+        -e "s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g" \
+        -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
+        -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
+        -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \
+        -e "s|@MONERO_MCP_TOKEN@|$(esc "${MONERO_MCP_TOKEN:-}")|g" \
+        -e "s|@MONERO_MCP_SPEND_TOKEN@|$(esc "${MONERO_MCP_SPEND_TOKEN:-}")|g" \
+        -e "s|@LIGHTNING_MCP_TOKEN@|$(esc "${LIGHTNING_MCP_TOKEN:-}")|g" \
+        -e "s|@LIGHTNING_MCP_SPEND_TOKEN@|$(esc "${LIGHTNING_MCP_SPEND_TOKEN:-}")|g" \
+        -e "s|@PG_PASSWORD@|$(esc "${PG_PASSWORD:-}")|g" \
+        -e "s|@SECRET_KEY@|$(esc "${SECRET_KEY:-}")|g" \
+        -e "s|@REFRESH_SECRET_KEY@|$(esc "${REFRESH_SECRET_KEY:-}")|g" \
+        -e "s|@NODE_SECRET_KEY@|$(esc "${NODE_SECRET_KEY:-}")|g" \
+        -e "s|@BOOTSTRAP_SECRET_PEPPER@|$(esc "${BOOTSTRAP_SECRET_PEPPER:-}")|g" \
+        -e "s|@BOLTMESH_API_HOST@|$(esc "$BOLTMESH_API_HOST")|g" \
+        -e "s|@BOLTMESH_FRONTEND_HOST@|$(esc "$BOLTMESH_FRONTEND_HOST")|g" \
+        -e "s|@BOLTMESH_COMPANY_NAME@|$(esc "$BOLTMESH_COMPANY_NAME")|g" \
+        -e "s|@BOLTMESH_SUPPORT_EMAIL@|$(esc "$BOLTMESH_SUPPORT_EMAIL")|g" \
+        -e "s|@BOLTMESH_AGENT_REPO@|$(esc "$BOLTMESH_AGENT_REPO")|g" \
+        -e "s|@BTCPAY_ADMIN_PASSWORD@|$(esc "${BTCPAY_ADMIN_PASSWORD:-}")|g" \
+        -e "s|@RESTIC_PASSWORD@|$(esc "${RESTIC_PASSWORD:-}")|g" \
+        "$src" > "$out"
+    # @BACKUP_VOLUMES@ becomes one Volume= line per BACKUP_PATHS entry, which a
+    # sed replacement cannot carry (its value is multi-line and would need the
+    # newlines escaped); substitute the whole line here instead. Only
+    # backup.container carries the token, so this is a no-op for every other
+    # template.
+    if grep -qF '@BACKUP_VOLUMES@' "$out"; then
+        vol="$(mktemp)"
+        backup_mounts > "$vol"
+        awk -v f="$vol" '
+            index($0, "@BACKUP_VOLUMES@") { while ((getline l < f) > 0) print l; close(f); next }
+            { print }
+        ' "$out" > "$out.vol"
+        mv -f "$out.vol" "$out"
+        rm -f "$vol"
+    fi
+}
+
+# Render a template into PATH only when PATH is missing: the seed-once rule for
+# every env file below. An operator edit (boltmesh/app.env) and a rotation
+# (scripts/rotate.sh's set_env_key on bitcoin-node-mcp/upstream.env and
+# btc-explorer/btc-explorer.env) must survive every install, which is why this
+# never calls install(1) over an existing file. The values are resolved by the
+# caller INSIDE the ensure_secret branch -- a value computed before it would
+# announce a new token on every run.
+seed_rendered() { # path label src [log hint]
+    local path="$1" label="$2" src="$3" hint="" tmp
+    ensure_secret "$path" "$label" || return 0
+    tmp="$(mktemp)"
+    render_to "$src" "$tmp"
+    [ -s "$tmp" ] || { rm -f "$tmp"; die "rendered $src is empty"; }
+    write_secret "$path" < "$tmp"
+    rm -f "$tmp"
+    [ -z "${4:-}" ] || hint=" -- $4"
+    log "wrote $path (mode 600)$hint"
+}
+
+# Render a machine-owned env file and rewrite it only when the bytes differ. An
+# unchanged file must not churn: a rewritten mtime is what makes an operator
+# think a credential moved.
+write_rendered_if_changed() { # path src
+    local path="$1" src="$2" tmp
+    tmp="$(mktemp)"
+    render_to "$src" "$tmp"
+    if [ -s "$path" ] && cmp -s "$tmp" "$path"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    write_secret "$path" < "$tmp"
+    rm -f "$tmp"
+    log "wrote $path (mode 600)"
+}
+
 first_nonempty() {
     local v
     for v in "$@"; do
@@ -1223,84 +1321,64 @@ fi
 # ---------------------------------------------------------------------------
 # 6. per-application env files (under the data dir)
 # ---------------------------------------------------------------------------
+# The SHAPE of every file below is deploy/env/<app>/<file>.env.in, rendered
+# here; this section keeps only the values and the write policy. The three
+# policies are not interchangeable:
+#   - seed_rendered: write only when the file is missing. An operator edit
+#     (boltmesh/app.env) and a rotation (scripts/rotate.sh's set_env_key on
+#     bitcoin-node-mcp/upstream.env and btc-explorer/btc-explorer.env) survive
+#     every install; that is what "install.sh never refreshes them" means.
+#   - write_rendered_if_changed: machine-owned, rewritten whenever the rendered
+#     bytes differ (the LAPI bouncer key, the view-only wallet URL).
+#   - render_unit: units only, never a config file.
+# The eight one-line token.env files stay table-driven by seed_token_env: a
+# template per file would be worse, not better.
 
 seed_token_env searxng-mcp SEARXNG_MCP_TOKEN
-
-BTC_ENV="$CONFIG_DIR/bitcoin-node-mcp"
 seed_token_env bitcoin-node-mcp BITCOIN_MCP_TOKEN
-seed_env "$BTC_ENV/upstream.env" "bitcoin-node-mcp upstream env" <<EOF
-# Upstream credentials for the Bitcoin Core node this server reads. Derived
-# from the node secrets; the unit reads this via EnvironmentFile.
-BITCOIN_RPC_USER=$BITCOIN_RPC_USER
-BITCOIN_RPC_PASSWORD=$BITCOIN_RPC_PASSWORD
-EOF
-
-FULCRUM_ENV="$CONFIG_DIR/fulcrum-mcp"
 seed_token_env fulcrum-mcp FULCRUM_MCP_TOKEN
-seed_env "$FULCRUM_ENV/upstream.env" "fulcrum-mcp upstream env" <<EOF
-# The Electrum endpoint this server reads. Fulcrum is reachable only on
-# npm-network, and the Electrum protocol has no authentication of its own.
-FULCRUM_URL=tcp://fulcrum:50001
-EOF
-
-LOGS_ENV="$CONFIG_DIR/victoria-logs-mcp"
 seed_token_env victoria-logs-mcp LOGS_MCP_TOKEN
-seed_env "$LOGS_ENV/upstream.env" "victoria-logs-mcp upstream env" <<EOF
-# The log store this server reads. VictoriaLogs has no authentication of its
-# own: it is loopback-only on the host, and this MCP server is its
-# authenticated front door.
-VICTORIA_LOGS_URL=http://victoria-logs:9428
-EOF
-
-METRICS_ENV="$CONFIG_DIR/victoriametrics-mcp"
 seed_token_env victoriametrics-mcp METRICS_MCP_TOKEN
-seed_env "$METRICS_ENV/upstream.env" "victoriametrics-mcp upstream env" <<EOF
-# The metrics store this server reads. VictoriaMetrics has no authentication
-# of its own: it is loopback-only on the host, and this MCP server is its
-# authenticated front door.
-VICTORIA_METRICS_URL=http://victoriametrics:8428
-EOF
-
-# crowdsec-mcp: the bearer token clients present, and the bouncer key it reads
-# decisions with. The token is seed-once like every other server's; the key is
-# NOT -- it is derived from $CROWDSEC_MCP_BOUNCER_KEY in secrets.env, which is
-# the authority (the same value the rendered crowdsec unit registers as the
-# "mcp" bouncer), so this file is rewritten whenever the two disagree. Seeding
-# it once would leave a rotated secret split across two files.
-CROWDSEC_ENV="$CONFIG_DIR/crowdsec-mcp"
 seed_token_env crowdsec-mcp CROWDSEC_MCP_TOKEN
-mkdir -p "$CROWDSEC_ENV"
-lapi_env="$CROWDSEC_ENV/lapi.env"
-lapi_tmp=$(mktemp)
-cat > "$lapi_tmp" <<EOF
-# The bouncer key this server reads decisions with (rendered from
-# CROWDSEC_MCP_BOUNCER_KEY in config/stack/secrets.env). Read-only by nature:
-# a bouncer may pull decisions and cannot write. Never put a machine password
-# here -- a machine may also create and delete decisions.
-CROWDSEC_LAPI_KEY=$CROWDSEC_MCP_BOUNCER_KEY
-EOF
-# Rewritten from the authority whenever it differs, unlike the seed-once token
-# above: this file is derived, not operator-edited. cmp rather than a rewrite on
-# principle -- an unchanged file must not churn the unit's mtime.
-if [ -s "$lapi_env" ] && cmp -s "$lapi_tmp" "$lapi_env"; then
-    rm -f "$lapi_tmp"
-else
-    install -m 600 "$lapi_tmp" "$lapi_env"
-    rm -f "$lapi_tmp"
-    log "wrote $lapi_env (mode 600)"
-fi
-
-# btcpay-mcp: the bearer token clients present, and the upstream wiring. The
-# token is seed-once like every other server's. The key is NOT seeded from a
-# copy: it is minted by scripts/btcpay_bootstrap.py into
-# config/btcpay/bootstrap.env, and configure.sh's write_btcpay_mcp_env()
-# rewrites this file from that state after every bootstrap. Seeding the key
-# here would leave a rotated secret split across two files (the same rule as
-# crowdsec's lapi.env). This seed only gives the unit a URL before the first
-# bootstrap.
-BTCPAY_MCP_ENV="$CONFIG_DIR/btcpay-mcp"
 seed_token_env btcpay-mcp BTCPAY_MCP_TOKEN
-seed_env "$BTCPAY_MCP_ENV/upstream.env" "btcpay-mcp upstream env" <<EOF
+seed_token_env monero-node-mcp MONERO_MCP_TOKEN
+
+# Static shapes: the table is the whole difference between them.
+SEED_ENV_TEMPLATES=(
+    "fulcrum-mcp/upstream.env"
+    "victoria-logs-mcp/upstream.env"
+    "victoriametrics-mcp/upstream.env"
+    "monero-node-mcp/upstream.env"
+    "monero-wallet-mcp/spend.env"
+    "lightning-mcp/spend.env"
+)
+for rel in "${SEED_ENV_TEMPLATES[@]}"; do
+    seed_rendered "$CONFIG_DIR/$rel" \
+        "$(dirname "$rel") $(basename "$rel" .env) env" \
+        "$DEPLOY_DIR/env/$rel.in"
+done
+
+# bitcoin-node-mcp: the node's own RPC credentials, derived from §1.
+seed_rendered "$CONFIG_DIR/bitcoin-node-mcp/upstream.env" \
+    "bitcoin-node-mcp upstream env" \
+    "$DEPLOY_DIR/env/bitcoin-node-mcp/upstream.env.in"
+
+# crowdsec-mcp: the bearer token clients present (seeded above), and the bouncer
+# key it reads decisions with. The key is NOT seed-once -- it is derived from
+# $CROWDSEC_MCP_BOUNCER_KEY in secrets.env, which is the authority (the same
+# value the rendered crowdsec unit registers as the "mcp" bouncer), so this
+# file is rewritten whenever the two disagree. Seeding it once would leave a
+# rotated secret split across two files.
+write_rendered_if_changed "$CONFIG_DIR/crowdsec-mcp/lapi.env" \
+    "$DEPLOY_DIR/env/crowdsec-mcp/lapi.env.in"
+
+# btcpay-mcp: the bearer token clients present (seeded above), and the upstream
+# wiring. The key is NOT seeded from a copy: it is minted by
+# scripts/btcpay_bootstrap.py into config/btcpay/bootstrap.env, and
+# configure.sh's write_btcpay_mcp_env() rewrites this file from that state after
+# every bootstrap. This seed only gives the unit a URL before the first
+# bootstrap.
+seed_env "$CONFIG_DIR/btcpay-mcp/upstream.env" "btcpay-mcp upstream env" <<EOF
 # The BTCPay instance this server reads. configure.sh rewrites this file from
 # config/btcpay/bootstrap.env (URL, the read-only BTCPAY_MCP_KEY, store id and
 # the public origin) after every bootstrap; do not hand-edit it.
@@ -1312,89 +1390,32 @@ EOF
 # needs the same bitcoind RPC credentials plus Fulcrum's Electrum endpoint. It
 # keeps no data of its own. Address history comes from Fulcrum; any txid
 # resolves through bitcoind's txindex (README: "Block explorers").
-seed_env "$CONFIG_DIR/btc-explorer/btc-explorer.env" "btc explorer env" <<EOF
-# BTC RPC Explorer (deploy/btc-explorer.container). Read via EnvironmentFile=.
-# The RPC password is a secret; the rest is wiring. Empty
-# BTCEXP_BASIC_AUTH_PASSWORD means the explorer is public (as served by NPM).
-BTCEXP_HOST=0.0.0.0
-BTCEXP_PORT=3002
-BTCEXP_BITCOIND_HOST=bitcoind
-BTCEXP_BITCOIND_PORT=8332
-BTCEXP_BITCOIND_USER=$BITCOIN_RPC_USER
-BTCEXP_BITCOIND_PASS=$BITCOIN_RPC_PASSWORD
-# Address history and balances come from the stack's own Fulcrum; no second
-# index and no external API. BTCEXP_ELECTRUM_TXINDEX is electrs-only, so it is
-# deliberately absent (Fulcrum is not electrs).
-BTCEXP_ADDRESS_API=electrum
-BTCEXP_ELECTRUM_SERVERS=tcp://fulcrum:50001
-# Served behind nginx-proxy-manager, which terminates TLS. Privacy mode keeps
-# the explorer from calling out for exchange rates or IP geolocation.
-BTCEXP_SECURE_SITE=true
-BTCEXP_PRIVACY_MODE=true
-BTCEXP_NO_RATES=true
-BTCEXP_SLOW_DEVICE_MODE=true
-BTCEXP_RPC_ALLOWALL=false
-# Optional HTTP basic auth (any username, this password). Empty = public.
-BTCEXP_BASIC_AUTH_PASSWORD=
-EOF
-
-XMR_ENV="$CONFIG_DIR/monero-node-mcp"
-seed_token_env monero-node-mcp MONERO_MCP_TOKEN
-seed_env "$XMR_ENV/upstream.env" "monero-node-mcp upstream env" <<EOF
-# Empty unless monerod was started with --rpc-login.
-MONERO_RPC_USER=
-MONERO_RPC_PASSWORD=
-EOF
+seed_rendered "$CONFIG_DIR/btc-explorer/btc-explorer.env" "btc explorer env" \
+    "$DEPLOY_DIR/env/btc-explorer/btc-explorer.env.in"
 
 XMRW_ENV="$CONFIG_DIR/monero-wallet-mcp"
 if ensure_secret "$XMRW_ENV/token.env" "monero-wallet-mcp token env"; then
-    read_token=$(new_or_reused_token monero-wallet-mcp MONERO_MCP_TOKEN)
-    write_secret "$XMRW_ENV/token.env" <<EOF
-# Read token: admits the endpoint, cannot call spend tools.
-MONERO_MCP_TOKEN=$read_token
-# Spend token: additionally required for transfer / sweep_all / create_address.
-MONERO_MCP_SPEND_TOKEN=$(rand_hex)
-EOF
-    log "wrote $XMRW_ENV/token.env (mode 600) with a read and a spend token"
+    MONERO_MCP_TOKEN=$(new_or_reused_token monero-wallet-mcp MONERO_MCP_TOKEN) \
+    MONERO_MCP_SPEND_TOKEN=$(rand_hex) \
+        seed_rendered "$XMRW_ENV/token.env" "monero-wallet-mcp token env" \
+            "$DEPLOY_DIR/env/monero-wallet-mcp/token.env.in" \
+            "with a read and a spend token"
 fi
-# Derived every run (machine-owned): the MCP now reads BTCPay's view-only
-# plugin wallet. The wallet RPC has no login by design (the plugin hardcodes
-# empty credentials) and holds no spend key, so the MCP's spend tools cannot
-# move funds.
-write_secret "$XMRW_ENV/upstream.env" <<EOF
-MONERO_WALLET_RPC_URL=http://monero-wallet-btcpay:18083/json_rpc
-MONERO_WALLET_RPC_USER=
-MONERO_WALLET_RPC_PASSWORD=
-EOF
-log "wrote $XMRW_ENV/upstream.env (mode 600)"
-seed_env "$XMRW_ENV/spend.env" "monero-wallet-mcp spend env" <<EOF
-# Spending is OFF until you set ENABLE_SPENDING=1. With it on, both caps below
-# must be positive (in XMR) or the server refuses to start. MAINNET: real money.
-ENABLE_SPENDING=0
-MAX_SPEND_PER_CALL=1
-MAX_SPEND_PER_DAY=5
-# Optional comma-separated destination allowlist; empty allows any address.
-ALLOWED_DESTINATIONS=
-EOF
+# Derived every run (machine-owned): the MCP reads BTCPay's view-only plugin
+# wallet. The wallet RPC has no login by design (the plugin hardcodes empty
+# credentials) and holds no spend key, so the MCP's spend tools cannot move
+# funds.
+write_rendered_if_changed "$XMRW_ENV/upstream.env" \
+    "$DEPLOY_DIR/env/monero-wallet-mcp/upstream.env.in"
 
 LN_ENV="$CONFIG_DIR/lightning-mcp"
 if ensure_secret "$LN_ENV/token.env" "lightning-mcp token env"; then
-    read_token=$(new_or_reused_token lightning-mcp LIGHTNING_MCP_TOKEN)
-    write_secret "$LN_ENV/token.env" <<EOF
-# Read token: admits the endpoint, cannot call spend tools.
-LIGHTNING_MCP_TOKEN=$read_token
-# Spend token: additionally required for invoice / pay / keysend / withdraw / close.
-LIGHTNING_MCP_SPEND_TOKEN=$(rand_hex)
-EOF
-    log "wrote $LN_ENV/token.env (mode 600) with a read and a spend token"
+    LIGHTNING_MCP_TOKEN=$(new_or_reused_token lightning-mcp LIGHTNING_MCP_TOKEN) \
+    LIGHTNING_MCP_SPEND_TOKEN=$(rand_hex) \
+        seed_rendered "$LN_ENV/token.env" "lightning-mcp token env" \
+            "$DEPLOY_DIR/env/lightning-mcp/token.env.in" \
+            "with a read and a spend token"
 fi
-seed_env "$LN_ENV/spend.env" "lightning-mcp spend env" <<EOF
-# Spending (payments) is OFF until you set ENABLE_SPENDING=1. With it on, both
-# caps below must be positive (in satoshis) or the server refuses to start.
-ENABLE_SPENDING=0
-MAX_PAYMENT_PER_CALL_SATS=10000
-MAX_PAYMENT_PER_DAY_SATS=100000
-EOF
 
 # ---------------------------------------------------------------------------
 # BoltMesh env files (under the data dir, like every other app's)
@@ -1406,94 +1427,33 @@ EOF
 BOLT_DB="$CONFIG_DIR/boltmesh"
 
 if ensure_secret "$BOLT_DB/db.env" "boltmesh db env"; then
-    pg_password=$(rand_hex)
-    write_secret "$BOLT_DB/db.env" <<EOF
-# The BoltMesh database. Read by the postgres unit (POSTGRES_*) and by the
-# backend/worker (DATABASE_URL, same password). The server ignores DATABASE_URL.
-POSTGRES_DB=vpndb
-POSTGRES_USER=vpnuser
-POSTGRES_PASSWORD=$pg_password
-DATABASE_URL=postgresql+asyncpg://vpnuser:$pg_password@postgres:5432/vpndb
-EOF
-    log "wrote $BOLT_DB/db.env (mode 600)"
+    PG_PASSWORD=$(rand_hex) \
+        seed_rendered "$BOLT_DB/db.env" "boltmesh db env" \
+            "$DEPLOY_DIR/env/boltmesh/db.env.in"
 fi
 
 # The pre-backup dump's connection settings, read back from db.env so a second
 # run keeps the same password.
 pg_password=$(env_value "$BOLT_DB/db.env" POSTGRES_PASSWORD)
 if ensure_secret "$BOLT_DB/dump.env" "boltmesh dump env"; then
-    write_secret "$BOLT_DB/dump.env" <<EOF
-# libpq settings for deploy/postgres-dump.container (the pre-backup pg_dumpall).
-# Deliberately NOT in db.env: PGHOST/PGUSER in the postgres server's own
-# environment would break its socket-based entrypoint bootstrap.
-PGHOST=postgres
-PGUSER=vpnuser
-PGPASSWORD=$pg_password
-EOF
-    log "wrote $BOLT_DB/dump.env (mode 600)"
+    PG_PASSWORD="$pg_password" \
+        seed_rendered "$BOLT_DB/dump.env" "boltmesh dump env" \
+            "$DEPLOY_DIR/env/boltmesh/dump.env.in"
 fi
 
 if ensure_secret "$BOLT_DB/secrets.env" "boltmesh secrets env"; then
-    write_secret "$BOLT_DB/secrets.env" <<EOF
-# JWT signing keys and the node-bootstrap pepper (each min 32 chars, distinct).
-# Generated once; regenerating them invalidates every session and node token.
-SECRET_KEY=$(new_or_reused_secret boltmesh-backend SECRET_KEY)
-REFRESH_SECRET_KEY=$(new_or_reused_secret boltmesh-backend REFRESH_SECRET_KEY)
-NODE_SECRET_KEY=$(new_or_reused_secret boltmesh-backend NODE_SECRET_KEY)
-BOOTSTRAP_SECRET_PEPPER=$(new_or_reused_secret boltmesh-backend BOOTSTRAP_SECRET_PEPPER)
-EOF
-    log "wrote $BOLT_DB/secrets.env (mode 600)"
+    SECRET_KEY=$(new_or_reused_secret boltmesh-backend SECRET_KEY) \
+    REFRESH_SECRET_KEY=$(new_or_reused_secret boltmesh-backend REFRESH_SECRET_KEY) \
+    NODE_SECRET_KEY=$(new_or_reused_secret boltmesh-backend NODE_SECRET_KEY) \
+    BOOTSTRAP_SECRET_PEPPER=$(new_or_reused_secret boltmesh-backend BOOTSTRAP_SECRET_PEPPER) \
+        seed_rendered "$BOLT_DB/secrets.env" "boltmesh secrets env" \
+            "$DEPLOY_DIR/env/boltmesh/secrets.env.in"
 fi
 
 if ensure_secret "$BOLT_DB/app.env" "boltmesh app env"; then
-    write_secret "$BOLT_DB/app.env" <<EOF
-# BoltMesh API + worker configuration. Operator-editable: the app reads one flat
-# environment, so the credentials YOU supply (OAuth, SMTP, the agent deploy
-# token) live here beside the URLs. The stack-owned values (database, JWT keys,
-# payment gateways) are in db.env/secrets.env/btcpay/backend.env -- do not duplicate
-# them here.
-#
-# APP_ENV=prod: the app derives Secure + SameSite=None cookies from it (the SPA
-# and the API are on different hosts) and stops loading any .env file.
-APP_ENV=prod
-APP_DEBUG=0
-CACHE_URL=redis://valkey:6379/0
-
-# Public URLs. API_BASE_URL is also the base of every OAuth redirect_uri, so it
-# must match the provider consoles and the nginx-proxy-manager proxy host.
-API_BASE_URL=https://$BOLTMESH_API_HOST
-FRONTEND_URL=https://$BOLTMESH_FRONTEND_HOST
-CORS_ALLOW_ORIGINS=https://$BOLTMESH_FRONTEND_HOST
-COMPANY_NAME=$BOLTMESH_COMPANY_NAME
-TRUST_PROXY_HEADERS=1
-
-# OAuth: register https://<api host>/v1/auth/google/callback and
-# https://<api host>/v1/auth/github/callback in each provider's console.
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-
-# SMTP for activation and password-reset mail.
-MAIL_SERVER=
-MAIL_PORT=587
-MAIL_USERNAME=
-MAIL_PASSWORD=
-MAIL_FROM=$BOLTMESH_SUPPORT_EMAIL
-MAIL_STARTTLS=true
-MAIL_SSL_TLS=false
-SUPPRESS_EMAIL=false
-TEMPLATES_DIR=templates
-
-# Node provisioning: the agent repo and a token that can read it.
-GITHUB_REPO=$BOLTMESH_AGENT_REPO
-GITHUB_TOKEN=
-AWS_IID_ACCOUNT_ID=
-AWS_IID_SIGNER_FINGERPRINTS=
-MANUAL_BOOTSTRAP_SECRET_TTL_DAYS=30
-SERVER_STALE_SECONDS=120
-EOF
-    log "wrote $BOLT_DB/app.env (mode 600) -- fill in OAuth/SMTP/GitHub before use"
+    seed_rendered "$BOLT_DB/app.env" "boltmesh app env" \
+        "$DEPLOY_DIR/env/boltmesh/app.env.in" \
+        "fill in OAuth/SMTP/GitHub before use"
 fi
 
 # Backup repository settings for deploy/backup.container. The unit is
@@ -1507,18 +1467,9 @@ if ensure_secret "$BACKUP_ENV" "backup env"; then
         "$(read_secret RESTIC_PASSWORD)" \
         "${RESTIC_PASSWORD:-}" \
         "$(rand_hex)")
-    write_secret "$BACKUP_ENV" <<EOF
-# restic repository for the nightly backup (deploy/backup.container). The
-# local default is the STACK_BACKUP_DIR host dir mounted at /repo; point
-# RESTIC_REPOSITORY at an offsite target (s3:, b2:, sftp:) for real disaster
-# recovery. RESTIC_PASSWORD is the only key to the encrypted backups -- keep a
-# copy somewhere other than the data disk. See
-# deploy/examples/backup/backup.env.example.
-RESTIC_REPOSITORY=/repo
-RESTIC_PASSWORD=$restic_password
-RESTIC_CACHE_DIR=/cache
-EOF
-    log "wrote $BACKUP_ENV (mode 600)"
+    RESTIC_PASSWORD="$restic_password" \
+        seed_rendered "$BACKUP_ENV" "backup env" \
+            "$DEPLOY_DIR/env/backup/backup.env.in"
 fi
 
 # Monitoring: the alert targets, the dead-man's-switch heartbeat and the
@@ -1663,20 +1614,10 @@ fi
 BTC_CONFIG="$CONFIG_DIR/btcpay"
 mkdir -p "$BTC_CONFIG"
 if ensure_secret "$BTC_CONFIG/bootstrap.env" "btcpay bootstrap env"; then
-    write_secret "$BTC_CONFIG/bootstrap.env" <<EOF
-# Input for scripts/btcpay_bootstrap.py and, after the first run, the state
-# file it writes back (admin key, runtime key, store id, webhook secret).
-BTCPAY_URL=http://btcpay:49392
-BTCPAY_ADMIN_EMAIL=admin@boltmesh.local
-BTCPAY_ADMIN_PASSWORD=$(rand_hex)
-BTCPAY_STORE_NAME=BoltMesh
-BTCPAY_WEBHOOK_URL=http://boltmesh-backend:8000/v1/webhooks/btcpay
-BTCPAY_XMR_ACCOUNT_INDEX=0
-BTCPAY_XMR_CONFIRMATIONS=1
-BTCPAY_MONITORING_MINUTES=10080
-BTCPAY_WAIT_SECONDS=120
-EOF
-    log "wrote $BTC_CONFIG/bootstrap.env (mode 600) -- change the admin email/password before first use"
+    BTCPAY_ADMIN_PASSWORD=$(rand_hex) \
+        seed_rendered "$BTC_CONFIG/bootstrap.env" "btcpay bootstrap env" \
+            "$DEPLOY_DIR/env/btcpay/bootstrap.env.in" \
+            "change the admin email/password before first use"
 fi
 if [ ! -s "$BTC_CONFIG/backend.env" ]; then
     write_secret "$BTC_CONFIG/backend.env" <<EOF
@@ -1686,17 +1627,9 @@ EOF
     log "seeded $BTC_CONFIG/backend.env (filled in after the bootstrap)"
 fi
 if ensure_secret "$BTC_CONFIG/xmr-wallet.env" "btcpay xmr wallet env"; then
-    write_secret "$BTC_CONFIG/xmr-wallet.env" <<EOF
-# The BTCPay plugin's VIEW-ONLY Monero wallet. Fill in the primary address and
-# private view key of the wallet whose spend key you keep offline, plus its
-# restore height; scripts/btcpay-wallet.sh imports it and the bootstrap enables
-# XMR-CHAIN. Leaving these empty keeps XMR disabled (the BTC-LN rail is
-# unaffected).
-XMR_WALLET_ADDRESS=
-XMR_VIEW_KEY=
-XMR_RESTORE_HEIGHT=0
-EOF
-    log "wrote $BTC_CONFIG/xmr-wallet.env (mode 600) -- fill it in to enable XMR"
+    seed_rendered "$BTC_CONFIG/xmr-wallet.env" "btcpay xmr wallet env" \
+        "$DEPLOY_DIR/env/btcpay/xmr-wallet.env.in" \
+        "fill it in to enable XMR"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1737,40 +1670,9 @@ fi
 # 8. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
 render_unit() {
-    local src="$1" target="$2" tmp vol
+    local src="$1" target="$2" tmp
     tmp="$(mktemp)"
-    sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
-        -e "s|@CONFIG_DIR@|$(esc "$CONFIG_DIR")|g" \
-        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
-        -e "s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g" \
-        -e "s|@BACKUP_PATHS@|$(esc "$(backup_restic_paths)")|g" \
-        -e "s|@BACKUP_EXCLUDES@|$(esc "$(backup_excludes)")|g" \
-        -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
-        -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
-        -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
-        -e "s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g" \
-        -e "s|@BTCPAY_HOST@|$(esc "$BTCPAY_HOST")|g" \
-        -e "s|@KUMA_ADD_HOSTS@|$(esc "$kuma_add_hosts")|g" \
-        -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
-        -e "s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g" \
-        -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
-        -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
-        -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \
-        "$src" > "$tmp"
-    # @BACKUP_VOLUMES@ becomes one Volume= line per BACKUP_PATHS entry, which a
-    # sed replacement cannot carry (its value is multi-line and would need the
-    # newlines escaped); substitute the whole line here instead. Only
-    # backup.container carries the token.
-    if grep -qF '@BACKUP_VOLUMES@' "$tmp"; then
-        vol="$(mktemp)"
-        backup_mounts > "$vol"
-        awk -v f="$vol" '
-            index($0, "@BACKUP_VOLUMES@") { while ((getline l < f) > 0) print l; close(f); next }
-            { print }
-        ' "$tmp" > "$tmp.vol"
-        mv -f "$tmp.vol" "$tmp"
-        rm -f "$vol"
-    fi
+    render_to "$src" "$tmp"
     [ -L "$target" ] && rm -f "$target"
     install -m 600 "$tmp" "$target"
     rm -f "$tmp"

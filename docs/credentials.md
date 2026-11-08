@@ -33,8 +33,9 @@ token on a command line.
   seed-once files are why a rotation is not an env edit — `bitcoin.conf` is
   edited inside the container, `torrc` only in its `HashedControlPassword` line
   (the onion block is `install.sh`'s), and `btc-explorer.env`/
-  `bitcoin-node-mcp/upstream.env` are rewritten because install.sh never
-  refreshes them. The CLN method allowlists live in `stack.conf`
+  `bitcoin-node-mcp/upstream.env` are rewritten by `rotate.sh` because
+  install.sh seeds them once (`seed_rendered`, §6; the policy is in
+  `docs/units.md`). The CLN method allowlists live in `stack.conf`
   (`CLN_READ_METHODS`/`CLN_SPEND_METHODS`, rendered by
   `rune_json`) precisely so the installer and the rotator mint the same runes.
   **Nothing is journaled and there is no `--resume`: a half-applied rotation is

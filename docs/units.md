@@ -11,7 +11,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
 - **`install.sh` is the only installer.** Every env file is seeded and every unit
   rendered there; a new service is a unit in its `UNITS` array, never a change in
-  an app repo.
+  an app repo. An env file's *shape* lives in `deploy/env/<app>/<file>.env.in`
+  and is rendered by the same substitution list as the units (`render_to`).
 - **A re-render does not change a running container.** `install.sh` advances
   `units.rendered`; only `deploy.sh` and `rotate.sh` advance `units.applied`,
   and only after applying. A hand render is drift and `verify.sh` names it.
@@ -32,6 +33,18 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 - **Secret resolution order** is `secrets.env` → the installed unit
   (`flag_value`) → the daemon's config (`bitcoin_conf_value`) → generate. That
   order is what makes adoption on a running host a no-op; keep it.
+
+- **Env files have three write policies, and they are not interchangeable**
+  (`install.sh` §6). `seed_rendered` writes only when the file is missing: an
+  operator edit (`boltmesh/app.env`) and a rotation (`scripts/rotate.sh`'s
+  `set_env_key` on `bitcoin-node-mcp/upstream.env` and `btc-explorer.env`)
+  survive every install. `write_rendered_if_changed` is for machine-owned files
+  (`crowdsec-mcp/lapi.env`, the view-only wallet's `upstream.env`) and rewrites
+  them only when the bytes differ, so an unchanged credential does not churn a
+  file's mtime. `render_unit` is for units only -- using it on a config file
+  would silently undo a rotation. Token values are resolved *inside* the
+  missing-file branch: a value computed before it would call
+  `new_or_reused_token` (and announce a new token) on every run.
 
 - **`install.sh` runs twice per deploy cycle** — `deploy.sh` renders up front,
   and `./configure.sh` re-runs it after `lightningd` is up, because the CLN

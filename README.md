@@ -1901,8 +1901,10 @@ under `$DATA_DIR/config/`, mode 600.
 - **Per-app env files**
   (`$DATA_DIR/config/<name>/{token,upstream,spend,node}.env`) hold the bearer
   tokens, upstream credentials, spend policy and CLN runes. The unit reads them
-  with `EnvironmentFile=`; the shapes are documented in
-  `deploy/examples/<name>/`.
+  with `EnvironmentFile=`; their shapes are `deploy/env/<name>/<file>.env.in`,
+  rendered by `install.sh` (seed-once, except the machine-owned `lapi.env` and
+  the view-only wallet's `upstream.env`). The files install.sh does not render
+  are documented in `deploy/examples/<name>/`.
 - **`$DATA_DIR/config/btc-explorer/btc-explorer.env`** holds the BTC
   explorer's bitcoind RPC credentials and its Fulcrum endpoint. The unit reads
   it with `EnvironmentFile=` (the explorer has no other configuration).
@@ -2089,16 +2091,17 @@ stack/
                           #   rendered into $CONFIG_DIR/logs/vector
     monitoring/scrape.yml # what victoriametrics scrapes, rendered into place
     searxng/{settings.yml,limiter.toml}
-    examples/<app>/*.example      # env-file shapes, kept in sync with install.sh by
-                                  #   hand -- except monitor.env and alertmanager.yml,
+    env/<app>/<file>.env.in       # the shape of every env file install.sh seeds
+                                  #   (upstream/spend/token/boltmesh/backup/btcpay);
+                                  #   rendered by install.sh, never mounted
+    examples/<app>/*.example      # shapes install.sh does not render (the one-line
+                                  #   token.env files, node.env, btcpay/backend.env)
+                                  #   -- except monitor.env and alertmanager.yml,
                                   #   which install.sh copies verbatim
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
-    examples/backup/*.example     # backup.env shape
     examples/monitoring/*.example # the monitor env (seeded verbatim) + alertmanager.yml
     examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
-    examples/boltmesh/*.example   # db/secrets/app env shapes
-    examples/btcpay/*.example     # backend.env shape
-    examples/btc-explorer/*.example # btc-explorer.env shape (RPC + Fulcrum wiring)
+    examples/kuma/*.example       # uptime-kuma/api.env shape (the kuma login)
   tor/Containerfile       # built by install.sh: the Tor proxy + onion services
   netcheck/Containerfile  # built by install.sh: the curl client the host checks run
   btc-explorer/Containerfile # built by deploy.sh: BTC RPC Explorer (stateless)
