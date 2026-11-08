@@ -86,6 +86,10 @@ RERENDERED=0
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
+# The MCP server table (names, token variables, probe tool/args, spend token)
+# comes from deploy/services.toml via MCP_PROBES, so a server added there is a
+# rotation target here without a second list to keep in step.
+load_manifest "$REPO_DIR"
 
 RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
 BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
@@ -692,47 +696,28 @@ apply_runes() {
 # holds one. Rotating therefore has two halves -- the server's token.env and,
 # for the client, a pointer at that file (the value is never printed, and
 # ~/.config/opencode/mcp.env already reads it from there at shell start).
-TOKEN_SERVERS=(
-    searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp
-    lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp
-    crowdsec-mcp btcpay-mcp
-)
+# The rotation targets and their token specs are the manifest's [mcp.*] table,
+# emitted as MCP_PROBES: container|read-token var|read tool|its args|needs-nodes|
+# spend-token var. The token file is $CONFIG_DIR/<container>/token.env by
+# convention, exactly as verify.sh reads it.
+TOKEN_SERVERS=()
+for _probe in "${MCP_PROBES[@]}"; do
+    IFS='|' read -r _container _var _tool _args _needs _spend <<<"$_probe"
+    TOKEN_SERVERS+=("$_container")
+done
+unset _probe _container _var _tool _args _needs _spend
 
 # env-file | read-token var | a read tool it answers | its args | spend-token var
 token_spec() { # server
-    case "$1" in
-        searxng-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/searxng-mcp/token.env" \
-                SEARXNG_MCP_TOKEN get_time '{"tz":"UTC"}' "" ;;
-        bitcoin-node-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/bitcoin-node-mcp/token.env" \
-                BITCOIN_MCP_TOKEN get_blockchain_info '{}' "" ;;
-        monero-node-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/monero-node-mcp/token.env" \
-                MONERO_MCP_TOKEN get_info '{}' "" ;;
-        monero-wallet-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/monero-wallet-mcp/token.env" \
-                MONERO_MCP_TOKEN get_balance '{}' MONERO_MCP_SPEND_TOKEN ;;
-        lightning-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/lightning-mcp/token.env" \
-                LIGHTNING_MCP_TOKEN getinfo '{}' LIGHTNING_MCP_SPEND_TOKEN ;;
-        fulcrum-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/fulcrum-mcp/token.env" \
-                FULCRUM_MCP_TOKEN get_chain_tip '{}' "" ;;
-        victoria-logs-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/victoria-logs-mcp/token.env" \
-                LOGS_MCP_TOKEN get_log_health '{}' "" ;;
-        victoriametrics-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/victoriametrics-mcp/token.env" \
-                METRICS_MCP_TOKEN get_metrics_health '{}' "" ;;
-        crowdsec-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/crowdsec-mcp/token.env" \
-                CROWDSEC_MCP_TOKEN list_decisions '{}' "" ;;
-        btcpay-mcp)
-            printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/btcpay-mcp/token.env" \
-                BTCPAY_MCP_TOKEN list_stores '{}' "" ;;
-        *) return 1 ;;
-    esac
+    local probe container var tool args _needs spend
+    for probe in "${MCP_PROBES[@]}"; do
+        IFS='|' read -r container var tool args _needs spend <<<"$probe"
+        [ "$container" = "$1" ] || continue
+        printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/$container/token.env" \
+            "$var" "$tool" "$args" "$spend"
+        return 0
+    done
+    return 1
 }
 
 # A bearer token is the endpoint's own credential, and the server holds exactly

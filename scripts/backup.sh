@@ -297,6 +297,21 @@ write_verify_db_status() { # result detail [snapshot tables]
         "snapshot=$snap" "tables=$tables"
 }
 
+# Resolve `latest` (or an id) to the short id the report names, plus its time,
+# as "id<TAB>time" -- one read for both drills: the dump inside must come from
+# that run, not from months earlier. Falls back to the literal ref without jq.
+resolve_snapshot() { # ref -> "short-id<TAB>time"
+    local ref="$1" json id="" time=""
+    id="$ref"
+    if command -v jq >/dev/null 2>&1; then
+        json=$(restic snapshots --latest 1 --json "$ref" 2>/dev/null || true)
+        id=$(printf '%s' "$json" | jq -r '.[0].short_id // empty' 2>/dev/null || true)
+        time=$(printf '%s' "$json" | jq -r '.[0].time // empty' 2>/dev/null || true)
+        id="${id:-$ref}"
+    fi
+    printf '%s\t%s' "$id" "$time"
+}
+
 # The scratch tree and the drill's throwaway postgres, removed on any exit path
 # (a failure must not leave a 700 MiB copy of the wallet on the data disk).
 verify_cleanup() {
@@ -681,7 +696,7 @@ if (verdict !== "ok") { console.error("quick_check: " + JSON.stringify(rows)); p
 #     the dump, and the status file's age check is what turns a run of skips into
 #     an alert.
 run_verify_db() {
-    local snap_id snap_time root sjson avail need rlog rrc rres
+    local snap_id snap_time root avail need rlog rrc rres
     mkdir -p "$DATA_DIR/audit"
     exec 9>"$VERIFY_LOCK"
     if command -v flock >/dev/null 2>&1 && ! flock -w 1800 9; then
@@ -692,14 +707,7 @@ run_verify_db() {
 
     # Resolve `latest` so the report names the snapshot that was proven, and keep
     # its time: the dump must come from that run, not from months earlier.
-    snap_id="$snapshot"
-    snap_time=""
-    if command -v jq >/dev/null 2>&1; then
-        sjson=$(restic snapshots --latest 1 --json "$snapshot" 2>/dev/null || true)
-        snap_id=$(printf '%s' "$sjson" | jq -r '.[0].short_id // empty' 2>/dev/null || true)
-        snap_time=$(printf '%s' "$sjson" | jq -r '.[0].time // empty' 2>/dev/null || true)
-        snap_id="${snap_id:-$snapshot}"
-    fi
+    IFS=$'\t' read -r snap_id snap_time <<< "$(resolve_snapshot "$snapshot")"
 
     # The dump is small, but the disk is shared with two chains: never start a
     # restore that could fill it.
@@ -800,14 +808,7 @@ case "$cmd" in
         # Resolve `latest` so the report names the snapshot that was proven, and
         # keep its time: the dumps inside it must come from that run, not from
         # months earlier (see verify_dump_contents).
-        snap_id="$snapshot"
-        snap_time=""
-        if command -v jq >/dev/null 2>&1; then
-            sjson=$(restic snapshots --latest 1 --json "$snapshot" 2>/dev/null || true)
-            snap_id=$(printf '%s' "$sjson" | jq -r '.[0].short_id // empty' 2>/dev/null || true)
-            snap_time=$(printf '%s' "$sjson" | jq -r '.[0].time // empty' 2>/dev/null || true)
-            snap_id="${snap_id:-$snapshot}"
-        fi
+        IFS=$'\t' read -r snap_id snap_time <<< "$(resolve_snapshot "$snapshot")"
 
         subset=""
         if [ "$VERIFY_CHECK" = 1 ]; then

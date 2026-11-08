@@ -50,8 +50,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # The manifest's [uptime_kuma] loopback_port is kuma.py's default; KUMA_URL (an
 # environment override) wins when it is set. The CLI, the data dir and the
-# declaration stream are lib.sh's stackctl_wrapper -- the same half
-# npm-hosts.sh uses.
+# manifest path are lib.sh's stackctl_wrapper -- the same half npm-hosts.sh
+# uses.
 if [ -n "${KUMA_URL:-}" ]; then
     stackctl_wrapper kuma-monitors "KUMA_URL=$KUMA_URL" "$@"
 else

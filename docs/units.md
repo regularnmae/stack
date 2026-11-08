@@ -135,7 +135,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `verify.sh` reads instead of keeping its own copy. `scripts/healthcheck-lint.sh`
   is the gate: interval is 30 s (HTTP) or 60 s (daemons), retries 3 or 5 with a
   reason, timeout explicit and 5–20 s, an HTTP probe fails on non-2xx, discards
-  the body and bounds itself, and a rule is waived only by an inline
+  the body and bounds itself, every non-oneshot container unit is named in
+  `verify.sh`'s container inventory (the one list it cannot source), and a rule
+  is waived only by an inline
   `# health-lint: <code> <reason>` comment, printed on every run so exemptions
   stay visible. Three decisions carry the reasoning:
   **`HealthOnFailure=kill`, never `restart`** — podman's own restart leaves the

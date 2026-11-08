@@ -1061,6 +1061,14 @@ else
     agent_skills_summary="not installed (--skip-agent-skills)"
 fi
 
+# The summary's prefix list is the manifest's, not a second copy: "/searxng" ->
+# "searxng", joined with "|" (empty when the manifest is old).
+mcp_prefixes=""
+for pair in ${MCP_HOSTS[@]+"${MCP_HOSTS[@]}"}; do
+    prefix="${pair%%:*}"
+    mcp_prefixes+="${mcp_prefixes:+|}${prefix#/}"
+done
+
 if [ "$SKIP_DAEMONS" = 1 ]; then
     cat <<EOF
 
@@ -1085,7 +1093,7 @@ NPM cannot proxy the Electrum protocol. ./verify.sh and the monitoring scripts
 read the other services by container name on npm-network.
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $DATA_DIR/config/npm/api.env has the NPM admin login (scripts/npm-hosts.sh
-  applies every proxy host in NPM_HOSTS).
+  applies every proxy host the manifest declares).
 The status page's monitors are reconciled once
   $DATA_DIR/config/uptime-kuma/api.env has the Uptime-Kuma admin login
   (scripts/kuma-monitors.sh applies every [kuma.monitor.*] in
@@ -1126,11 +1134,11 @@ Stack deployed.
                     50002 (SSL, self-signed). Fulcrum indexes alongside
                     bitcoind and accepts wallets once its index has caught up
                     (podman logs fulcrum)
-  MCP over NPM:     https://$MCP_HOST/<searxng|bitcoin|monero|monero-wallet|lightning|fulcrum|logs|metrics|crowdsec|btcpay>
+  MCP over NPM:     https://$MCP_HOST/<${mcp_prefixes}>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
   Onion (no DNS):   the same surface as http://<onion>.onion/ (ONION_SERVICES in
-                    stack.conf); the addresses are printed below once tor has
-                    published them
+                    deploy/services.toml); the addresses are printed below once
+                    tor has published them
   Status page:      uptime-kuma on https://$UPTIME_KUMA_HOST, its monitors
                     declared in deploy/services.toml and reconciled
                     once $DATA_DIR/config/uptime-kuma/api.env has the login

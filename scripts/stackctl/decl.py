@@ -1,25 +1,18 @@
-# The stdin scalar protocol, and the canonical pipe-formats' parsers.
+# The canonical pipe-formats' parsers.
 #
-# The bash wrappers own the CLI and stream what they resolved to the Python
-# core over stdin, one TAB-separated record per line:
-#
-#   V<TAB>NAME<TAB>value    a scalar (DATA_DIR, DRY_RUN, MANIFEST, ...)
-#
-# TAB because a value can contain spaces; no value can contain a TAB. The
-# declarations themselves (proxy hosts, MCP prefixes, onion services,
-# monitors) no longer travel this pipe: deploy/services.toml is their one
-# home, and the cores load it directly (manifest.py). What survives below is
-# the canonical pipe-FORMAT of each declaration --
+# deploy/services.toml is the one home of every declaration (proxy hosts, MCP
+# prefixes, onion services, monitors), and the reconcilers load it directly
+# (manifest.py). The parsers below exist because manifest.py composes exactly
+# these strings from the TOML tables and validates them through the parsers --
 #
 #   proxy host    "domain|[scheme://]forward_host:port|flags"
 #   MCP endpoint  "/prefix:container:port"
 #   onion service "name|target|mirrors|probe-path|expected-code"
 #   monitor       "name|url[|codes[|interval[|retries]]]"
 #
-# -- because manifest.py composes exactly these strings from the TOML tables
-# and validates them through these parsers. One validation implementation,
-# two eras of input format, and the bash consumers (verify.sh,
-# deploy/install.sh) still parse the shell emission with the same shapes.
+# One validation implementation, two eras of input format, and the bash
+# consumers (verify.sh, deploy/install.sh) still parse the shell emission
+# with the same shapes.
 #
 # The parsers reproduce the original field splitting exactly, quirks
 # included: `IFS='|' read -r a b c` puts EVERY remaining pipe into the last
@@ -27,40 +20,11 @@
 from __future__ import annotations
 
 import re
-import sys
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from .ui import die
 
 _CODES_RE = re.compile(r"^[0-9]{3}-[0-9]{3}(,[0-9]{3}-[0-9]{3})*$")
-
-
-class Decls:
-    """One stdin stream's worth of scalars."""
-
-    def __init__(self) -> None:
-        self.vars: Dict[str, str] = {}
-
-    def var(self, name: str, default: str = "") -> str:
-        return self.vars.get(name, default)
-
-    def flag(self, name: str) -> bool:
-        return self.vars.get(name, "0") == "1"
-
-
-def read_decls(stream=sys.stdin) -> Decls:
-    decls = Decls()
-    for line in stream:
-        line = line.rstrip("\n")
-        if not line:
-            continue
-        kind, _, raw = line.partition("\t")
-        if kind == "V":
-            name, _, value = raw.partition("\t")
-            decls.vars[name] = value
-        else:
-            die(f"bad declaration line from the wrapper: {line!r}")
-    return decls
 
 
 # --- NPM_HOSTS: "domain | [scheme://]forward_host:port | flags" --------------
@@ -110,7 +74,8 @@ def parse_npm_host(raw: str) -> NpmHost:
 # --- MCP_HOSTS: "/prefix:container:loopback-port" ----------------------------
 class McpHost:
     __slots__ = ("prefix", "container", "port", "raw",
-                 "token_var", "probe_tool", "probe_args", "needs_nodes")
+                 "token_var", "probe_tool", "probe_args", "needs_nodes",
+                 "spend_token_var")
 
     def __init__(self, prefix, container, port, raw):
         self.prefix = prefix
@@ -125,6 +90,9 @@ class McpHost:
         self.probe_tool = ""
         self.probe_args = "{}"
         self.needs_nodes = False
+        # The spend-token variable, for the two servers that carry one; empty
+        # everywhere else. scripts/rotate.sh's token specs come from here.
+        self.spend_token_var = ""
 
 
 def parse_mcp_host(raw: str) -> McpHost:

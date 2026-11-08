@@ -62,7 +62,7 @@ if [ "$NO_NODES" = 1 ]; then
     containers=(
         tor valkey searxng uptime-kuma nginx-proxy-manager
         netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
-        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp
+        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp crowdsec-mcp btcpay-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 else
@@ -70,7 +70,7 @@ else
         bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-btcpay lightningd btcpay nbxplorer
         tor valkey searxng uptime-kuma nginx-proxy-manager
         netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
-        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp
+        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp crowdsec-mcp btcpay-mcp
         postgres boltmesh-backend boltmesh-worker boltmesh-frontend
     )
 fi
@@ -227,7 +227,7 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "MCP endpoints"
-# name|token-var|deep-tool|deep-args|needs-nodes
+# name|token-var|deep-tool|deep-args|needs-nodes|spend-token-var
 # The list is declared with each server in deploy/services.toml ([mcp.*]) and
 # emitted by the manifest as MCP_PROBES (scripts/lib.sh's load_manifest), so a
 # server added there is probed here without a second table to keep in step. The
@@ -236,6 +236,7 @@ head2 "MCP endpoints"
 # npm-network for every server but crowdsec-mcp, which runs on the host network
 # and is read through netcheck-host at 127.0.0.1:8113 (mcp_base / mcp_curl). It
 # also names the MCP_HOSTS entry whose loopback port nginx-proxy-manager fronts.
+# The last field is scripts/rotate.sh's; verify.sh does not use it.
 [ -n "${MCP_PROBES[*]:-}" ] \
     || die "the manifest emitted no MCP_PROBES (run ./deploy.sh)"
 
@@ -244,7 +245,7 @@ head2 "MCP endpoints"
 declare -A EP_ENV=() EP_VAR=()
 
 for e in "${MCP_PROBES[@]}"; do
-    IFS='|' read -r name var tool args needs_nodes <<<"$e"
+    IFS='|' read -r name var tool args needs_nodes _spend_var <<<"$e"
     envfile="$CONFIG_DIR/$name/token.env"
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"

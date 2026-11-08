@@ -709,6 +709,26 @@ read_secret() {
     env_value "$SECRETS_FILE" "$1"
 }
 
+# The one append-if-missing rule for a key in secrets.env. An existing value is
+# NEVER regenerated: the two CrowdSec bouncer keys are registered in the LAPI
+# under exactly the value the rendered unit carries, so a new one would leave the
+# old registration live and enforcement silently dead. A value that is absent is
+# written once (the caller's candidate, else a fresh hex secret) and echoed back
+# for the caller to assign and export.
+ensure_secret_key() { # key [value] -> the value now in the file
+    local key="$1" value="${2:-}" cur
+    cur=$(read_secret "$key")
+    if [ -n "$cur" ]; then
+        printf '%s' "$cur"
+        return 0
+    fi
+    value="${value:-$(rand_hex)}"
+    printf '%s=%s\n' "$key" "$value" >> "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
+    log "wrote $key to $SECRETS_FILE (mode 600)" >&2
+    printf '%s' "$value"
+}
+
 flag_value() {
     local file="$1" name="$2"
     [ -f "$file" ] || return 0
@@ -794,12 +814,8 @@ EOF
 fi
 
 # Adopted hosts have a secrets.env from before BTCPay existed. ensure_secret
-# never rewrites it, so append this one key when it is missing (same pattern as
-# the bouncer key below).
-if [ -z "$(read_secret BTCPAY_DB_PASSWORD)" ]; then
-    printf 'BTCPAY_DB_PASSWORD=%s\n' "$BTCPAY_DB_PASSWORD" >> "$SECRETS_FILE"
-    log "added BTCPAY_DB_PASSWORD to $SECRETS_FILE"
-fi
+# never rewrites it, so add this one key when it is missing.
+BTCPAY_DB_PASSWORD=$(ensure_secret_key BTCPAY_DB_PASSWORD "$BTCPAY_DB_PASSWORD")
 
 # The bouncer's key is the one secret NOT in that heredoc: it has to exist on a
 # host deployed before the bouncer did, and ensure_secret would never touch an
@@ -811,13 +827,7 @@ fi
 # its LAPI on start; a new value would leave the old bouncer registered and
 # enforcement silently dead (the LAPI answers 403 and stack-bouncer reports "LAPI
 # unreachable" -- the status file exists for exactly this).
-CROWDSEC_BOUNCER_KEY=$(read_secret CROWDSEC_BOUNCER_KEY)
-if [ -z "$CROWDSEC_BOUNCER_KEY" ]; then
-    CROWDSEC_BOUNCER_KEY=$(rand_hex)
-    printf 'CROWDSEC_BOUNCER_KEY=%s\n' "$CROWDSEC_BOUNCER_KEY" >> "$SECRETS_FILE"
-    chmod 600 "$SECRETS_FILE"
-    log "generated CROWDSEC_BOUNCER_KEY and appended it to $SECRETS_FILE"
-fi
+CROWDSEC_BOUNCER_KEY=$(ensure_secret_key CROWDSEC_BOUNCER_KEY)
 export CROWDSEC_BOUNCER_KEY
 
 # The MCP server's own bouncer key: a second, read-only client of the same
@@ -828,13 +838,7 @@ export CROWDSEC_BOUNCER_KEY
 # without it -- and under the same never-regenerate rule: the crowdsec
 # entrypoint only registers a bouncer when the name is absent, so a new value
 # would leave `mcp` holding the old key and every tool answering 403.
-CROWDSEC_MCP_BOUNCER_KEY=$(read_secret CROWDSEC_MCP_BOUNCER_KEY)
-if [ -z "$CROWDSEC_MCP_BOUNCER_KEY" ]; then
-    CROWDSEC_MCP_BOUNCER_KEY=$(rand_hex)
-    printf 'CROWDSEC_MCP_BOUNCER_KEY=%s\n' "$CROWDSEC_MCP_BOUNCER_KEY" >> "$SECRETS_FILE"
-    chmod 600 "$SECRETS_FILE"
-    log "generated CROWDSEC_MCP_BOUNCER_KEY and appended it to $SECRETS_FILE"
-fi
+CROWDSEC_MCP_BOUNCER_KEY=$(ensure_secret_key CROWDSEC_MCP_BOUNCER_KEY)
 export CROWDSEC_MCP_BOUNCER_KEY
 
 # ---------------------------------------------------------------------------

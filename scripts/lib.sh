@@ -1113,9 +1113,10 @@ ensure_data_dirs() {
 # carries those lists; this helper is how a bash caller gets them back under
 # the SAME variable names it always sourced, by eval'ing the shell emission
 # of `python3 -m stackctl manifest shell` -- NAME='value' lines and array
-# assignments, nothing else. MCP_PROBES (verify.sh's probe table) is the one
-# emission with no stack.conf predecessor. python3 is a bootstrap dependency
-# (agent-mcp already needed it).
+# assignments, nothing else. MCP_PROBES (the per-server probe/token table
+# verify.sh and scripts/rotate.sh consume) is the one emission with no
+# stack.conf predecessor. python3 is a bootstrap dependency (agent-mcp already
+# needed it).
 #
 # The one thing it must never do is run inside stack.conf: bootstrap.sh
 # sources that file standalone (curl | bash, no checkout present), so
@@ -1141,9 +1142,8 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
 # only a CLI (--dry-run, --prune, --help), the data dir and one endpoint
 # override; everything else is their Python core in scripts/stackctl/, which
 # loads deploy/services.toml itself. So the wrapper's whole job is to resolve the
-# data dir, turn the one override they carry into a declaration record, and hand
-# the core its facts as V<TAB>NAME<TAB>value lines on stdin -- a scalar protocol
-# whose values can contain spaces but never a TAB (scripts/stackctl/decl.py).
+# data dir and hand the core its facts in the environment -- paths and flags,
+# never a secret.
 #
 # Extra facts are passed as NAME=value arguments, so a wrapper reads as the one
 # thing it adds:
@@ -1152,14 +1152,13 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
 # cannot land in one wrapper and not the other.
 stackctl_wrapper() { # module [NAME=value ...]
     local module="$1"; shift
-    local dry_run=0 prune=0 arg name value py
-    local -a pairs=()
+    local dry_run=0 prune=0 py
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) dry_run=1 ;;
             --prune)   prune=1 ;;
             -h|--help) usage_header "$0"; exit 0 ;;
-            *=*)       pairs+=("$1") ;;
+            *=*)       ;;
             *)         die "unknown argument: $1 (try --help)" ;;
         esac
         shift
@@ -1174,16 +1173,17 @@ stackctl_wrapper() { # module [NAME=value ...]
         || die "the reconciler venv is missing: run ./deploy/install.sh (it builds $REPO_DIR/.venv from scripts/stackctl/requirements.txt)"
     resolve_data_dir
     py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    {
-        printf 'V\tMANIFEST\t%s\n' "$REPO_DIR/deploy/services.toml"
-        printf 'V\tDATA_DIR\t%s\n' "$DATA_DIR"
-        printf 'V\tCONFIG_DIR\t%s\n' "$CONFIG_DIR"
-        printf 'V\tDRY_RUN\t%s\n' "$dry_run"
-        printf 'V\tPRUNE\t%s\n' "$prune"
-        for arg in ${pairs[@]+"${pairs[@]}"}; do
-            name=${arg%%=*} value=${arg#*=}
-            printf 'V\t%s\t%s\n' "$name" "$value"
+    # The core reads these names directly (decl.py no longer parses a stdin
+    # protocol). Export in a subshell so the wrapper's own environment stays
+    # untouched after it returns to the caller.
+    (
+        export MANIFEST="$REPO_DIR/deploy/services.toml"
+        export DRY_RUN="$dry_run" PRUNE="$prune"
+        for arg in "$@"; do
+            export "${arg?}"
         done
-    } | PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}" "$python_bin" -m stackctl "$module"
+        PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}" \
+            "$python_bin" -m stackctl "$module"
+    )
 }
 

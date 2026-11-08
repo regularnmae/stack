@@ -1,6 +1,6 @@
 # `python3 -m stackctl <command>` -- the entry point the bash wrappers in
 # scripts/ exec. The wrappers own the CLI contract (flags, usage header,
-# stack.conf, resolve_data_dir) and pipe declarations in over stdin; this
+# stack.conf, resolve_data_dir) and pass their facts in the environment; this
 # dispatch only routes to the reconciler and translates ui.Fatal into
 # lib.sh's die() output shape ("ERROR: msg" on stderr, exit 1).
 import sys

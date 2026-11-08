@@ -185,23 +185,23 @@ def _login(api: Any, username: str, password: str) -> Any:
     return None
 
 
-def reconcile(d: decl.Decls, client_factory: Any = None) -> int:
+def reconcile(client_factory: Any = None) -> int:
     """Load the declarations, connect, reconcile, disconnect.
 
     `client_factory` exists for the offline tests: it is called with the base
     URL and must return something shaped like KumaClient."""
-    # The declarations come from the service manifest, not the stdin pipe:
     # deploy/services.toml is the one home of the monitors and the page
     # (manifest.py loads and validates), and it also names kuma's loopback
-    # publish, which is the default URL below.
-    manifest_path = d.var("MANIFEST")
+    # publish, which is the default URL below. The wrapper passes its paths
+    # and flags in the environment.
+    manifest_path = os.environ.get("MANIFEST", "")
     if not manifest_path:
         die("the wrapper did not pass MANIFEST (the path to deploy/services.toml)")
     mf = manifest.load(manifest_path)
 
-    config_dir = d.var("CONFIG_DIR")
-    dry_run = d.flag("DRY_RUN")
-    prune = d.flag("PRUNE")
+    config_dir = os.environ.get("CONFIG_DIR", "")
+    dry_run = os.environ.get("DRY_RUN") == "1"
+    prune = os.environ.get("PRUNE") == "1"
     kuma_env = os.path.join(config_dir, "uptime-kuma", "api.env")
 
     username = envfile.env_or_file("KUMA_USERNAME", kuma_env)
@@ -218,7 +218,7 @@ def reconcile(d: decl.Decls, client_factory: Any = None) -> int:
         die(f"no monitors are declared in {manifest_path}")
 
     page = mf.kuma_page
-    base_url = d.var("KUMA_URL") or f"http://127.0.0.1:{mf.kuma_loopback}"
+    base_url = os.environ.get("KUMA_URL") or f"http://127.0.0.1:{mf.kuma_loopback}"
     if page is None or not page.slug:
         log("KUMA_STATUS_SLUG is empty; only the monitors will be reconciled")
         log(f"reconciling {len(monitors)} monitor(s)")
@@ -342,4 +342,4 @@ def _status_page(api: Any, slug: str, title: str, group: str,
 
 
 def main(argv: List[str]) -> int:
-    return reconcile(decl.read_decls())
+    return reconcile()

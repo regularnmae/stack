@@ -1,6 +1,6 @@
 # nginx-proxy-manager's proxy-host reconciler -- the Python core of
-# scripts/npm-hosts.sh (which keeps the CLI, sources stack.conf and pipes the
-# declarations in; see decl.py for the protocol).
+# scripts/npm-hosts.sh (which keeps the CLI, sources stack.conf and passes its
+# facts in the environment; deploy/services.toml is the declaration).
 #
 # Ported behaviour-for-behaviour from the bash original, including its output
 # lines and exit semantics, so `--dry-run` output is diffable against the old
@@ -216,20 +216,20 @@ def find_host_id(hosts: Any, domain: str) -> Optional[int]:
     return None
 
 
-def reconcile(d: decl.Decls) -> int:
-    # The declarations come from the service manifest, not the stdin pipe:
+def reconcile() -> int:
     # deploy/services.toml is the one home of the proxy hosts, the MCP
-    # prefixes and the onion services (manifest.py loads and validates).
-    manifest_path = d.var("MANIFEST")
+    # prefixes and the onion services (manifest.py loads and validates). The
+    # wrapper passes its paths and flags in the environment.
+    manifest_path = os.environ.get("MANIFEST", "")
     if not manifest_path:
         die("the wrapper did not pass MANIFEST (the path to deploy/services.toml)")
     mf = manifest.load(manifest_path)
 
-    api_base = d.var("NPM_API", "http://127.0.0.1:81")
-    data_dir = d.var("DATA_DIR")
-    config_dir = d.var("CONFIG_DIR", os.path.join(data_dir, "config"))
-    dry_run = d.flag("DRY_RUN")
-    prune = d.flag("PRUNE")
+    api_base = os.environ.get("NPM_API", "http://127.0.0.1:81")
+    data_dir = os.environ.get("DATA_DIR", "")
+    config_dir = os.environ.get("CONFIG_DIR") or os.path.join(data_dir, "config")
+    dry_run = os.environ.get("DRY_RUN") == "1"
+    prune = os.environ.get("PRUNE") == "1"
     npm_env = os.path.join(config_dir, "npm", "api.env")
 
     email = envfile.env_or_file("NPM_EMAIL", npm_env)
@@ -389,4 +389,4 @@ def _prune(api: NpmApi, declared_domains: List[str], dry_run: bool) -> None:
 
 
 def main(argv: List[str]) -> int:
-    return reconcile(decl.read_decls())
+    return reconcile()

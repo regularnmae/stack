@@ -144,20 +144,6 @@ class TestDecl(unittest.TestCase):
         self.assertIn("bad interval", die_msg(decl.parse_kuma_monitor, "n|https://x|200-299|x"))
         self.assertIn("bad retries", die_msg(decl.parse_kuma_monitor, "n|https://x|200-299|60|x"))
 
-    def test_read_decls_protocol(self):
-        d = decl.read_decls(io.StringIO(
-            "V\tDATA_DIR\t/data\n"
-            "V\tDRY_RUN\t1\n"
-            "V\tMANIFEST\t/path/services.toml\n"))
-        self.assertEqual(d.var("DATA_DIR"), "/data")
-        self.assertTrue(d.flag("DRY_RUN"))
-        self.assertFalse(d.flag("PRUNE"))
-        self.assertEqual(d.var("MANIFEST"), "/path/services.toml")
-        # The declaration arrays no longer travel this pipe (the manifest is
-        # their home); any other record kind is a wrapper bug.
-        self.assertIn("bad declaration line",
-                      die_msg(decl.read_decls, io.StringIO("H\tx|1\n")))
-
 
 # ---------------------------------------------------------------------------
 
@@ -395,30 +381,34 @@ class TestNpmReconcile(unittest.TestCase):
             f.write("\n".join(blocks))
         return path
 
-    def decls(self, hosts_lines, mcp=(), dry="0", prune="0", request_cert=None):
+    def facts(self, hosts_lines, mcp=(), dry="0", prune="0", request_cert=None):
+        """Put the wrapper's facts in the environment, where the reconciler
+        reads them (NPM_REQUEST_CERT included -- it never travelled the old
+        declaration stream either)."""
         if request_cert is not None:
-            # NPM_REQUEST_CERT reaches the reconciler through the process
-            # environment (inherited from the operator's shell), exactly as it
-            # reached the bash original -- not through the declaration stream.
             os.environ["NPM_REQUEST_CERT"] = request_cert
             self.addCleanup(os.environ.pop, "NPM_REQUEST_CERT", None)
-        lines = [f"V\tMANIFEST\t{self.write_manifest(hosts_lines, mcp)}",
-                 f"V\tNPM_API\t{self.api}",
-                 f"V\tDATA_DIR\t{self.tmp}",
-                 f"V\tCONFIG_DIR\t{self.config}",
-                 f"V\tDRY_RUN\t{dry}",
-                 f"V\tPRUNE\t{prune}"]
-        return decl.read_decls(io.StringIO("\n".join(lines) + "\n"))
+        env = {
+            "MANIFEST": self.write_manifest(hosts_lines, mcp),
+            "NPM_API": self.api,
+            "DATA_DIR": self.tmp,
+            "CONFIG_DIR": self.config,
+            "DRY_RUN": dry,
+            "PRUNE": prune,
+        }
+        for key, value in env.items():
+            os.environ[key] = value
+            self.addCleanup(os.environ.pop, key, None)
 
-    def reconcile(self, d):
+    def reconcile(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = npm.reconcile(d)
+            rc = npm.reconcile()
         return rc, out.getvalue(), err.getvalue()
 
     def test_dry_run_touches_nothing(self):
-        d = self.decls(["d.example.net|127.0.0.1:8107|ws,block"], dry="1")
-        rc, out, err = self.reconcile(d)
+        self.facts(["d.example.net|127.0.0.1:8107|ws,block"], dry="1")
+        rc, out, err = self.reconcile()
         self.assertEqual(rc, 0)
         self.assertIn("[dry-run] would create a proxy host for d.example.net", out)
         payload = json.loads(out[out.index("{"):out.rindex("}") + 1])
@@ -433,8 +423,8 @@ class TestNpmReconcile(unittest.TestCase):
                                   "domain_names": ["d.example.net"]})
         older = {"id": 2, "provider": "letsencrypt", "domain_names": ["d.example.net"]}
         self.server.certs.insert(0, older)  # newest (id 6) must win
-        d = self.decls(["d.example.net|127.0.0.1:8107|force-ssl,block"])
-        rc, out, _ = self.reconcile(d)
+        self.facts(["d.example.net|127.0.0.1:8107|force-ssl,block"])
+        rc, out, _ = self.reconcile()
         self.assertEqual(rc, 0)
         self.assertRegex(out, r"created proxy host \d+")
         created = [r for r in self.server.requests if r[0] == "POST" and r[1] == "/api/nginx/proxy-hosts"]
@@ -442,7 +432,7 @@ class TestNpmReconcile(unittest.TestCase):
         self.assertTrue(created[0][2]["ssl_forced"])
 
         self.server.requests.clear()
-        rc, out, _ = self.reconcile(d)
+        rc, out, _ = self.reconcile()
         self.assertRegex(out, r"updated proxy host")
         updated = [r for r in self.server.requests if r[0] == "PUT"]
         self.assertEqual(updated[0][2]["certificate_id"], 6)
@@ -451,19 +441,19 @@ class TestNpmReconcile(unittest.TestCase):
         self.assertEqual(cert_posts, [])  # reused, never re-requested
 
     def test_no_certificate_strips_force_ssl(self):
-        d = self.decls(["d.example.net|127.0.0.1:8107|force-ssl,block"],
+        self.facts(["d.example.net|127.0.0.1:8107|force-ssl,block"],
                        request_cert="0")
-        rc, out, _ = self.reconcile(d)
+        rc, out, _ = self.reconcile()
         self.assertEqual(rc, 0)
         created = [r for r in self.server.requests if r[0] == "POST" and r[1] == "/api/nginx/proxy-hosts"]
         self.assertEqual(created[0][2]["certificate_id"], 0)
         self.assertFalse(created[0][2]["ssl_forced"])
 
     def test_mcp_host_locations_and_limits(self):
-        d = self.decls(["m.example.net|127.0.0.1:8100|mcp,force-ssl,http2"],
+        self.facts(["m.example.net|127.0.0.1:8100|mcp,force-ssl,http2"],
                        mcp=["/searxng:searxng-mcp:8100", "/bitcoin:bitcoin-node-mcp:8101"],
                        request_cert="0")
-        rc, out, _ = self.reconcile(d)
+        rc, out, _ = self.reconcile()
         self.assertEqual(rc, 0)
         body = [r for r in self.server.requests if r[0] == "POST" and r[1] == "/api/nginx/proxy-hosts"][0][2]
         self.assertEqual([l["path"] for l in body["locations"]], ["/searxng", "/bitcoin"])
@@ -474,9 +464,9 @@ class TestNpmReconcile(unittest.TestCase):
         self.assertIn("searxng-mcp/token.env", out)
 
     def test_onion_host(self):
-        d = self.decls(["*.onion|127.0.0.1:8100|mcp"],
+        self.facts(["*.onion|127.0.0.1:8100|mcp"],
                        mcp=["/searxng:searxng-mcp:8100"], request_cert="1")
-        rc, out, _ = self.reconcile(d)
+        rc, out, _ = self.reconcile()
         self.assertEqual(rc, 0)
         body = [r for r in self.server.requests if r[0] == "POST" and r[1] == "/api/nginx/proxy-hosts"][0][2]
         self.assertEqual(body["certificate_id"], 0)
@@ -494,8 +484,8 @@ class TestNpmReconcile(unittest.TestCase):
                                   "certificate_id": 0})
         self.server.certs.append({"id": 7, "provider": "letsencrypt",
                                   "domain_names": ["stale.example.net"]})
-        d = self.decls(["keep.example.net|127.0.0.1:8107|block"], prune="1")
-        rc, out, _ = self.reconcile(d)
+        self.facts(["keep.example.net|127.0.0.1:8107|block"], prune="1")
+        rc, out, _ = self.reconcile()
         self.assertEqual(rc, 0)
         self.assertIn("deleted proxy host 99 (not in NPM_HOSTS)", out)
         self.assertIn("deleted certificate 7 (unused, not in NPM_HOSTS)", out)
@@ -505,8 +495,8 @@ class TestNpmReconcile(unittest.TestCase):
 
     def test_missing_credentials_self_skip(self):
         os.remove(os.path.join(self.config, "npm", "api.env"))
-        d = self.decls(["d|127.0.0.1:1|"])
-        rc, out, _ = self.reconcile(d)
+        self.facts(["d|127.0.0.1:1|"])
+        rc, out, _ = self.reconcile()
         self.assertEqual(rc, 0)
         self.assertIn("no nginx-proxy-manager API credentials", out)
         self.assertEqual(self.server.requests, [])
@@ -623,17 +613,23 @@ class TestKumaReconcile(unittest.TestCase):
             f.write("\n".join(blocks))
         return path
 
-    def decls(self, monitors, dry="0", prune="0", slug="stack"):
-        lines = [f"V\tMANIFEST\t{self.write_manifest(monitors, slug)}",
-                 f"V\tCONFIG_DIR\t{self.config}",
-                 f"V\tDRY_RUN\t{dry}",
-                 f"V\tPRUNE\t{prune}"]
-        return decl.read_decls(io.StringIO("\n".join(lines) + "\n"))
+    def facts(self, monitors, dry="0", prune="0", slug="stack"):
+        """Put the wrapper's facts in the environment, where the reconciler
+        reads them."""
+        env = {
+            "MANIFEST": self.write_manifest(monitors, slug),
+            "CONFIG_DIR": self.config,
+            "DRY_RUN": dry,
+            "PRUNE": prune,
+        }
+        for key, value in env.items():
+            os.environ[key] = value
+            self.addCleanup(os.environ.pop, key, None)
 
-    def reconcile(self, d, api):
+    def reconcile(self, api):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = kuma.reconcile(d, client_factory=lambda url: api)
+            rc = kuma.reconcile(client_factory=lambda url: api)
         return rc, out.getvalue(), err.getvalue()
 
     def test_all_unchanged_and_page_left_alone(self):
@@ -645,8 +641,8 @@ class TestKumaReconcile(unittest.TestCase):
             ],
             page={"id": 7, "publicGroupList": [{"monitorList": [{"id": 1}]}]},
         )
-        rc, out, _ = self.reconcile(
-            self.decls(["SearXNG|https://s|200-299", "Fulcrum|tcp://h:50001"]), api)
+        self.facts(["SearXNG|https://s|200-299", "Fulcrum|tcp://h:50001"])
+        rc, out, _ = self.reconcile(api)
         self.assertEqual(rc, 0)
         self.assertIn('monitor "SearXNG" unchanged (id 1)', out)
         self.assertIn('monitor "Fulcrum" unchanged (id 2)', out)
@@ -663,11 +659,12 @@ class TestKumaReconcile(unittest.TestCase):
              "accepted_statuscodes": ["200-299"], "notificationIDList": {"9": True},
              "interval": 300, "conditions": ["cond"]},
         ])
-        rc, out, _ = self.reconcile(self.decls([
+        self.facts([
             "SearXNG|https://new|200-299,400-499",
             "New port|tcp://p:50001",
             "New http|https://n|200-299",
-        ]), api)
+        ])
+        rc, out, _ = self.reconcile(api)
         self.assertEqual(rc, 0)
         self.assertIn('updated monitor "SearXNG" (id 3)', out)
         self.assertIn('created monitor "New port" (id 11', out)
@@ -704,8 +701,9 @@ class TestKumaReconcile(unittest.TestCase):
             {"id": 3, "name": "SearXNG", "type": "http", "url": "https://old",
              "accepted_statuscodes": ["200-299"]},
         ])
-        rc, out, _ = self.reconcile(self.decls([
-            "SearXNG|https://newer|200-299", "New port|tcp://p:50001"], dry="1"), api)
+        self.facts([
+            "SearXNG|https://newer|200-299", "New port|tcp://p:50001"], dry="1")
+        rc, out, _ = self.reconcile(api)
         self.assertIn("[dry-run] would update monitor", out)
         self.assertIn("[dry-run] would create monitor", out)
         self.assertEqual(api.writes(), [])
@@ -720,8 +718,8 @@ class TestKumaReconcile(unittest.TestCase):
             ],
             page={"id": 7, "publicGroupList": []},  # exists but empty -> we fill it
         )
-        rc, out, _ = self.reconcile(
-            self.decls(["Keep|https://k|200-299"], prune="1"), api)
+        self.facts(["Keep|https://k|200-299"], prune="1")
+        rc, out, _ = self.reconcile(api)
         self.assertEqual(rc, 0)
         self.assertIn('deleted monitor "Stale" (id 9, not declared)', out)
         self.assertIn("published status page 'stack' (1 monitor(s))", out)
@@ -740,7 +738,8 @@ class TestKumaReconcile(unittest.TestCase):
                        "accepted_statuscodes": ["200-299"]}],
             page=None,
         )
-        rc, out, _ = self.reconcile(self.decls(["Keep|https://k|200-299"]), api)
+        self.facts(["Keep|https://k|200-299"])
+        rc, out, _ = self.reconcile(api)
         self.assertEqual(rc, 0)
         self.assertIn("created status page 'stack'", out)
         names = [c[0] for c in api.calls]
@@ -750,17 +749,18 @@ class TestKumaReconcile(unittest.TestCase):
 
     def test_bad_login_dies(self):
         api = FailingKumaApi()
-        d = self.decls(["X|https://x"])
+        self.facts(["X|https://x"])
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(Fatal) as ctx:
-                kuma.reconcile(d, client_factory=lambda url: api)
+                kuma.reconcile(client_factory=lambda url: api)
         self.assertIn("Incorrect username", ctx.exception.msg)
         self.assertEqual(api.calls[-1], ("close",))
 
     def test_missing_credentials_self_skip(self):
         os.remove(os.path.join(self.config, "uptime-kuma", "api.env"))
         api = FakeKumaApi()
-        rc, out, _ = self.reconcile(self.decls(["X|https://x"]), api)
+        self.facts(["X|https://x"])
+        rc, out, _ = self.reconcile(api)
         self.assertEqual(rc, 0)
         self.assertIn("no Uptime-Kuma admin login", out)
         self.assertEqual(api.calls, [])
@@ -803,6 +803,8 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(m.mcp[0].port, "8100")
         self.assertEqual(m.mcp[0].token_var, "SEARXNG_MCP_TOKEN")
         self.assertEqual(m.mcp[0].probe_tool, "get_time")
+        wallet = [x for x in m.mcp if x.container == "monero-wallet-mcp"][0]
+        self.assertEqual(wallet.spend_token_var, "MONERO_MCP_SPEND_TOKEN")
         self.assertEqual(m.onion[2].name, "btc-explorer")   # HiddenServiceDir name
         self.assertEqual(m.onion[2].rest, "/|200,401")
         self.assertEqual(m.kuma_loopback, 8107)
@@ -842,7 +844,7 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(out[6], "btc-explorer|10.89.0.243:3002|btc.boltmesh.net|/|200,401")
         self.assertEqual(out[7], "boltmesh.net")
         self.assertEqual(out[8], "10")
-        self.assertEqual(out[9], 'searxng-mcp|SEARXNG_MCP_TOKEN|get_time|{"tz":"UTC"}|0')
+        self.assertEqual(out[9], 'searxng-mcp|SEARXNG_MCP_TOKEN|get_time|{"tz":"UTC"}|0|')
 
     def test_real_manifest_agrees_with_agents_md(self):
         from stackctl import manifest

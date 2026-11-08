@@ -128,7 +128,7 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   reconciles them through
   NPM's admin API on `127.0.0.1:81` (update in place by `domain_names`, else
   create, plus a Let's Encrypt certificate per host). The reconciler itself is
-  Python (`scripts/stackctl/npm.py`, fed the declarations over stdin by the
+  Python (`scripts/stackctl/npm.py`, handed its facts in the environment by the
   wrapper): it talks to the loopback admin API with urllib, so it needs neither
   a netcheck transport nor `jq`, and a credential held in the process's memory
   never reaches an argv. It needs the admin login in

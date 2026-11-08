@@ -7,7 +7,8 @@
 #   * the Python reconcilers (npm.py, kuma.py) -- typed objects, directly;
 #   * the bash callers (deploy.sh, verify.sh, deploy/install.sh) -- through
 #     `manifest shell`, which emits the SAME variable names they always
-#     sourced from stack.conf (plus MCP_PROBES, verify.sh's probe table, which
+#     sourced from stack.conf (plus MCP_PROBES, the probe/token table
+#     verify.sh and scripts/rotate.sh consume, which
 #     has no stack.conf predecessor), so scripts/lib.sh's load_manifest is a
 #     one-line addition per consumer and no caller's body changed. The
 #     emission is only NAME='value' lines and array assignments, and is
@@ -79,7 +80,7 @@ class Manifest:
         if self.mcp:
             entries = " ".join(shlex.quote(f"{m.prefix}:{m.container}:{m.port}") for m in self.mcp)
             lines.append(f"MCP_HOSTS=({entries})")
-            # verify.sh's probe table: container|token-var|tool|args|needs-nodes.
+            # Probe/token table: container|token-var|tool|args|needs-nodes|spend-var.
             # The env file is the container's own token.env by convention, so it
             # is not repeated here.
             probes = " ".join(shlex.quote(_probe_entry(m)) for m in self.mcp)
@@ -112,10 +113,12 @@ def _table(data: dict, name: str) -> Dict[str, Any]:
 
 def _probe_entry(e: decl.McpHost) -> str:
     """One verify.sh probe record. `|` is the bash field separator, so the
-    fields must not contain one; probe_args is JSON and validated below."""
+    fields must not contain one; probe_args is JSON and validated below. The
+    last field is the server's spend-token variable (empty for most), which
+    scripts/rotate.sh reads from the same record."""
     return "|".join((
         e.container, e.token_var, e.probe_tool, e.probe_args,
-        "1" if e.needs_nodes else "0",
+        "1" if e.needs_nodes else "0", e.spend_token_var,
     ))
 
 
@@ -140,6 +143,8 @@ def _validate_probes(m: "Manifest") -> None:
             die(f"deploy/services.toml: {where} probe_args is not JSON")
         if not isinstance(args, dict):
             die(f"deploy/services.toml: {where} probe_args must be a JSON object")
+        if e.spend_token_var and not re.fullmatch(r"[A-Z][A-Z0-9_]*", e.spend_token_var):
+            die(f"deploy/services.toml: {where} spend_token_var must be an env-var name")
 
 
 def _host(data: dict, key: str, hosts: Dict[str, Host], where: str) -> Host:
@@ -202,7 +207,7 @@ def load(path: str) -> Manifest:
             die(f"deploy/services.toml: [mcp.{key}] and [mcp.{seen_ports[entry.port]}] "
                 f"both publish loopback port {entry.port}")
         seen_ports[entry.port] = key
-        for field in ("token_var", "probe_tool", "probe_args"):
+        for field in ("token_var", "probe_tool", "probe_args", "spend_token_var"):
             if not isinstance(table.get(field, ""), str):
                 die(f"deploy/services.toml: [mcp.{key}] {field} must be a string")
         if not isinstance(table.get("needs_nodes", False), bool):
@@ -211,6 +216,7 @@ def load(path: str) -> Manifest:
         entry.probe_tool = table.get("probe_tool", "")
         entry.probe_args = table.get("probe_args", "{}")
         entry.needs_nodes = table.get("needs_nodes", False)
+        entry.spend_token_var = table.get("spend_token_var", "")
         m.mcp.append(entry)
 
     # --- the proxy hosts -----------------------------------------------------

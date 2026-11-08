@@ -21,7 +21,7 @@
 #     deploy/install.sh builds $REPO_DIR/.venv from that file and the wrappers
 #     exec its interpreter;
 #   * the bash wrappers in scripts/ own the CLI contract (flags, usage header,
-#     stack.conf, resolve_data_dir) and pipe declarations in over stdin, so
+#     stack.conf, resolve_data_dir) and pass their facts in the environment, so
 #     every command in AGENTS.md and every deploy.sh branch keeps working;
 #   * output conventions match scripts/lib.sh exactly: log() is "==> msg" on
 #     stdout, warn() "WARNING: msg" and die() "ERROR: msg" on stderr, exit 1;

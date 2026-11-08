@@ -38,6 +38,6 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # host's namespace: the admin API is reached on the loopback.
 NPM_API="${NPM_API_URL:-http://127.0.0.1:81}"
 
-# The CLI, the data dir and the declaration stream are lib.sh's
-# stackctl_wrapper -- the same half kuma-monitors.sh uses.
+# The CLI, the data dir and the manifest path are lib.sh's stackctl_wrapper --
+# the same half kuma-monitors.sh uses.
 stackctl_wrapper npm-hosts "NPM_API=$NPM_API" "$@"

@@ -102,9 +102,11 @@ kuma_add_host = false
 # The probe fields are verify.sh's half of the same declaration: `token_var` is
 # the variable in $DATA_DIR/config/<container>/token.env, and `probe_tool` /
 # `probe_args` are the one read-only tool that proves the server reaches its
-# upstream. `needs_nodes` skips the deep call under verify.sh --no-nodes. The
-# manifest emits them as MCP_PROBES, so adding a server here adds its probe --
-# there is no second table in verify.sh to keep in step.
+# upstream. `needs_nodes` skips the deep call under verify.sh --no-nodes, and
+# `spend_token_var` (only the two money servers have one) is the variable
+# scripts/rotate.sh rotates under --spend. The manifest emits them as
+# MCP_PROBES, so adding a server here adds its probe and its rotation target --
+# there is no second table in verify.sh or rotate.sh to keep in step.
 # ---------------------------------------------------------------------------
 
 [mcp.searxng]
@@ -139,6 +141,7 @@ prefix = "/monero-wallet"
 container = "monero-wallet-mcp"
 port = 8103
 token_var = "MONERO_MCP_TOKEN"
+spend_token_var = "MONERO_MCP_SPEND_TOKEN"
 probe_tool = "get_balance"
 probe_args = '{}'
 needs_nodes = true
@@ -148,6 +151,7 @@ prefix = "/lightning"
 container = "lightning-mcp"
 port = 8104
 token_var = "LIGHTNING_MCP_TOKEN"
+spend_token_var = "LIGHTNING_MCP_SPEND_TOKEN"
 probe_tool = "getinfo"
 probe_args = '{}'
 needs_nodes = true
