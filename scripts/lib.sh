@@ -154,6 +154,18 @@ dur_s() {
     printf '%s' $(( (ms + 999) / 1000 ))
 }
 
+# "4.176GB" -> bytes, the way podman's go-units renders a size in `podman stats`.
+# coreutils' numfmt already parses both spellings it can emit -- SI ("kB", "MB",
+# "GB") and binary ("KiB", "MiB") -- so the awk table this replaced was a wheel.
+# The trailing "B" is stripped because numfmt's suffixes stop at the unit letter
+# ("4.176G", not "4.176GB"). LC_ALL=C pins the decimal point: under a comma
+# locale numfmt would read "4.176" as a grouped integer. Prints nothing and
+# returns non-zero on anything it cannot parse, which is how the metrics
+# collector keeps a hole as a hole.
+human_bytes() {
+    LC_ALL=C numfmt --from=auto --to=none "${1%B}" 2>/dev/null
+}
+
 # Wait for a container's own healthcheck to report healthy. Shared by deploy.sh
 # (which starts the units) and scripts/rotate.sh (which restarts the ones a
 # rotated credential touches), so both wait the same way. Honours DRY_RUN when
@@ -541,15 +553,13 @@ unit_digest_changed() { # before-digest after-digest
 # explicit set when the caller already holds one (deploy.sh records the digests
 # that were applied, not whatever is on disk a moment later).
 unit_digest_write() { # file [digest-set]
-    local f="$1" d="${2:-}" tmp
+    local f="$1" d="${2:-}"
     [ -n "$d" ] || d=$(unit_digest)
-    mkdir -p "$(dirname "$f")" || return 1
-    tmp=$(mktemp "${f}.XXXXXX") || return 1
     if [ -n "$d" ]; then
-        printf '%s\n' "$d" > "$tmp"
+        printf '%s\n' "$d" | write_atomic "$f" 600
+    else
+        write_atomic "$f" 600 </dev/null
     fi
-    chmod 600 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$f"
 }
 
 # The last applied digest set, empty when this host has no baseline yet (a fresh
@@ -630,27 +640,43 @@ kuma_image() {
     container_image_or uptime-kuma "${UPTIME_KUMA_IMAGE:-docker.io/louislam/uptime-kuma:2}"
 }
 
-# Write a Prometheus textfile for node-exporter's textfile collector: stdin -> a
-# .prom file, atomically, with the permissions the exporter needs. node-exporter
-# runs as uid 65534 -- a *subuid* under rootless podman -- so it owns neither the
-# directory nor the file and must still be able to read them; getting that wrong
-# is the quietest way to lose every custom metric, which is why the mode lives
-# here and not in each writer:
-#   printf 'stack_x 1\n' | prom_write "$DATA_DIR/monitoring/textfile/stack.prom"
-prom_write() {
-    local target="$1" dir tmp
-    dir=$(dirname "$target")
+# Write stdin to PATH in one step: a hidden temp file beside it, the mode, then
+# a rename within the same directory. The rename is what makes a reader see the
+# old file or the new one and never half of either, which matters everywhere a
+# timer writes and a sweep reads.
+#
+# DIR-MODE is for the one case where the reader owns neither the directory nor
+# the file: node-exporter runs as uid 65534 -- a *subuid* under rootless podman
+# -- and if either mode slips, the collector serves nothing, the quietest
+# possible way to lose every metric.
+#
+#   printf 'stack_x 1\n' | write_atomic "$path" 644 755
+#
+# On failure the destination is left as it was and the temp file is removed, so
+# a caller can report the error rather than leave a `.name.XXXXXX` behind.
+write_atomic() { # path mode [dir-mode]
+    local path="$1" mode="$2" dmode="${3:-}" dir tmp
+    dir=$(dirname "$path")
     mkdir -p "$dir" || return 1
-    # 0755 the directory, 0644 the file: the exporter has only "other" access.
-    chmod 0755 "$dir" 2>/dev/null || true
-    tmp=$(mktemp "$dir/.$(basename "$target").XXXXXX") || return 1
+    [ -z "$dmode" ] || chmod "$dmode" "$dir" 2>/dev/null || true
+    tmp=$(mktemp "$dir/.$(basename "$path").XXXXXX") || return 1
     if ! cat > "$tmp"; then
         rm -f "$tmp"
         return 1
     fi
-    chmod 0644 "$tmp"
-    # Atomic within the directory, so the collector never serves half a file.
-    mv -f "$tmp" "$target"
+    if ! chmod "$mode" "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+}
+
+# Write a Prometheus textfile for node-exporter's textfile collector: stdin -> a
+# .prom file, atomically, with the permissions the exporter needs (see
+# write_atomic above for why 0755/0644):
+#   printf 'stack_x 1\n' | prom_write "$DATA_DIR/monitoring/textfile/stack.prom"
+prom_write() {
+    write_atomic "$1" 644 755
 }
 
 # Write a status file: the one record a oneshot unit leaves for scripts/monitor.sh
@@ -658,25 +684,24 @@ prom_write() {
 # atomically so a sweep never sees half a line. ok_epoch is the last SUCCESS and
 # is carried forward by a failure or a skip: age checks key on it, so a job that
 # skips forever (no disk space, an oversized set, a registry that never answers)
-# cannot look healthy just because its timer fired. deploy/root/'s two scripts
-# still write this shape by hand because they run as root and cannot source the
-# checkout; this is the user-tier implementation the rest share.
+# cannot look healthy just because its timer fired. deploy/root/status.sh is the
+# root tier's own copy of this shape (it cannot source the checkout); the two
+# are cross-checked by tests/test-status.sh so they cannot drift apart.
 #
 # The caller supplies the file, the line naming the unit that scheduled it, its
 # own extra KEY=VALUE fields, and a detail (newlines flattened to one line).
 status_write() { # path header result detail [KEY=VALUE ...]
     local path="$1" header="$2" result="$3" detail="$4"
     shift 4
-    local now prev_ok="" ok_epoch tmp line dir
+    local now prev_ok="" ok_epoch line
     now=$(date +%s)
     [ -f "$path" ] && prev_ok=$(env_value "$path" ok_epoch)
     case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
     if [ "$result" = ok ]; then ok_epoch="$now"; else ok_epoch="$prev_ok"; fi
-    dir=$(dirname "$path")
-    mkdir -p "$dir" || { warn "could not create $dir"; return 0; }
-    tmp=$(mktemp "$dir/.$(basename "$path").XXXXXX") \
-        || { warn "could not write $path"; return 0; }
-    if {
+    # A status file is best-effort: the job already did its work, and dying here
+    # would turn a full disk into a failed unit instead of a visible stale
+    # ok_epoch. The caller's own exit code is the job's verdict.
+    if ! {
         printf '%s\n' "$header"
         printf 'time=%s\n' "$(date -Is)"
         printf 'epoch=%s\n' "$now"
@@ -686,10 +711,7 @@ status_write() { # path header result detail [KEY=VALUE ...]
             printf '%s\n' "$line"
         done
         printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
-    } > "$tmp"; then
-        mv -f "$tmp" "$path" || { rm -f "$tmp"; warn "could not write $path"; }
-    else
-        rm -f "$tmp"
+    } | write_atomic "$path" 644; then
         warn "could not write $path"
     fi
     return 0

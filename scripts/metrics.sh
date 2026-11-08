@@ -253,10 +253,11 @@ fi
 #   * mem_usage is podman's working set (memory.current - inactive_file), not
 #     RSS, hence the name; its units are decimal (4.176GB == 4176224256 B,
 #     verified against the cgroup), but go-units' binary suffixes are accepted
-#     too so a podman change cannot silently zero the series. Sizes inherit
-#     podman's 4-significant-digit rendering: right for a graph, and the exact
-#     values are always in the container's cgroup (cpu.stat usage_usec,
-#     memory.current) if a one-off measurement needs them.
+#     too so a podman change cannot silently zero the series -- lib.sh's
+#     human_bytes reads both spellings. Sizes inherit podman's 4-significant-
+#     digit rendering: right for a graph, and the exact values are always in
+#     the container's cgroup (cpu.stat usage_usec, memory.current) if a one-off
+#     measurement needs them.
 #   * block_io reads 0B/0B on every container here -- the io controller does
 #     not account under rootless cgroups -- so it is not exported at all.
 #   * the label is the container NAME, never the id: a recreated container keeps
@@ -275,28 +276,6 @@ fi
 # which rate() tolerates, while an empty field stays a hole (below), because
 # dur_ms answers 0 for unparsable input and that is not the same thing.
 cpu_seconds() { awk -v ms="$(dur_ms "$1")" 'BEGIN { printf "%.3f", ms / 1000 }'; }
-
-# "4.176GB" -> bytes. Only the first half of mem_usage/net_io is ever passed in.
-human_bytes() {
-    awk -v s="$1" '
-        BEGIN {
-            if (!match(s, /^[0-9]+(\.[0-9]+)?/)) exit 1
-            num = substr(s, 1, RLENGTH) + 0
-            u = substr(s, RLENGTH + 1)
-            if      (u == ""   || u == "B")   mult = 1
-            else if (u == "kB")               mult = 1e3
-            else if (u == "MB")               mult = 1e6
-            else if (u == "GB")               mult = 1e9
-            else if (u == "TB")               mult = 1e12
-            else if (u == "PB")               mult = 1e15
-            else if (u == "KiB")              mult = 1024
-            else if (u == "MiB")              mult = 1024 * 1024
-            else if (u == "GiB")              mult = 1024 * 1024 * 1024
-            else if (u == "TiB")              mult = 1024 * 1024 * 1024 * 1024
-            else exit 1
-            printf "%.0f\n", num * mult
-        }'
-}
 
 if cstats=$(podman stats --no-stream --format json 2>/dev/null) \
     && jq -e 'type == "array"' >/dev/null 2>&1 <<<"$cstats"; then

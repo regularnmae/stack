@@ -198,19 +198,18 @@ gen() { rand_hex; }
 # when the key is absent). awk gets the values through the environment so a
 # value is never re-interpreted as awk -v escapes.
 set_env_key() { # file key value
-    local f="$1" k="$2" v="$3" tmp mode
+    local f="$1" k="$2" v="$3" mode
     [ -f "$f" ] || die "missing $f; run deploy/install.sh first"
     if [ "$DRY_RUN" = 1 ]; then say "would set $k in $f"; return 0; fi
     mode=$(stat -c %a "$f")
-    tmp=$(mktemp "$(dirname "$f")/.rot.XXXXXX")
-    K="$k" V="$v" awk '
+    if ! K="$k" V="$v" awk '
         BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"]; done = 0 }
         index($0, k "=") == 1 { print k "=" v; done = 1; next }
         { print }
         END { if (!done) print k "=" v }
-    ' "$f" > "$tmp"
-    chmod "$mode" "$tmp"
-    mv -f "$tmp" "$f"
+    ' "$f" | write_atomic "$f" "$mode"; then
+        die "could not rewrite $f"
+    fi
 }
 
 set_env_key_if_file() { # file key value
@@ -222,15 +221,14 @@ set_env_key_if_file() { # file key value
 # key that is deliberately transient: RESTIC_PASSWORD_NEXT, the write-ahead
 # copy of a restic password the repository has not accepted yet.
 unset_env_key() { # file key
-    local f="$1" k="$2" tmp mode
+    local f="$1" k="$2" mode
     [ -f "$f" ] || return 0
     grep -q "^$k=" "$f" || return 0
     if [ "$DRY_RUN" = 1 ]; then say "would remove $k from $f"; return 0; fi
     mode=$(stat -c %a "$f")
-    tmp=$(mktemp "$(dirname "$f")/.rot.XXXXXX")
-    grep -v "^$k=" "$f" > "$tmp" || true
-    chmod "$mode" "$tmp"
-    mv -f "$tmp" "$f"
+    if ! { grep -v "^$k=" "$f" || true; } | write_atomic "$f" "$mode"; then
+        die "could not rewrite $f"
+    fi
 }
 
 # bitcoind owns its data dir and install.sh hands bitcoin.conf to the image uid,

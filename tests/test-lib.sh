@@ -78,6 +78,41 @@ assert_eq fail "$(env_value "$status" result)" 'status_write records a failure'
 assert_eq "$first_ok" "$(env_value "$status" ok_epoch)" \
     'status_write carries ok_epoch through a failure'
 
+# write_atomic is the primitive behind prom_write, status_write and
+# unit_digest_write: stdin -> a hidden temp beside the target, the mode, then a
+# rename. The rename is the point -- a reader sees the old file or the new one.
+printf 'hello\n' | write_atomic "$TMP_DIR/atomic.txt" 600
+assert_eq hello "$(cat "$TMP_DIR/atomic.txt")" 'write_atomic writes stdin'
+assert_eq 600 "$(stat -c %a "$TMP_DIR/atomic.txt")" 'write_atomic sets the mode'
+mkdir -p "$TMP_DIR/atdir"
+chmod 700 "$TMP_DIR/atdir"
+printf 'x\n' | write_atomic "$TMP_DIR/atdir/f" 644 755
+assert_eq 755 "$(stat -c %a "$TMP_DIR/atdir")" 'write_atomic sets the directory mode'
+assert_eq 644 "$(stat -c %a "$TMP_DIR/atdir/f")" 'write_atomic sets the file mode'
+assert_eq 0 "$(find "$TMP_DIR" -name '.atomic.txt.*' | wc -l)" \
+    'write_atomic leaves no temp file behind'
+# A failed write must not replace what is already there. Root ignores the
+# directory mode, so this is only meaningful as an unprivileged user (CI is).
+if [ "$(id -u)" -ne 0 ]; then
+    mkdir -p "$TMP_DIR/rodir"
+    printf 'old\n' > "$TMP_DIR/rodir/f"
+    chmod 500 "$TMP_DIR/rodir"
+    if printf 'new\n' | write_atomic "$TMP_DIR/rodir/f" 644 2>/dev/null; then
+        printf 'FAIL: write_atomic succeeded in a read-only directory\n' >&2
+        exit 1
+    fi
+    chmod 700 "$TMP_DIR/rodir"
+    assert_eq old "$(cat "$TMP_DIR/rodir/f")" 'write_atomic keeps the old file on failure'
+fi
+
+# Podman renders a size as go-units does ("4.176GB", "512B") or, on a change,
+# binary ("2GiB"); numfmt reads both once the trailing B is gone.
+assert_eq 500000000 "$(human_bytes 500MB)" 'human_bytes parses an SI size'
+assert_eq 512 "$(human_bytes 512B)" 'human_bytes parses a bare byte count'
+assert_eq 0 "$(human_bytes 0B)" 'human_bytes parses zero'
+assert_eq 2147483648 "$(human_bytes 2GiB)" 'human_bytes parses an IEC size'
+assert_eq "" "$(human_bytes nonsense)" 'human_bytes refuses garbage'
+
 # One substitution list for the root tier, shared by install.sh and verify.sh.
 printf '@DATA_DIR@|@CONFIG_DIR@|@REPO_DIR@|@IDS_RETENTION_DAYS@\n' > "$TMP_DIR/root.tmpl"
 assert_eq '/d&|y|/d&|y/config|/r&|x|14' \
