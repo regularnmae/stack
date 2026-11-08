@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Helpers shared by deploy.sh, deploy/install.sh, verify.sh and the scripts/
-# helpers. Sourced, not executed. bootstrap.sh stays self-contained because it
-# must run standalone (curl | bash) on a host with no checkout, so it does not
-# use this file.
+# Helpers shared by deploy.sh, configure.sh, deploy/install.sh, verify.sh and
+# the scripts/ helpers. Sourced, not executed. bootstrap.sh stays self-contained
+# because it must run standalone (curl | bash) on a host with no checkout, so it
+# does not use this file.
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -268,29 +268,6 @@ wait_healthy() { # container timeout
         fi
         sleep 5
     done
-}
-
-# Wait for several containers at once. wait_healthy is the right shape for one
-# unit, but a deploy that restarted a dozen of them paid one StartPeriod +
-# Interval after another -- the checks are independent, so run them in parallel
-# and return one verdict. Each unit still gets wait_healthy's own floor (its
-# StartPeriod + Interval raises the caller's timeout) and its own log line; the
-# caller decides whether a failure is fatal.
-#   wait_healthy_many TIMEOUT container...
-wait_healthy_many() { # timeout container...
-    local t="$1"; shift
-    local -a pids=()
-    local c p failed=0
-    [ "$#" -gt 0 ] || return 0
-    [ "${DRY_RUN:-0}" = 1 ] && return 0
-    for c in "$@"; do
-        wait_healthy "$c" "$t" &
-        pids+=("$!")
-    done
-    for p in "${pids[@]}"; do
-        wait "$p" || failed=1
-    done
-    return "$failed"
 }
 
 # A CLN rune restriction: one alternatives group naming method prefixes, in the
@@ -729,10 +706,11 @@ prom_write() {
 }
 
 # stdin -> an env file that carries a secret (or a credential-bearing URL): the
-# one writer for both halves of the stack. install.sh seeds them and deploy.sh
-# rewrites two from the BTCPay bootstrap state, and those two used to differ --
-# umask+cat in one, mktemp+install in the other -- which is exactly the kind of
-# split where one side forgets the mode. Atomic, 0600, parent created.
+# one writer for both halves of the stack. install.sh seeds them and
+# configure.sh rewrites two from the BTCPay bootstrap state, and those two used
+# to differ -- umask+cat in one, mktemp+install in the other -- which is exactly
+# the kind of split where one side forgets the mode. Atomic, 0600, parent
+# created.
 write_env_file() { # path
     write_atomic "$1" 600
 }

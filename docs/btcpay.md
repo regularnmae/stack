@@ -44,8 +44,8 @@ this before touching `config/btcpay/`, `btcpay-wallet.sh`, the bootstrap, or the
   btcpay's unit unchanged — and `start` is a no-op on an active container, so
   `start_btcpay` calls
   `btcpay_plugin_newer` (the DLL's mtime against podman's `StartedAt`, i.e.
-  `refresh_image_unit` answered for a file) and restarts before its single health
-  wait. BTCPay loads plugin assemblies at start and keeps the mapped copy, which
+  `refresh_image_unit` answered for a file) and restarts BTCPay when the DLL is
+  newer. BTCPay loads plugin assemblies at start and keeps the mapped copy, which
   is why the restart is required, not tidy: `btcpay-bootstrap` enables XMR-CHAIN
   through BTCPay's API and needs the new assembly loaded.
 

@@ -16,7 +16,8 @@
 #
 #   ./configure.sh                    # all of the above, in that order
 #   ./configure.sh --only runes       # one section
-#   ./configure.sh --skip-daemons     # no wallet/runes/BTCPay work
+#   ./configure.sh --skip-daemons     # no daemon-dependent work (wallet/runes/
+#                                     # BTCPay/handshake)
 #   ./configure.sh --skip-apps        # no BoltMesh migrations
 #   ./configure.sh --no-wallets       # do not prompt for the Bitcoin wallet
 #   ./configure.sh --dry-run          # print the plan; change nothing
@@ -65,6 +66,21 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# --only names one section; the skip flags describe the stack. A section that
+# the flags exclude would otherwise run anyway, so catch the contradiction
+# before any wait starts.
+if [ -n "$ONLY" ]; then
+    if [ "$SKIP_DAEMONS" = 1 ]; then
+        case "$ONLY" in
+            wallet|runes|btcpay|agents)
+                die "--only $ONLY needs the chain daemons; drop --skip-daemons" ;;
+        esac
+    fi
+    if [ "$SKIP_APPS" = 1 ] && [ "$ONLY" = boltmesh ]; then
+        die "--only boltmesh conflicts with --skip-apps"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # readiness helpers
 # ---------------------------------------------------------------------------
@@ -86,12 +102,14 @@ wait_cmd() { # description timeout cmd...
 }
 
 # Print the last lines of a container's log with an indent, so a timeout shows
-# *why* instead of just spinning.
+# *why* instead of just spinning. Never fails: it runs after a failed wait, when
+# the container may not exist at all, and the caller's "warn and move on" must
+# not turn into a set -e exit over a missing log.
 dump_tail() { # container [lines]
     local c="$1" n="${2:-30}"
     [ "$DRY_RUN" = 1 ] && return 0
     warn "last $n log lines from $c:"
-    podman logs --tail "$n" "$c" 2>&1 | sed 's/^/  | /'
+    podman logs --tail "$n" "$c" 2>&1 | sed 's/^/  | /' || true
 }
 
 # True while bitcoind is in initial block download. CLN cannot finish starting
@@ -118,9 +136,10 @@ restart_if_active() { # unit
         || warn "$1 did not restart; it keeps the old env"
 }
 
-# Write stdin to PATH only when the bytes differ. Returns 0 when it wrote,
-# 1 when the file was already current (or the write failed and warned), so a
-# caller can restart only the units whose env actually changed.
+# Write stdin to PATH only when the bytes differ: 0 when it wrote, 1 when the
+# file was already current, 2 when the write failed (already warned). Split so a
+# caller restarts the unit that reads PATH only for 0, and can still tell an
+# unchanged file from a broken write.
 write_if_changed() { # path
     local path="$1" tmp
     tmp=$(mktemp)
@@ -134,10 +153,18 @@ write_if_changed() { # path
     if ! write_env_file "$path" < "$tmp"; then
         warn "could not write $path"
         rm -f "$tmp"
-        return 1
+        return 2
     fi
     rm -f "$tmp"
     return 0
+}
+
+# A file's bytes as a digest, empty when it does not exist. Used to decide
+# whether a unit that reads its EnvironmentFile= at start needs a restart --
+# systemd does not re-read it for a running service.
+file_digest() { # path
+    [ -f "$1" ] || return 0
+    sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -183,8 +210,18 @@ configure_runes() {
     fi
     # install.sh checks the node is reachable and mints the read/spend runes;
     # it is idempotent and a no-op once both runes are usable.
+    local envf="$CONFIG_DIR/lightning-mcp/node.env" before after
+    before=$(file_digest "$envf")
     log "re-running the installer to mint the CLN runes"
     "$REPO_DIR/deploy/install.sh" || warn "the installer did not complete"
+    after=$(file_digest "$envf")
+    if [ "$before" != "$after" ]; then
+        # lightning-mcp reads LIGHTNING_RUNE from its EnvironmentFile= at start,
+        # so a rune minted after the server started is invisible to it until it
+        # restarts. scripts/rotate.sh restarts it for the same reason. On a
+        # fresh host deploy.sh started the server before any rune existed.
+        restart_if_active lightning-mcp
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -210,7 +247,7 @@ ensure_btcpay_db() {
 }
 
 write_btcpay_backend_env() {
-    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store secret
+    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store secret rc=0
     [ -s "$state" ] || { warn "no $state; the BTCPay bootstrap has not completed"; return 1; }
     key=$(env_value "$state" BTCPAY_API_KEY)
     store=$(env_value "$state" BTCPAY_STORE_ID)
@@ -219,19 +256,23 @@ write_btcpay_backend_env() {
         warn "the BTCPay bootstrap state is incomplete; not writing the backend env"
         return 1
     fi
-    if write_if_changed "$CONFIG_DIR/btcpay/backend.env" <<EOF
+    write_if_changed "$CONFIG_DIR/btcpay/backend.env" <<EOF || rc=$?
 # Written by configure.sh from btcpay/bootstrap.env. Do not hand-edit.
 BTCPAY_URL=http://btcpay:49392
 BTCPAY_API_KEY=$key
 BTCPAY_STORE_ID=$store
 BTCPAY_WEBHOOK_SECRET=$secret
 EOF
-    then
-        log "wrote $CONFIG_DIR/btcpay/backend.env (mode 600)"
-        # The backend and worker read it as an EnvironmentFile when they start.
-        restart_if_active boltmesh-backend
-        restart_if_active boltmesh-worker
-    fi
+    case "$rc" in
+        0)
+            log "wrote $CONFIG_DIR/btcpay/backend.env (mode 600)"
+            # The backend and worker read it as an EnvironmentFile when they start.
+            restart_if_active boltmesh-backend
+            restart_if_active boltmesh-worker
+            ;;
+        1) ;;  # already current
+        *) return 1 ;;
+    esac
 }
 
 # The read side of the same state: the store-scoped, read-only key
@@ -239,7 +280,7 @@ EOF
 # re-minted key cannot leave a stale copy in the unit's EnvironmentFile -- the
 # same reason crowdsec's lapi.env is derived from secrets.env.
 write_btcpay_mcp_env() {
-    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store envf
+    local state="$CONFIG_DIR/btcpay/bootstrap.env" key store envf rc=0
     [ -s "$state" ] || { warn "no $state; the BTCPay bootstrap has not completed"; return 1; }
     key=$(env_value "$state" BTCPAY_MCP_KEY)
     store=$(env_value "$state" BTCPAY_STORE_ID)
@@ -249,17 +290,21 @@ write_btcpay_mcp_env() {
     fi
     envf="$CONFIG_DIR/btcpay-mcp/upstream.env"
     mkdir -p "$(dirname "$envf")"
-    if write_if_changed "$envf" <<EOF
+    write_if_changed "$envf" <<EOF || rc=$?
 # Written by configure.sh from btcpay/bootstrap.env. Do not hand-edit.
 BTCPAY_URL=http://btcpay:49392
 BTCPAY_PUBLIC_URL=https://$BTCPAY_HOST
 BTCPAY_API_KEY=$key
 BTCPAY_STORE_ID=$store
 EOF
-    then
-        log "wrote $envf (mode 600)"
-        restart_if_active btcpay-mcp
-    fi
+    case "$rc" in
+        0)
+            log "wrote $envf (mode 600)"
+            restart_if_active btcpay-mcp
+            ;;
+        1) ;;  # already current
+        *) return 1 ;;
+    esac
 }
 
 configure_btcpay() {
@@ -343,6 +388,14 @@ configure_agents() {
         log "agent-mcp is not installed; skipping the handshake (./deploy.sh --only agent-skills)"
         return 0
     fi
+    if [ "$SKIP_DAEMONS" = 1 ]; then
+        log "skipping the agent-mcp handshake (--skip-daemons): bitcoin-node-mcp has no chain to read"
+        return 0
+    fi
+    if ! podman container exists bitcoin-node-mcp 2>/dev/null; then
+        log "bitcoin-node-mcp is not deployed; skipping the agent-mcp handshake"
+        return 0
+    fi
     wait_healthy bitcoin-node-mcp "$APP_HEALTH_WAIT" \
         || { warn "bitcoin-node-mcp is not healthy; skipping the agent-mcp handshake"; return 0; }
     if "$HOME/.local/bin/agent-mcp" bitcoin-node get_blockchain_info >/dev/null 2>&1; then
@@ -399,7 +452,7 @@ if [ "$DRY_RUN" = 1 ]; then
             plan_section btcpay
         fi
         [ "$SKIP_APPS" = 1 ] || plan_section boltmesh
-        plan_section agents
+        [ "$SKIP_DAEMONS" = 1 ] || plan_section agents
     fi
     exit 0
 fi

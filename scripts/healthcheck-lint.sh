@@ -58,7 +58,8 @@ done
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # dur_ms (and dur_s, the rounded-up whole-second view) is shared with
-# wait_healthy: the same parser reads a unit's durations here and at deploy time.
+# wait_healthy: the same parser reads a unit's durations here and in the
+# post-start waits (configure.sh, scripts/rotate.sh).
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 HEALTHLESS_UNITS=("${HEALTHLESS_UNITS[@]:-}")

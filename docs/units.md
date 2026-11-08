@@ -82,7 +82,10 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   sweep) is the verdict. The work that needs a service to be answering -- the
   CLN runes, the wallets, the BTCPay databases/bootstrap and the BoltMesh
   migrations -- is the second step, `./configure.sh`, which owns every bounded
-  wait (`wait_healthy`, `wait_cmd`).
+  wait (`wait_healthy`, `wait_cmd`). It also restarts `lightning-mcp` when the
+  rune file changed: the server reads `LIGHTNING_RUNE` from its
+  `EnvironmentFile=` at start, so a rune minted after it started is otherwise
+  invisible (a fresh host deploys the server before any rune exists).
 
 - **`scripts/rotate.sh` is the third writer of `units.applied`.** A rotation
   re-renders through `install.sh` (only `bitcoin-rpc` and `tor-control` bake a

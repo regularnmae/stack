@@ -28,7 +28,8 @@ daemon unit, `fulcrum`, or an explorer.
   still restarts a still-active but `unhealthy` lightningd, as the fallback for
   a container older than that unit line; it does not wait. `./configure.sh`
   waits for wallet-level RPC before waiting on lightningd (and dumps the log on
-  a timeout) before minting the runes. That wait is
+  a timeout) before minting the runes, then restarts `lightning-mcp` when the
+  rune file changed. That wait is
   `bitcoind_wallet_ready` (`listwallets` non-empty), **never a bare
   `getwalletinfo`**: a node with two wallets loaded -- a legacy datadir-root
   `mainnet` plus an unnamed `""` -- answers `-19` "Wallet file not specified",

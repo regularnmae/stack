@@ -50,8 +50,8 @@ Restart=always
 # that into five starts in eight seconds -- which also tripped systemd's default
 # start limit (5 starts / 10s) and left the explorer failed until someone
 # restarted it. Thirty seconds outlives the start limit window and gives monerod
-# time to open the restricted RPC; deploy_explorers waits for that port before
-# it bounces the explorer.
+# time to open the restricted RPC; deploy_explorers no longer waits on that port,
+# so the retry is the recovery.
 RestartSec=30s
 TimeoutStartSec=300
 

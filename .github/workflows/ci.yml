@@ -147,10 +147,11 @@ jobs:
       # restart) and ./configure.sh is the second step, the only place that
       # waits for a service to answer. A health wait creeping back into the
       # deploy turns every redeploy into a slow verification; fail here instead
-      # of in review.
+      # of in review. Comments may name the helpers; only a code line is a call.
       - name: deploy.sh does not wait for health
         run: |
-          if grep -nE 'wait_healthy|wait_cmd' deploy.sh; then
+          [ -f deploy.sh ] || { echo "::error::deploy.sh is missing"; exit 1; }
+          if grep -nE '^[[:space:]]*[^#[:space:]].*(wait_healthy|wait_cmd)' deploy.sh; then
             echo "::error::deploy.sh must not wait for health; that work belongs in configure.sh"
             exit 1
           fi

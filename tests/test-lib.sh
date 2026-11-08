@@ -226,6 +226,5 @@ if unit_in_set "" " tor "; then
     printf 'FAIL: unit_in_set matched an empty unit\n' >&2
     exit 1
 fi
-assert_eq 0 "$(wait_healthy_many 1; echo $?)" 'wait_healthy_many with no containers'
 
 printf 'shared shell helper tests: ok\n'

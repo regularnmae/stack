@@ -246,8 +246,10 @@ wallet/bootstrap, BoltMesh migrations). Common flags:
 ./deploy.sh --dry-run                 # print the plan, change nothing
 ./configure.sh                        # wait for each service, then do the post-start work
 ./configure.sh --only runes           # one section (wallet|runes|btcpay|boltmesh|agents)
-./configure.sh --skip-daemons         # no wallet/runes/BTCPay work
+./configure.sh --skip-daemons         # no daemon-dependent work (wallet/runes/BTCPay/handshake)
+./configure.sh --skip-apps            # no BoltMesh migrations
 ./configure.sh --no-wallets           # skip the interactive wallet prompts
+./configure.sh --dry-run              # print the plan, change nothing
 ./verify.sh                           # container health, MCP handshakes, onion fetches
 ./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
 ./scripts/metrics.sh                  # one metrics collection (metrics.timer runs it)
@@ -619,7 +621,9 @@ podman run --rm \
 ```
 
 Then restart what reads it (`./deploy.sh` for config, `./deploy.sh --only tor`
-for the onion keys). Keep the single-directory mount: a target of `/` with the
+for the onion keys) and re-mint the runes with `./configure.sh --only runes`
+(the restored `config/` carries runes the node may no longer know). Keep the
+single-directory mount: a target of `/` with the
 whole data dir mounted is an in-place restore of everything, which is the
 previous runbook.
 
@@ -1000,8 +1004,8 @@ recovery needs.
 
 What the replay still does not prove: that the data is *usable* (roles,
 extensions, row-level security — it counts tables), that `boltmesh-backend` boots
-on the replayed cluster (that is `./deploy.sh --only boltmesh` after a restore,
-which runs `alembic upgrade head`), or anything about the offsite copy.
+on the replayed cluster (that is `./configure.sh --only boltmesh` after a
+restore, which runs `alembic upgrade head`), or anything about the offsite copy.
 
 ## Monitoring & the spend tripwire
 

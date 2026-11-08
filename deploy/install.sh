@@ -1618,7 +1618,7 @@ if command -v podman >/dev/null 2>&1 \
             log "created a usable read rune and a read+spend rune"
         fi
     else
-        log "lightningd not reachable yet; runes will be created by a later install.sh run"
+        log "lightningd not reachable yet; runes will be created by a later ./configure.sh run"
     fi
 fi
 

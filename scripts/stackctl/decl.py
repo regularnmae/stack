@@ -169,7 +169,7 @@ def parse_onion_service(raw: str) -> OnionService:
     return OnionService(name, target, mirrors, rest, raw)
 
 
-# --- KUMA_MONITORS: "name | url [| codes [| interval [| retries ]]]" ---------
+# --- kuma.monitor.* -> "name | url [| codes [| interval [| retries ]]]" ------
 class KumaMonitor:
     """A normalized monitor declaration, in the shape kuma's add/edit handlers
     read. `type` is "http" (url + codes) or "port" (hostname + port, kuma's TCP

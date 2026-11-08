@@ -519,7 +519,7 @@ start_infra() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. the rest of the daemons, then lightning-mcp's runes
+# 5. lightningd (the CLN runes are minted by ./configure.sh)
 # ---------------------------------------------------------------------------
 start_daemons() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping the chain daemons (--skip-daemons)"; return 0; fi
@@ -562,17 +562,18 @@ start_btcpay() {
     start_unit nbxplorer || warn "nbxplorer did not start"
     start_unit monero-wallet-btcpay || warn "monero-wallet-btcpay did not start"
 
-    local btcpay_active=0
+    local btcpay_active=0 btcpay_applied=0
     systemctl --user is-active --quiet btcpay.service 2>/dev/null && btcpay_active=1
-    start_unit btcpay || warn "btcpay did not start"
+    if start_unit btcpay; then btcpay_applied=1; else warn "btcpay did not start"; fi
     # btcpay is deferred by the digest pass (its restart belongs here, after
     # postgres/nbxplorer are started), so a changed unit is applied now rather
-    # than left on the old definition until the next run.
+    # than left on the old definition until the next run. A failed restart is
+    # not "applied": units_commit must keep the baseline where it is.
     if [ "$btcpay_active" = 1 ] && unit_was_changed btcpay && ! unit_applied btcpay; then
         log "btcpay.service changed; restarting it to pick up the new unit"
-        restart_unit btcpay || warn "btcpay did not restart"
+        if restart_unit btcpay; then btcpay_applied=1; else warn "btcpay did not restart"; btcpay_applied=0; fi
     fi
-    mark_applied btcpay
+    [ "$btcpay_applied" = 0 ] || mark_applied btcpay
     # A plugin bump is a file in the plugin directory, so no unit digest notices
     # it and `start` is a no-op on an already-active container: compare what is
     # loaded with what is on disk, the same call refresh_image_unit makes for an
@@ -1029,7 +1030,8 @@ start_btcpay || warn "BTCPay did not come up; continuing -- run ./verify.sh"
 # Configure the proxy hosts before the explorers: their images are local builds,
 # and the rest of the public surface must not wait for them. The explorer hosts
 # point at loopback ports, so NPM starts fine before the containers do; kuma's
-# monitors run after deploy_explorers so they see them up.
+# monitors are reconciled after deploy_explorers, though they are URLs and no
+# wait is involved.
 configure_npm_hosts
 sync_npm_network
 if [ "$DO_AGENT_SKILLS" = 1 ]; then
