@@ -834,6 +834,36 @@ else
     fi
 fi
 
+# The schedules. Each job's *effect* is already checked above -- snapshot age,
+# drill age, dump freshness, the signup watermark -- so a timer that stopped is
+# proven by the job's output once its threshold passes. What the effect cannot
+# show is a unit that was never installed (there is no output to age), and what
+# it shows only after a threshold is a schedule that has already been dead for
+# hours. A warning, not a failure, so one fact never pages twice: the effect
+# check owns the alarm, this names the cause. (The metrics timer is not here: its
+# own block below checks it, because that is where its staleness is judged.)
+schedule_faults=""
+if command -v systemctl >/dev/null 2>&1; then
+    for u in backup.timer backup-verify.timer backup-verify-db.timer \
+             registrations.timer monitor.timer; do
+        if ! systemctl --user cat "$u" >/dev/null 2>&1; then
+            schedule_faults="$schedule_faults $u(not installed)"
+        elif ! systemctl --user is-active --quiet "$u" 2>/dev/null; then
+            schedule_faults="$schedule_faults $u(not active)"
+        fi
+    done
+    # db-dump is a oneshot service (backup.container Wants=/After= it), so its
+    # "active" state is dead by design once it has run; only its installation is
+    # a question here, and the dump freshness above is the effect check.
+    systemctl --user cat db-dump.service >/dev/null 2>&1 \
+        || schedule_faults="$schedule_faults db-dump.service(not installed)"
+fi
+if [ -z "$schedule_faults" ]; then
+    ok "every scheduled job is installed and active"
+else
+    soft "scheduled job(s) not running:$schedule_faults -- ./deploy/install.sh installs them; systemctl --user status <unit> says why"
+fi
+
 # Certificate expiry: NPM renews by itself, and fails silently. One cert per
 # hosted name lives under letsencrypt/live/<id>/cert.pem.
 CERT_MIN=""
@@ -906,6 +936,16 @@ if systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
     else
         fail "metrics collector has never written $STACK_PROM"
     fi
+    # A fresh file is not a graph: node-exporter runs as uid 65534 (a subuid), so
+    # a textfile left 0600 is a collector that works and a history that stops.
+    # Proven from the outside, by the series the exporter actually serves -- the
+    # same trap README's "textfile is a permissions trap" names.
+    if ne_metrics=$(net_curl -s -m 10 http://host.containers.internal:9100/metrics 2>/dev/null) \
+        && grep -q '^stack_metrics_timestamp' <<< "$ne_metrics"; then
+        ok "node-exporter serves the stack's textfile series"
+    else
+        soft "node-exporter serves no stack_* series (textfile permissions 0600? the exporter is down?): $DATA_DIR/monitoring/textfile"
+    fi
 else
     soft "metrics.timer is not active; the metrics pipeline is not checked"
 fi
@@ -926,6 +966,38 @@ if systemctl --user is-active --quiet vector.service 2>/dev/null; then
     fi
 else
     soft "vector.service is not active; log shipping is not checked"
+fi
+
+# journald's storage: a reboot must not erase the record the store exists to
+# keep. The config alone is not proof -- a /var/log/journal that tmpfiles has not
+# prepared leaves journald writing to /run while Storage=persistent is in force,
+# which is the state this host was in once (bootstrap.sh judges it by a *.journal
+# file, not by the drop-in).
+if [ -n "$(find /var/log/journal -name '*.journal' -print -quit 2>/dev/null)" ]; then
+    ok "journald is persistent ($(du -sh /var/log/journal 2>/dev/null | cut -f1))"
+elif grep -qs '^Storage=persistent' /etc/systemd/journald.conf.d/99-stack.conf; then
+    soft "journald is configured persistent but still writes to /run (sudo ./bootstrap.sh re-applies tmpfiles)"
+else
+    soft "journald is volatile (sudo ./bootstrap.sh makes it persistent; the store still covers reboots)"
+fi
+
+# podman's own events are two lines per exec and one per healthcheck, so pointed
+# at journald they are most of the store's volume. install.sh (user) and
+# bootstrap (root) point them at a bounded file; a replaced containers.conf
+# turns the flood back on, which is silent until someone reads the store's
+# growth. The user side is asked of podman (that is the effective value); the
+# root side is read from the merged file, because asking root's podman needs
+# sudo.
+podman_events=$(podman info --format '{{.Host.EventLogger}}' 2>/dev/null || true)
+case "$podman_events" in
+    journald) soft "podman events go to journald (deploy/install.sh moves them to a bounded file)" ;;
+    "")       soft "could not read podman's event logger (podman info failed)" ;;
+    *)        ok "podman events -> $podman_events, not the journal" ;;
+esac
+if grep -Eq '^[[:space:]]*events_logger[[:space:]]*=[[:space:]]*"file"' /etc/containers/containers.conf 2>/dev/null; then
+    ok "root podman events -> file (/etc/containers/containers.conf)"
+else
+    soft "root podman events still go to journald (sudo ./bootstrap.sh writes /etc/containers/containers.conf)"
 fi
 
 # The carrier, read the way the restart counters above are: delta'd between
@@ -1216,6 +1288,28 @@ else
         printf '%s\n' "$am_failed" > "$ALERT_FAILED_FILE" 2>/dev/null || true
     fi
     [ "$am_ok" = 1 ] && ok "Alertmanager answers, and nothing failed to deliver since the last sweep"
+    # The config on disk is operator-owned and hand-edited. Alertmanager keeps
+    # running the last good config when it refuses a new one, so an invalid edit
+    # is silent until the next restart -- a warning rather than a page: the
+    # running path still works, and it needs a human edit either way.
+    AM_CFG="$CONFIG_DIR/monitoring/alertmanager/alertmanager.yml"
+    if [ ! -f "$AM_CFG" ]; then
+        soft "no alertmanager config at $AM_CFG (run deploy/install.sh)"
+    else
+        # amtool lives in the image, so only ask when the health probe above
+        # answered -- otherwise a stopped container reads as a broken config,
+        # which is already reported.
+        if [ "$am_code" = 200 ] \
+            && ! am_chk=$(podman exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>&1); then
+            soft "alertmanager config is invalid (${am_chk##*$'\n'}); it runs the last good one until that is fixed"
+        fi
+        # The seeded config ships with the receiver's email block commented out:
+        # until it is filled in, the path accepts alerts and delivers nothing. A
+        # fresh host is not broken, it is just not paging yet.
+        if ! grep -qE '^[[:space:]]*email_configs:' "$AM_CFG"; then
+            soft "alerting is inert: no email_configs in $AM_CFG (fill in SMTP, then scripts/monitor.sh --test)"
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------------------

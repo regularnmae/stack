@@ -1036,8 +1036,10 @@ path are in `docs/units.md`, "Healthchecks follow a contract".
   Monero wallet's lag behind `monerod`, the host itself (disk and inode space,
   disk saturation, backup age, the pre-backup dump freshness, certificate
   expiry, units that crash-looped
-  since the last sweep, the metrics collector going quiet, the log pipeline
-  going quiet, a live CLN rune the stack does not reference, and bitcoind's
+  since the last sweep, the schedules that produce all of it (the backup,
+  drill, dump, metrics, signup and monitor timers), the metrics collector going
+  quiet, the log pipeline going quiet, journald's persistence and podman's
+  event backend, a live CLN rune the stack does not reference, and bitcoind's
   RPC password disagreeing with `secrets.env`) — then the spend tripwire.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
@@ -1094,8 +1096,9 @@ signups stay in `$DATA_DIR/audit/registrations.log`.
 `$DATA_DIR/config/monitoring/alertmanager/alertmanager.yml`** (mode 600, seeded
 from `deploy/examples/monitoring/alertmanager.yml.example`; uncomment
 `email_configs` and set `global.smtp_*`). Until then Alertmanager accepts alerts
-and delivers nothing, `verify.sh` says so ("alerting is inert"), and nothing
-fails on a fresh host. Prove the whole path with `scripts/monitor.sh --test`.
+and delivers nothing; `scripts/monitor.sh` warns with "alerting is inert" in the
+journal (the mail path is what is missing), and nothing fails on a fresh host.
+Prove the whole path with `scripts/monitor.sh --test`.
 
 The SMTP facts worth knowing: `smtp_smarthost` is the **submission** server, not
 the recipient's domain (`smtp.gmail.com:587` with an App Password works, and is
@@ -1117,8 +1120,9 @@ spam — no SPF, no DKIM, no matching PTR. A provider relay carries all three.
     silent. Set the check's period to the timer interval (5 minutes).
 
 With no heartbeat the monitor still runs and records to
-`$DATA_DIR/audit/audit.log`, and `verify.sh` reports whether the timer is
-installed and active. The host checks' thresholds are the same file
+`$DATA_DIR/audit/audit.log`, and the sweep reports whether every schedule —
+including its own timer — is installed and active. The host checks' thresholds
+are the same file
 (`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
 `MONITOR_DUMP_MAX_AGE_H`, `MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`,
 `MONITOR_METRICS_MAX_AGE_S`,
@@ -1170,8 +1174,10 @@ Three consequences worth knowing:
 - **The textfile is a permissions trap.** `node-exporter` runs as uid 65534 (a
   subuid under rootless podman), so it owns neither the directory nor the files.
   Both writers chmod the directory `0755` and the files `0644`; if you ever see
-  graphs stop while the containers are healthy, check that first — `verify.sh`
-  has a check for it (`node-exporter /metrics` must carry `stack_*` series).
+  graphs stop while the containers are healthy, check that first: the sweep
+  distinguishes the writer ("metrics collector is stale") from the exporter
+  ("node-exporter serves no `stack_*` series", the 0600 case), and
+  `ls -l $DATA_DIR/monitoring/textfile` names the permission.
 
 ### Logs and history
 
@@ -1216,7 +1222,7 @@ search. `deploy/install.sh` points podman's event log at a bounded file
 ring, gone at reboot), and `sudo ./bootstrap.sh` writes the same setting for
 root's own podman, which is what the sensor's healthchecks use. `podman events`
 still reads it, and `scripts/logs.sh` never has to be searched past it.
-`verify.sh` checks both files and fails if the user-side one is lost.
+`scripts/monitor.sh` checks both and warns if the user-side one is lost.
 
 One consequence for an operator: **`podman logs -f` no longer works.** Follow
 uses podman's *events* stream to learn that a container died, so with events in a
@@ -1299,7 +1305,10 @@ Two consequences worth knowing:
   that matters is the silent one (all three units read "active" while nothing
   is shipping). A dead store therefore *adds* an alert; every other check still
   reads the daemons and the host directly, so the pipeline can never silence
-  one. `verify.sh` runs the same query plus a real LogsQL search.
+  one. The same `--health` call also proves the nginx-proxy-manager **file**
+  source is being read, by comparing its access log's mtime with the store's
+  newest `npm_access` entry — both quiet is a quiet site, a written file with no
+  entries is a broken source.
 
 No Grafana, for logs either: `vmui` and VictoriaLogs' own LogsQL UI answer the
 two questions ("how did it move" and "what did it say"), and one less container

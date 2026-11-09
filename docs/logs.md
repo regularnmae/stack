@@ -50,9 +50,9 @@ event-logger setting. The operator narrative is README's "Logs and history".
   `health_status`, 1,352 exec -- all shipped into the store, i.e. the noise
   `scripts/logs.sh` was supposed to answer past. `podman_events_conf` writes
   `[engine] events_logger = "file"` plus `events_logfile_max_size = "10m"` into
-  `~/.config/containers/containers.conf`, and `verify.sh` fails if `podman info
-  --format {{.Host.EventLogger}}` reports `journald` again. Four reasons it
-  lives there rather than at the 64 `podman exec` call sites: a per-call
+  `~/.config/containers/containers.conf`, and `scripts/monitor.sh` warns if
+  `podman info --format {{.Host.EventLogger}}` reports `journald` again. Four
+  reasons it lives there rather than at the 64 `podman exec` call sites: a per-call
   `--events-backend=none` cannot reach the healthcheck units at all; no
   discipline survives the 65th call site (that is how the first one-place
   mitigation decayed); `file` keeps `podman events` readable from a bounded ring
@@ -72,9 +72,9 @@ event-logger setting. The operator narrative is README's "Logs and history".
   `install.sh --root`, i.e. `sudo ./bootstrap.sh`), which is what the
   `deploy/root/` sensor's own healthchecks read -- they are podman children of
   the *system* manager, so the user file cannot reach them, and they were the
-  whole remainder of the flood (~120 lines an hour). `verify.sh` checks both: the
-  user side through `podman info`, the root side by reading the merged file,
-  since asking root's podman would need sudo.
+  whole remainder of the flood (~120 lines an hour). `scripts/monitor.sh` checks
+  both: the user side through `podman info`, the root side by reading the merged
+  file, since asking root's podman would need sudo.
   **`podman logs -f` stops working, by podman's own rule** (`using --follow with
   the journald --log-driver but without the journald --events-backend (file) is
   not supported`): follow reads the events stream to learn the container died,
@@ -114,7 +114,8 @@ event-logger setting. The operator narrative is README's "Logs and history".
   `root:systemd-journal` and the tmpfiles ACL (`systemd-tmpfiles --create
   --prefix /var/log/journal` -- the ACL is what `vector` reads through), then
   restarts **and flushes**, and judges the result by whether a `*.journal` exists
-  under `/var/log/journal`, never by the config file. `verify.sh` does the same.
+  under `/var/log/journal`, never by the config file. `scripts/monitor.sh` does
+  the same on every sweep.
 
 - **`vector`'s journald source: `current_boot_only=false` does not work on
   systemd 250-257** ("not supported for systemd versions 250 through 257"), so

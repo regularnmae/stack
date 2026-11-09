@@ -75,6 +75,7 @@ Options:
   --follow             stream new entries instead of a window (^C to stop)
   --stats              count entries per container for the window
   --health             exit non-zero when the pipeline is not shipping
+                       (includes the nginx-proxy-manager file source)
   --window S           --health: how recent the newest entry must be (default 900)
   --json               print the store's JSON, one object per line
   --no-color           plain output even on a TTY
@@ -241,6 +242,37 @@ if [ "$HEALTH" = 1 ]; then
     if [ "$count" -eq 0 ]; then
         printf 'no log entries in the last %ss (vector stopped, or the store is not being written)\n' "$WINDOW" >&2
         exit 1
+    fi
+    # The NPM file source is the half journald cannot see, and it fails on its
+    # own: an image update that moves the log path or changes log_format leaves
+    # vector reading nothing, forever, with every unit green -- and CrowdSec reads
+    # the same directory, so detection goes blind at the same moment. "No
+    # requests" is not a fault on a quiet site, so the access log's own mtime
+    # decides: a file written inside the window with no entries in the store
+    # means the source is not being read, while both being old means nobody
+    # visited.
+    resolve_data_dir
+    vl_query /select/logsql/query --get \
+        --data-urlencode "query=_time:${WINDOW}s log_type:\"npm_access\" | stats count() as n"
+    npm_count=$(printf '%s' "$body" | jq -r '.n // empty' 2>/dev/null) || npm_count=""
+    case "$npm_count" in
+        ''|*[!0-9]*) die "log store returned an unreadable nginx-proxy-manager count: ${body:-empty response}" ;;
+    esac
+    if [ "$npm_count" -eq 0 ]; then
+        newest_npm=""
+        if [ -d "$DATA_DIR/npm/data/logs" ]; then
+            newest_npm=$(find "$DATA_DIR/npm/data/logs" -name '*_access.log' -printf '%T@\n' 2>/dev/null \
+                | sort -n | tail -1 | cut -d. -f1)
+        fi
+        case "$newest_npm" in
+            ''|*[!0-9]*) ;;
+            *)
+                if [ "$(( $(date +%s) - newest_npm ))" -le "$WINDOW" ]; then
+                    printf 'no nginx-proxy-manager entries in the last %ss although its access log was written %ss ago (deploy/logs/vector.toml npm source is not reading %s)\n' \
+                        "$WINDOW" "$(( $(date +%s) - newest_npm ))" "$DATA_DIR/npm/data/logs" >&2
+                    exit 1
+                fi ;;
+        esac
     fi
     [ "$QUIET" = 1 ] || printf 'ok: %s entr%s in the last %ss\n' \
         "$count" "$([ "$count" = 1 ] && printf 'y' || printf 'ies')" "$WINDOW"

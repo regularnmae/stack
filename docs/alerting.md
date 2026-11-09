@@ -43,11 +43,23 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   that check is the only thing keeping a new threshold discoverable. It carries
   the host checks (disk, inodes, disk saturation,
   backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
-  hottest sensor, a stale metrics textfile, the syslog socket, the signup
-  watcher's freshness) and the
+  hottest sensor, a stale metrics textfile, the exporter that serves it, the
+  backup/drill/dump/metrics and registrations **schedules**, journald's persistence, podman's event backend,
+  the syslog socket, the signup watcher's freshness), the Alertmanager facts the
+  mail path depends on (its config still parses, a receiver is filled in) and the
   chain/daemon checks (a
   `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
   peers/channels, monerod's lag, the wallet's lag).
+
+- **`verify.sh` is the on-demand diagnostic; the monitor is the only periodic
+  decider.** The schedules, the metrics textfile, the log pipeline and
+  Alertmanager's config used to be checked in both places, so one fault arrived
+  as two alerts with two hold-downs and two resolutions. `verify.sh` no longer
+  carries its Backups/Monitoring/Metrics/Alerting/Logs sections; its header says
+  which section owns each fact now. The rule that follows: a check belongs in the
+  sweep when it is a condition that clears and should page, and in `verify.sh`
+  when it is config drift worth naming to a human (a rendered unit that was never
+  applied, a hand-edited `servers.json`, the root tier's files).
 
 - **The syslog socket is probed, not assumed:** sshd, PAM, sudo and cron all log
   through `/dev/log`, and a stale socket inode drops every one of those messages —
@@ -166,7 +178,9 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   host loopback. The numbers are published through its **textfile collector**,
   whose permissions are the trap: the exporter is uid 65534 (a subuid), so both
   writers chmod the directory `0755` and the files `0644` — a silent "graphs
-  stopped while everything is healthy" is almost always that.
+  stopped while everything is healthy" is almost always that, so the sweep
+  checks both halves: `stack.prom`'s mtime (the writer) and whether
+  node-exporter actually serves a `stack_*` series (the reader).
   `$DATA_DIR/monitoring` is regenerable and outside the backup set, and
   `monitor.prom` carries the sweep's own numbers. The series and the
   observe/decide split are documented in `scripts/metrics.sh`.
@@ -209,6 +223,10 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   pipeline is alive.** `scripts/logs.sh --health` (newest entry within
   `MONITOR_LOGS_MAX_AGE_S`, default 900) is the one exception to "alerting never
   queries the pipeline": the failure it catches is the pipeline's own silent
-  death, and a failure there can only *add* an alert. Everything else still
-  reads the daemons and the host directly.
+  death, and a failure there can only *add* an alert. The same call also proves
+  the nginx-proxy-manager **file** source is being read (the access log's mtime
+  against the store's newest `npm_access` entry, because a quiet site and a dead
+  source both look like "no requests"); that is a second query in the same
+  script, not a second call site. Everything else still reads the daemons and the
+  host directly.
 
