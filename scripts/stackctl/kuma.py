@@ -35,7 +35,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from . import decl, envfile, manifest
+from . import envfile, manifest
 from .ui import die, log
 
 
@@ -48,7 +48,7 @@ def say(msg: str) -> None:
 
 # A monitor is only touched when a *declared* field changed; interval and
 # retries belong to the UI once the monitor exists.
-def declared_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
+def declared_fields(m: manifest.KumaMonitor) -> Dict[str, Any]:
     if m.type == "port":
         return {
             "type": "port",
@@ -63,7 +63,7 @@ def declared_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
             "accepted_statuscodes": m.codes}
 
 
-def edit_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
+def edit_fields(m: manifest.KumaMonitor) -> Dict[str, Any]:
     # Only what the declaration owns: uptime-kuma-api merges the rest of the
     # stored monitor back in (getMonitor + update), so the UI's method, body,
     # headers, interval and notifications survive an edit untouched. A port
@@ -74,7 +74,7 @@ def edit_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
     return {"url": m.url, "accepted_statuscodes": m.codes}
 
 
-def add_fields(m: decl.KumaMonitor) -> Dict[str, Any]:
+def add_fields(m: manifest.KumaMonitor) -> Dict[str, Any]:
     """The whole new-monitor payload (an add has no stored state to carry).
 
     accepted_statuscodes is explicit even for a port monitor: kuma's `add`
@@ -104,7 +104,7 @@ def normalized_codes(m: Any) -> List[str]:
     return sorted(str(c) for c in codes) if isinstance(codes, list) else []
 
 
-def differs(existing: Dict[str, Any], m: decl.KumaMonitor) -> bool:
+def differs(existing: Dict[str, Any], m: manifest.KumaMonitor) -> bool:
     if (existing.get("type") or "http") != m.type:
         return True
     if m.type == "port":

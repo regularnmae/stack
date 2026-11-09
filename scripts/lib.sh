@@ -1258,8 +1258,8 @@ stackctl_wrapper() { # module [NAME=value ...]
         || die "the reconciler venv is missing: run ./deploy/install.sh (it builds $REPO_DIR/.venv from scripts/stackctl/requirements.txt)"
     resolve_data_dir
     py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    # The core reads these names directly (decl.py no longer parses a stdin
-    # protocol). Pass them through env(1) instead of exporting them in a
+    # The core reads these names directly (the old stdin pipe protocol is gone).
+    # Pass them through env(1) instead of exporting them in a
     # subshell: the wrapper's own environment stays untouched either way, but a
     # subshell `export DRY_RUN` reads as a modification shellcheck thinks the
     # sourcing scripts can lose (SC2031 at every later use). The NAME=value

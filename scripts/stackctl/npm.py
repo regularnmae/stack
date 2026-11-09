@@ -34,7 +34,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import decl, envfile, http, manifest
+from . import envfile, http, manifest
 from .ui import die, log, warn
 
 # Streaming settings for the MCP host, applied at server scope so every
@@ -111,7 +111,7 @@ class NpmApi:
             return None, text
 
 
-def mcp_locations(mcp_hosts: List[decl.McpHost]) -> List[Dict[str, Any]]:
+def mcp_locations(mcp_hosts: List[manifest.McpHost]) -> List[Dict[str, Any]]:
     """One location per MCP_HOSTS entry, each rewritten onto that container's
     /mcp. Three fields per entry: the container name is kept for the credential
     path (the endpoint list names its token.env), but NPM forwards to the
@@ -123,7 +123,7 @@ def mcp_locations(mcp_hosts: List[decl.McpHost]) -> List[Dict[str, Any]]:
             "path": m.prefix,
             "forward_scheme": "http",
             "forward_host": "127.0.0.1",
-            "forward_port": int(m.port),
+            "forward_port": m.port,
             "forward_path": "/mcp",
             "access_list_id": 0,
         })
@@ -156,7 +156,7 @@ def build_payload(domain: str, scheme: str, host: str, port: str, cert_id: int,
     }
 
 
-def rate_limits(host: decl.NpmHost) -> str:
+def rate_limits(host: manifest.NpmHost) -> str:
     """The zone a vhost gets pointed at. The zones themselves are declared in
     $DATA_DIR/npm/data/nginx/custom/http.conf (deploy/npm/http.conf, seeded by
     install.sh); this is where one is attached to a host, because which applies

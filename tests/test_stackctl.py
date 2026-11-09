@@ -6,7 +6,8 @@
 # behind KumaClient and the tests drive a fake of it)
 #
 # What is covered, and why each layer exists:
-#   * decl.py -- the declaration parsers and their verbatim error messages;
+#   * manifest.py -- the declarations, their per-field validation, and the
+#     shell emission bash evaluates;
 #   * npm.py -- payload construction byte-for-byte (field order included,
 #     which is what made the golden diff against the bash original a real
 #     check), plus a full reconcile against a fake NPM admin API;
@@ -34,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from stackctl import decl, envfile, kuma, npm  # noqa: E402
+from stackctl import envfile, kuma, manifest, npm  # noqa: E402
 from stackctl.ui import Fatal  # noqa: E402
 
 
@@ -86,63 +87,40 @@ class TestEnvfile(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestDecl(unittest.TestCase):
-    def test_npm_host(self):
-        h = decl.parse_npm_host("status.example.net|127.0.0.1:8107|ws,block")
+class TestDeclarations(unittest.TestCase):
+    """The declaration types themselves. Reading them out of TOML is
+    TestManifest's job; these pin the small behaviours the reconcilers rely on."""
+
+    def test_npm_host_flags(self):
+        h = manifest.NpmHost("status.example.net", "http", "127.0.0.1", 8107,
+                             "ws,block")
         self.assertEqual((h.domain, h.scheme, h.host, h.port, h.flags),
-                         ("status.example.net", "http", "127.0.0.1", "8107", "ws,block"))
+                         ("status.example.net", "http", "127.0.0.1", 8107, "ws,block"))
         self.assertTrue(h.has_flag("ws"))
         self.assertFalse(h.has_flag("w"))
+        self.assertFalse(h.has_flag("bloc"))
+        self.assertEqual(h.flags_without("ws"), "block")
 
-    def test_npm_host_scheme_and_tail_pipes(self):
-        h = decl.parse_npm_host("d|https://up:443|a|b|c")
-        self.assertEqual((h.scheme, h.host, h.port), ("https", "up", "443"))
-        # IFS='|' read keeps every remaining pipe in the last field.
-        self.assertEqual(h.flags, "a|b|c")
-
-    def test_npm_host_errors(self):
-        self.assertIn("bad proxy-host declaration",
-                      die_msg(decl.parse_npm_host, "only-one-field"))
-        self.assertIn("bad forward scheme",
-                      die_msg(decl.parse_npm_host, "d|ftp://x:1|"))
-        self.assertIn("bad forward port",
-                      die_msg(decl.parse_npm_host, "d|no-port-here|"))
-
-    def test_mcp_host_greedy_port(self):
-        m = decl.parse_mcp_host("/searxng:searxng-mcp:8100")
+    def test_mcp_host_probe_defaults(self):
+        m = manifest.McpHost("/searxng", "searxng-mcp", 8100)
         self.assertEqual((m.prefix, m.container, m.port),
-                         ("/searxng", "searxng-mcp", "8100"))
-        self.assertIn("bad MCP endpoint declaration", die_msg(decl.parse_mcp_host, "no-colons"))
-        self.assertIn("bad MCP endpoint declaration",
-                      die_msg(decl.parse_mcp_host, "/x:c:notaport"))
+                         ("/searxng", "searxng-mcp", 8100))
+        # Empty until manifest.load fills them from the [mcp.*] table.
+        self.assertEqual((m.token_var, m.probe_tool, m.probe_args,
+                          m.needs_nodes, m.spend_token_var),
+                         ("", "", "{}", False, ""))
 
-    def test_onion_service(self):
-        o = decl.parse_onion_service("boltmesh|10.89.0.241:80|mirror|/|200,401")
-        self.assertEqual((o.name, o.target, o.mirrors), ("boltmesh", "10.89.0.241:80", "mirror"))
-
-    def test_kuma_http_and_port(self):
-        m = decl.parse_kuma_monitor("SearXNG|https://search.example.net|200-299,400-499|120|3")
-        self.assertEqual((m.type, m.url, m.codes, m.interval, m.maxretries),
-                         ("http", "https://search.example.net", ["200-299", "400-499"], 120, 3))
-        p = decl.parse_kuma_monitor("Fulcrum (Electrum TCP)|tcp://h.internal:50001||60|2")
-        self.assertEqual((p.type, p.hostname, p.port, p.codes), ("port", "h.internal", 50001, []))
+    def test_kuma_describe_and_defaults(self):
+        p = manifest.KumaMonitor("Fulcrum (Electrum TCP)", "port",
+                                 url="tcp://h.internal:50001",
+                                 hostname="h.internal", port=50001)
         self.assertEqual(p.describe(), "h.internal:50001 (tcp)")
         self.assertEqual(p.url, "tcp://h.internal:50001")
-        # defaults
-        d = decl.parse_kuma_monitor("X|https://x")
-        self.assertEqual((d.codes, d.interval, d.maxretries), (["200-299"], 60, 2))
-
-    def test_kuma_errors(self):
-        self.assertIn("bad monitor declaration", die_msg(decl.parse_kuma_monitor, "name-only"))
-        self.assertIn("bad accepted status codes",
-                      die_msg(decl.parse_kuma_monitor, "n|https://x|200"))
-        self.assertIn("accepts no status codes",
-                      die_msg(decl.parse_kuma_monitor, "n|tcp://h:1|200-299"))
-        self.assertIn("bad tcp:// target", die_msg(decl.parse_kuma_monitor, "n|tcp://noport"))
-        self.assertIn("bad port", die_msg(decl.parse_kuma_monitor, "n|tcp://h:0"))
-        self.assertIn("bad monitor URL", die_msg(decl.parse_kuma_monitor, "n|ftp://x"))
-        self.assertIn("bad interval", die_msg(decl.parse_kuma_monitor, "n|https://x|200-299|x"))
-        self.assertIn("bad retries", die_msg(decl.parse_kuma_monitor, "n|https://x|200-299|60|x"))
+        self.assertEqual((p.codes, p.interval, p.retry_interval, p.maxretries),
+                         ([], 60, 60, 2))
+        h = manifest.KumaMonitor("X", "http", url="https://x", codes=["200-299"],
+                                 interval=120, retry_interval=120, maxretries=3)
+        self.assertEqual(h.describe(), "https://x (codes 200-299)")
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +153,9 @@ class TestNpmPayloads(unittest.TestCase):
         self.assertTrue(npm.ADVANCED_MCP.endswith("chunked_transfer_encoding on;"))
 
     def test_rate_limits_per_ingress(self):
-        clearweb = decl.parse_npm_host("d|127.0.0.1:1|block")
-        mcp = decl.parse_npm_host("m|127.0.0.1:1|mcp,http2")
-        onion = decl.parse_npm_host("x.onion|127.0.0.1:1|mcp")
+        clearweb = manifest.NpmHost("d", "http", "127.0.0.1", 1, "block")
+        mcp = manifest.NpmHost("m", "http", "127.0.0.1", 1, "mcp,http2")
+        onion = manifest.NpmHost("x.onion", "http", "127.0.0.1", 1, "mcp")
         self.assertEqual(npm.rate_limits(clearweb),
                          "limit_req zone=stack_ip burst=60 nodelay;\nlimit_conn stack_conn 40;")
         self.assertEqual(npm.rate_limits(mcp), "limit_conn stack_conn 200;")
@@ -186,12 +164,12 @@ class TestNpmPayloads(unittest.TestCase):
         self.assertEqual(npm.rate_limits(onion), "limit_req zone=stack_onion burst=120 nodelay;")
 
     def test_flags_without(self):
-        h = decl.parse_npm_host("d|127.0.0.1:1|mcp,force-ssl,http2")
+        h = manifest.NpmHost("d", "http", "127.0.0.1", 1, "mcp,force-ssl,http2")
         self.assertEqual(h.flags_without("force-ssl"), "mcp,http2")
 
     def test_mcp_locations(self):
-        locs = npm.mcp_locations([decl.parse_mcp_host("/x:c:8100"),
-                                  decl.parse_mcp_host("/y:d:8101")])
+        locs = npm.mcp_locations([manifest.McpHost("/x", "c", 8100),
+                                  manifest.McpHost("/y", "d", 8101)])
         self.assertEqual(locs, [
             {"path": "/x", "forward_scheme": "http", "forward_host": "127.0.0.1",
              "forward_port": 8100, "forward_path": "/mcp", "access_list_id": 0},
@@ -216,14 +194,15 @@ class TestKumaLogic(unittest.TestCase):
         self.assertEqual(kuma.normalized_codes({"accepted_statuscodes": "junk"}), [])
 
     def test_differs(self):
-        http = decl.parse_kuma_monitor("n|https://x|200-299")
+        http = manifest.KumaMonitor("n", "http", url="https://x", codes=["200-299"])
         self.assertFalse(kuma.differs({"type": "http", "url": "https://x",
                                        "accepted_statuscodes": ["200-299"]}, http))
         self.assertTrue(kuma.differs({"type": "http", "url": "https://y",
                                       "accepted_statuscodes": ["200-299"]}, http))
         self.assertTrue(kuma.differs({"type": "http", "url": "https://x",
                                       "accepted_statuscodes": ["200-299,300-399"]}, http))
-        port = decl.parse_kuma_monitor("n|tcp://h:50001")
+        port = manifest.KumaMonitor("n", "port", url="tcp://h:50001",
+                                    hostname="h", port=50001)
         self.assertFalse(kuma.differs({"type": "port", "hostname": "h", "port": 50001}, port))
         self.assertTrue(kuma.differs({"type": "port", "hostname": "h", "port": "50002"}, port))
         self.assertTrue(kuma.differs({"type": "http", "url": "https://x",
@@ -357,21 +336,23 @@ class TestNpmReconcile(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def write_manifest(self, hosts_lines, mcp=()):
-        """Declarations are no longer streamed: the reconciler reads the
-        service manifest (deploy/services.toml's schema). The tests author the
-        old pipe-shaped entry as shorthand and expand it into the TOML tables
-        the manifest loader expects."""
+        """The reconciler reads the service manifest (deploy/services.toml's
+        schema). The tests author a host as "domain|host:port|flags" shorthand
+        and expand it into the TOML tables the manifest loader expects."""
         blocks = []
         for i, entry in enumerate(hosts_lines):
             domain, forward, flags = entry.split("|", 2)
             flag_list = json.dumps([f for f in flags.split(",") if f])
+            fwd_host, fwd_port = forward.rsplit(":", 1)
+            forward_keys = (f'forward_host = "{fwd_host}"\n'
+                            f'forward_port = {fwd_port}\n')
             if domain == "*.onion":
                 blocks.append(f'[npm.h{i}]\ndomain = "*.onion"\n'
-                              f'forward = "{forward}"\nflags = {flag_list}\n')
+                              f'{forward_keys}flags = {flag_list}\n')
             else:
                 blocks.append(f'[host.h{i}]\ndomain = "{domain}"\n')
                 blocks.append(f'[npm.h{i}]\nhost = "h{i}"\n'
-                              f'forward = "{forward}"\nflags = {flag_list}\n')
+                              f'{forward_keys}flags = {flag_list}\n')
         for i, entry in enumerate(mcp):
             prefix, container, port = entry[1:].split(":")
             blocks.append(f'[mcp.m{i}]\nprefix = "/{prefix}"\n'
@@ -800,13 +781,13 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(m.hosts["frontend"].domain, "boltmesh.net")
         self.assertEqual(m.hosts["frontend"].env, "BOLTMESH_FRONTEND_HOST")
         self.assertEqual(m.mcp[0].prefix, "/searxng")
-        self.assertEqual(m.mcp[0].port, "8100")
+        self.assertEqual(m.mcp[0].port, 8100)
         self.assertEqual(m.mcp[0].token_var, "SEARXNG_MCP_TOKEN")
         self.assertEqual(m.mcp[0].probe_tool, "get_time")
         wallet = [x for x in m.mcp if x.container == "monero-wallet-mcp"][0]
         self.assertEqual(wallet.spend_token_var, "MONERO_MCP_SPEND_TOKEN")
         self.assertEqual(m.onion[2].name, "btc-explorer")   # HiddenServiceDir name
-        self.assertEqual(m.onion[2].rest, "/|200,401")
+        self.assertEqual((m.onion[2].path, m.onion[2].codes), ("/", ["200", "401"]))
         self.assertEqual(m.kuma_loopback, 8107)
         self.assertEqual(m.kuma_page.slug, "stack")
         fulcrum = [x for x in m.kuma_monitors if x.type == "port"][0]
@@ -882,7 +863,8 @@ port = 8100
         unknown_host = self.write("unknown-host.toml", """
 [npm.x]
 host = "nope"
-forward = "127.0.0.1:8100"
+forward_host = "127.0.0.1"
+forward_port = 8100
 """)
         self.assertIn("no [host.nope]", die_msg(manifest.load, unknown_host))
 
@@ -895,7 +877,8 @@ container = "one-mcp"
 port = 8100
 [npm.x]
 host = "a"
-forward = "127.0.0.1:8105"
+forward_host = "127.0.0.1"
+forward_port = 8105
 flags = ["mcp"]
 """)
         self.assertIn("no [mcp.*] entry publishes", die_msg(manifest.load, bad_flag))
@@ -905,6 +888,69 @@ flags = ["mcp"]
 
         missing = os.path.join(self.tmp, "missing.toml")
         self.assertIn("missing", die_msg(manifest.load, missing))
+
+    def test_field_errors_name_the_table(self):
+        from stackctl import manifest
+
+        def bad(name, body, needle):
+            path = self.write(name, body)
+            msg = die_msg(manifest.load, path)
+            self.assertIsNotNone(msg, f"{name} was accepted")
+            self.assertIn(needle, msg)
+
+        base_mcp = """
+[host.a]
+domain = "a.example"
+[mcp.one]
+prefix = "/one"
+container = "one-mcp"
+port = 8100
+"""
+        bad("bad-prefix.toml", base_mcp.replace('"/one"', '"one"'),
+            "is not a path")
+        bad("bad-mcp-port.toml", base_mcp.replace("port = 8100", "port = 0"),
+            "out of range")
+
+        bad("no-forward.toml", """
+[host.a]
+domain = "a.example"
+[npm.x]
+host = "a"
+""", "needs forward_host")
+        bad("bad-forward-scheme.toml", """
+[host.a]
+domain = "a.example"
+[npm.x]
+host = "a"
+forward_host = "127.0.0.1"
+forward_port = 8100
+scheme = "ftp"
+""", "neither http nor https")
+
+        bad("bad-onion-target.toml", """
+[host.a]
+domain = "a.example"
+[onion.x]
+target = "noport"
+mirrors = "a"
+""", "is not host:port")
+
+        bad("bad-kuma-codes.toml", """
+[host.a]
+domain = "a.example"
+[kuma.monitor.x]
+name = "X"
+host = "a"
+codes = ["200"]
+""", "codes must be ranges")
+        bad("tcp-and-host.toml", """
+[host.a]
+domain = "a.example"
+[kuma.monitor.x]
+name = "X"
+host = "a"
+tcp = "h:1"
+""", "declares tcp AND")
 
     def test_probe_fields_are_required_and_valid(self):
         from stackctl import manifest
@@ -921,7 +967,8 @@ port = 8100
 
 [npm.one]
 host = "mcp"
-forward = "127.0.0.1:8100"
+forward_host = "127.0.0.1"
+forward_port = 8100
 flags = ["mcp"]
 
 [uptime_kuma]
@@ -961,7 +1008,8 @@ needs_nodes = false
 
 [npm.one]
 host = "mcp"
-forward = "127.0.0.1:8100"
+forward_host = "127.0.0.1"
+forward_port = 8100
 flags = ["mcp"]
 
 [uptime_kuma]

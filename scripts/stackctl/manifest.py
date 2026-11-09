@@ -1,29 +1,30 @@
-# deploy/services.toml: the loader, the shell emission, and the CI check.
+# deploy/services.toml: the declarations, the loader, and the shell emission.
 #
-# This file is what turned five parallel lists in stack.conf (MCP_HOSTS,
-# NPM_HOSTS, ONION_SERVICES, KUMA_MONITORS and the *_HOST scalars) into ONE
-# declaration. Two audiences read it:
+# This file owns every cross-cutting registry fact the stack has -- the DNS
+# names it answers on, which loopback publishes nginx-proxy-manager forwards to,
+# the MCP path prefixes, the tor onion services, and the status page's monitors
+# -- so there is one declaration and no parallel lists. It replaced five lists in
+# stack.conf (MCP_HOSTS, NPM_HOSTS, ONION_SERVICES, KUMA_MONITORS and the *_HOST
+# scalars), each of which had to be edited in step with the others and with the
+# table in AGENTS.md.
 #
-#   * the Python reconcilers (npm.py, kuma.py) -- typed objects, directly;
-#   * the bash callers (deploy.sh, verify.sh, deploy/install.sh) -- through
-#     `manifest shell`, which emits the SAME variable names they always
-#     sourced from stack.conf (plus MCP_PROBES, the probe/token table
-#     verify.sh and scripts/rotate.sh consume, which
-#     has no stack.conf predecessor), so scripts/lib.sh's load_manifest is a
-#     one-line addition per consumer and no caller's body changed. The
-#     emission is only NAME='value' lines and array assignments, and is
-#     eval-safe by construction (shlex.quote).
+# Two audiences read the TOML, and neither sees a second grammar:
+#
+#   * the Python reconcilers (npm.py, kuma.py) -- these typed objects, directly;
+#   * the bash callers (deploy.sh, verify.sh, deploy/install.sh, rotate.sh) --
+#     through `manifest shell`, which emits the same variable names they always
+#     sourced from stack.conf (plus the probe table verify.sh and rotate.sh need,
+#     which has no stack.conf predecessor). scripts/lib.sh's load_manifest is a
+#     one-line addition per consumer.
+#
+# The fields are validated here, once, as they are read: each table is checked
+# field by field and an error names the TOML table it came from. Nothing composes
+# a string and re-parses it, so there is no second format to keep in step.
 #
 # Operator overrides keep the old contract: every [host.*] carries an `env`
-# name, and a non-empty $<env> in the process environment wins over the
-# TOML's `domain` -- exactly what stack.conf's `${VAR:-default}` did, so
+# name, and a non-empty $<env> in the process environment wins over the TOML's
+# `domain` -- exactly what stack.conf's ${VAR:-default} did, so
 # `BOLTMESH_FRONTEND_HOST=staging.example.net ./deploy.sh` still works.
-#
-# Validation strategy: the TOML tables are THIN -- they reference [host.*]
-# keys instead of repeating domains -- and each composed entry goes through
-# decl.py's parsers, which are the same validators the old stack.conf strings
-# went through. One validation implementation, two input formats, and the
-# error messages name the composed entry so the offending line is obvious.
 from __future__ import annotations
 
 import json
@@ -33,13 +34,22 @@ import shlex
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import decl
 from .ui import die
 
 try:
     import tomllib  # Python 3.11+; the guard gives the clear error below
 except ImportError:  # pragma: no cover - the host bootstrap installs 3.12
     tomllib = None
+
+# A status-code field is one or more `NNN-NNN` ranges (kuma's own shape).
+_CODES_RE = re.compile(r"^[0-9]{3}-[0-9]{3}$")
+# A vhost flag ("force-ssl", "mcp", ...) and a container name.
+_FLAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_CONTAINER_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
+_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# tor's HiddenServicePort target: a name or address and a numeric port.
+_TARGET_RE = re.compile(r"^[A-Za-z0-9_.-]+:[0-9]+$")
+_MAX_PORT = 65535
 
 
 class Host:
@@ -61,13 +71,106 @@ class KumaPage:
         self.group = group
 
 
+class NpmHost:
+    """One [npm.*] proxy host: the name NPM serves and where it forwards."""
+
+    __slots__ = ("domain", "scheme", "host", "port", "flags")
+
+    def __init__(self, domain: str, scheme: str, host: str, port: int, flags: str):
+        self.domain = domain
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        self.flags = flags  # the comma-separated string, as declared
+
+    def has_flag(self, flag: str) -> bool:
+        # lib.sh's has_flag(): match on the comma-wrapped string, so "mcp"
+        # never matches inside another flag's name.
+        return f",{flag}," in f",{self.flags},"
+
+    def flags_without(self, flag: str) -> str:
+        kept = [f for f in self.flags.split(",") if f and f != flag]
+        return ",".join(kept)
+
+
+class McpHost:
+    """One [mcp.*] server: its path prefix, loopback publish and probe.
+
+    Probe metadata lives in the same table as the server, so adding a server
+    adds its verify probe and its rotation target -- there is no second table in
+    verify.sh or rotate.sh to keep in step. `token_var` is the variable in
+    $DATA_DIR/config/<container>/token.env; `probe_tool`/`probe_args` are the one
+    read-only tool that proves the server reaches its upstream; `needs_nodes`
+    skips the deep call under verify.sh --no-nodes; `spend_token_var` is empty
+    for everything but the two money servers.
+    """
+
+    __slots__ = ("prefix", "container", "port", "token_var", "probe_tool",
+                 "probe_args", "needs_nodes", "spend_token_var")
+
+    def __init__(self, prefix: str, container: str, port: int):
+        self.prefix = prefix
+        self.container = container
+        self.port = port
+        self.token_var = ""
+        self.probe_tool = ""
+        self.probe_args = "{}"
+        self.needs_nodes = False
+        self.spend_token_var = ""
+
+
+class OnionService:
+    """One [onion.*] hidden service. The table key is the HiddenServiceDir name
+    under $DATA_DIR/tor/onion/<name> -- a rename is a new onion address."""
+
+    __slots__ = ("name", "target", "mirrors", "path", "codes")
+
+    def __init__(self, name: str, target: str, mirrors: str, path: str,
+                 codes: List[str]):
+        self.name = name
+        self.target = target
+        self.mirrors = mirrors
+        self.path = path
+        self.codes = codes
+
+
+class KumaMonitor:
+    """One [kuma.monitor.*] declaration, in the shape kuma's add/edit handlers
+    read. `type` is "http" (url + codes) or "port" (hostname + port, kuma's TCP
+    check). interval/retryInterval/maxretries default as the old bash wrapper did
+    (60/interval/2)."""
+
+    __slots__ = ("name", "type", "url", "hostname", "port", "codes",
+                 "interval", "retry_interval", "maxretries")
+
+    def __init__(self, name: str, type: str, url: str = "",
+                 hostname: Optional[str] = None, port: Optional[int] = None,
+                 codes: Optional[List[str]] = None, interval: int = 60,
+                 retry_interval: int = 60, maxretries: int = 2):
+        self.name = name
+        self.type = type
+        self.url = url
+        self.hostname = hostname
+        self.port = port
+        self.codes = codes or []
+        self.interval = interval
+        self.retry_interval = retry_interval
+        self.maxretries = maxretries
+
+    def describe(self) -> str:
+        """How a declaration reads in a log line."""
+        if self.type == "port":
+            return f"{self.hostname}:{self.port} (tcp)"
+        return f"{self.url} (codes {','.join(self.codes)})"
+
+
 class Manifest:
     def __init__(self) -> None:
         self.hosts: Dict[str, Host] = {}
-        self.mcp: List[decl.McpHost] = []
-        self.npm: List[decl.NpmHost] = []
-        self.onion: List[decl.OnionService] = []
-        self.kuma_monitors: List[decl.KumaMonitor] = []
+        self.mcp: List[McpHost] = []
+        self.npm: List[NpmHost] = []
+        self.onion: List[OnionService] = []
+        self.kuma_monitors: List[KumaMonitor] = []
         self.kuma_page: Optional[KumaPage] = None
         self.kuma_loopback: int = 8107
 
@@ -86,7 +189,7 @@ class Manifest:
             probes = " ".join(shlex.quote(_probe_entry(m)) for m in self.mcp)
             lines.append(f"MCP_PROBES=({probes})")
         if self.onion:
-            entries = " ".join(shlex.quote(o.raw) for o in self.onion)
+            entries = " ".join(shlex.quote(_onion_entry(o)) for o in self.onion)
             lines.append(f"ONION_SERVICES=({entries})")
         # The vhosts uptime-kuma's own monitors may resolve on the host
         # (install.sh renders --add-host=<domain>:host-gateway per entry):
@@ -102,6 +205,7 @@ class Manifest:
         return "\n".join(lines) + "\n"
 
 
+# --- reading the TOML --------------------------------------------------------
 def _table(data: dict, name: str) -> Dict[str, Any]:
     table = data.get(name)
     if table is None:
@@ -111,7 +215,26 @@ def _table(data: dict, name: str) -> Dict[str, Any]:
     return table
 
 
-def _probe_entry(e: decl.McpHost) -> str:
+def _text(table: dict, field: str, where: str, default: Optional[str] = None) -> str:
+    value = table.get(field, default)
+    if value is None:
+        die(f"deploy/services.toml: {where} needs {field}")
+    if not isinstance(value, str) or not value:
+        die(f"deploy/services.toml: {where} {field} must be a non-empty string")
+    return value
+
+
+def _number(value: Any, where: str, field: str, low: int, high: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        die(f"deploy/services.toml: {where} {field} must be a whole number "
+            f"({low}-{high})")
+    if not low <= value <= high:
+        die(f"deploy/services.toml: {where} {field} {value} is out of range "
+            f"({low}-{high})")
+    return value
+
+
+def _probe_entry(e: McpHost) -> str:
     """One verify.sh probe record. `|` is the bash field separator, so the
     fields must not contain one; probe_args is JSON and validated below. The
     last field is the server's spend-token variable (empty for most), which
@@ -122,16 +245,21 @@ def _probe_entry(e: decl.McpHost) -> str:
     ))
 
 
+def _onion_entry(o: OnionService) -> str:
+    """One install.sh/verify.sh onion record: name|target|mirrors|path|codes."""
+    return "|".join((o.name, o.target, o.mirrors, o.path, ",".join(o.codes)))
+
+
 def _validate_probes(m: "Manifest") -> None:
-    """Every [mcp.*] must declare its probe: MCP_PROBES is consumed as a complete
-    table, and a server silently missing from it is exactly the drift this
-    manifest exists to prevent."""
+    """Every [mcp.*] must declare its probe: the probe table is consumed as a
+    complete list, and a server silently missing from it is exactly the drift
+    this manifest exists to prevent."""
     for e in m.mcp:
         where = f"[mcp.{e.container}]"
         if not e.token_var:
             die(f"deploy/services.toml: {where} needs token_var "
                 f"(the variable in its token.env)")
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", e.token_var):
+        if not _ENV_RE.fullmatch(e.token_var):
             die(f"deploy/services.toml: {where} token_var must be an env-var name")
         if not e.probe_tool:
             die(f"deploy/services.toml: {where} needs probe_tool")
@@ -143,7 +271,7 @@ def _validate_probes(m: "Manifest") -> None:
             die(f"deploy/services.toml: {where} probe_args is not JSON")
         if not isinstance(args, dict):
             die(f"deploy/services.toml: {where} probe_args must be a JSON object")
-        if e.spend_token_var and not re.fullmatch(r"[A-Z][A-Z0-9_]*", e.spend_token_var):
+        if e.spend_token_var and not _ENV_RE.fullmatch(e.spend_token_var):
             die(f"deploy/services.toml: {where} spend_token_var must be an env-var name")
 
 
@@ -172,16 +300,17 @@ def load(path: str) -> Manifest:
     # --- the hosts, in file order, env overrides applied -------------------
     domains: Dict[str, str] = {}
     for key, table in _table(data, "host").items():
-        if not isinstance(table, dict) or "domain" not in table:
-            die(f"deploy/services.toml: [host.{key}] needs a domain")
-        domain = str(table["domain"])
+        where = f"[host.{key}]"
+        if not isinstance(table, dict):
+            die(f"deploy/services.toml: {where} must be a table")
+        domain = _text(table, "domain", where)
         env = str(table.get("env", key.upper()))
         # The operator override: a non-empty $<env> wins, like ${VAR:-default}.
         domain = os.environ.get(env) or domain
         if not domain:
-            die(f"deploy/services.toml: [host.{key}] resolves to an empty domain")
+            die(f"deploy/services.toml: {where} resolves to an empty domain")
         if domain in domains:
-            die(f"deploy/services.toml: [host.{key}] and [host.{domains[domain]}] "
+            die(f"deploy/services.toml: {where} and [host.{domains[domain]}] "
                 f"both serve {domain}")
         domains[domain] = key
         m.hosts[key] = Host(key, domain, env, bool(table.get("kuma_add_host", True)))
@@ -191,27 +320,37 @@ def load(path: str) -> Manifest:
     seen_containers: Dict[str, str] = {}
     seen_ports: Dict[int, str] = {}
     for key, table in _table(data, "mcp").items():
+        where = f"[mcp.{key}]"
         if not isinstance(table, dict):
-            die(f"deploy/services.toml: [mcp.{key}] must be a table")
-        prefix = str(table.get("prefix", ""))
-        container = str(table.get("container", ""))
-        port = table.get("port")
-        entry = decl.parse_mcp_host(f"{prefix}:{container}:{port}")
+            die(f"deploy/services.toml: {where} must be a table")
+        prefix = _text(table, "prefix", where)
+        container = _text(table, "container", where)
+        port = _number(table.get("port"), where, "port", 1, _MAX_PORT)
+        # The prefix is a URL path segment and one of the bash emitters' keys;
+        # a ':' or '|' in it would be a different declaration in the emission.
+        if not prefix.startswith("/") or len(prefix) < 2 \
+                or any(c in prefix for c in ":| \t"):
+            die(f"deploy/services.toml: {where} prefix '{prefix}' is not a path "
+                f"(want \"/name\")")
+        if not _CONTAINER_RE.fullmatch(container):
+            die(f"deploy/services.toml: {where} container '{container}' is not a "
+                f"container name")
+        entry = McpHost(prefix, container, port)
         for seen, value, label in ((seen_prefixes, entry.prefix, "prefix"),
                                    (seen_containers, entry.container, "container")):
             if value in seen:
-                die(f"deploy/services.toml: [mcp.{key}] reuses the {label} "
+                die(f"deploy/services.toml: {where} reuses the {label} "
                     f"of [mcp.{seen[value]}] ({value})")
             seen[value] = key
         if entry.port in seen_ports:
-            die(f"deploy/services.toml: [mcp.{key}] and [mcp.{seen_ports[entry.port]}] "
+            die(f"deploy/services.toml: {where} and [mcp.{seen_ports[entry.port]}] "
                 f"both publish loopback port {entry.port}")
         seen_ports[entry.port] = key
         for field in ("token_var", "probe_tool", "probe_args", "spend_token_var"):
             if not isinstance(table.get(field, ""), str):
-                die(f"deploy/services.toml: [mcp.{key}] {field} must be a string")
+                die(f"deploy/services.toml: {where} {field} must be a string")
         if not isinstance(table.get("needs_nodes", False), bool):
-            die(f"deploy/services.toml: [mcp.{key}] needs_nodes must be true or false")
+            die(f"deploy/services.toml: {where} needs_nodes must be true or false")
         entry.token_var = table.get("token_var", "")
         entry.probe_tool = table.get("probe_tool", "")
         entry.probe_args = table.get("probe_args", "{}")
@@ -223,66 +362,97 @@ def load(path: str) -> Manifest:
     mcp_ports = {e.port for e in m.mcp}
     npm_domains: Dict[str, str] = {}
     for key, table in _table(data, "npm").items():
+        where = f"[npm.{key}]"
         if not isinstance(table, dict):
-            die(f"deploy/services.toml: [npm.{key}] must be a table")
-        forward = str(table.get("forward", ""))
-        flags = table.get("flags", [])
-        if not isinstance(flags, list):
-            die(f"deploy/services.toml: [npm.{key}] flags must be a list")
-        flags_str = ",".join(str(f) for f in flags)
+            die(f"deploy/services.toml: {where} must be a table")
         if "domain" in table:
-            domain = str(table["domain"])
+            domain = _text(table, "domain", where)
         else:
             domain = _host(data, str(table.get("host", "")), m.hosts, f"npm.{key}").domain
-        host = decl.parse_npm_host(f"{domain}|{forward}|{flags_str}")
+        forward_host = _text(table, "forward_host", where)
+        forward_port = _number(table.get("forward_port"), where, "forward_port",
+                               1, _MAX_PORT)
+        scheme = str(table.get("scheme", "http"))
+        if scheme not in ("http", "https"):
+            die(f"deploy/services.toml: {where} scheme '{scheme}' is neither "
+                f"http nor https")
+        flags = table.get("flags", [])
+        if not isinstance(flags, list) or not all(
+                isinstance(f, str) and _FLAG_RE.fullmatch(f) for f in flags):
+            die(f"deploy/services.toml: {where} flags must be a list of names "
+                f"like force-ssl, http2, ws, block, mcp")
+        host = NpmHost(domain, scheme, forward_host, forward_port, ",".join(flags))
         if host.domain in npm_domains:
-            die(f"deploy/services.toml: [npm.{key}] and [npm.{npm_domains[host.domain]}] "
+            die(f"deploy/services.toml: {where} and [npm.{npm_domains[host.domain]}] "
                 f"both serve {host.domain}")
         npm_domains[host.domain] = key
         if host.has_flag("mcp") and host.port not in mcp_ports:
-            die(f"deploy/services.toml: [npm.{key}] carries the mcp flag but forwards "
+            die(f"deploy/services.toml: {where} carries the mcp flag but forwards "
                 f"to {host.port}, which no [mcp.*] entry publishes")
         m.npm.append(host)
 
     # --- the onion services ---------------------------------------------------
     for key, table in _table(data, "onion").items():
+        where = f"[onion.{key}]"
         if not isinstance(table, dict):
-            die(f"deploy/services.toml: [onion.{key}] must be a table")
-        target = str(table.get("target", ""))
-        mirrors = _host(data, str(table.get("mirrors", "")), m.hosts, f"onion.{key}").domain
+            die(f"deploy/services.toml: {where} must be a table")
+        target = _text(table, "target", where)
+        if not _TARGET_RE.fullmatch(target):
+            die(f"deploy/services.toml: {where} target '{target}' is not "
+                f"host:port (tor validates it, so a name that does not resolve "
+                f"keeps tor from starting)")
+        mirrors = _host(data, str(table.get("mirrors", "")), m.hosts,
+                        f"onion.{key}").domain
         path = str(table.get("path", "/"))
+        if not path.startswith("/"):
+            die(f"deploy/services.toml: {where} path '{path}' must start with /")
         codes = table.get("codes", [])
         if not isinstance(codes, list) or not codes \
                 or not all(isinstance(c, int) and 100 <= c <= 599 for c in codes):
-            die(f"deploy/services.toml: [onion.{key}] codes must be HTTP status codes")
-        entry = decl.parse_onion_service(
-            f"{key}|{target}|{mirrors}|{path}|{','.join(str(c) for c in codes)}")
-        m.onion.append(entry)
+            die(f"deploy/services.toml: {where} codes must be HTTP status codes")
+        m.onion.append(OnionService(key, target, mirrors, path,
+                                    [str(c) for c in codes]))
 
     # --- the status page's monitors --------------------------------------------
     # [kuma.monitor.*] nests two levels deep in TOML, unlike the flat tables
     # above: data["kuma"]["monitor"][<key>].
     names: Dict[str, str] = {}
     for key, table in _table(_table(data, "kuma"), "monitor").items():
+        where = f"[kuma.monitor.{key}]"
         if not isinstance(table, dict):
-            die(f"deploy/services.toml: [kuma.monitor.{key}] must be a table")
-        name = str(table.get("name", ""))
+            die(f"deploy/services.toml: {where} must be a table")
+        name = _text(table, "name", where)
         if name in names:
-            die(f"deploy/services.toml: [kuma.monitor.{key}] and "
+            die(f"deploy/services.toml: {where} and "
                 f"[kuma.monitor.{names[name]}] are both named \"{name}\"")
         names[name] = key
-        interval = int(table.get("interval", 60))
-        retries = int(table.get("retries", 2))
+        interval = _number(table.get("interval", 60), where, "interval", 1, 86400)
+        retries = _number(table.get("retries", 2), where, "retries", 1, 10)
         if "tcp" in table:
-            entry = f"{name}|tcp://{table['tcp']}||{interval}|{retries}"
-        else:
-            host = _host(data, str(table.get("host", "")), m.hosts, f"kuma.monitor.{key}")
-            codes = table.get("codes", ["200-299"])
-            if not isinstance(codes, list):
-                die(f"deploy/services.toml: [kuma.monitor.{key}] codes must be a list")
-            path = str(table.get("path", ""))
-            entry = f"{name}|https://{host.domain}{path}|{','.join(str(c) for c in codes)}|{interval}|{retries}"
-        m.kuma_monitors.append(decl.parse_kuma_monitor(entry))
+            if "host" in table or "path" in table or "codes" in table:
+                die(f"deploy/services.toml: {where} declares tcp AND host/path/codes; "
+                    f"a port monitor takes no URL or status codes")
+            target = _text(table, "tcp", where)
+            if not _TARGET_RE.fullmatch(target):
+                die(f"deploy/services.toml: {where} tcp '{target}' is not host:port")
+            hostname, _, port_s = target.rpartition(":")
+            m.kuma_monitors.append(KumaMonitor(
+                name, "port", url=f"tcp://{target}", hostname=hostname,
+                port=int(port_s), interval=interval, retry_interval=interval,
+                maxretries=retries))
+            continue
+        host = _host(data, str(table.get("host", "")), m.hosts, f"kuma.monitor.{key}")
+        codes = table.get("codes", ["200-299"])
+        if not isinstance(codes, list) or not codes or not all(
+                isinstance(c, str) and _CODES_RE.fullmatch(c) for c in codes):
+            die(f"deploy/services.toml: {where} codes must be ranges like "
+                f"\"200-299\" (a token-gated endpoint answers 401, which counts as up)")
+        mon_path = str(table.get("path", ""))
+        if mon_path and not mon_path.startswith("/"):
+            die(f"deploy/services.toml: {where} path '{mon_path}' must start with /")
+        m.kuma_monitors.append(KumaMonitor(
+            name, "http", url=f"https://{host.domain}{mon_path}", codes=list(codes),
+            interval=interval, retry_interval=interval, maxretries=retries))
 
     page = _table(_table(data, "kuma"), "page")
     if page:
@@ -293,10 +463,8 @@ def load(path: str) -> Manifest:
         )
 
     kuma = _table(data, "uptime_kuma")
-    port = int(kuma.get("loopback_port", 8107))
-    if not 1 <= port <= 65535:
-        die(f"deploy/services.toml: [uptime_kuma] loopback_port {port} is not a port")
-    m.kuma_loopback = port
+    m.kuma_loopback = _number(kuma.get("loopback_port", 8107), "[uptime_kuma]",
+                              "loopback_port", 1, _MAX_PORT)
     return m
 
 

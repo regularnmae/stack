@@ -10,7 +10,7 @@
 # memory, not in an argv that `ps` can read.
 #
 # Rules this package holds:
-#   * stdlib for the declaration layer -- manifest.py, decl.py, envfile.py and
+#   * stdlib for the declaration layer -- manifest.py, envfile.py and
 #     npm.py run on the host's bare python3 (bootstrap.sh), because
 #     load_manifest is called by install.sh/verify.sh/CI before any venv can be
 #     assumed;
@@ -28,4 +28,4 @@
 #   * behaviour is ported, not reimagined: the comments that explain a trap
 #     (kuma's login race, the status page that belongs to the UI, NPM's
 #     rate-limit zones) travel with the code they protect.
-__all__ = ["decl", "envfile", "http", "kuma", "manifest", "npm", "ui"]
+__all__ = ["envfile", "http", "kuma", "manifest", "npm", "ui"]

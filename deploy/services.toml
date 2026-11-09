@@ -206,15 +206,15 @@ needs_nodes = true
 # through NPM's admin API (there is no hand-clicked host any more). One
 # declaration covers creation, update and TLS.
 #
-#   host     a [host.*] key whose domain this vhost serves
-#   forward  where NPM proxies to: [scheme://]host:port, scheme defaulting to
-#            http (https would be for an upstream that speaks TLS, if one is
-#            ever added). Every forward names 127.0.0.1, never a container:
-#            NPM runs on the host network (deploy/nginx-proxy-manager.container
-#            -- that is what gives it clients' real addresses), so it cannot
-#            resolve a container name and every service it fronts publishes
-#            its port on the host's loopback. Each port is the PublishPort= of
-#            that service's unit.
+#   host          a [host.*] key whose domain this vhost serves
+#   forward_host  where NPM proxies to. Always 127.0.0.1, never a container:
+#                 NPM runs on the host network (deploy/nginx-proxy-manager.
+#                 container -- that is what gives it clients' real addresses),
+#                 so it cannot resolve a container name and every service it
+#                 fronts publishes its port on the host's loopback.
+#   forward_port  that publish: the PublishPort= of the service's unit
+#   scheme        http (the default) or https, for an upstream that speaks TLS
+#                 if one is ever added
 #   flags    force-ssl  redirect :80 to :443 (needs a certificate)
 #            http2      negotiate HTTP/2
 #            ws         allow websocket upgrade
@@ -232,44 +232,52 @@ needs_nodes = true
 
 [npm.frontend]
 host = "frontend"
-forward = "127.0.0.1:8106"
+forward_host = "127.0.0.1"
+forward_port = 8106
 flags = ["ws", "block"]
 
 [npm.api]
 host = "api"
-forward = "127.0.0.1:8105"
+forward_host = "127.0.0.1"
+forward_port = 8105
 flags = ["ws", "block"]
 
 [npm.search]
 host = "search"
-forward = "127.0.0.1:8082"
+forward_host = "127.0.0.1"
+forward_port = 8082
 flags = ["ws", "block"]
 
 [npm.btcpay]
 host = "btcpay"
-forward = "127.0.0.1:49392"
+forward_host = "127.0.0.1"
+forward_port = 49392
 flags = ["ws", "force-ssl", "block"]
 
 [npm.btc_explorer]
 host = "btc_explorer"
-forward = "127.0.0.1:8108"
+forward_host = "127.0.0.1"
+forward_port = 8108
 flags = ["force-ssl", "block"]
 
 [npm.xmr_explorer]
 host = "xmr_explorer"
-forward = "127.0.0.1:8109"
+forward_host = "127.0.0.1"
+forward_port = 8109
 flags = ["force-ssl", "block"]
 
 [npm.status]
 host = "status"
-forward = "127.0.0.1:8107"
+forward_host = "127.0.0.1"
+forward_port = 8107
 flags = ["ws", "block"]
 
 [npm.mcp_edge]
 # The MCP one's forward is only the default (root) target, which is not part
 # of the contract -- the [mcp.*] locations above are.
 host = "mcp"
-forward = "127.0.0.1:8100"
+forward_host = "127.0.0.1"
+forward_port = 8100
 flags = ["mcp", "force-ssl", "http2"]
 
 [npm.onion_wildcard]
@@ -280,7 +288,8 @@ flags = ["mcp", "force-ssl", "http2"]
 # [onion.*] entries). No force-ssl, no certificate: NPM is reached in plain
 # HTTP over the gateway and tor already provides the encryption.
 domain = "*.onion"
-forward = "127.0.0.1:8100"
+forward_host = "127.0.0.1"
+forward_port = 8100
 flags = ["mcp"]
 
 # ---------------------------------------------------------------------------
