@@ -215,6 +215,28 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   restart-loop the container. `/ready` is for an operator or a host-side probe;
   no unit's `HealthCmd` depends on it.
 
+- **A failing probe is a FAIL, not a warning -- `verify.sh` reads the suffix,
+  not the "Up".** `podman ps` renders a container whose probe is failing as
+  `Up 5 minutes (unhealthy)` and one whose probe has not answered yet as
+  `Up 10 seconds (starting)` (podman 5.x; some builds render
+  `(health: starting)`); both begin with `Up`, so the old prefix-match reported
+  a red container as a warning, and `warn` never counts as a failure. That
+  mattered because `scripts/monitor.sh` carries only `verify.sh`'s FAIL lines
+  and its exit code: an unhealthy container was invisible to alerting while
+  every sweep said the stack was fine. The states are now classified once, by
+  `container_health_state` in `scripts/lib.sh` (tested in
+  `tests/test-lib.sh`), and `verify.sh` fails on `unhealthy`, naming the remedy.
+  `starting` stays a warning deliberately: podman promotes a probe that never
+  succeeds to `unhealthy` after `HealthStartPeriod` x `HealthRetries`, so the
+  state is bounded and transient, whereas a FAIL would page on the tail of
+  every ordinary restart (the sweep runs every five minutes and
+  `bitcoind`/`lightningd` carry a 5m start period). Plain `Up` with no health
+  status is a warning too, except for the `HEALTHLESS_UNITS` above. Two units
+  are still expected to be red for long stretches -- `monero-wallet-btcpay`
+  during a rescan, `boltmesh-backend` on a database blip (HC008's exemptions) --
+  but both already fail their own functional checks (`/health`, `get_height`),
+  so this adds no new page there.
+
 ## A durable unit is stopped, not killed
 
 - **Quadlet's stop path has two deadlines, and raising one alone changes

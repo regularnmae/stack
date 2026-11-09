@@ -166,6 +166,27 @@ human_bytes() {
     LC_ALL=C numfmt --from=auto --to=none "${1%B}" 2>/dev/null
 }
 
+# The state of a container's own healthcheck, from the Status column `podman ps`
+# prints. A failing probe is "Up 5 minutes (unhealthy)" and one that has not
+# answered yet is "Up 10 seconds (starting)" -- both still START with "Up",
+# which is why a caller that matches "^Up" reads a red container as a green
+# one. (Podman 5.x prints "(starting)"; Docker and some older builds print
+# "(health: starting)", so both are accepted.) verify.sh is the caller, and
+# scripts/monitor.sh carries only its FAIL lines and exit code, so a probe that
+# fails while the container is up must be a failure there, not a warning.
+# Tested in tests/test-lib.sh. One of:
+#   healthy | unhealthy | starting | up (no probe defined) | down | other
+container_health_state() { # status
+    case "$1" in
+        '')                                    printf 'down' ;;
+        *'(unhealthy)'*)                       printf 'unhealthy' ;;
+        *'(health: starting)'*|*'(starting)'*) printf 'starting' ;;
+        *'(healthy)'*)                         printf 'healthy' ;;
+        'Up'*)                                 printf 'up' ;;
+        *)                                     printf 'other' ;;
+    esac
+}
+
 # Wait for a container's own healthcheck to report healthy. Shared by
 # configure.sh (the post-start step deploy.sh hands off to) and
 # scripts/rotate.sh (which restarts the ones a rotated credential touches), so

@@ -14,6 +14,19 @@ source "$ROOT_DIR/tests/lib.sh"
 assert_eq 9000500 "$(dur_ms 2h30m0.5s)" 'fractional duration'
 assert_eq 500 "$(dur_ms 500ms)" 'millisecond duration'
 assert_eq 5 "$(dur_s 4.5s)" 'duration rounds up'
+
+# A failing probe is still "Up 5 minutes (unhealthy)", and an undecided one is
+# "Up 10 seconds (starting)" (podman 5.x) or "(health: starting)" (Docker and
+# some builds) -- both start with "Up", so the status must be classified by its
+# health suffix. verify.sh fails on `unhealthy` and the monitor carries only its
+# FAIL lines, so a regression here is a silent red.
+assert_eq unhealthy "$(container_health_state 'Up 5 minutes (unhealthy)')" 'unhealthy probe'
+assert_eq starting  "$(container_health_state 'Up 10 seconds (health: starting)')" 'probe not yet decided (Docker-style)'
+assert_eq starting  "$(container_health_state 'Up 10 seconds (starting)')" 'probe not yet decided (podman 5.x)'
+assert_eq healthy   "$(container_health_state 'Up 3 hours (healthy)')" 'healthy probe'
+assert_eq up        "$(container_health_state 'Up 2 hours')" 'no probe defined'
+assert_eq down      "$(container_health_state '')" 'not running'
+assert_eq other     "$(container_health_state 'Exited (1) 5 minutes ago')" 'exited'
 assert_eq '[["method^getinfo","method^listpeers"]]' \
     "$(rune_json getinfo listpeers)" 'rune restriction JSON'
 

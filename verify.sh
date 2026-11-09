@@ -83,20 +83,37 @@ healthless=" "
 for _u in "${HEALTHLESS_UNITS[@]:-}"; do
     healthless+="${_u%%|*} "
 done
-for c in "${containers[@]}"; do
+# One classifier for every container check in this file, because a failing probe
+# still reads "Up ... (unhealthy)": the old prefix match passed (or, worse,
+# warned about) a container whose healthcheck was red, and a warning never
+# increments fails -- so the monitor, which carries only FAIL lines and the exit
+# code, could not see it. `starting` stays a warning on purpose: podman promotes
+# a probe that never succeeds to (unhealthy) after HealthStartPeriod x retries,
+# so the state is bounded and transient, while a FAIL there would page on the
+# tail of every ordinary restart (a 5-minute sweep, StartPeriod up to 5m).
+check_container() { # container
+    local c="$1" line
     line=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
-    if [ -z "$line" ]; then
-        bad "$c is not running"
-    elif printf '%s' "$line" | grep -q '(healthy)'; then
-        pass "$c: $line"
-    elif printf '%s' "$line" | grep -q '^Up'; then
-        case "$healthless" in
-            *" $c "*) pass "$c: $line (no healthcheck by design)" ;;
-            *)        warn "$c: $line (no health status)" ;;
-        esac
-    else
-        bad "$c: $line"
-    fi
+    case "$(container_health_state "$line")" in
+        healthy)
+            pass "$c: $line" ;;
+        unhealthy)
+            bad "$c: $line -- its healthcheck is failing (podman inspect -f '{{json .State.Health}}' $c; podman logs --tail 50 $c)" ;;
+        starting)
+            warn "$c: $line (the healthcheck has not answered yet)" ;;
+        down)
+            bad "$c is not running" ;;
+        up)
+            case "$healthless" in
+                *" $c "*) pass "$c: $line (no healthcheck by design)" ;;
+                *)        warn "$c: $line (no health status)" ;;
+            esac ;;
+        *)
+            bad "$c: $line" ;;
+    esac
+}
+for c in "${containers[@]}"; do
+    check_container "$c"
 done
 
 # The exposure model in one line: NPM on the host network is what makes a
@@ -207,14 +224,11 @@ head2 "BTCPay settlement"
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking BTCPay/NBXplorer"
 else
-    for c in btcpay nbxplorer monero-wallet-btcpay; do
-        status=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
-        case "$status" in
-            *"(healthy)"*) pass "$c: $status" ;;
-            "") bad "$c is not running" ;;
-            *) warn "$c: $status" ;;
-        esac
-    done
+    # btcpay, nbxplorer and monero-wallet-btcpay are in the container inventory
+    # above (both branches), so check_container already names their state with the
+    # one classifier. This section owns the functional question instead -- what
+    # the endpoint answers -- rather than keeping a second, laxer copy of the
+    # status rules.
     # The same endpoint the backend's /health uses: a 200 means BTCPay and its
     # database are serving, not merely that the container is up.
     btcpay_health=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://btcpay:49392/api/v1/health 2>/dev/null || echo 000)

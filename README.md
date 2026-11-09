@@ -1019,8 +1019,11 @@ defines one or is declared healthless in `stack.conf` with a reason, and
 `./scripts/healthcheck-lint.sh` fails the build when a unit drifts from it
 (explicit interval/start/retries/timeout, a bounded HTTP probe, and
 `HealthOnFailure=kill` so the restart is systemd's and the monitor's restart
-counter can see it). The rules, the two exemptions and why a probe must not
-check the data path are in `docs/units.md`, "Healthchecks follow a contract".
+counter can see it). A failing probe reads `Up … (unhealthy)` in `podman ps`, so
+`verify.sh` classifies the health suffix rather than the `Up` and fails on it --
+`scripts/monitor.sh` carries its FAIL lines, so a red container is not merely a
+warning. The rules, the two exemptions and why a probe must not check the data
+path are in `docs/units.md`, "Healthchecks follow a contract".
 
 - `scripts/monitor.sh` — runs every five minutes from
   `deploy/monitor.timer`. Read-only: it starts nothing and rewrites no config.
