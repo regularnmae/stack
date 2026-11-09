@@ -1236,6 +1236,7 @@ five `podman logs -f` windows:
 ./scripts/logs.sh --since 30m                        # everything, labelled
 ./scripts/logs.sh --since 2h --container lightningd
 ./scripts/logs.sh --since 1h --grep 'WARN|ERR' --priority warning
+./scripts/logs.sh --since 24h --priority notice      # every Suricata alert
 ./scripts/logs.sh --since 24h --stats                # who is spamming
 ./scripts/logs.sh --follow --container boltmesh-backend
 ./scripts/logs.sh --health                           # is anything still arriving?

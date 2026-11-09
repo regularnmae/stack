@@ -139,7 +139,13 @@ event-logger setting. The operator narrative is README's "Logs and history".
   and the root tier owns that directory (the rootful sensor must not write into
   a user-owned directory). Suricata stamps `+0000`, which is not RFC3339, so the
   remap normalizes it -- otherwise the store falls back to arrival time and the
-  alert timeline drifts. Rotated `eve.json.YYYYMMDD` files are deliberately not
+  alert timeline drifts. It also assigns `priority` from the alert's own
+  severity (1 high -> `err`, 2 -> `warning`, 3+ -> `notice`; every non-alert
+  event -> `info`), so `--priority err` is the high-severity alerts,
+  `--priority notice` is every alert, and `--priority info` keeps the DNS/TLS/
+  HTTP timeline. Priority is assigned at ingest: rows written before this
+  mapping keep none for the store's retention and stay invisible to any
+  `--priority` filter. Rotated `eve.json.YYYYMMDD` files are deliberately not
   matched; a fresh start backfills the current day (~21k events / 12 MB here,
   ~2 MB compressed in the store) and checkpoints resume from there. BoltMesh's
   backend and worker write structlog JSON to stdout: the remap parses it for

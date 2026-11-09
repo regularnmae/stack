@@ -196,6 +196,20 @@ if err == null && is_object(parsed) {
         .message = (to_string(.event_type) ?? "suricata") + " " + (to_string(.src_ip) ?? "?") + " -> " + (to_string(.dest_ip) ?? "?")
     }
 }
+# Every source sets `priority`, so `logs.sh --priority` decides on whole rows and
+# never silently drops a source. Suricata's ladder is its own severity: 1 (high)
+# is an error, 2 (medium) a warning, 3 (low) a notice -- so `--priority notice`
+# is every alert and `--priority info` adds the DNS/TLS/HTTP timeline around it.
+# Set AFTER the merge, so a parsed eve field cannot overwrite it, and outside the
+# parse check, so a malformed line still gets a level instead of vanishing from
+# every priority query.
+.priority = "info"
+if .event_type == "alert" {
+    sev = to_string(.alert.severity) ?? ""
+    if sev == "1" { .priority = "err" }
+    else if sev == "2" { .priority = "warning" }
+    else { .priority = "notice" }
+}
 '''
 
 # ---------------------------------------------------------------------------
