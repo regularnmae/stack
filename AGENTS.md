@@ -81,7 +81,7 @@ get set. A container name, port or variable name changes on both sides at once.
 | `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `127.0.0.1:8104` | `0.0.0.0:8000`, `/health` |
 | `fulcrum-mcp` | `fulcrum-mcp` / `localhost/fulcrum-mcp:latest` | `token.env`, `upstream.env` | `fulcrum:50001` | `fulcrum-mcp:8000` | `127.0.0.1:8110` | `0.0.0.0:8000`, `/health` |
 | `victoria-logs-mcp` | `victoria-logs-mcp` / `localhost/victoria-logs-mcp:latest` | `token.env`, `upstream.env` | `victoria-logs:9428` | `victoria-logs-mcp:8000` | `127.0.0.1:8111` | `0.0.0.0:8000`, `/health` |
-| `victoriametrics-mcp` | `victoriametrics-mcp` / `localhost/victoriametrics-mcp:latest` | `token.env`, `upstream.env` | `victoriametrics:8428` | `victoriametrics-mcp:8000` | `127.0.0.1:8112` | `0.0.0.0:8000`, `/health` |
+| `victoriametrics-mcp` | `victoriametrics-mcp` / `localhost/victoriametrics-mcp:latest` | `token.env`, `upstream.env` | `victoriametrics:8428`, `alertmanager:9093` (`ALERTMANAGER_URL`) | `victoriametrics-mcp:8000` | `127.0.0.1:8112` | `0.0.0.0:8000`, `/health` |
 | `crowdsec-mcp` | `crowdsec-mcp` / `localhost/crowdsec-mcp:latest` | `token.env`, `lapi.env` | CrowdSec LAPI, `127.0.0.1:8080` | **— (`Network=host`)** | `127.0.0.1:8113` | `127.0.0.1:8113` (host net), `/health` |
 | `btcpay-mcp` | `btcpay-mcp` / `localhost/btcpay-mcp:latest` | `token.env`, `upstream.env` | `btcpay:49392` | `btcpay-mcp:8000` | `127.0.0.1:8114` | `0.0.0.0:8000`, `/health` |
 

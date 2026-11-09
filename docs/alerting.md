@@ -121,6 +121,15 @@ tripwire".
   PromQL the agent can ask. Its `get_metrics_health` reads
   `stack_metrics_timestamp`, the same heartbeat the monitor's staleness
   check is about, so an agent can tell an empty graph from a dead collector.
+  `get_stack_status` is the one-call answer to "what is broken?": it combines
+  Alertmanager's live `/api/v2/alerts` (reached at `alertmanager:9093` on the
+  same network -- the unit publishes only to loopback) with the verify,
+  chain and job series, and reports `ok`/`warning`/`critical`/`unknown`
+  plus the alerts themselves. It is a convenience for an agent, not a second
+  alerting path: severity still comes from the monitor, and a dead store or
+  Alertmanager is named in the answer rather than turned into a green one.
+  A series with no sample is `null`, never `0` -- a collector skips an
+  unreachable daemon.
 
 - **Per-container cost is stored, but only as counters and gauges a query can
   trust.** `scripts/metrics.sh` reads `podman stats --no-stream --format json`

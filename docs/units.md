@@ -206,7 +206,14 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   (`exited 0` = done) — before that, waiting on a `postgres-dump`/`btcpay-bootstrap`
   job spun its whole 180 s and warned "container missing" about a job that had
   succeeded. The ten MCP servers' `healthcheck.py` (authenticated `initialize`,
-  SSE `data:` unwrap, 5 s bound) is the model for an app-side probe.
+  SSE `data:` unwrap, 5 s bound) is the model for an app-side probe. Their
+  **data path is a separate, unauthenticated `GET /ready`** -- a bounded probe
+  of the upstream that answers 200 with its height/lag or 503 with the reason.
+  It exists so "the process is up" and "the upstream answers" are different
+  answers, and it must never replace `healthcheck.py` in `HealthCmd`: a syncing
+  or stopped upstream is legitimately red, and `HealthOnFailure=kill` would
+  restart-loop the container. `/ready` is for an operator or a host-side probe;
+  no unit's `HealthCmd` depends on it.
 
 ## A durable unit is stopped, not killed
 

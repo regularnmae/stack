@@ -1253,7 +1253,9 @@ on the MCP host, its own bearer token) runs PromQL over the store's read-only
 API, so `vmui` stays an SSH-tunnel view and the store stays out of
 the proxy tier. Its `get_metrics_health` reads the same textfile heartbeat the
 monitor does, so "the graph has a gap" and "the collector died" are
-distinguishable from an agent.
+distinguishable from an agent. Its `get_stack_status` answers the wider
+question in one call: Alertmanager's live alerts plus the verify, chain and job
+series, with a single verdict.
 
 `crowdsec` has an exposition of its own on `127.0.0.1:6060`, pinned to loopback
 for the same reason (`deploy/crowdsec/config.yaml.local`), and its one reader is
