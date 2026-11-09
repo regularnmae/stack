@@ -62,10 +62,9 @@ usage() {
 
 Options:
   --since DUR          window to read (default 15m; 30s, 90m, 2h, 7d)
-  --container NAME     only this container (repeatable; the unit names in
-                       README's "What runs")
-  --unit NAME          only this systemd unit (repeatable; host scripts such as
-                       monitor.service or ids.service)
+  --container NAME     only this container (repeatable; values are OR-ed)
+  --unit NAME          only this systemd unit (repeatable; together with
+                       --container it means either source)
   --grep REGEX         keep entries matching an RE2 regular expression
   --priority LEVEL     this severity and worse: emerg|alert|crit|err|warning|
                        notice|info|debug
@@ -139,14 +138,33 @@ netcheck_ready || exit 127
 # Quote a value for a LogsQL phrase, then let --data-urlencode do the URL.
 escape_ql() { printf '%s' "$1" | sed -e 's/[\\"]/\\&/g'; }
 
+# One `field:in("v1","v2")` filter for the repeated flags. Repeating a filter in
+# LogsQL is an AND (`container:"a" container:"b"`), and no row can carry two
+# container labels or two units -- so the list belongs inside in(), not beside
+# it. Values are quoted so a name with `-`, `:` or a space stays one phrase.
+in_filter() { # field value...
+    local field="$1" out="" v
+    shift
+    for v in "$@"; do
+        out+="${out:+,}\"$(escape_ql "$v")\""
+    done
+    printf '%s:in(%s)' "$field" "$out"
+}
+
 build_query() { # since -> a LogsQL query string
-    local q="_time:$1" one levels
-    for one in ${CONTAINERS[@]+"${CONTAINERS[@]}"}; do
-        q+=" container:\"$(escape_ql "$one")\""
-    done
-    for one in ${UNITS[@]+"${UNITS[@]}"}; do
-        q+=" unit:\"$(escape_ql "$one")\""
-    done
+    local q="_time:$1" levels sources=()
+    # --container and --unit together mean either source: one row can never be
+    # both, so the groups are OR-ed rather than appended as separate ANDs.
+    if [ "${#CONTAINERS[@]}" -gt 0 ]; then
+        sources+=("$(in_filter container "${CONTAINERS[@]}")")
+    fi
+    if [ "${#UNITS[@]}" -gt 0 ]; then
+        sources+=("$(in_filter unit "${UNITS[@]}")")
+    fi
+    case "${#sources[@]}" in
+        1) q+=" ${sources[0]}" ;;
+        2) q+=" (${sources[0]} OR ${sources[1]})" ;;
+    esac
     [ -n "$GREP" ] && q+=" ~\"$(escape_ql "$GREP")\""
     if [ -n "$PRIORITY" ]; then
         levels=$(priority_levels "$PRIORITY")
