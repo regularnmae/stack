@@ -1153,12 +1153,13 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
 stackctl_wrapper() { # module [NAME=value ...]
     local module="$1"; shift
     local dry_run=0 prune=0 py
+    local -a overrides=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) dry_run=1 ;;
             --prune)   prune=1 ;;
             -h|--help) usage_header "$0"; exit 0 ;;
-            *=*)       ;;
+            *=*)       overrides+=("$1") ;;
             *)         die "unknown argument: $1 (try --help)" ;;
         esac
         shift
@@ -1174,16 +1175,15 @@ stackctl_wrapper() { # module [NAME=value ...]
     resolve_data_dir
     py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     # The core reads these names directly (decl.py no longer parses a stdin
-    # protocol). Export in a subshell so the wrapper's own environment stays
-    # untouched after it returns to the caller.
-    (
-        export MANIFEST="$REPO_DIR/deploy/services.toml"
-        export DRY_RUN="$dry_run" PRUNE="$prune"
-        for arg in "$@"; do
-            export "${arg?}"
-        done
-        PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}" \
-            "$python_bin" -m stackctl "$module"
-    )
+    # protocol). Pass them through env(1) instead of exporting them in a
+    # subshell: the wrapper's own environment stays untouched either way, but a
+    # subshell `export DRY_RUN` reads as a modification shellcheck thinks the
+    # sourcing scripts can lose (SC2031 at every later use). The NAME=value
+    # arguments have to be collected while parsing -- the loop has already
+    # shifted them away by the time the core runs.
+    local -a envs=("MANIFEST=$REPO_DIR/deploy/services.toml" "DRY_RUN=$dry_run" "PRUNE=$prune")
+    envs+=(${overrides[@]+"${overrides[@]}"})
+    PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}" \
+        env "${envs[@]}" "$python_bin" -m stackctl "$module"
 }
 

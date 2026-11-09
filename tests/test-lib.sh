@@ -162,6 +162,34 @@ if restic_snapshot_summary >/dev/null; then
     exit 1
 fi
 
+# stackctl_wrapper hands the reconciler its paths, flags and the caller's
+# NAME=value overrides in the environment, and nothing more. The overrides are
+# the easy part to lose: the parse loop shifts every argument away, so they
+# must be collected as they are seen. They were silently dropped for one
+# refactor, and both cores have a loopback default, so nothing failed.
+mkdir -p "$TMP_DIR/ctl/.venv/bin" "$TMP_DIR/ctl/deploy"
+cat > "$TMP_DIR/ctl/.venv/bin/python" <<'SH'
+#!/usr/bin/env bash
+printf 'argv=%s\n' "$*"
+printf 'MANIFEST=%s\n' "${MANIFEST:-}"
+printf 'DRY_RUN=%s\n' "${DRY_RUN:-}"
+printf 'PRUNE=%s\n' "${PRUNE:-}"
+printf 'NPM_API=%s\n' "${NPM_API:-}"
+SH
+chmod +x "$TMP_DIR/ctl/.venv/bin/python"
+: > "$TMP_DIR/ctl/deploy/services.toml"
+got=$(
+    REPO_DIR="$TMP_DIR/ctl" STACK_DATA_DIR="$TMP_DIR" \
+    STACK_DATA_ENV="$TMP_DIR/data-dir.env" \
+        stackctl_wrapper npm-hosts "NPM_API=http://example.invalid:81" --dry-run
+    printf 'LEAK=%s|%s|%s\n' "${MANIFEST:-unset}" "${DRY_RUN:-unset}" "${NPM_API:-unset}"
+)
+assert_eq "argv=-m stackctl npm-hosts
+MANIFEST=$TMP_DIR/ctl/deploy/services.toml
+DRY_RUN=1
+PRUNE=0
+NPM_API=http://example.invalid:81
+LEAK=unset|unset|unset" "$got" 'stackctl_wrapper passes paths, flags and overrides only'
 
 # write_atomic is the primitive behind prom_write, status_write and
 # unit_digest_write: stdin -> a hidden temp beside the target, the mode, then a
