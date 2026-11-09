@@ -142,8 +142,22 @@ setup_bitcoin() {
             podman cp "$path" "bitcoind:/data/.bitcoin/restorewallet.dat"
             podman exec -u 0 bitcoind chown 1000:1000 /data/.bitcoin/restorewallet.dat >/dev/null 2>&1 || true
             log "restoring wallet '$BITCOIN_WALLET'"
-            bitcoind_cli -named restorewallet wallet_name="$BITCOIN_WALLET" wallet_backup_file=/data/.bitcoin/restorewallet.dat
+            # The named argument is backup_file (help restorewallet), and
+            # load_on_startup=true is what puts the name in settings.json --
+            # without it a successful restore is gone at the next bitcoind
+            # restart. The rescan can outrun bitcoin-cli's 900 s default, so wait
+            # indefinitely. Capture the status instead of letting set -e abort:
+            # the temp copy has to go either way.
+            local rc=0
+            bitcoind_cli -rpcclienttimeout=0 -named restorewallet \
+                wallet_name="$BITCOIN_WALLET" \
+                backup_file=/data/.bitcoin/restorewallet.dat \
+                load_on_startup=true || rc=$?
             podman exec bitcoind rm -f /data/.bitcoin/restorewallet.dat >/dev/null 2>&1 || true
+            if [ "$rc" -ne 0 ]; then
+                warn "restorewallet failed (bitcoin-cli exit $rc); check: podman logs bitcoind"
+                return 1
+            fi
             ;;
         *)
             log "skipping the Bitcoin wallet"

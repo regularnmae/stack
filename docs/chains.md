@@ -15,6 +15,8 @@ daemon unit, `fulcrum`, or an explorer.
 - **`lightningd` can die with its container still "Up"**, which is why its unit
   carries `HealthOnFailure=kill`.
 - **The explorers add no index**; they read bitcoind (plus Fulcrum) or monerod.
+- **A wallet restore is `restorewallet` with `backup_file`, `load_on_startup=true`
+  and no RPC timeout** (`-rpcclienttimeout=0`).
 
 ## lightningd dies with its container left Up
 
@@ -42,6 +44,21 @@ daemon unit, `fulcrum`, or an explorer.
   `listwallets`). Not on
   `monero-wallet-btcpay`: its healthcheck is red for as long as the wallet
   refreshes, so killing it would restart the refresh from scratch.
+
+## Restoring the Bitcoin wallet
+
+`scripts/wallets.sh` restores a `.dat` backup by copying it into the container and
+calling `restorewallet`. Three things about that call are traps:
+
+- The named parameter is `backup_file`; `wallet_backup_file` does not exist and
+  answers `-8 Unknown named parameter`.
+- `load_on_startup=true` is what writes the name into `settings.json`. Without it
+  the restore succeeds and the wallet is absent at the next bitcoind restart.
+- `restorewallet` rescans, and this node has no `blockfilterindex`, so the call can
+  outlast `bitcoin-cli`'s 900 s default: pass `-rpcclienttimeout=0`.
+
+The temp copy inside the datadir is removed whether the call succeeds or fails, so
+its status is captured instead of letting `set -e` abort at the RPC.
 
 ## CLN peers and channels
 
