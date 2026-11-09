@@ -86,14 +86,19 @@ HealthRetries=3
 HealthStartPeriod=180s
 # A red healthcheck after that start period means the engine is no longer
 # answering, and a container that reads "Up" while the engine is wedged is the
-# failure mode this repo documents for lightningd. Kill it and let the Quadlet
-# default Restart=always recreate it.
+# failure mode this repo documents for lightningd. Kill it and let systemd's
+# Restart=always recreate it.
 HealthOnFailure=kill
 
 [Service]
 # A cold start includes the rule update (bounded at 180 s in start.sh); the
 # default 90 s would mark the unit failed mid-download.
 TimeoutStartSec=300
+# Quadlet does not default a restart policy: without this line systemd's own
+# default (no) applies, so a clean entrypoint exit or the HealthOnFailure kill
+# above left the sensor down for good. Every other non-oneshot container unit
+# in the stack sets it explicitly.
+Restart=always
 
 [Install]
 WantedBy=multi-user.target

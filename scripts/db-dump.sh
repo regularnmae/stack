@@ -38,13 +38,25 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
+# Arguments are parsed before anything with a side effect. resolve_data_dir
+# persists ~/.config/stack/data-dir.env, so a bare `--help` (or a typo'd target)
+# must not get that far; it used to create the dump directories and chmod them
+# before even looking at $1.
+DUMPS=(npm kuma)
+case "${1:-}" in
+    -h|--help) usage_header "$0"; exit 0 ;;
+    npm)  DUMPS=(npm) ;;
+    kuma) DUMPS=(kuma) ;;
+    "")   ;;
+    *)    die "unknown target: $1 (expected npm or kuma, or no argument for both)" ;;
+esac
+
 resolve_data_dir
 command -v podman >/dev/null 2>&1 || die "podman is required"
 
 # The dumps carry user tables (NPM's account hashes, kuma's users and monitors):
 # 0600, in directories install.sh has already made 0700.
 umask 077
-DUMPS=(npm kuma)
 NPM_DATA="$DATA_DIR/npm/data"
 NPM_DUMP_DIR="$DATA_DIR/npm-dump"
 KUMA_DUMP_DIR="$DATA_DIR/uptime-kuma-dump"
@@ -105,7 +117,11 @@ db.backup(out).then(() => {
         return 1
     fi
     [ -s "$stage" ] || { warn "npm: the SQLite copy is empty; keeping the previous dump"; return 1; }
-    mv -f "$stage" "$NPM_DUMP"
+    # set -e does NOT reach into a function called as `dump_npm || rc=1`, so the
+    # install step has to check itself or a failed rename exits 0 with the old
+    # dump in place.
+    mv -f "$stage" "$NPM_DUMP" \
+        || { warn "npm: could not install $NPM_DUMP; keeping the previous dump"; rm -f "$stage"; return 1; }
     # The container writes with its own umask (022), so the copy arrives 0644;
     # this one carries NPM's account hashes. The kuma half is written by this
     # shell and already honours umask 077.
@@ -138,18 +154,11 @@ dump_kuma() {
         rm -f "$stage"
         return 1
     fi
-    mv -f "$stage" "$KUMA_DUMP"
+    mv -f "$stage" "$KUMA_DUMP" \
+        || { warn "kuma: could not install $KUMA_DUMP; keeping the previous dump"; rm -f "$stage"; return 1; }
     chmod 600 "$KUMA_DUMP" 2>/dev/null || true
     log "kuma: wrote $KUMA_DUMP ($(du -h "$KUMA_DUMP" | cut -f1), completion trailer present)"
 }
-
-case "${1:-}" in
-    -h|--help) usage_header "$0"; exit 0 ;;
-    npm)  DUMPS=(npm) ;;
-    kuma) DUMPS=(kuma) ;;
-    "")   ;;
-    *)    die "unknown target: $1 (expected npm or kuma, or no argument for both)" ;;
-esac
 
 rc=0
 for target in "${DUMPS[@]}"; do

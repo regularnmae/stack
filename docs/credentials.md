@@ -16,6 +16,11 @@ token on a command line.
   performs it**, not at the call site.
 - **No bearer token reaches the host's argv**; a curl config on stdin carries
   them.
+- **A secret key is minted once and never duplicated.** `install.sh`'s
+  `ensure_secret_key` rewrites an empty or duplicated `KEY=` line (reusing the
+  first non-empty value) instead of appending a second line that `env_value`
+  would not read, and never regenerates a value that is already set -- the
+  CrowdSec bouncer registrations depend on that.
 
 ## Spending stays off
 

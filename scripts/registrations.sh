@@ -88,6 +88,32 @@ AM_URL="${AM_URL%/}"
 # future federation key on it.
 ALERT_INSTANCE="$(hostname -s 2>/dev/null || echo stack)"
 
+# The test alert needs the Alertmanager path and nothing else -- in particular
+# no BoltMesh database -- so it is handled BEFORE the app-tier guard below. A
+# --skip-apps host (and a checkout that has not run install.sh) can still prove
+# the info route.
+if [ "$ALERT_TEST" = 1 ]; then
+    [ "$AM_URL" = off ] && die "alerting is off (MONITOR_ALERTMANAGER_URL=off)"
+    starts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    ends=$(date -u -d '+2 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    # A fresh signup id on every run: the route groups per signup, and the
+    # notification log dedupes a group it has already mailed -- a fixed label
+    # would make a second test look broken.
+    body=$(jq -cn --arg inst "$ALERT_INSTANCE" --arg s "$starts" --arg e "$ends" \
+        --arg id "test-$(date +%s)" \
+        '[{labels:{alertname:"boltmesh_signup",severity:"info",service:"boltmesh",instance:$inst,signup:$id},
+           annotations:{summary:"BoltMesh: test signup alert",description:"Sent by scripts/registrations.sh --test; it resolves in about two minutes and sends no recovered mail."},
+           startsAt:$s, endsAt:$e}]')
+    curl -fsS -m 10 -H 'Content-Type: application/json' \
+        --data-binary "$body" "$AM_URL/api/v2/alerts" >/dev/null \
+        || die "could not post a test alert to $AM_URL/api/v2/alerts"
+    printf 'test alert accepted by %s\n' "$AM_URL"
+    printf 'expect ONE mail within ~90s (group_wait 30s), with no resolved mail after it.\n'
+    printf 'nothing arrived? Mail is proven by scripts/monitor.sh --test; if that works,\n'
+    printf 'check the severity=info route in %s/monitoring/alertmanager/alertmanager.yml\n' "$CONFIG_DIR"
+    exit 0
+fi
+
 # The BoltMesh database. Both names are non-secret and come from the generated
 # db.env, the same file the backend reads. The container check below, not this
 # file, is what tells a --skip-apps host apart: db.env is seeded everywhere.
@@ -153,28 +179,6 @@ SQL
 WM_TS=$(env_value "$STATE_FILE" watermark_ts)
 WM_ID=$(env_value "$STATE_FILE" watermark_id)
 valid_watermark || { WM_TS=""; WM_ID=""; }
-
-if [ "$ALERT_TEST" = 1 ]; then
-    [ "$AM_URL" = off ] && die "alerting is off (MONITOR_ALERTMANAGER_URL=off)"
-    starts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    ends=$(date -u -d '+2 minutes' '+%Y-%m-%dT%H:%M:%SZ')
-    # A fresh signup id on every run: the route groups per signup, and the
-    # notification log dedupes a group it has already mailed -- a fixed label
-    # would make a second test look broken.
-    body=$(jq -cn --arg inst "$ALERT_INSTANCE" --arg s "$starts" --arg e "$ends" \
-        --arg id "test-$(date +%s)" \
-        '[{labels:{alertname:"boltmesh_signup",severity:"info",service:"boltmesh",instance:$inst,signup:$id},
-           annotations:{summary:"BoltMesh: test signup alert",description:"Sent by scripts/registrations.sh --test; it resolves in about two minutes and sends no recovered mail."},
-           startsAt:$s, endsAt:$e}]')
-    curl -fsS -m 10 -H 'Content-Type: application/json' \
-        --data-binary "$body" "$AM_URL/api/v2/alerts" >/dev/null \
-        || die "could not post a test alert to $AM_URL/api/v2/alerts"
-    printf 'test alert accepted by %s\n' "$AM_URL"
-    printf 'expect ONE mail within ~90s (group_wait 30s), with no resolved mail after it.\n'
-    printf 'nothing arrived? Mail is proven by scripts/monitor.sh --test; if that works,\n'
-    printf 'check the severity=info route in %s/monitoring/alertmanager/alertmanager.yml\n' "$CONFIG_DIR"
-    exit 0
-fi
 
 if [ -z "$WM_TS" ]; then
     if ! seed_watermark; then

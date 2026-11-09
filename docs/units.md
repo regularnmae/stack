@@ -290,7 +290,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
 - **Data-dir ownership:** `bitcoind` runs as the image uid
   (host 525287 = in-container 1000) and do **not** re-own their bind mounts, so
-  `install.sh` `podman unshare chown -R 1000:1000`s them; `monerod` re-owns its
+  `install.sh` hands it the datadir entry and `bitcoin.conf` (top-level only,
+  never a recursive walk over the chain: bitcoind creates the block and
+  LevelDB subdirectories as that uid itself); `monerod` re-owns its
   own directory. `cln/`, `tor/`, `uptime-kuma/` and `fulcrum/` are written by
   container root (= the host user under rootless podman).
 

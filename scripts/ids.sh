@@ -48,6 +48,11 @@ CURSOR_FILE="$AUDIT_DIR/ids.cursor"
 AUDIT_LOG="$AUDIT_DIR/ids.log"
 mkdir -p "$AUDIT_DIR"
 
+# The bounded EVE window is staged here while it is counted. The trap covers a
+# failure between creating the chunk and removing it at the end of the block.
+CHUNK=""
+trap '[ -z "${CHUNK:-}" ] || rm -f "$CHUNK"' EXIT
+
 # Suricata writes here (deploy/root/suricata.container): root-owned directory,
 # world-readable files. A missing file is a normal state on a host whose root
 # tier has not been installed yet, not an error.
@@ -126,7 +131,9 @@ say "crowdsec: $CROWDSEC_STATE, $DECISIONS decision(s)${NEWEST:+ (newest: $NEWES
 # is supposed to notice. The cursor carries the inode as well as the offset:
 # logrotate (deploy/root/logrotate-stack-ids) renames the file and creates a new
 # one, and a same-size-or-larger new file would otherwise be read from the old
-# offset, skipping its beginning. A truncate still trips the size check.
+# offset, skipping its beginning. A truncate still trips the size check. The
+# offset always lands on a line boundary, so a line still being written is read
+# whole next sweep rather than started mid-line.
 ALERTS=0
 LAST_ALERT=""
 # eve=ok|missing|unreadable|na goes into the status file: "0 alerts" is only
@@ -160,31 +167,51 @@ if [ "$SURICATA_STATE" = active ]; then
         if [ -n "$ino" ] && [ "$cur_ino" != "$ino" ]; then off=0; fi
         if [ "$size" -lt "$off" ]; then off=0; fi
         if [ "$size" -gt "$off" ]; then
-            # -R + fromjson? so a torn final line (an unfinished write) is skipped
-            # instead of failing the whole stream. The cursor advances whenever the
-            # read *completed*, not only when it found an alert -- zero alerts is the
-            # normal state, and leaving the cursor behind re-reads the whole file
-            # every sweep, which is the load the cursor exists to avoid. pipefail
-            # makes a failing tail/jq skip the advance instead, so an unreadable
-            # window is re-examined rather than silently stepped over -- and it is
-            # why the else below is a verdict, not just a missing advance.
+            # Read exactly the window [off, size) -- never "to EOF". The file is
+            # being appended to while this runs: tail-to-EOF counted alerts past
+            # size and then rewound the cursor to size, so the next sweep counted
+            # them again. dd's byte-count flags bound the read, and unlike
+            # `tail | head` they do not fail on a SIGPIPE at the boundary.
             #
-            # Only the signature is printed, not signature_id: the id was in the
-            # stream as a second tab-separated field once, and `read -a` splits on
-            # tabs as well as spaces, so LAST_ALERT came back as "2010936" while the
-            # message claimed it was the signature. Two fields, count and signature,
-            # and `read` with two names keeps the rest of the line (spaces and all).
-            if raw=$(tail -c +$((off + 1)) "$EVE" 2>/dev/null \
-                | jq -Rr 'fromjson? | select(.event_type == "alert") | .alert.signature' 2>/dev/null \
-                | awk '{n++; last=$0} END {print n+0 "\t" last}'); then
-                read -r ALERTS LAST_ALERT <<< "$raw"
-                ALERTS="${ALERTS:-0}"
-                LAST_ALERT="${LAST_ALERT:-}"
-                case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
-                printf '%s:%s\n' "$ino" "$size" > "$CURSOR_FILE"
+            # -R + fromjson? so a torn final line (an unfinished write) is
+            # skipped instead of failing the whole stream. Only the signature is
+            # printed, not signature_id: the id was in the stream as a second
+            # tab-separated field once, and `read -a` splits on tabs as well as
+            # spaces, so LAST_ALERT came back as "2010936" while the message
+            # claimed it was the signature. Two fields, count and signature, and
+            # `read` with two names keeps the rest of the line (spaces and all).
+            window=$((size - off))
+            CHUNK=""
+            if ! CHUNK=$(mktemp "$AUDIT_DIR/.ids-chunk.XXXXXX" 2>/dev/null); then
+                CHUNK=""
+                EVE_STATE=unreadable
+            elif dd if="$EVE" of="$CHUNK" iflag=skip_bytes,count_bytes \
+                    skip="$off" count="$window" 2>/dev/null; then
+                if raw=$(jq -Rr 'fromjson? | select(.event_type == "alert") | .alert.signature' \
+                        < "$CHUNK" 2>/dev/null \
+                        | awk '{n++; last=$0} END {print n+0 "\t" last}'); then
+                    read -r ALERTS LAST_ALERT <<< "$raw"
+                    ALERTS="${ALERTS:-0}"
+                    LAST_ALERT="${LAST_ALERT:-}"
+                    case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
+                    # Advance only over COMPLETE lines: if size lands inside a
+                    # line, that line is re-read whole next sweep instead of
+                    # being started mid-line and dropped by fromjson?. The inode
+                    # is re-checked because logrotate may have replaced the file
+                    # between the stat above and this read; a changed inode means
+                    # the next sweep must start at 0, not at this offset.
+                    consumed=$(complete_line_bytes "$CHUNK") || consumed=0
+                    if [ "$consumed" -gt 0 ] \
+                        && [ "$(stat -c %i "$EVE" 2>/dev/null || echo "")" = "$ino" ]; then
+                        printf '%s:%s\n' "$ino" "$((off + consumed))" > "$CURSOR_FILE"
+                    fi
+                else
+                    EVE_STATE=unreadable
+                fi
             else
                 EVE_STATE=unreadable
             fi
+            [ -z "$CHUNK" ] || { rm -f "$CHUNK"; CHUNK=""; }
         fi
     fi
 fi

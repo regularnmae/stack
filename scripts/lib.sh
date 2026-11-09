@@ -154,6 +154,43 @@ dur_s() {
     printf '%s' $(( (ms + 999) / 1000 ))
 }
 
+# True when dur_ms would have parsed the WHOLE string. dur_ms answers 0 for
+# anything it cannot read, which is right for "no duration" but hides junk from
+# a caller that must tell a real zero from an unreadable value -- `podman stats`
+# prints cpu_time: "N/A" for a container it cannot account, and that must stay
+# a hole rather than be written as 0.000.
+dur_valid() { [[ ${1:-} =~ ^([0-9]+(\.[0-9]+)?(ms|h|m|s))+$ ]]; }
+
+# Bytes of complete lines in a file: everything through the last newline. A
+# reader that tracks a byte cursor must not advance past the start of a line
+# still being written, or the rest of that line is lost on the next read. No
+# newline at all answers 0, which means "do not advance".
+#
+# The common case is one stat and one byte: a file that ends in a newline is
+# entirely complete. Otherwise the trailing partial line is normally short, so
+# the last newline is found in a 64 KiB block from the end (widened only if a
+# single line longer than that leaves no newline in it).
+complete_line_bytes() {
+    local n block=65536 from bytes last
+    n=$(stat -c %s "$1" 2>/dev/null) || return 1
+    [ "$n" -gt 0 ] || { printf 0; return 0; }
+    if [ "$(tail -c 1 "$1" | wc -l)" -gt 0 ]; then
+        printf '%s' "$n"
+        return 0
+    fi
+    while :; do
+        from=$(( n - block ))
+        [ "$from" -lt 0 ] && from=0
+        bytes=$(( n - from ))
+        last=$(tail -c "$bytes" "$1" \
+            | LC_ALL=C od -An -v -tu1 \
+            | awk '{ for (i = 1; i <= NF; i++) { k++; if ($i == 10) last = k } } END { print last + 0 }')
+        [ "$last" -gt 0 ] && { printf '%s' $(( from + last )); return 0; }
+        [ "$from" -eq 0 ] && { printf 0; return 0; }
+        block=$(( block * 4 ))
+    done
+}
+
 # "4.176GB" -> bytes, the way podman's go-units renders a size in `podman stats`.
 # coreutils' numfmt already parses both spellings it can emit -- SI ("kB", "MB",
 # "GB") and binary ("KiB", "MiB") -- so the awk table this replaced was a wheel.
@@ -572,6 +609,31 @@ unit_digest() {
     if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
         sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 " vector.unit" }'
     fi
+}
+
+# Map a running container name to the systemd unit that owns it. Usually the
+# same string, but a unit may set ContainerName to something else
+# (deploy/backup.container is stack-backup under backup.service). Reading the
+# rendered unit is the only way to know, and it matters: `systemctl show
+# stack-backup.service -p NRestarts` answers 0 just like a real unit, so a
+# caller that assumes name == unit records a restart series for a unit that
+# does not exist and a monitor that never sees that job's restarts. Falls back
+# to the name when no rendered unit claims it (a container from somewhere else).
+unit_for_container() { # container-name -> unit stem
+    local name="$1" q f stem cname
+    q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
+    for f in "$q"/*.container; do
+        [ -f "$f" ] || continue
+        stem=${f##*/}
+        stem=${stem%.container}
+        cname=$(sed -n 's/^ContainerName=//p' "$f" 2>/dev/null | head -n1)
+        [ -n "$cname" ] || cname="$stem"
+        if [ "$cname" = "$name" ]; then
+            printf '%s' "$stem"
+            return 0
+        fi
+    done
+    printf '%s' "$name"
 }
 
 # Is a unit in a space-delimited set of unit stems (" bitcoind tor ")? The

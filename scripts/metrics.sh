@@ -143,9 +143,17 @@ if ln=$(lightning_cli getinfo 2>/dev/null) && [ -n "$ln" ]; then
     # Connected peers, not getinfo's num_peers: that one is documented as "the
     # total count of peers, connected or with channels", so it stays >= 1 for a
     # node whose only peer is offline and the series would read as healthy.
-    lpeers=$(lightning_cli listpeers 2>/dev/null || echo '{"peers":[]}')
-    emit stack_cln_peers \
-        "$(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null || echo 0)"
+    # A failed listpeers/listpeerchannels is a HOLE, not an empty list: the
+    # fallback `{"peers":[]}` used to turn an unreachable node into a healthy
+    # zero and write no collector_error.
+    npeers=""
+    if lpeers=$(lightning_cli listpeers 2>/dev/null) && [ -n "$lpeers" ]; then
+        npeers=$(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null) || npeers=""
+    fi
+    case "$npeers" in
+        ''|*[!0-9]*) collector_error lightningd-peers ;;
+        *)           emit stack_cln_peers "$npeers" ;;
+    esac
     # Present only while the condition holds, so test for the key rather than
     # its value.
     emit stack_cln_bitcoind_sync_warning \
@@ -153,10 +161,15 @@ if ln=$(lightning_cli getinfo 2>/dev/null) && [ -n "$ln" ]; then
     # The node's own channels, with each peer's connection state: listchannels is
     # the gossip table and has no connectivity field (see scripts/monitor.sh), so
     # this reads listpeerchannels and counts only operational ones.
-    pchans=$(lightning_cli listpeerchannels 2>/dev/null || echo '{"channels":[]}')
-    emit stack_cln_channels_offline \
-        "$(jq -r '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' <<<"$pchans" 2>/dev/null || echo 0)"
-    say "lightningd $(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null || echo 0) connected peer(s)"
+    noff=""
+    if pchans=$(lightning_cli listpeerchannels 2>/dev/null) && [ -n "$pchans" ]; then
+        noff=$(jq -r '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' <<<"$pchans" 2>/dev/null) || noff=""
+    fi
+    case "$noff" in
+        ''|*[!0-9]*) collector_error lightningd-channels ;;
+        *)           emit stack_cln_channels_offline "$noff" ;;
+    esac
+    say "lightningd ${npeers:-?} connected peer(s)"
 else
     emit stack_cln_rpc_up 0
     collector_error lightningd
@@ -233,9 +246,15 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
     while read -r cname; do
         [ -n "$cname" ] || continue
-        nr=$(systemctl --user show "$cname.service" -p NRestarts --value 2>/dev/null) || continue
+        # The container name is not always the unit stem: deploy/backup.container
+        # sets ContainerName=stack-backup under backup.service, and
+        # `systemctl show stack-backup.service` answers 0 like a real unit, so
+        # the old label named a unit that does not exist.
+        unit=$(unit_for_container "$cname")
+        nr=$(systemctl --user show "$unit.service" -p NRestarts --value 2>/dev/null) || continue
+        [ -n "$nr" ] || continue
         case "$nr" in (*[!0-9]*) continue ;; esac
-        emit "stack_systemd_restarts{unit=\"$cname\"}" "$nr"
+        emit "stack_systemd_restarts{unit=\"$unit\"}" "$nr"
     done < <(podman ps --format '{{.Names}}' 2>/dev/null)
 fi
 
@@ -263,18 +282,20 @@ fi
 #   * the label is the container NAME, never the id: a recreated container keeps
 #     its series, and rate() sees the counter reset instead of a new series.
 #
-# A hole stays a hole: a container whose cpu/mem cannot be parsed is skipped for
-# that run rather than written as zero, and one collector_error names the parse
-# without a per-container label (that would explode the cardinality on a bad
-# podman release).
+# A hole stays a hole: a container field whose cpu/mem cannot be parsed is
+# omitted for that run rather than written as zero, and one collector_error
+# names the parse without a per-container label (that would explode the
+# cardinality on a bad podman release). The two fields are independent, so a
+# cpu_time of "N/A" still leaves the memory series in place.
 # ---------------------------------------------------------------------------
 
 # podman prints cpu_time as a Go duration ("47m45.158824s"), and lib.sh's
 # dur_ms already parses those -- it is what wait_healthy and healthcheck-lint
 # read, so this must not grow a second parser that could disagree on a fraction.
 # Its floor is a millisecond: a container younger than one tick reads 0.000,
-# which rate() tolerates, while an empty field stays a hole (below), because
-# dur_ms answers 0 for unparsable input and that is not the same thing.
+# which rate() tolerates. An unparsable field ("N/A") is rejected by dur_valid
+# before it gets here: dur_ms answers 0 for it too, and that is not the same
+# thing.
 cpu_seconds() { awk -v ms="$(dur_ms "$1")" 'BEGIN { printf "%.3f", ms / 1000 }'; }
 
 if cstats=$(podman stats --no-stream --format json 2>/dev/null) \
@@ -288,14 +309,25 @@ if cstats=$(podman stats --no-stream --format json 2>/dev/null) \
             *[!A-Za-z0-9_.-]*) cbad=1; continue ;;
         esac
         csecs=""
-        [ -n "$cputime" ] && csecs=$(cpu_seconds "$cputime")
-        cmem_b=$(human_bytes "$cmem") || cmem_b=""
-        if [ -z "$csecs" ] || [ -z "$cmem_b" ]; then
-            cbad=1
-            continue
+        # dur_valid, not just non-empty: dur_ms answers 0 for junk, so podman's
+        # cpu_time: "N/A" used to be written as a real 0.000 instead of a hole.
+        if [ -n "$cputime" ] && dur_valid "$cputime"; then
+            csecs=$(cpu_seconds "$cputime")
         fi
-        emit "stack_container_cpu_seconds_total{container=\"$cname\"}" "$csecs"
-        emit "stack_container_mem_working_set_bytes{container=\"$cname\"}" "$cmem_b"
+        cmem_b=$(human_bytes "$cmem") || cmem_b=""
+        # Emit each half independently: a broken CPU reading must not also erase
+        # the memory series, but either missing value is recorded as a parse
+        # error (and never written as a zero).
+        if [ -n "$csecs" ]; then
+            emit "stack_container_cpu_seconds_total{container=\"$cname\"}" "$csecs"
+        else
+            cbad=1
+        fi
+        if [ -n "$cmem_b" ]; then
+            emit "stack_container_mem_working_set_bytes{container=\"$cname\"}" "$cmem_b"
+        else
+            cbad=1
+        fi
         case "$cpids" in
             ''|*[!0-9]*) cbad=1 ;;
             *) emit "stack_container_pids{container=\"$cname\"}" "$cpids" ;;

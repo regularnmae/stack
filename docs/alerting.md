@@ -144,7 +144,8 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   push leaves the watermark alone (so the mail is late, never lost) and the
   *first* run seeds it from the newest existing row, because deploying this must
   not mail the accounts that already exist. `--dry-run` shows what would be sent;
-  `--test` proves the `info` route without touching the watermark.
+  `--test` proves the `info` route without touching the watermark, and it runs
+  before the app-tier check, so a `--skip-apps` host can use it too.
 - **A dead watcher is a warning, not a page.** The sweep reads the status
   file's `ok_epoch` against `MONITOR_REGISTRATIONS_MAX_AGE_MIN` (20, i.e. twenty
   missed runs) and warns; the site is fine, only the notification is missing.

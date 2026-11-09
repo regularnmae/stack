@@ -358,19 +358,36 @@ install_root_tier() {
     if [ -x /usr/sbin/auditctl ]; then
         while IFS= read -r rule; do
             [ -n "$rule" ] || continue
+            # -W takes the WATCH PATH, not the whole `-w ...` line. Passing the
+            # line made auditctl read "-w" as the path and fail with "The path
+            # must start with '/'" -- hidden by the `|| true` this replaced --
+            # so nothing was ever removed. augenrules then aborted on the first
+            # duplicate ("Rule exists") and a newly added watch never loaded
+            # (measured here: 7 of 9 after a bootstrap). Only file watches are
+            # ours in this ruleset.
+            case "$rule" in
+                -w\ *) rule="${rule#-w }" ;;
+                *)     continue ;;
+            esac
             # shellcheck disable=SC2086  # the rule text IS the argument list
-            /usr/sbin/auditctl -W $rule >/dev/null 2>&1 || true
+            /usr/sbin/auditctl -W $rule >/dev/null 2>&1 \
+                || warn "could not remove stack audit rule: $rule"
         done <<< "$(/usr/sbin/auditctl -l 2>/dev/null | grep -- '-k stack_' || true)"
     fi
     # augenrules exits non-zero on "Rule exists" even when the ruleset is already
     # what we want (it replays the whole file), so the verdict is the kernel's
     # rule list, not the exit code.
     /usr/sbin/augenrules --load >/dev/null 2>&1 || true
+    n_expected=$(grep -c -- '-k stack_' /etc/audit/rules.d/60-stack.rules 2>/dev/null || true)
+    case "$n_expected" in ''|*[!0-9]*) n_expected=0 ;; esac
     n_rules=$(/usr/sbin/auditctl -l 2>/dev/null | grep -c -- '-k stack_' || true)
     if [ ! -x /usr/sbin/augenrules ]; then
         warn "auditctl/augenrules are missing (EL10 ships them in the audit-rules package); run: sudo dnf install -y audit-rules && sudo ./bootstrap.sh"
     elif [ "${n_rules:-0}" -gt 0 ]; then
-        log "audit rules loaded (${n_rules} watch(es))"
+        log "audit rules loaded (${n_rules}/${n_expected} watch(es))"
+        if [ "${n_rules:-0}" -lt "$n_expected" ]; then
+            warn "audit: only ${n_rules} of ${n_expected} stack watches loaded; run: sudo /usr/sbin/auditctl -R /etc/audit/audit.rules"
+        fi
     else
         warn "no stack audit rules are loaded; run: sudo /usr/sbin/augenrules --load"
     fi
@@ -650,10 +667,15 @@ EOF
 }
 
 # Hand paths to the image's in-container uid 1000 (host subuid, 525287 here).
+# Deliberately NOT recursive: callers pass every path that needs re-owning. A
+# recursive chown over a Bitcoin datadir walked hundreds of GB of block and
+# LevelDB files on every deploy (while bitcoind was running), which is why the
+# call site names the datadir and its config explicitly. Subdirectories are
+# created by the container itself, already as that uid.
 chown_image_uid() {
     command -v podman >/dev/null 2>&1 || return 0
-    podman unshare chown -R 1000:1000 "$@" 2>/dev/null \
-        || log "could not chown $* -- run: podman unshare chown -R 1000:1000 $*"
+    podman unshare chown 1000:1000 "$@" 2>/dev/null \
+        || log "could not chown $* -- run: podman unshare chown 1000:1000 $*"
 }
 
 # The backup set (BACKUP_PATHS in stack.conf) rendered the two ways
@@ -814,18 +836,44 @@ read_secret() {
 # NEVER regenerated: the two CrowdSec bouncer keys are registered in the LAPI
 # under exactly the value the rendered unit carries, so a new one would leave the
 # old registration live and enforcement silently dead. A value that is absent is
-# written once (the caller's candidate, else a fresh hex secret) and echoed back
-# for the caller to assign and export.
+# written once (the caller's candidate, else the first non-empty duplicate
+# already in the file, else a fresh hex secret) and echoed back for the caller to
+# assign and export.
+#
+# The file is rewritten through write_secret (atomic, 0600) whenever the key is
+# present but its value is empty: appending a second `KEY=value` after an empty
+# `KEY=` would be invisible to env_value (which reads the first match), so every
+# install would mint another key. The append branch makes sure the file ends in
+# a newline first, or the new key glues itself to the previous line and the next
+# run cannot find it either.
 ensure_secret_key() { # key [value] -> the value now in the file
-    local key="$1" value="${2:-}" cur
+    local key="$1" value="${2:-}" cur found
     cur=$(read_secret "$key")
     if [ -n "$cur" ]; then
         printf '%s' "$cur"
         return 0
     fi
-    value="${value:-$(rand_hex)}"
-    printf '%s=%s\n' "$key" "$value" >> "$SECRETS_FILE"
-    chmod 600 "$SECRETS_FILE"
+    # An adopted file can already carry the key with an empty value, or a
+    # duplicate left by an older installer. Reuse the first non-empty duplicate:
+    # that is the value the LAPI most likely registered, so a broken host is
+    # repaired instead of being handed a third key that would 403.
+    found=$(sed -n "s/^$key=//p" "$SECRETS_FILE" 2>/dev/null | grep -v '^$' | head -n1 || true)
+    value="${value:-${found:-$(rand_hex)}}"
+    if grep -q "^$key=" "$SECRETS_FILE" 2>/dev/null; then
+        awk -v k="$key" -v v="$value" '
+            index($0, k "=") == 1 {
+                if (!done) { print k "=" v; done = 1 }
+                next
+            }
+            { print }
+        ' "$SECRETS_FILE" | write_secret "$SECRETS_FILE"
+    else
+        if [ -s "$SECRETS_FILE" ] && [ "$(tail -c 1 "$SECRETS_FILE" | wc -l)" -eq 0 ]; then
+            printf '\n' >> "$SECRETS_FILE"
+        fi
+        printf '%s=%s\n' "$key" "$value" >> "$SECRETS_FILE"
+        chmod 600 "$SECRETS_FILE"
+    fi
     log "wrote $key to $SECRETS_FILE (mode 600)" >&2
     printf '%s' "$value"
 }
@@ -985,6 +1033,7 @@ EOF
     log "seeded $DATA_DIR/bitcoin/bitcoin.conf"
 fi
 [ -d "$DATA_DIR/bitcoin" ] && chown_image_uid "$DATA_DIR/bitcoin"
+[ -s "$DATA_DIR/bitcoin/bitcoin.conf" ] && chown_image_uid "$DATA_DIR/bitcoin/bitcoin.conf"
 
 # Download and extract the pinned Monero plugin when the pinned artifact is not
 # the one on disk. A failure is a warning, not a fatal error: BTC-LN still works
@@ -1685,14 +1734,30 @@ render_unit() {
 # for the CrowdSec config (parsers/, scenarios/, acquis.d/), whose files the
 # container mounts one by one -- a directory mount over /etc/crowdsec would
 # fight the image's own entrypoint, which seeds the rest of that tree.
+#
+# The destination is an install-owned MIRROR, not a merge: a parser, scenario or
+# acquisition deleted from deploy/crowdsec/ must also leave the installed tree,
+# or CrowdSec keeps loading it -- and because unit_digest hashes the installed
+# tree, its removal would never show up as drift and the unit would not be
+# restarted. Runtime state lives under $DATA_DIR/ids/crowdsec, never here.
 sync_tree() { # src-dir dest-dir
-    local src="$1" dest="$2" rel
+    local src="$1" dest="$2" rel stale=()
     [ -d "$src" ] || return 0
     ( cd "$src" && find . -type f -print ) | while IFS= read -r rel; do
         rel="${rel#./}"
         mkdir -p "$dest/$(dirname "$rel")"
         render_unit "$src/$rel" "$dest/$rel"
     done
+    [ -d "$dest" ] || return 0
+    while IFS= read -r rel; do
+        rel="${rel#./}"
+        [ -f "$src/$rel" ] || stale+=("$rel")
+    done < <( cd "$dest" && find . -type f -print )
+    for rel in "${stale[@]}"; do
+        rm -f "$dest/$rel" \
+            || die "could not remove stale $dest/$rel (deleted from $src)"
+    done
+    find "$dest" -mindepth 1 -depth -type d -empty -delete 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------

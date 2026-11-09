@@ -405,17 +405,31 @@ if [ ! -x "$AGENT_BIN" ]; then
     warn "agent-mcp is not installed (./deploy.sh --only agent-skills)"
 else
     pass "agent-mcp is installed"
-    missing=()
-    for harness in "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.claude"; do
-        [ -d "$harness" ] || continue
-        for skill in bitcoin-node monero-node monero-wallet lightning searxng fulcrum victoria-logs victoriametrics; do
-            [ -e "$harness/skills/$skill/SKILL.md" ] || missing+=("$harness/skills/$skill")
+    # Enumerate the clone, never a copy of its list: a hand-written list here
+    # silently checked 8 of the 11 skills (btcpay, crowdsec and crypto-stack
+    # were added to agent-skills and not to this line), so "every skill is
+    # linked" could pass while three links were missing.
+    skills=()
+    if [ -d "$AGENT_DIR/skills" ]; then
+        for skill_dir in "$AGENT_DIR"/skills/*/; do
+            [ -f "$skill_dir/SKILL.md" ] && skills+=("$(basename "$skill_dir")")
         done
-    done
-    if [ "${#missing[@]}" -eq 0 ]; then
-        pass "every skill is linked into the harnesses installed here"
+    fi
+    if [ "${#skills[@]}" -eq 0 ]; then
+        warn "cannot enumerate the skills ($AGENT_DIR/skills is missing); skipping the link check (./deploy.sh --only agent-skills re-clones them)"
     else
-        bad "${#missing[@]} skill link(s) missing (e.g. ${missing[0]}); run ./deploy.sh --only agent-skills"
+        missing=()
+        for harness in "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.claude"; do
+            [ -d "$harness" ] || continue
+            for skill in "${skills[@]}"; do
+                [ -e "$harness/skills/$skill/SKILL.md" ] || missing+=("$harness/skills/$skill")
+            done
+        done
+        if [ "${#missing[@]}" -eq 0 ]; then
+            pass "every skill is linked into the harnesses installed here (${#skills[@]})"
+        else
+            bad "${#missing[@]} skill link(s) missing (e.g. ${missing[0]}); run ./deploy.sh --only agent-skills"
+        fi
     fi
 
     # servers.json is the skills' copy of the public surface: one URL per

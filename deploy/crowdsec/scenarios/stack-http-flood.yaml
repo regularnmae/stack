@@ -3,8 +3,12 @@
 #
 # This is the rule that protects the *availability* of the one public box, not
 # its confidentiality -- the vhosts are TLS-terminated by nginx and the app is
-# behind a queue. The capacity is deliberately huge (300 requests in 10 s, i.e.
-# 30/s sustained) because anything tighter collides with:
+# behind a queue. It is a leaky bucket with a deliberately huge capacity: a
+# 300-event burst, refilling at ~30/s (one event every 33 ms). A client
+# sustaining more than ~30/s trips it; a legitimate slow poller never does.
+# (300/10s used to read as "300 requests in 10 s", but it actually leaked one
+# event per 10 s, so a client polling once every ten seconds eventually banned
+# itself.) Anything tighter collides with:
 #   * uptime-kuma (one request/min per declared monitor -- ~0.13/s with
 #     today's list, whitelisted anyway),
 #   * a page's asset load (one index.html plus its bundles),
@@ -18,7 +22,7 @@ description: "one client flooding the public vhosts"
 filter: "evt.Meta.log_type == 'npm_access'"
 groupby: evt.Meta.source_ip
 capacity: 300
-leakspeed: 10s
+leakspeed: 33ms
 blackhole: 10m
 labels:
   service: npm

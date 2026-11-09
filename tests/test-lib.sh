@@ -40,6 +40,31 @@ while IFS=$'\t' read -r input want; do
     assert_eq "$want" "$(dur_ms "$input")" "dur_ms fixture '$input'"
 done < "$ROOT_DIR/tests/fixtures/durations.txt"
 
+# dur_ms deliberately answers 0 for junk; callers that must keep a hole as a
+# hole (metrics.sh's podman cpu_time "N/A") need the separate whole-string test.
+assert_eq yes "$(dur_valid 2h30m0.5s && echo yes || echo no)" 'duration accepted'
+assert_eq yes "$(dur_valid 47m45.158824s && echo yes || echo no)" 'podman duration accepted'
+assert_eq no  "$(dur_valid N/A && echo yes || echo no)" 'non-duration rejected'
+assert_eq no  "$(dur_valid '' && echo yes || echo no)" 'empty value rejected'
+
+# A byte cursor may only advance over complete lines. "a\nb" has two complete
+# bytes and a torn tail; the reader must not claim the tail.
+printf 'a\nb'   > "$TMP_DIR/torn";   assert_eq 2 "$(complete_line_bytes "$TMP_DIR/torn")" 'partial tail not counted'
+printf 'a\nb\n' > "$TMP_DIR/whole";  assert_eq 4 "$(complete_line_bytes "$TMP_DIR/whole")" 'all complete lines counted'
+: > "$TMP_DIR/empty";                assert_eq 0 "$(complete_line_bytes "$TMP_DIR/empty")" 'empty file'
+printf 'abc'    > "$TMP_DIR/nonl";   assert_eq 0 "$(complete_line_bytes "$TMP_DIR/nonl")" 'no newline means nothing consumed'
+
+# The container name is not the unit stem when a unit sets ContainerName (the
+# backup job is stack-backup under backup.service), and metrics/monitor both
+# used to assume they were equal.
+mkdir -p "$TMP_DIR/units"
+printf '[Container]\nContainerName=stack-backup\n' > "$TMP_DIR/units/backup.container"
+printf '[Container]\n' > "$TMP_DIR/units/bitcoind.container"
+QUADLET_DIR="$TMP_DIR/units"
+assert_eq backup    "$(unit_for_container stack-backup)" 'ContainerName maps to its unit'
+assert_eq bitcoind  "$(unit_for_container bitcoind)"     'unit stem is the default name'
+assert_eq stranger  "$(unit_for_container stranger)"     'unknown name falls back to itself'
+
 # mcp_result unwraps the two shapes mcp_call can print: a plain JSON-RPC body,
 # and the streamable-HTTP transport's SSE stream. The tool's payload is a JSON
 # string at .result.content[0].text, so the caller's jq filter runs on JSON.

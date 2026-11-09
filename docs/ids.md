@@ -26,7 +26,14 @@ README's "Intrusion detection".
   `fe80::/10`. A classifier failure is fail-closed: nothing is applied and
   `bouncer.status` records why.
 - **`CROWDSEC_BOUNCER_KEY` is never regenerated.** The container registers that
-  exact key at start.
+  exact key at start. `ensure_secret_key` rewrites an empty or duplicated
+  `KEY=` line -- reusing the first non-empty value, which is what the LAPI most
+  likely registered -- instead of appending a second one that `env_value` would
+  never read.
+- **The CrowdSec config tree is an install-owned mirror.** `install.sh`'s
+  `sync_tree` prunes a parser, scenario or acquisition deleted from
+  `deploy/crowdsec/`, so a removed file cannot keep loading; the digest over the
+  installed tree changes, which is also what restarts the unit.
 - **A whitelist expression is a plain string prefix, not a network.**
 - **Never run `auditctl -D`.** Remove our rules one at a time with `auditctl -W`.
 - **Directory watches record nothing on this kernel**; entry creation is caught
@@ -184,7 +191,10 @@ README's "Intrusion detection".
   rotate a static `filename`. `create`, not `copytruncate`, because the sensor
   holds the fd at its offset. The CrowdSec tailer's `ReOpen` follows the new
   file, and `ids.sh`'s cursor carries the inode so a rotation cannot make it
-  skip the new file's beginning.
+  skip the new file's beginning. The cursor also lands only on a line boundary:
+  it is advanced over the last complete line in the bounded window, so a line
+  still being written is read whole on the next sweep instead of started
+  mid-line, and bytes appended after the stat are counted once, not twice.
 - **A dead feed must not look healthy.** `verify.sh` replays a synthetic public
   EVE alert through `cscli explain` (expects `stack/suricata-policy`), replays
   the same alert from `127.0.0.1` (expects `whitelisted`), and proves the

@@ -872,15 +872,20 @@ restart_state=""
 restarted=0
 if command -v systemctl >/dev/null 2>&1; then
     for c in $(podman ps --format '{{.Names}}' 2>/dev/null); do
-        nr=$(systemctl --user show "$c.service" -p NRestarts --value 2>/dev/null || true)
+        # Container name != unit stem for anything that sets ContainerName
+        # (backup.container is stack-backup under backup.service), and
+        # systemctl answers 0 for a unit that does not exist -- so assuming the
+        # two are equal silently stopped watching that job's restarts.
+        u=$(unit_for_container "$c")
+        nr=$(systemctl --user show "$u.service" -p NRestarts --value 2>/dev/null || true)
         [ -n "$nr" ] || continue
         case "$nr" in (*[!0-9]*) continue ;; esac
-        was="${prev_restarts[$c]:-0}"
+        was="${prev_restarts[$u]:-0}"
         if [ "$nr" -gt "$((was + THRESH_RESTART))" ]; then
-            fail "$c restarted $((nr - was)) time(s) since the last sweep"
+            fail "$u restarted $((nr - was)) time(s) since the last sweep"
             restarted=$((restarted + 1))
         fi
-        restart_state+="$c $nr"$'\n'
+        restart_state+="$u $nr"$'\n'
     done
     printf '%s' "$restart_state" > "$RESTART_STATE" 2>/dev/null || true
     [ "$restarted" = 0 ] && ok "no unit restarted more than $THRESH_RESTART time(s) since the last sweep"
