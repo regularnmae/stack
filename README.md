@@ -998,7 +998,10 @@ That restores as usual and then replays `postgres-dump/all.sql` into a throwaway
 `postgres` container and `uptime-kuma-dump/kuma.sql` into a throwaway MariaDB
 started from the uptime-kuma image (the same server version that wrote it),
 asserting each produces tables. The postgres database name is not hardcoded:
-whatever the dump creates is discovered and counted. It is also a rehearsal of
+whatever the dump creates is discovered and counted. If an image the replay needs
+is missing or cannot be pulled, the run records a **skip**, not a pass: the
+file-level checks did pass, but a skip must not reset the last-success age the
+monitor alerts on. It is also a rehearsal of
 [Replay the live databases](#replay-the-live-databases), which is the step a real
 recovery needs.
 

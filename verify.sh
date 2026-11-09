@@ -775,6 +775,8 @@ if [ "$DEEP" = 1 ]; then
             vage=$(( STATUS_AGE_S / 3600 ))
             if [ "$STATUS_RESULT" = fail ]; then
                 bad "last backup restore drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify}"
+            elif [ "$STATUS_RESULT" = skip ]; then
+                warn "last backup restore drill skipped: ${STATUS_DETAIL:-no detail} (last success ${vage}h ago)"
             else
                 pass "last backup restore drill passed ${vage}h ago"
             fi
@@ -794,6 +796,8 @@ if [ "$DEEP" = 1 ]; then
             dage=$(( STATUS_AGE_S / 3600 ))
             if [ "$STATUS_RESULT" = fail ]; then
                 bad "last database drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify-db}"
+            elif [ "$STATUS_RESULT" = skip ]; then
+                warn "last database drill skipped: ${STATUS_DETAIL:-no detail} (last success ${dage}h ago)"
             else
                 pass "last database drill passed ${dage}h ago"
             fi

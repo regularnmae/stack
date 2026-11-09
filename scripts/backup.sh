@@ -30,7 +30,11 @@
 #                     into a throwaway postgres, uptime-kuma-dump/kuma.sql into a
 #                     throwaway MariaDB -- and prove they produce tables. The
 #                     SQLite copy is checked on every run instead (quick_check is
-#                     cheap); this is the manual, on-demand full drill.
+#                     cheap); this is the manual, on-demand full drill. A replay
+#                     that cannot run because its image is missing or unpullable
+#                     is recorded as a skip (the file-level drill still passed):
+#                     writing `ok` there would reset the last success and hide
+#                     the fact that nothing was replayed.
 #
 # `verify-db` is the monthly database drill, run by deploy/backup-verify-db.timer:
 # it restores ONLY the snapshot's postgres-dump directory (a few MiB, not the
@@ -272,10 +276,13 @@ VERIFY_DB_TARGET="${BACKUP_VERIFY_DB_TARGET:-$DATA_DIR/backup-verify-db}"
 VERIFY_DB_MIN_FREE_MB="${BACKUP_VERIFY_DB_MIN_FREE_MB:-512}"
 REPLAY_CONTAINER=""
 # Set by the replay helpers: the failure's detail, and (rc 2) the reason the
-# image could not be obtained -- a registry outage is not a broken dump.
+# image could not be obtained -- a registry outage is not a broken dump. The
+# caller collects the ones that were skipped into replay_skips, because a drill
+# that could not replay must record `skip`, never `ok` (ok_epoch is the age).
 replay_detail=""
 replay_skip_detail=""
 replay_tables=""
+replay_skips=""
 
 # The record scripts/monitor.sh alerts on (a failed oneshot unit is otherwise
 # just a line in `systemctl --user status`). scripts/lib.sh's status_write owns
@@ -537,15 +544,15 @@ verify_replay_dump() { # restored data root
 # pull, and the only proof that matters -- the SQL imports and the kuma schema is
 # there. Reached only from `verify --with-db` (the monthly drill probes the
 # postgres dump, which is the one the app tier dies without); same return codes as
-# verify_replay_dump. A missing image stays a soft skip rather than a pull: the
-# weekly run must not acquire a registry dependency.
+# verify_replay_dump, so a missing image is rc 2 and the caller records a skip.
+# It is never pulled: the weekly run must not acquire a registry dependency.
 verify_replay_kuma_dump() { # restored data root
     local root="$1" dump="$1/uptime-kuma-dump/kuma.sql" image out tables
     image=$(kuma_image)
     [ -s "$dump" ] || { replay_detail="the snapshot holds no uptime-kuma-dump/kuma.sql"; return 1; }
     if ! podman image exists "$image" 2>/dev/null; then
-        warn "$image is not present; skipped the kuma replay"
-        return 0
+        replay_skip_detail="$image is not present, and the kuma replay never pulls"
+        return 2
     fi
     log "replaying kuma.sql into a throwaway $image"
     if ! out=$(podman run --rm --pull=never --network none \
@@ -943,14 +950,14 @@ case "$cmd" in
         verify_dump_contents "$root"
 
         if [ "$VERIFY_WITH_DB" = 1 ]; then
-            # An unobtainable image is a warning here, not a verdict: this is a
-            # manual full drill, and the monthly verify-db owns the pull and the
-            # record of whether the dump itself replays.
+            # An unobtainable image is a skip, not a verdict -- and not an `ok`
+            # either: ok_epoch is the age monitor.sh reads, so a drill that could
+            # not replay must not reset it. Both helpers report that as rc 2.
             rrc=0
             verify_replay_dump "$root" || rrc=$?
             case "$rrc" in
                 0) ;;
-                2) warn "verify --with-db: $replay_skip_detail" ;;
+                2) replay_skips="postgres: $replay_skip_detail" ;;
                 *) write_verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
                    die "$replay_detail" ;;
             esac
@@ -958,13 +965,20 @@ case "$cmd" in
             verify_replay_kuma_dump "$root" || rrc=$?
             case "$rrc" in
                 0) ;;
+                2) replay_skips="${replay_skips:+$replay_skips; }kuma: $replay_skip_detail" ;;
                 *) write_verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
                    die "$replay_detail" ;;
             esac
         fi
 
-        write_verify_status ok "" "$snap_id" "$files" "$total_bytes" "$subset"
-        log "restore drill passed: $files file(s), $(( total_bytes / 1048576 )) MiB restored from $snap_id"
+        if [ -n "$replay_skips" ]; then
+            write_verify_status skip "the replay was skipped -- $replay_skips" \
+                "$snap_id" "$files" "$total_bytes" "$subset"
+            warn "restore drill restored $files file(s) from $snap_id, but the replay was skipped: $replay_skips"
+        else
+            write_verify_status ok "" "$snap_id" "$files" "$total_bytes" "$subset"
+            log "restore drill passed: $files file(s), $(( total_bytes / 1048576 )) MiB restored from $snap_id"
+        fi
         ;;
     verify-db)
         run_verify_db
