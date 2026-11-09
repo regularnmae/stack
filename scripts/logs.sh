@@ -29,7 +29,10 @@
 # netcheck container on npm-network: victoria-logs is addressed by its container
 # name, and that keeps this CLI independent of the host's own package set (the
 # monitor needs a host curl; nothing else does). Read-only and safe to run at
-# any time.
+# any time. A failed request is an error, not an empty result: a refused
+# connection, a rejected query (a bad --since, an invalid --grep regex) or
+# malformed JSON exits non-zero with the store's own reason, and only a
+# completed query with no rows prints "no matching entries".
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -178,15 +181,15 @@ build_query() { # since -> a LogsQL query string
 # traceback stays on one row instead of breaking the column layout.
 format_entries() {
     if [ "$JSON" = 1 ]; then
-        jq -c .
+        jq --unbuffered -c .
         return
     fi
-    jq -r '
+    jq --unbuffered -r '
         [ ._time,
           (.container // .unit // .SYSLOG_IDENTIFIER // "-"),
           (.priority // "-"),
           (._msg | tostring | rtrimstr("\n") | gsub("\n"; " ⏎ ")) ] | @tsv
-    ' 2>/dev/null | while IFS=$'\t' read -r ts src prio msg; do
+    ' | while IFS=$'\t' read -r ts src prio msg; do
         local colour="" reset="" when
         if [ "$COLOR" = 1 ]; then
             reset=$'\033[0m'
@@ -203,17 +206,38 @@ format_entries() {
     done
 }
 
+# One request to the LogsQL query endpoint. Sets $body; a transport failure or
+# an HTTP error is fatal, because the alternative is an outage -- or a query the
+# store rejected -- reading as "no matching entries". VictoriaLogs answers a
+# rejected query with HTTP 4xx and a one-line plain-text reason, so the status
+# and the body are both load-bearing: curl's -f would throw the reason away.
+vl_query() { # path [curl args...]
+    local path="$1" raw rc code
+    shift
+    raw=$(net_curl -sS -m 30 -w '__VL_HTTP__%{http_code}' "$@" "$LOGS_URL$path") || rc=$?
+    if [ "${rc:-0}" -ne 0 ]; then
+        die "log store query failed (curl ${rc}): $LOGS_URL is not answering"
+    fi
+    code=${raw##*__VL_HTTP__}
+    body=${raw%__VL_HTTP__*}
+    case "$code" in
+        2??) ;;
+        *) die "log store rejected the query (HTTP ${code:-?}): ${body:-no reason given}" ;;
+    esac
+}
+
 if [ "$HEALTH" = 1 ]; then
     code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 5 "$LOGS_URL/health" 2>/dev/null) || code=""
     if [ "${code:-000}" != 200 ]; then
         printf 'log store unreachable: %s/health -> %s\n' "$LOGS_URL" "${code:-no answer}" >&2
         exit 1
     fi
-    body=$(net_curl -s -m 10 --get \
-        --data-urlencode "query=_time:${WINDOW}s | stats count() as n" \
-        "$LOGS_URL/select/logsql/query" 2>/dev/null) || body=""
+    vl_query /select/logsql/query --get \
+        --data-urlencode "query=_time:${WINDOW}s | stats count() as n"
     count=$(printf '%s' "$body" | jq -r '.n // empty' 2>/dev/null) || count=""
-    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    case "$count" in
+        ''|*[!0-9]*) die "log store returned an unreadable count: ${body:-empty response}" ;;
+    esac
     if [ "$count" -eq 0 ]; then
         printf 'no log entries in the last %ss (vector stopped, or the store is not being written)\n' "$WINDOW" >&2
         exit 1
@@ -225,14 +249,16 @@ fi
 
 if [ "$STATS" = 1 ]; then
     query="$(build_query "$SINCE") | stats by (container) count() as n | sort by (n desc) | limit $LIMIT"
-    body=$(net_curl -s -m 30 --get --data-urlencode "query=$query" \
-        "$LOGS_URL/select/logsql/query" 2>/dev/null) || body=""
-    if [ "$JSON" = 1 ]; then
-        printf '%s\n' "$body" | jq -c .
+    vl_query /select/logsql/query --get --data-urlencode "query=$query"
+    if [ -z "$body" ]; then
+        [ "$JSON" = 1 ] && exit 0
+        printf 'no entries in the last %s\n' "$SINCE" >&2
         exit 0
     fi
-    if ! printf '%s' "$body" | jq -e 'length > 0' >/dev/null 2>&1; then
-        printf 'no entries in the last %s\n' "$SINCE" >&2
+    printf '%s\n' "$body" | jq empty >/dev/null 2>&1 \
+        || die "log store returned malformed JSON"
+    if [ "$JSON" = 1 ]; then
+        printf '%s\n' "$body" | jq -c .
         exit 0
     fi
     printf '%8s  %s\n' "count" "container"
@@ -246,19 +272,35 @@ if [ "$FOLLOW" = 1 ]; then
     # replay history before following (unless the operator asked for it).
     [ "$SINCE_SET" = 1 ] || SINCE=1s
     query=$(build_query "$SINCE")
-    net_curl -sN -m 0 --get --data-urlencode "query=$query" \
-        "$LOGS_URL/select/logsql/tail" 2>/dev/null | format_entries
+    # Tail announces a failure only as curl's exit status (the store's reason is
+    # an HTTP body that would feed the formatter), so prove the query once
+    # through the ordinary endpoint, where vl_query can report it.
+    vl_query /select/logsql/query --get \
+        --data-urlencode "query=$query" \
+        --data-urlencode "limit=1"
+    net_curl -sN -f -m 0 --get --data-urlencode "query=$query" \
+        "$LOGS_URL/select/logsql/tail" | format_entries
+    rcs=("${PIPESTATUS[@]}")
+    case "${rcs[0]}" in
+        0) [ "${rcs[1]}" -eq 0 ] || die "could not format the log stream" ;;
+        # Requested stops: ^C, SIGTERM, and SIGPIPE when the consumer closes the
+        # pipe (head -n, grep -m). None of them is a shipper failure.
+        130|141|143) exit "${rcs[0]}" ;;
+        *) die "log stream failed (curl ${rcs[0]})" ;;
+    esac
     exit 0
 fi
 
 query=$(build_query "$SINCE")
-body=$(net_curl -s -m 30 --get \
+vl_query /select/logsql/query --get \
     --data-urlencode "query=$query" \
-    --data-urlencode "limit=$LIMIT" \
-    "$LOGS_URL/select/logsql/query" 2>/dev/null) || body=""
-if [ -z "$body" ] && [ "$JSON" = 0 ]; then
+    --data-urlencode "limit=$LIMIT"
+if [ -z "$body" ]; then
+    [ "$JSON" = 1 ] && exit 0
     printf 'no matching entries in the last %s\n' "$SINCE" >&2
     exit 0
 fi
+printf '%s\n' "$body" | jq empty >/dev/null 2>&1 \
+    || die "log store returned malformed JSON"
 printf '%s\n' "$body" | format_entries
 exit 0
