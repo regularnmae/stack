@@ -1229,8 +1229,9 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
 # never a secret.
 #
 # Extra facts are passed as NAME=value arguments, so a wrapper reads as the one
-# thing it adds:
-#   stackctl_wrapper npm-hosts "NPM_API=${NPM_API_URL:-http://127.0.0.1:81}"
+# thing it adds -- and only when the operator set it, so the core's own default
+# stays the single place the endpoint is written down:
+#   stackctl_wrapper npm-hosts "NPM_API=$NPM_API"
 # One copy is also what keeps the two flags from drifting apart: a new option
 # cannot land in one wrapper and not the other.
 stackctl_wrapper() { # module [NAME=value ...]

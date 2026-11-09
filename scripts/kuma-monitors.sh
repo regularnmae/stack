@@ -45,6 +45,8 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../stack.conf
+[ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 

@@ -31,13 +31,21 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../stack.conf
+[ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
 # nginx-proxy-manager is on the host network, so its own nginx owns :81 in the
-# host's namespace: the admin API is reached on the loopback.
-NPM_API="${NPM_API_URL:-http://127.0.0.1:81}"
-
+# host's namespace: the admin API is reached on the loopback, which is npm.py's
+# default. NPM_API (an environment override) wins when it is set, and is passed
+# only then -- the default stays written down once, in the Python core.
+#
 # The CLI, the data dir and the manifest path are lib.sh's stackctl_wrapper --
-# the same half kuma-monitors.sh uses.
-stackctl_wrapper npm-hosts "NPM_API=$NPM_API" "$@"
+# the same half kuma-monitors.sh uses, with the same "pass the override only
+# when it is set" shape.
+if [ -n "${NPM_API:-}" ]; then
+    stackctl_wrapper npm-hosts "NPM_API=$NPM_API" "$@"
+else
+    stackctl_wrapper npm-hosts "$@"
+fi
