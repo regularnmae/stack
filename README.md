@@ -1401,7 +1401,7 @@ dedup); this is the plumbing, in two small files you can read (`bouncer.sh` for
 the apply, `ipguard.py` for the address guard).
 
 ```sh
-sudo /etc/stack-ids/bouncer.sh --dry-run    # the rules it would apply, applied to nothing
+sudo /etc/stack-ids/bouncer.sh --dry-run    # the rules it would apply; writes nothing, not even the status file
 sudo nft list table inet stack_bans         # who is banned right now
 systemctl stop stack-bouncer.timer          # the kill switch: detection keeps working
 ```
@@ -1465,6 +1465,12 @@ eve.json is also shipped into the log store (`vector` reads it as a file; see
 [Logs and history](#logs-and-history)), so an alert can be read next to what
 nginx-proxy-manager, the daemons and BoltMesh were doing at the same moment
 instead of in a separate `tail`.
+
+`ids.status` also carries `eve=ok|missing|unreadable|na`. The alert count is a
+report, not a page, but it is only a report if the file was read: when the
+sensor is `active` and `eve.json` is missing or unreadable (permissions,
+SELinux, a missing `jq`), the roll-up fails instead of leaving `alerts=0` and
+advancing `ok_epoch`.
 
 `deploy/ids.timer` runs the roll-up every five minutes at `*:2/5` — deliberately
 between the monitor's sweeps — and `scripts/monitor.sh` alerts on a stale or
@@ -1543,7 +1549,7 @@ writes: the account databases, `sudoers`, `sshd_config`, `auditd.conf`, and the
 stack's own `secrets.env` and `hsm_secret`. `stack-audit.timer` turns the
 root-only log into `$DATA_DIR/audit/auditd.status`, which the monitor pages on.
 
-Two things about it are worth knowing:
+Four things about it are worth knowing:
 
 * **Directory watches do not work on this kernel.** `-w /etc/sudoers.d/ -p wa`
   (with and without the trailing slash, and the `-a always,exit -F dir=…` form)
@@ -1551,9 +1557,19 @@ Two things about it are worth knowing:
   fires normally. Entry creation — a new unit file, a new sudoers drop-in, a new
   cron job, the classic persistence moves — is therefore covered by a **hash diff**
   in the same report: every file under `/etc/systemd/system`,
-  `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d` and
-  `/etc/ssh/sshd_config.d` is hashed each run, and anything new or changed is
-  counted and named. That also survives environments where audit is unavailable.
+  `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d`,
+  `/etc/ssh/sshd_config.d` and `/etc/audit/rules.d` is hashed each run, and
+  anything new, changed or **removed** is counted and named (deletions compare
+  paths, so a modified file is not counted twice). That also survives
+  environments where audit is unavailable.
+* **The ruleset is checked as state, not as an event.** `install.sh --root`
+  removes and re-adds every `stack_` watch on each run, so `op=remove_rule`
+  events cannot tell a deploy from tampering — and the kernel never writes the
+  `op=del_rule` an earlier version grepped for. The report compares the rendered
+  `/etc/audit/rules.d/60-stack.rules` with `auditctl -l` (`watches=N/M` in the
+  status), pages on a missing rules file or a shortfall, and counts as events
+  only removals of rules that are **not** the stack's. A remove+re-add inside a
+  single five-minute window is the one case neither half sees.
 * Events carry a **key** (`stack_hard` for host-level config the repo never
   writes, `stack_data` for the stack's secrets), and only `stack_hard` fails the
   sweep. Rotation and deploys touch the data-dir files on purpose; a monitor that

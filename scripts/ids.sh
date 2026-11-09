@@ -129,47 +129,70 @@ say "crowdsec: $CROWDSEC_STATE, $DECISIONS decision(s)${NEWEST:+ (newest: $NEWES
 # offset, skipping its beginning. A truncate still trips the size check.
 ALERTS=0
 LAST_ALERT=""
-if [ -s "$EVE" ]; then
-    size=$(stat -c %s "$EVE" 2>/dev/null || echo 0)
-    ino=$(stat -c %i "$EVE" 2>/dev/null || echo "")
-    off=0
-    cur=""
-    [ -f "$CURSOR_FILE" ] && cur=$(cat "$CURSOR_FILE" 2>/dev/null)
-    case "$cur" in
-        *:*) cur_ino=${cur%%:*}; off=${cur#*:} ;;
-        # A cursor from before inode tracking: trust the offset, do not re-read
-        # the whole file once just because the format changed.
-        *)   cur_ino="$ino"; off="$cur" ;;
-    esac
-    case "$off" in ''|*[!0-9]*) off=0 ;; esac
-    if [ -n "$ino" ] && [ "$cur_ino" != "$ino" ]; then off=0; fi
-    if [ "$size" -lt "$off" ]; then off=0; fi
-    if [ "$size" -gt "$off" ]; then
-        # -R + fromjson? so a torn final line (an unfinished write) is skipped
-        # instead of failing the whole stream. The cursor advances whenever the
-        # read *completed*, not only when it found an alert -- zero alerts is the
-        # normal state, and leaving the cursor behind re-reads the whole file
-        # every sweep, which is the load the cursor exists to avoid. pipefail
-        # makes a failing tail/jq skip the advance instead, so an unreadable
-        # window is re-examined rather than silently stepped over.
-        #
-        # Only the signature is printed, not signature_id: the id was in the
-        # stream as a second tab-separated field once, and `read -a` splits on
-        # tabs as well as spaces, so LAST_ALERT came back as "2010936" while the
-        # message claimed it was the signature. Two fields, count and signature,
-        # and `read` with two names keeps the rest of the line (spaces and all).
-        if raw=$(tail -c +$((off + 1)) "$EVE" 2>/dev/null \
-            | jq -Rr 'fromjson? | select(.event_type == "alert") | .alert.signature' 2>/dev/null \
-            | awk '{n++; last=$0} END {print n+0 "\t" last}'); then
-            read -r ALERTS LAST_ALERT <<< "$raw"
-            ALERTS="${ALERTS:-0}"
-            LAST_ALERT="${LAST_ALERT:-}"
-            case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
-            printf '%s:%s\n' "$ino" "$size" > "$CURSOR_FILE"
+# eve=ok|missing|unreadable|na goes into the status file: "0 alerts" is only
+# good news if the file was actually read. The guard used to be
+# `[ -s "$EVE" ]` with no else, so a permission/SELinux problem, a missing jq,
+# or an eve.json removed under a running sensor left ALERTS at 0, the verdict
+# looked only at the engine states, and the roll-up said ok -- alert counting
+# could be dead for as long as nobody looked. A missing feed is normal only when
+# the sensor is not running.
+EVE_STATE=na
+if [ "$SURICATA_STATE" = active ]; then
+    EVE_STATE=ok
+    if [ ! -e "$EVE" ]; then
+        EVE_STATE=missing
+    elif [ ! -r "$EVE" ]; then
+        EVE_STATE=unreadable
+    elif ! size=$(stat -c %s "$EVE" 2>/dev/null); then
+        EVE_STATE=unreadable
+    else
+        ino=$(stat -c %i "$EVE" 2>/dev/null || echo "")
+        off=0
+        cur=""
+        [ -f "$CURSOR_FILE" ] && cur=$(cat "$CURSOR_FILE" 2>/dev/null)
+        case "$cur" in
+            *:*) cur_ino=${cur%%:*}; off=${cur#*:} ;;
+            # A cursor from before inode tracking: trust the offset, do not re-read
+            # the whole file once just because the format changed.
+            *)   cur_ino="$ino"; off="$cur" ;;
+        esac
+        case "$off" in ''|*[!0-9]*) off=0 ;; esac
+        if [ -n "$ino" ] && [ "$cur_ino" != "$ino" ]; then off=0; fi
+        if [ "$size" -lt "$off" ]; then off=0; fi
+        if [ "$size" -gt "$off" ]; then
+            # -R + fromjson? so a torn final line (an unfinished write) is skipped
+            # instead of failing the whole stream. The cursor advances whenever the
+            # read *completed*, not only when it found an alert -- zero alerts is the
+            # normal state, and leaving the cursor behind re-reads the whole file
+            # every sweep, which is the load the cursor exists to avoid. pipefail
+            # makes a failing tail/jq skip the advance instead, so an unreadable
+            # window is re-examined rather than silently stepped over -- and it is
+            # why the else below is a verdict, not just a missing advance.
+            #
+            # Only the signature is printed, not signature_id: the id was in the
+            # stream as a second tab-separated field once, and `read -a` splits on
+            # tabs as well as spaces, so LAST_ALERT came back as "2010936" while the
+            # message claimed it was the signature. Two fields, count and signature,
+            # and `read` with two names keeps the rest of the line (spaces and all).
+            if raw=$(tail -c +$((off + 1)) "$EVE" 2>/dev/null \
+                | jq -Rr 'fromjson? | select(.event_type == "alert") | .alert.signature' 2>/dev/null \
+                | awk '{n++; last=$0} END {print n+0 "\t" last}'); then
+                read -r ALERTS LAST_ALERT <<< "$raw"
+                ALERTS="${ALERTS:-0}"
+                LAST_ALERT="${LAST_ALERT:-}"
+                case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
+                printf '%s:%s\n' "$ino" "$size" > "$CURSOR_FILE"
+            else
+                EVE_STATE=unreadable
+            fi
         fi
     fi
 fi
-say "suricata alerts since the last run: $ALERTS${LAST_ALERT:+ (last: $LAST_ALERT)}"
+if [ "$EVE_STATE" = na ]; then
+    say "suricata alerts since the last run: $ALERTS${LAST_ALERT:+ (last: $LAST_ALERT)}"
+else
+    say "suricata alerts since the last run: $ALERTS${LAST_ALERT:+ (last: $LAST_ALERT)} (eve=$EVE_STATE)"
+fi
 
 # ---------------------------------------------------------------------------
 # the verdict
@@ -188,6 +211,14 @@ case "$CROWDSEC_STATE" in
     unreachable) problem="${problem:+$problem; }crowdsec LAPI is not answering" ;;
     *) problem="${problem:+$problem; }crowdsec is $CROWDSEC_STATE" ;;
 esac
+# The sensor being up is not the same as its output being readable: without this
+# the counters above are zero because nothing was read, not because nothing
+# happened, and ok_epoch would keep advancing.
+case "$EVE_STATE" in
+    ok|na) ;;
+    missing)    problem="${problem:+$problem; }suricata is active but $EVE is missing" ;;
+    unreadable) problem="${problem:+$problem; }suricata is active but $EVE could not be read" ;;
+esac
 
 result=ok
 [ -n "$problem" ] && result=fail
@@ -196,10 +227,10 @@ status_write "$STATUS_FILE" \
     "# written by scripts/ids.sh (deploy/ids.timer)" \
     "$result" "$problem" \
     "suricata=$SURICATA_STATE" "crowdsec=$CROWDSEC_STATE" \
-    "alerts=$ALERTS" "decisions=$DECISIONS"
+    "alerts=$ALERTS" "decisions=$DECISIONS" "eve=$EVE_STATE"
 
-printf '%s result=%s suricata=%s crowdsec=%s alerts=%d decisions=%d%s\n' \
-    "$(date -Is)" "$result" "$SURICATA_STATE" "$CROWDSEC_STATE" "$ALERTS" "$DECISIONS" \
+printf '%s result=%s suricata=%s crowdsec=%s eve=%s alerts=%d decisions=%d%s\n' \
+    "$(date -Is)" "$result" "$SURICATA_STATE" "$CROWDSEC_STATE" "$EVE_STATE" "$ALERTS" "$DECISIONS" \
     "${problem:+ -- $problem}" >> "$AUDIT_LOG"
 
 [ "$result" = ok ] || { printf 'ids: %s\n' "$problem" >&2; exit 1; }

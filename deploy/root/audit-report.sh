@@ -84,12 +84,51 @@ case "$data" in ''|*[!0-9]*) data=0 ;; esac
 # The summary above is read with --no-config, because loading the rule set makes
 # the kernel emit a keyed CONFIG_CHANGE per rule added: counting those would fail
 # the sweep on every bootstrap (measured here: three per reload, from
-# `auditctl -R`). A rule being *removed* is the opposite kind of event -- that is
-# how someone else blinds the host -- so it is counted here instead.
+# `auditctl -R`).
+#
+# A removal is the opposite kind of event -- that is how someone blinds the host
+# -- but the kernel spells it op=remove_rule (audit_log_rule_change("remove_rule",
+# ...) from AUDIT_DEL_RULE), never op=del_rule, so the old grep here matched
+# nothing. Fixing the pattern alone is not enough either: `install.sh --root`
+# removes every loaded stack_ watch (`auditctl -W`) and reloads them on every
+# run, so a deploy legitimately writes nine op=remove_rule events with
+# key="stack_*". Counting those would page on our own deploy. So:
+#   * removals of rules that are NOT ours are counted here -- an ALLEXEC rule or
+#     a daemon's own rule disappearing is somebody else turning the light off;
+#   * our own nine are checked as STATE below (what `auditctl -l` reports). That
+#     is also the only check that notices a removal which is never reloaded.
+# The one hole left is a remove+re-add inside a single window, which neither the
+# event filter nor the state can tell from a deploy.
 removed=$(ausearch --start "$since_date" "$since_time" -m CONFIG_CHANGE 2>/dev/null \
-    | grep -c 'op=del_rule' || true)
+    | grep 'op=remove_rule' | grep -v 'key="stack_' | wc -l || true)
 case "$removed" in ''|*[!0-9]*) removed=0 ;; esac
 [ "$removed" -gt 0 ] && hard=$((hard + removed))
+
+# The kernel's rule list is what "watching" means. The rendered file is the
+# expectation: a shortfall is a watch that is gone, and a missing file (the same
+# --root run that installed this script renders it) is audit's own config
+# disappearing -- exactly what stack_hard exists for. A host with no auditctl at
+# all (EL10 ships it in the audit-rules package) is reported as unavailable, not
+# paged: those watches were never loaded to be lost.
+RULES_FILE=/etc/audit/rules.d/60-stack.rules
+rules_expected=0
+rules_loaded=0
+rules_detail=""
+if [ -s "$RULES_FILE" ]; then
+    rules_expected=$(grep -c -- '-k stack_' "$RULES_FILE" 2>/dev/null || true)
+    case "$rules_expected" in ''|*[!0-9]*) rules_expected=0 ;; esac
+else
+    hard=$((hard + 1))
+    rules_detail="audit rules file $RULES_FILE is missing"
+fi
+if [ -x /usr/sbin/auditctl ]; then
+    rules_loaded=$(/usr/sbin/auditctl -l 2>/dev/null | grep -c -- '-k stack_' || true)
+    case "$rules_loaded" in ''|*[!0-9]*) rules_loaded=0 ;; esac
+    if [ "$rules_expected" -gt 0 ] && [ "$rules_loaded" -lt "$rules_expected" ]; then
+        hard=$((hard + 1))
+        rules_detail="${rules_detail:+$rules_detail; }${rules_loaded} of ${rules_expected} stack audit watch(es) loaded"
+    fi
+fi
 
 detail=""
 if [ "$hard" -gt 0 ]; then
@@ -100,6 +139,7 @@ if [ "$hard" -gt 0 ]; then
         | tail -3 | tr '\n' ' ')
 fi
 [ "$removed" -gt 0 ] && detail="${detail:+$detail }$removed audit rule(s) removed"
+[ -n "$rules_detail" ] && detail="${detail:+$detail }$rules_detail"
 
 # ---------------------------------------------------------------------------
 # the hash diff: entry creation in the directories audit will not watch
@@ -113,7 +153,7 @@ fi
 # legitimately rewrites stack-bouncer.* and suricata.container every time it runs,
 # and a monitor that pages on its own deploy stops being read. The count and the
 # filenames go into the sweep; an unexplained one is what an operator looks at.
-FIM_DIRS="/etc/systemd/system /etc/containers/systemd /etc/sudoers.d /etc/cron.d /etc/ssh/sshd_config.d /etc/stack-ids"
+FIM_DIRS="/etc/systemd/system /etc/containers/systemd /etc/sudoers.d /etc/cron.d /etc/ssh/sshd_config.d /etc/stack-ids /etc/audit/rules.d"
 FIM_BASELINE="$DATA_DIR/audit/auditd.fim"
 fim_changes=0
 fim_detail=""
@@ -129,12 +169,23 @@ if [ -d /etc/systemd/system ]; then
     done
     if [ -s "$FIM_BASELINE" ]; then
         # Entries present now and not in the baseline: a new file, or a changed
-        # one (its hash moved). Deletions are ordinary churn and are ignored.
+        # one (its hash moved).
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             fim_changes=$((fim_changes + 1))
             [ "$fim_changes" -le 5 ] && fim_detail="$fim_detail ${line##* }"
         done <<< "$(comm -13 <(sort "$FIM_BASELINE") <(sort "$current") 2>/dev/null)"
+        # A path that is gone is counted too: the interesting direction in these
+        # directories is a unit, a sudoers drop-in or an audit rule file
+        # disappearing. Comparing PATHS for the removals (not the "hash  path"
+        # lines) keeps a modified file from being counted twice, since its old
+        # hash vanished and its new one appeared.
+        while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            fim_changes=$((fim_changes + 1))
+            [ "$fim_changes" -le 5 ] && fim_detail="$fim_detail ${path}(removed)"
+        done <<< "$(comm -23 <(awk '{print $2}' "$FIM_BASELINE" | sort) \
+            <(awk '{print $2}' "$current" | sort) 2>/dev/null)"
     fi
     # The baseline becomes the current state, so a change is reported once and
     # then is the new normal: this is a timeline for an operator, not a latch.
@@ -144,7 +195,7 @@ if [ -d /etc/systemd/system ]; then
         rm -f "$current"
     fi
     if [ "$SHOW" = 1 ] && [ "$fim_changes" -gt 0 ]; then
-        printf 'fim: %s new/changed file(s):%s\n' "$fim_changes" "$fim_detail"
+        printf 'fim: %s change(s):%s\n' "$fim_changes" "$fim_detail"
     fi
 fi
 
@@ -160,17 +211,22 @@ result=ok
 # "nothing happened" and "nothing is being watched".
 audit_state=live
 if [ -x /usr/sbin/auditctl ]; then
-    n_watch=$(/usr/sbin/auditctl -l 2>/dev/null | grep -c -- '-k stack_' || true)
     n_kern=$(ausearch -m CONFIG_CHANGE -ts boot 2>/dev/null | grep -c 'type=CONFIG_CHANGE' || true)
-    if [ "${n_watch:-0}" -gt 0 ] && [ "${n_kern:-0}" -eq 0 ]; then
+    if [ "$rules_loaded" -gt 0 ] && [ "${n_kern:-0}" -eq 0 ]; then
         audit_state=inert
     fi
+elif [ "$rules_expected" -gt 0 ]; then
+    # The rules file exists but nothing can load it: bootstrap installs
+    # audit-rules and warns when it cannot, so say so here rather than call an
+    # unloaded ruleset "live".
+    audit_state=unavailable
 fi
 
 status_write "$STATUS" \
     "# written by /etc/stack-ids/audit-report.sh (stack-audit.timer)" \
     "$result" "$detail" \
     "hard=$hard" "data=$data" "fim=$fim_changes" \
+    "watches=$rules_loaded/$rules_expected" \
     "audit=$audit_state" "read=$read_state"
 
 # Only advance the cursor on a clean read: a failed ausearch must re-examine the

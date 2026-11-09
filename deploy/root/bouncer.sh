@@ -6,7 +6,7 @@
 # this stack that drops a packet, and it is deliberately dumb: CrowdSec owns the
 # decision (who, why, how long), this owns the plumbing.
 #
-#   /etc/stack-ids/bouncer.sh --dry-run    print the rules, change nothing
+#   /etc/stack-ids/bouncer.sh --dry-run    print the rules, write nothing
 #   /etc/stack-ids/bouncer.sh             apply, write $DATA_DIR/audit/bouncer.status
 #
 # Why not the upstream bouncer: docker.io/crowdsecurity/cs-firewall-bouncer is
@@ -64,7 +64,10 @@ errlog=$(mktemp) || exit 1
 trap 'rm -f "$errlog"' EXIT
 
 STATUS="$DATA_DIR/audit/bouncer.status"
-mkdir -p "$DATA_DIR/audit"
+# A dry run is a read, down to the directory: bouncer.status is the live verdict
+# the monitor pages on, and an operator checking the rules while the LAPI is down
+# must not replace it (nor create the audit dir on a host that has none yet).
+[ "$DRY_RUN" = 1 ] || mkdir -p "$DATA_DIR/audit"
 
 say() { [ "$DRY_RUN" = 1 ] && printf '%s\n' "$*"; return 0; }
 
@@ -142,6 +145,15 @@ dur_to_sec() {
 }
 
 write_status() { # result detail banned [skipped]
+    # The guard lives here, not at the single success path at the end of the
+    # file: every failure path (LAPI, JSON shape, classifier, nft) calls this
+    # too, and each of them used to overwrite the live verdict -- so a manual
+    # `--dry-run` against a down LAPI set result=fail and made the monitor page,
+    # despite the header saying "write nothing".
+    if [ "$DRY_RUN" = 1 ]; then
+        say "dry-run: would have written $STATUS result=$1${2:+ ($2)}"
+        return 0
+    fi
     status_write "$STATUS" \
         "# written by /etc/stack-ids/bouncer.sh (stack-bouncer.timer)" \
         "$1" "$2" "banned=$3" "skipped=${4:-0}"

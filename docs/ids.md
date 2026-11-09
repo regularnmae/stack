@@ -91,7 +91,10 @@ README's "Intrusion detection".
   Failure directions are chosen: an unreachable LAPI leaves existing bans alone
   (never read "no decisions" as "unban all"), and a failed `nft -f` rolls back
   atomically. `scripts/monitor.sh` fails on a stale `audit/bouncer.status`, which
-  is the only signal that detection is healthy while nothing enforces.
+  is the only signal that detection is healthy while nothing enforces. That
+  verdict is the *live* one: `bouncer.sh --dry-run` writes nothing at all,
+  including the status file, so checking the rules against a down LAPI cannot
+  page (nor advance `ok_epoch`).
   `scripts/ids.sh` rolls the engines up into `$DATA_DIR/audit/ids.status` (the
   `backup-verify.status` pattern) rather than letting the monitor reach into a
   rootful unit and a `podman exec`; a stale status is the failure signal. Its
@@ -187,6 +190,14 @@ README's "Intrusion detection".
   the same alert from `127.0.0.1` (expects `whitelisted`), and proves the
   container can read the feed. `scripts/ids.sh` still counts alerts from
   `eve.json`; its decision counter now includes the Suricata scenarios too.
+  The count itself is only meaningful if the read happened, so the roll-up
+  records `eve=ok|missing|unreadable|na` and **fails** when the sensor is
+  `active` but its feed is absent or unreadable — otherwise a permission or
+  SELinux problem (or a missing `jq`) left `alerts=0`, the verdict looked only
+  at the engine states, and `ok_epoch` kept advancing while alert counting was
+  dead. A sensor that has just started can fail one sweep before `eve.json`
+  appears; that is the same transient as `systemctl is-active` reporting
+  `activating`.
 
 ## The audit tier watches files only
 
@@ -196,8 +207,11 @@ README's "Intrusion detection".
   inside it, while the same watch on a file fires. Entry creation -- a new unit
   file, a sudoers drop-in, a cron job -- is covered instead by the hash diff in
   `deploy/root/audit-report.sh` over `/etc/systemd/system`,
-  `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d` and
-  `/etc/ssh/sshd_config.d`, which also names the file. Keys split the verdict:
+  `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d`,
+  `/etc/ssh/sshd_config.d` and `/etc/audit/rules.d`, which also names the file.
+  Deletions are counted as well as new and changed files (a path that disappeared
+  is the interesting direction in these trees), by comparing paths so a modified
+  file is not counted twice. Keys split the verdict:
   `stack_hard` (account databases, sudoers, sshd, audit's own config -- nothing
   in this repo writes them) fails the sweep, `stack_data` (the stack's secrets,
   which rotation and deploys do write) only reports. Two EL10 details:
@@ -226,10 +240,19 @@ README's "Intrusion detection".
   never happened — `read=ok|failed` in the status file is the guard against that
   recurring. (2) The summary is read with `--no-config`, because loading the rule
   set makes the kernel emit a keyed CONFIG_CHANGE per rule added (three per
-  reload from `auditctl -R`), and counting those pages on every deploy; a rule
-  *removed* (`op=del_rule`) is counted instead, since that is how somebody blinds
-  the host. (3) Volume is whatever rules are actually in the kernel, not what is
-  in `rules.d`: this host carries a runtime-only `-a always,exit -F arch=b64 -S
+  reload from `auditctl -R`), and counting those pages on every deploy. A rule
+  *removed* is how somebody blinds the host, but the kernel spells it
+  `op=remove_rule` (`del_rule` never appears), and `install.sh --root` removes
+  and re-adds every `stack_` watch on each run — so the event alone cannot tell
+  a deploy from tampering. What is counted as an event is a removal whose key is
+  **not** ours; our own nine are verified as *state*: the rendered
+  `/etc/audit/rules.d/60-stack.rules` is compared with `auditctl -l`
+  (`watches=N/M` in the status file), a missing rules file or a shortfall fails
+  the sweep, and `audit=unavailable` says the rules were never loaded because
+  the `audit-rules` package is missing. A remove+re-add inside one five-minute
+  window is the one case neither half sees. (3) Volume is whatever rules are
+  actually in the kernel, not what is in `rules.d`: this host carries a
+  runtime-only `-a always,exit -F arch=b64 -S
   execve -F key=ALLEXEC` that no file in `/etc/audit/` mentions (`auditctl -l` is
   the only place to see it), so every exec on the host is logged — ~16/s here,
   which rotates `/var/log/audit` every ~5 minutes. The repo's own nine watches

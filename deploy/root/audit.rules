@@ -44,7 +44,8 @@
 
 ## --- audit's own configuration -------------------------------------------
 ## Whoever can edit these can blind the host, which is the first thing a careful
-## intruder does. (A new file in rules.d shows up in the hash diff.)
+## intruder does. (A new, changed or removed file in rules.d shows up in the hash
+## diff.)
 -w /etc/audit/auditd.conf -p wa -k stack_hard
 
 ## --- the stack's secrets -------------------------------------------------

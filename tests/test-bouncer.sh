@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Offline regression tests for the Go-duration parser in deploy/root/bouncer.sh.
+# Offline regression tests for deploy/root/bouncer.sh: the Go-duration parser
+# and the reason a `--dry-run` leaves the live status file alone.
 #
 # The bouncer runs as root and deliberately does not read the checkout, so it
 # cannot source scripts/lib.sh -- which is why its dur_to_sec is a second copy
@@ -52,5 +53,31 @@ done < "$ROOT_DIR/tests/fixtures/durations.txt"
 assert_eq 3600 "$(dur_to_sec '')" 'dur_to_sec defaults an absent duration to 1h'
 assert_eq 3600 "$(dur_to_sec 'abc')" 'dur_to_sec defaults garbage to 1h'
 assert_eq 86400 "$(dur_to_sec '48h')" 'dur_to_sec caps a long ban at 24h'
+
+# --- write_status: a dry run must not replace the live verdict --------------
+# The guard is inside write_status so every failure path is covered (LAPI, JSON
+# shape, classifier, nft), not just the success path that exits before the real
+# write. A manual --dry-run against a down LAPI used to overwrite
+# audit/bouncer.status with result=fail and page the monitor.
+extract write_status "$BOUNCER" > "$TMP_DIR/write_status.sh"
+[ -s "$TMP_DIR/write_status.sh" ] \
+    || { printf 'FAIL: write_status not found in %s\n' "$BOUNCER" >&2; exit 1; }
+
+STATUS="$TMP_DIR/bouncer.status"
+CALLS="$TMP_DIR/status-calls"
+: > "$CALLS"
+say() { :; }
+status_write() { printf '%s\n' "$1" >> "$CALLS"; }
+# shellcheck source=/dev/null
+. "$TMP_DIR/write_status.sh"
+
+export DRY_RUN=1
+write_status fail "LAPI unreachable at 127.0.0.1:8080" ""
+[ -s "$CALLS" ] && { printf 'FAIL: --dry-run wrote the live status file\n' >&2; exit 1; }
+[ -e "$STATUS" ] && { printf 'FAIL: --dry-run created %s\n' "$STATUS" >&2; exit 1; }
+
+export DRY_RUN=0
+write_status ok "" 2 1
+assert_eq "$STATUS" "$(cat "$CALLS")" 'write_status writes the live verdict outside --dry-run'
 
 printf 'bouncer parser tests: ok\n'

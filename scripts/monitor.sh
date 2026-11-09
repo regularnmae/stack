@@ -1123,11 +1123,15 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
             if [ "$aage_m" -gt "$THRESH_AUDIT_AGE_M" ]; then
                 fail "the audit report has not run for ${aage_m} min (systemctl status stack-audit.timer)"
             else
-                if [ "$(env_value "$AUDIT_STATUS_FILE" audit)" = inert ]; then
-                    ok "audit: ${audit_fim} persistence-dir change(s); the kernel audit subsystem emits nothing on this host, so the hash diff is the live check"
-                else
-                    ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported"
-                fi
+                case "$(env_value "$AUDIT_STATUS_FILE" audit)" in
+                    inert)
+                        ok "audit: ${audit_fim} persistence-dir change(s); the kernel audit subsystem emits nothing on this host, so the hash diff is the live check" ;;
+                    unavailable)
+                        ok "audit: ${audit_fim} persistence-dir change(s) reported; no stack watches are loaded"
+                        soft "auditctl/augenrules are missing, so the stack's audit watches cannot load (sudo dnf install audit-rules && sudo ./bootstrap.sh)" ;;
+                    *)
+                        ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported" ;;
+                esac
                 # `aureport` failing means the window is re-read rather than
                 # skipped (audit-report.sh pins its cursor), so this is a report,
                 # not a page: nothing was lost, but the counters are stale.
