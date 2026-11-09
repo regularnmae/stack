@@ -73,9 +73,11 @@ README's "Intrusion detection".
   a stale bouncer and a LAPI answering 403, i.e. silent non-enforcement), and it
   is the one secret appended to `secrets.env` rather than written by its heredoc,
   because it has to exist on hosts deployed before it; (4) `ipguard.py` refuses
-  private space **and every address the host holds** -- `192.168.1.112` is what
-  onion traffic and Uptime-Kuma look like, so banning it takes the onion
-  services, the status page and the operator's own SSH session down together.
+  private space (including the deprecated IPv6 site-local block `fec0::/10`,
+  which `ipaddress` still reports as global) **and every address the host
+  holds** -- `192.168.1.112` is what onion traffic and Uptime-Kuma look like, so
+  banning it takes the onion services, the status page and the operator's own
+  SSH session down together.
   Enforcement also refuses **`STACK_WAN_IP`**, and that one is not in `OWN_IPS`:
   the router holds the public address, not the host, yet a LAN client that
   resolves a public name goes out through the router and comes back through NAT

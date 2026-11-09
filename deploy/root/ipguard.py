@@ -12,7 +12,8 @@
 # `::ffff:10.0.0.1` fall through to a ban, and had no answer for a network
 # value. ipaddress is stdlib, python3 is already a bootstrap dependency, and
 # this file is installed root-owned under /etc/stack-ids -- the bouncer still
-# reads nothing from the user-writable checkout.
+# reads nothing from the user-writable checkout. One range is spelled out below
+# (fec0::/10) because ipaddress still calls it global.
 #
 # Protocol (one record per line, TAB-separated; no address can contain a TAB):
 #
@@ -36,6 +37,13 @@ import sys
 from typing import Optional, Set, Union
 
 Address = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+
+# IPv6 site-local (fec0::/10), deprecated by RFC 3879 and never routed on the
+# public internet. Python 3.12 still reports these addresses as is_global and
+# not is_private, so unlike every other non-public range this one needs an
+# explicit rule; it is checked before is_private so the reason stays the same if
+# a later stdlib starts classifying it as private instead.
+_IPV6_SITE_LOCAL = ipaddress.IPv6Network("fec0::/10")
 
 # The addresses the host holds. A token that does not parse is ignored: the
 # string comparison it replaces could not match it either, and the CIDR rules
@@ -96,6 +104,8 @@ def _classify(
     # nft cannot parse one at all.
     if getattr(addr, "scope_id", None):
         return None, "zoned"
+    if isinstance(check, ipaddress.IPv6Address) and check in _IPV6_SITE_LOCAL:
+        return None, "site-local"
     if check.is_private:
         return None, "private"
     if check.is_reserved:

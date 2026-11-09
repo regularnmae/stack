@@ -8,7 +8,8 @@
 # public space immediately outside it must BAN. A skip that is too wide only
 # loses enforcement; a ban that is too wide can lock the operator out -- so the
 # table names the failures the old shell glob had (fe80::/10 beyond fe80::,
-# ::ffff:10.0.0.1) rather than just the happy path.
+# ::ffff:10.0.0.1) and the range ipaddress itself gets wrong (fec0::/10, which
+# Python 3.12 still calls global) rather than just the happy path.
 import os
 import subprocess
 import sys
@@ -96,6 +97,11 @@ class IpguardTest(unittest.TestCase):
         for value in ("fc00::1", "fd12:3456:789a::1"):
             self.assert_skip(value, "private")
         self.assert_skip("2001:db8::1", "private")
+        # Deprecated site-local space (RFC 3879) is not routable, but Python
+        # 3.12 reports it as global, so the guard carries the rule itself. Both
+        # ends of the /10: the boundary, and the last address in the block.
+        for value in ("fec0::1", "fec0:ffff:ffff:ffff::1", "feff::1"):
+            self.assert_skip(value, "site-local")
 
     def test_ipv6_public(self):
         self.assert_ban("2606:4700::1111", "v6")
