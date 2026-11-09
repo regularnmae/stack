@@ -1057,7 +1057,7 @@ fi
 # name does not change between versions.
 stage_btcpay_plugin() {
     local dir="$DATA_DIR/btcpay/Plugins/$BTCPAY_PLUGIN_ID"
-    local marker="$dir/.artifact-sha256" tmp stage
+    local marker="$dir/.artifact-sha256" tmp stage old has_old
     local installed=""
     [ -f "$marker" ] && installed=$(cat "$marker" 2>/dev/null)
     if [ -f "$dir/$BTCPAY_PLUGIN_ID.dll" ] && [ "$installed" = "$BTCPAY_PLUGIN_SHA256" ]; then
@@ -1079,8 +1079,8 @@ stage_btcpay_plugin() {
         return 0
     fi
     # Extract into a sibling directory and swap it in whole: extracting over the
-    # previous version would leave its extra files behind, and a failed extract
-    # must not destroy a plugin that works.
+    # previous version would leave its extra files behind, and a failed download,
+    # extract or swap must not destroy a plugin that works.
     stage=$(mktemp -d "$DATA_DIR/btcpay/Plugins/.stage.XXXXXX") || {
         warn "could not create a staging directory for the BTCPay Monero plugin"
         rm -f "$tmp"
@@ -1107,9 +1107,43 @@ stage_btcpay_plugin() {
     # directory under a running BTCPay is safe; deploy.sh restarts it when the
     # DLL is newer than the container (btcpay_plugin_newer) and configure.sh
     # runs the bootstrap.
-    rm -rf "$dir"
+    # Move the installed tree aside rather than deleting it: a directory cannot
+    # be replaced atomically, so the old copy is the only thing that keeps BTCPay
+    # loadable if the second rename fails. The aside name is fixed and OUTSIDE
+    # Plugins/ (BTCPay scans that directory for assemblies and must not find a
+    # second copy there), and it is removed only after the new tree is in place.
+    old="$DATA_DIR/btcpay/.plugin-previous"
+    if [ ! -e "$dir" ] && [ -e "$old" ]; then
+        # A previous run died between the two renames; the only working copy is
+        # still here.
+        if ! mv "$old" "$dir"; then
+            warn "could not restore the BTCPay Monero plugin from $old"
+            rm -rf "$stage"
+            return 0
+        fi
+    fi
+    rm -rf "$old"
+    has_old=0
+    if [ -e "$dir" ]; then
+        if ! mv "$dir" "$old"; then
+            warn "could not move the installed BTCPay Monero plugin aside; keeping it"
+            rm -rf "$stage"
+            return 0
+        fi
+        has_old=1
+    fi
     chmod 755 "$stage"
-    mv "$stage" "$dir" || { warn "could not move the BTCPay Monero plugin into $dir"; rm -rf "$stage"; return 0; }
+    if ! mv "$stage" "$dir"; then
+        warn "could not move the BTCPay Monero plugin into $dir"
+        if [ "$has_old" = 1 ]; then
+            mv "$old" "$dir" 2>/dev/null || warn "the previous plugin is left in $old"
+        fi
+        rm -rf "$stage"
+        return 0
+    fi
+    if [ "$has_old" = 1 ]; then
+        rm -rf "$old"
+    fi
     printf '%s\n' "$BTCPAY_PLUGIN_SHA256" > "$marker"
     log "installed the BTCPay Monero plugin into $dir"
 }

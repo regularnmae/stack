@@ -38,10 +38,12 @@ this before touching `config/btcpay/`, `btcpay-wallet.sh`, the bootstrap, or the
   `install.sh` writes `.artifact-sha256` into the plugin directory and skips the
   download only while that marker still matches `BTCPAY_PLUGIN_SHA256`; the
   extraction goes into a staging sibling and is swapped in whole, so a new
-  version never inherits the old one's leftover files and a failed download or
-  extract leaves the working plugin alone. But a unit digest cannot see a file in
-  `$DATA_DIR` — it hashes the unit definitions, and `--only btcpay` finds
-  btcpay's unit unchanged — and `start` is a no-op on an active container, so
+  version never inherits the old one's leftover files. The installed tree is
+  moved aside (not deleted) until the staged one is in place, so a failed
+  download, extract or swap leaves the working plugin loadable. But a unit
+  digest cannot see a file in `$DATA_DIR` — it hashes the unit definitions, and
+  `--only btcpay` finds btcpay's unit unchanged — and `start` is a no-op on an
+  active container, so
   `start_btcpay` calls
   `btcpay_plugin_newer` (the DLL's mtime against podman's `StartedAt`, i.e.
   `refresh_image_unit` answered for a file) and restarts BTCPay when the DLL is
