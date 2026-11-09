@@ -50,9 +50,11 @@ restore" and "Disaster recovery".
   scratch tree is `trap`-removed on every exit path and must stay out of
   `BACKUP_PATHS`; that same exit trap records a failure when a run dies without
   writing a verdict (`set -e`, `TimeoutStartSec`), so the previous `ok` cannot
-  make a broken run look healthy; `--with-db` replays the dump into a throwaway
-  postgres and is manual on purpose, because the weekly run must not depend on
-  pulling an image.
+  make a broken run look healthy; `--with-db` replays the two SQL dumps — the
+  `pg_dumpall` into a throwaway postgres, `kuma.sql` into a throwaway MariaDB —
+  and is manual on purpose, because the weekly run must not depend on pulling an
+  image. There is no server to replay the SQLite copy into, so it gets `PRAGMA
+  quick_check` on every run instead.
   A `--with-db` run whose replay cannot happen (the image is missing, or its pull
   fails) records **`skip`, never `ok`**: `ok_epoch` is the age the monitor keys on,
   so a drill that never replayed must not look like one that did. That is the same
@@ -124,9 +126,11 @@ restore" and "Disaster recovery".
 - **The backup set is declared once, as `BACKUP_PATHS` in `stack.conf`**
   (`cln btcpay tor config npm audit uptime-kuma postgres-dump npm-dump
   uptime-kuma-dump`), and what restic must skip inside it once too, as
-  `BACKUP_EXCLUDES` (`audit/auditd.fim` plus the three live database files).
-  `install.sh` renders both into `backup.container` (one read-only `Volume=` per
-  entry, the path list and the `--exclude` flags in `Exec=`), and
+  `BACKUP_EXCLUDES` (`audit/auditd.fim`, the live SQLite database, kuma's
+  embedded-MariaDB datadir, and its two transient leftovers: `uptime-kuma/run`
+  and the 0-byte `uptime-kuma/kuma.db`). `install.sh` renders them into
+  `backup.container` (one read-only `Volume=` per entry, plus the path list, the
+  `--exclude` flags and `BACKUP_RETENTION`'s keep policy in `Exec=`), and
   `scripts/backup.sh` derives its own mounts, restic arguments, restore
   directories and confirmation prompt from the same arrays, so a hand run and the
   nightly job copy the same thing. Chains, the Fulcrum index, `searxng/`,

@@ -26,11 +26,12 @@
 #   --no-check        skip `restic check --read-data-subset` (the restore still
 #                     verifies the restored bytes)
 #   --keep            leave the restored tree in place to inspect it
-#   --with-db         additionally replay all three dumps -- postgres-dump/all.sql
+#   --with-db         additionally replay the two SQL dumps -- postgres-dump/all.sql
 #                     into a throwaway postgres, uptime-kuma-dump/kuma.sql into a
 #                     throwaway MariaDB -- and prove they produce tables. The
 #                     SQLite copy is checked on every run instead (quick_check is
-#                     cheap); this is the manual, on-demand full drill. A replay
+#                     cheap, and there is no server to replay it into); this is
+#                     the manual, on-demand full drill. A replay
 #                     that cannot run because its image is missing or unpullable
 #                     is recorded as a skip (the file-level drill still passed):
 #                     writing `ok` there would reset the last success and hide
@@ -74,10 +75,15 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "${BACKUP_PATHS+x}" != x ] || [ "${#BACKUP_PATHS[@]}" -eq 0 ]; then
     die "stack.conf must define BACKUP_PATHS (the backup set)"
 fi
+# The keep policy, from the same declaration install.sh renders into
+# deploy/backup.container. Not defaulted: `restic forget --prune` with no keep
+# rule deletes every snapshot, which is the one way this array can hurt.
+if [ "${BACKUP_RETENTION+x}" != x ] || [ "${#BACKUP_RETENTION[@]}" -eq 0 ]; then
+    die "stack.conf must define BACKUP_RETENTION (the keep policy)"
+fi
 
 RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
 STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
-RETENTION=(--keep-daily 7 --keep-weekly 4 --keep-monthly 6)
 
 command -v podman >/dev/null 2>&1 || die "podman is required"
 
@@ -217,12 +223,12 @@ ensure_mount_dirs
 
 # The same job the nightly unit runs (deploy/backup.container's Exec=), built
 # from the same declaration: the path list, the excludes and the retention
-# policy are generated, so the two cannot drift.
+# policy all come from stack.conf, so the two cannot drift.
 job_script=$(
     printf 'set -e\n'
     printf 'restic snapshots >/dev/null 2>&1 || restic init\n'
     printf 'restic backup %s %s --host stack --tag stack\n' "${backup_paths[*]}" "$exclude_args"
-    printf 'restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune\n'
+    printf 'restic forget --tag stack %s --prune\n' "${BACKUP_RETENTION[*]}"
 )
 
 # The nightly unit gets fresh dumps from postgres-dump.service and
@@ -1005,7 +1011,7 @@ case "$cmd" in
         run_verify_db
         ;;
     forget)
-        restic forget --tag stack "${RETENTION[@]}" --prune
+        restic forget --tag stack "${BACKUP_RETENTION[@]}" --prune
         ;;
     unlock)
         restic unlock
@@ -1057,8 +1063,10 @@ case "$cmd" in
         podman unshare chown -R 1000:1000 "$DATA_DIR/bitcoin" 2>/dev/null \
             || warn "could not chown $DATA_DIR/bitcoin to the image uid"
         log "restore complete; start the stack with ./deploy.sh"
-        # The two live databases are not in the snapshot as files: their dumps
-        # are. Say so here, where an operator finishing a restore is looking.
-        log "after ./deploy.sh: copy $DATA_DIR/npm-dump/database.sqlite over $DATA_DIR/npm/data/database.sqlite (NPM stopped), and import $DATA_DIR/uptime-kuma-dump/kuma.sql into kuma's MariaDB -- see README 'Disaster recovery'"
+        # The three live databases are not in the snapshot as files: their dumps
+        # are. Say so here, where an operator finishing a restore is looking --
+        # postgres first, because that is the one the BoltMesh tier cannot start
+        # without.
+        log "after ./deploy.sh: replay $DATA_DIR/postgres-dump/all.sql into the cluster (README 'Disaster recovery', step 5), copy $DATA_DIR/npm-dump/database.sqlite over $DATA_DIR/npm/data/database.sqlite (NPM stopped), and import $DATA_DIR/uptime-kuma-dump/kuma.sql into kuma's MariaDB"
         ;;
 esac

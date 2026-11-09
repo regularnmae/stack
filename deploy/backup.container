@@ -63,9 +63,10 @@ Volume=@BACKUP_DIR@:/repo:z
 Volume=@DATA_DIR@/backup-cache:/cache:z
 Entrypoint=/bin/sh
 # The --exclude list is BACKUP_EXCLUDES in stack.conf (the live databases and
-# the root-owned IDS baseline); deploy/install.sh renders it here and
-# scripts/backup.sh builds the same flags for a hand run.
-Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup @BACKUP_PATHS@ @BACKUP_EXCLUDES@ --host stack --tag stack && restic forget --tag stack --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune"
+# the root-owned IDS baseline) and the keep policy is BACKUP_RETENTION there;
+# deploy/install.sh renders both here and scripts/backup.sh builds the same flags
+# for a hand run, so neither list is written down twice.
+Exec=-c "restic snapshots >/dev/null 2>&1 || restic init; restic backup @BACKUP_PATHS@ @BACKUP_EXCLUDES@ --host stack --tag stack && restic forget --tag stack @BACKUP_RETENTION@ --prune"
 
 [Service]
 Type=oneshot

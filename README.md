@@ -987,8 +987,8 @@ drill owns that claim, and it runs monthly:
 ./deploy.sh --only backup-verify-db     # run it now
 ```
 
-The full drill — restore everything, then replay all three dumps — is still
-available on demand:
+The full drill — restore everything, then replay the two SQL dumps (postgres and
+kuma) — is still available on demand:
 
 ```sh
 ./scripts/backup.sh verify --with-db

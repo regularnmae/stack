@@ -496,6 +496,11 @@ fi
 if [ "${BACKUP_PATHS+x}" != x ] || [ "${#BACKUP_PATHS[@]}" -eq 0 ]; then
     die "stack.conf must define BACKUP_PATHS (the backup set)"
 fi
+# The keep policy is rendered into the same unit: an empty array would render
+# `restic forget --tag stack --prune`, i.e. delete every snapshot.
+if [ "${BACKUP_RETENTION+x}" != x ] || [ "${#BACKUP_RETENTION[@]}" -eq 0 ]; then
+    die "stack.conf must define BACKUP_RETENTION (the keep policy)"
+fi
 
 # Every unit is rendered: all of them reference either the data dir or the
 # config dir, so none is a plain symlink any more. Pairs are "source:target".
@@ -723,6 +728,14 @@ backup_excludes() {
     printf '%s' "${out% }"
 }
 
+# The keep policy (BACKUP_RETENTION in stack.conf) as `restic forget` flags.
+# Space-joined: the entries are flags and counts, never a path, so each one is a
+# separate word in the Exec= line and no quoting is needed. scripts/backup.sh
+# passes the same array to its own forget, so a policy edit moves both.
+backup_retention_flags() {
+    printf '%s' "${BACKUP_RETENTION[*]}"
+}
+
 # ---------------------------------------------------------------------------
 # the one template render
 # ---------------------------------------------------------------------------
@@ -741,6 +754,7 @@ render_to() { # src out
         -e "s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g" \
         -e "s|@BACKUP_PATHS@|$(esc "$(backup_restic_paths)")|g" \
         -e "s|@BACKUP_EXCLUDES@|$(esc "$(backup_excludes)")|g" \
+        -e "s|@BACKUP_RETENTION@|$(esc "$(backup_retention_flags)")|g" \
         -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
         -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
         -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
