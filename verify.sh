@@ -20,7 +20,10 @@
 # nginx-proxy-manager, which is on the host network -- it is read on 127.0.0.1,
 # the same place it listens.
 #
-# Read-only. Exits non-zero if anything is wrong.
+# Read-only against the stack: it starts nothing, writes nothing in $DATA_DIR and
+# changes no unit. It does resolve the data dir like every other host script, so
+# on a host whose pointer is missing it persists ~/.config/stack/data-dir.env.
+# Exits non-zero if anything is wrong.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

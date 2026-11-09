@@ -1229,11 +1229,13 @@ mkdir -p "$DATA_DIR/monitoring/alertmanager" "$CONFIG_DIR/monitoring/alertmanage
 
 # The config is seeded ONCE and then belongs to the operator: it carries the
 # SMTP password, so rewriting it on every deploy would both clobber an edited
-# route tree and re-arm a placeholder credential. Written in place (`cat >`),
-# not installed/moved, because Alertmanager watches the path: a replaced inode
-# behind the directory mount would still be seen, but a move would break the
-# open file the reloader is stat-ing. The unit mounts the directory for the
-# same reason (deploy/alertmanager.container explains it).
+# route tree and re-arm a placeholder credential. It goes through write_secret
+# (write_atomic: temp file + rename, mode 600) like every other credential-
+# bearing file, and the unit mounts the DIRECTORY rather than the file so the
+# replaced inode is visible instead of leaving the container on a deleted one.
+# That buys no automatic reload: Alertmanager v0.34 has no config watcher, so an
+# edit takes effect only after `curl -X POST http://127.0.0.1:9093/-/reload` (or
+# SIGHUP) -- see docs/alerting.md and the example's header.
 ALERT_CFG="$CONFIG_DIR/monitoring/alertmanager/alertmanager.yml"
 if ensure_secret "$ALERT_CFG" "alertmanager config"; then
     write_secret "$ALERT_CFG" < "$DEPLOY_DIR/examples/monitoring/alertmanager.yml.example"

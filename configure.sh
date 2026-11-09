@@ -79,6 +79,9 @@ if [ -n "$ONLY" ]; then
     if [ "$SKIP_APPS" = 1 ] && [ "$ONLY" = boltmesh ]; then
         die "--only boltmesh conflicts with --skip-apps"
     fi
+    if [ "$DO_WALLETS" = 0 ] && [ "$ONLY" = wallet ]; then
+        die "--only wallet conflicts with --no-wallets"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

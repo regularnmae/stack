@@ -1111,7 +1111,8 @@ bitcoind, monerod, fulcrum, lightningd, btcpay, nbxplorer and the BTCPay wallet.
 deploy.sh does not wait for health and does not do the work that needs a
 running service. Next:
 
-  ./configure.sh --skip-daemons  # BoltMesh migrations, agent-mcp handshake
+  ./configure.sh --skip-daemons  # BoltMesh migrations (the agent-mcp
+                                 # handshake needs the chain daemons)
   ./verify.sh                    # container health, MCP handshakes, onion fetches
 EOF
 else
