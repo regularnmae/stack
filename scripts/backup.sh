@@ -283,6 +283,11 @@ replay_detail=""
 replay_skip_detail=""
 replay_tables=""
 replay_skips=""
+# Set once this run records a verdict of its own; verify_cleanup's guard reads
+# it so an exit with no verdict (set -e, TimeoutStartSec) cannot leave the
+# previous `result=ok` in place and read healthy. Same discipline as
+# VERIFY_DB_WROTE for the monthly drill.
+VERIFY_WROTE=0
 
 # The record scripts/monitor.sh alerts on (a failed oneshot unit is otherwise
 # just a line in `systemctl --user status`). scripts/lib.sh's status_write owns
@@ -294,6 +299,14 @@ write_verify_status() { # result detail [snapshot files bytes subset]
         "# written by scripts/backup.sh verify (deploy/backup-verify.timer)" \
         "$result" "$detail" \
         "snapshot=$snap" "files=$files" "bytes=$bytes" "subset=$subset"
+}
+
+# Every verdict the weekly drill records goes through this, so the cleanup guard
+# below knows one was written. It is the only path that sets the flag -- a
+# `write_verify_status` that bypassed it would fake an unrecorded exit.
+verify_status() { # result detail [snapshot files bytes subset]
+    write_verify_status "$@"
+    VERIFY_WROTE=1
 }
 
 write_verify_db_status() { # result detail [snapshot tables]
@@ -324,6 +337,14 @@ resolve_snapshot() { # ref -> "short-id<TAB>time"
 verify_cleanup() {
     if [ -n "${REPLAY_CONTAINER:-}" ]; then
         podman rm -f "$REPLAY_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    # The guard against a drill that dies before writing a verdict: `set -e` can
+    # exit from anywhere, and the timer's TimeoutStartSec lands here too. A
+    # status file left at the previous `result=ok` would make a broken weekly
+    # run read healthy, so an exit with no verdict of our own records a failure.
+    if [ "${VERIFY_WROTE:-0}" != 1 ]; then
+        write_verify_status fail \
+            "the drill exited without recording a verdict; see journalctl --user -u backup-verify.service"
     fi
     case "${VERIFY_TARGET:-}" in
         ""|/) return 0 ;;
@@ -650,11 +671,11 @@ verify_dump_contents() { # restored data root
     dump="$root/uptime-kuma-dump/kuma.sql"
     if [ -s "$dump" ]; then
         if ! grep -q '^-- MariaDB dump' "$dump"; then
-            write_verify_status fail "uptime-kuma-dump/kuma.sql has no mariadb-dump header" "$snap_id" "$files" "$total_bytes" "$subset"
+            verify_status fail "uptime-kuma-dump/kuma.sql has no mariadb-dump header" "$snap_id" "$files" "$total_bytes" "$subset"
             die "uptime-kuma-dump/kuma.sql has no mariadb-dump header"
         fi
         if ! grep -q '^-- Dump completed' "$dump"; then
-            write_verify_status fail "uptime-kuma-dump/kuma.sql is truncated (no completion trailer)" "$snap_id" "$files" "$total_bytes" "$subset"
+            verify_status fail "uptime-kuma-dump/kuma.sql is truncated (no completion trailer)" "$snap_id" "$files" "$total_bytes" "$subset"
             die "uptime-kuma-dump/kuma.sql is truncated: the dump did not finish"
         fi
     fi
@@ -673,13 +694,13 @@ db.close();
 const verdict = Array.isArray(rows) && rows[0] ? rows[0].quick_check : "";
 if (verdict !== "ok") { console.error("quick_check: " + JSON.stringify(rows)); process.exit(1); }
 ' >/dev/null 2>&1; then
-            write_verify_status fail "npm-dump/database.sqlite failed SQLite quick_check" "$snap_id" "$files" "$total_bytes" "$subset"
+            verify_status fail "npm-dump/database.sqlite failed SQLite quick_check" "$snap_id" "$files" "$total_bytes" "$subset"
             die "npm-dump/database.sqlite failed SQLite quick_check: the copy is damaged"
         fi
     fi
 
     if ! assert_dump_fresh "$root" postgres-dump/all.sql npm-dump/database.sqlite uptime-kuma-dump/kuma.sql; then
-        write_verify_status fail "$dump_stale_detail" "$snap_id" "$files" "$total_bytes" "$subset"
+        verify_status fail "$dump_stale_detail" "$snap_id" "$files" "$total_bytes" "$subset"
         die "$dump_stale_detail"
     fi
 
@@ -807,7 +828,7 @@ case "$cmd" in
         # (with the last success carried forward) rather than as a broken backup.
         exec 9>"$VERIFY_LOCK"
         if command -v flock >/dev/null 2>&1 && ! flock -w 1800 9; then
-            write_verify_status skip "another backup/restore run holds $VERIFY_LOCK" "$snapshot"
+            verify_status skip "another backup/restore run holds $VERIFY_LOCK" "$snapshot"
             die "timed out waiting for $VERIFY_LOCK"
         fi
         trap verify_cleanup EXIT
@@ -831,12 +852,12 @@ case "$cmd" in
                 # a scheduling collision, not a broken repository.
                 if verify_skip_if_locked "$clog"; then
                     rm -f "$clog"
-                    write_verify_status skip "another restic run holds the repository lock" "$snap_id" "" "" "$subset"
+                    verify_status skip "another restic run holds the repository lock" "$snap_id" "" "" "$subset"
                     log "skipping the drill: another restic run holds the repository lock"
                     exit 0
                 fi
                 rm -f "$clog"
-                write_verify_status fail "restic check failed (subset $subset): the repository holds unreadable data" "$snap_id" "" "" "$subset"
+                verify_status fail "restic check failed (subset $subset): the repository holds unreadable data" "$snap_id" "" "" "$subset"
                 die "restic check failed: the repository holds unreadable data (see above)"
             fi
             rm -f "$clog"
@@ -850,13 +871,13 @@ case "$cmd" in
         if [ "$src" -ne 0 ]; then
             if verify_skip_if_locked "$slog"; then
                 rm -f "$slog"
-                write_verify_status skip "another restic run holds the repository lock" "$snap_id" "" "" "$subset"
+                verify_status skip "another restic run holds the repository lock" "$snap_id" "" "" "$subset"
                 log "skipping the drill: another restic run holds the repository lock"
                 exit 0
             fi
             cat "$slog"
             rm -f "$slog"
-            write_verify_status fail "restic stats failed" "$snap_id" "" "" "$subset"
+            verify_status fail "restic stats failed" "$snap_id" "" "" "$subset"
             die "restic stats failed"
         fi
         stats=$(cat "$slog")
@@ -864,7 +885,7 @@ case "$cmd" in
         size=$(printf '%s' "$stats" | jq -r '.total_size // 0' 2>/dev/null || true)
         size="${size:-0}"
         if [ "$size" -gt $(( VERIFY_MAX_MB * 1024 * 1024 )) ]; then
-            write_verify_status skip "restore is $(( size / 1048576 )) MiB, above BACKUP_VERIFY_MAX_MB=$VERIFY_MAX_MB" "$snap_id" "" "$size" "$subset"
+            verify_status skip "restore is $(( size / 1048576 )) MiB, above BACKUP_VERIFY_MAX_MB=$VERIFY_MAX_MB" "$snap_id" "" "$size" "$subset"
             log "skipping the restore: $(( size / 1048576 )) MiB exceeds BACKUP_VERIFY_MAX_MB=$VERIFY_MAX_MB"
             log "raise BACKUP_VERIFY_MAX_MB to drill a set that large, or run it by hand with --keep"
             exit 0
@@ -873,7 +894,7 @@ case "$cmd" in
         avail=$(df -Pk "$VERIFY_TARGET" 2>/dev/null | awk 'NR==2 {print $4 * 1024}')
         need=$(( size + size / 2 ))
         if [ -n "${avail:-}" ] && [ "$avail" -lt "$need" ]; then
-            write_verify_status skip "not enough space at $VERIFY_TARGET: need $(( need / 1048576 )) MiB, have $(( avail / 1048576 )) MiB free" "$snap_id" "" "$size" "$subset"
+            verify_status skip "not enough space at $VERIFY_TARGET: need $(( need / 1048576 )) MiB, have $(( avail / 1048576 )) MiB free" "$snap_id" "" "$size" "$subset"
             log "skipping the restore: $(( need / 1048576 )) MiB needed at $VERIFY_TARGET, $(( avail / 1048576 )) MiB free"
             exit 0
         fi
@@ -892,13 +913,13 @@ case "$cmd" in
         cat "$rlog"
         if [ "$rrc" -ne 0 ] && verify_skip_if_locked "$rlog"; then
             rm -f "$rlog"
-            write_verify_status skip "another restic run holds the repository lock" "$snap_id" "" "" "$subset"
+            verify_status skip "another restic run holds the repository lock" "$snap_id" "" "" "$subset"
             log "skipping the drill: another restic run holds the repository lock"
             exit 0
         fi
         if ! restore_acceptable "$rlog" "$rrc"; then
             rm -f "$rlog"
-            write_verify_status fail "restore failed (restic restore --verify)" "$snap_id" "" "$size" "$subset"
+            verify_status fail "restore failed (restic restore --verify)" "$snap_id" "" "$size" "$subset"
             die "restore failed"
         fi
         rm -f "$rlog"
@@ -908,13 +929,13 @@ case "$cmd" in
         total_bytes=0
         for vp in "${BACKUP_PATHS[@]}"; do
             if [ ! -d "$root/$vp" ]; then
-                write_verify_status fail "the snapshot holds no /data/$vp" "$snap_id" "$files" "$total_bytes" "$subset"
+                verify_status fail "the snapshot holds no /data/$vp" "$snap_id" "$files" "$total_bytes" "$subset"
                 die "the restored snapshot holds no /data/$vp"
             fi
             vfiles=$(tree_count "$root/$vp")
             vbytes=$(tree_size "$root/$vp")
             if [ "$vfiles" -eq 0 ] || [ "$vbytes" -eq 0 ]; then
-                write_verify_status fail "/data/$vp came back empty" "$snap_id" "$files" "$total_bytes" "$subset"
+                verify_status fail "/data/$vp came back empty" "$snap_id" "$files" "$total_bytes" "$subset"
                 die "/data/$vp came back empty: the snapshot does not hold it"
             fi
             files=$(( files + vfiles ))
@@ -924,15 +945,15 @@ case "$cmd" in
         # The markers: the files whose absence makes the directory worthless.
         for marker in ${BACKUP_VERIFY_PATHS[@]+"${BACKUP_VERIFY_PATHS[@]}"}; do
             if [ ! -e "$root/$marker" ]; then
-                write_verify_status fail "/data/$marker is missing from the snapshot" "$snap_id" "$files" "$total_bytes" "$subset"
+                verify_status fail "/data/$marker is missing from the snapshot" "$snap_id" "$files" "$total_bytes" "$subset"
                 die "/data/$marker is missing from the snapshot"
             fi
             if [ -d "$root/$marker" ] && [ "$(tree_count "$root/$marker")" -eq 0 ]; then
-                write_verify_status fail "/data/$marker is an empty directory in the snapshot" "$snap_id" "$files" "$total_bytes" "$subset"
+                verify_status fail "/data/$marker is an empty directory in the snapshot" "$snap_id" "$files" "$total_bytes" "$subset"
                 die "/data/$marker is an empty directory in the snapshot"
             fi
             if [ -f "$root/$marker" ] && [ ! -s "$root/$marker" ]; then
-                write_verify_status fail "/data/$marker is empty in the snapshot" "$snap_id" "$files" "$total_bytes" "$subset"
+                verify_status fail "/data/$marker is empty in the snapshot" "$snap_id" "$files" "$total_bytes" "$subset"
                 die "/data/$marker is empty in the snapshot"
             fi
         done
@@ -941,7 +962,7 @@ case "$cmd" in
         # completion trailer are the cheap proof it finished; the replay
         # (`verify-db` monthly, `--with-db` by hand) is the expensive one.
         if ! assert_pg_dump_shaped "$root/postgres-dump/all.sql"; then
-            write_verify_status fail "$pg_dump_bad_detail" "$snap_id" "$files" "$total_bytes" "$subset"
+            verify_status fail "$pg_dump_bad_detail" "$snap_id" "$files" "$total_bytes" "$subset"
             die "$pg_dump_bad_detail"
         fi
 
@@ -958,7 +979,7 @@ case "$cmd" in
             case "$rrc" in
                 0) ;;
                 2) replay_skips="postgres: $replay_skip_detail" ;;
-                *) write_verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
+                *) verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
                    die "$replay_detail" ;;
             esac
             rrc=0
@@ -966,17 +987,17 @@ case "$cmd" in
             case "$rrc" in
                 0) ;;
                 2) replay_skips="${replay_skips:+$replay_skips; }kuma: $replay_skip_detail" ;;
-                *) write_verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
+                *) verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
                    die "$replay_detail" ;;
             esac
         fi
 
         if [ -n "$replay_skips" ]; then
-            write_verify_status skip "the replay was skipped -- $replay_skips" \
+            verify_status skip "the replay was skipped -- $replay_skips" \
                 "$snap_id" "$files" "$total_bytes" "$subset"
             warn "restore drill restored $files file(s) from $snap_id, but the replay was skipped: $replay_skips"
         else
-            write_verify_status ok "" "$snap_id" "$files" "$total_bytes" "$subset"
+            verify_status ok "" "$snap_id" "$files" "$total_bytes" "$subset"
             log "restore drill passed: $files file(s), $(( total_bytes / 1048576 )) MiB restored from $snap_id"
         fi
         ;;

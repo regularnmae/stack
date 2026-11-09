@@ -48,8 +48,11 @@ restore" and "Disaster recovery".
   success), so a drill that skips forever (over `BACKUP_VERIFY_MAX_MB`, or
   without 1.5× the restore size free) fails instead of looking healthy. The
   scratch tree is `trap`-removed on every exit path and must stay out of
-  `BACKUP_PATHS`; `--with-db` replays the dump into a throwaway postgres and is
-  manual on purpose, because the weekly run must not depend on pulling an image.
+  `BACKUP_PATHS`; that same exit trap records a failure when a run dies without
+  writing a verdict (`set -e`, `TimeoutStartSec`), so the previous `ok` cannot
+  make a broken run look healthy; `--with-db` replays the dump into a throwaway
+  postgres and is manual on purpose, because the weekly run must not depend on
+  pulling an image.
   A `--with-db` run whose replay cannot happen (the image is missing, or its pull
   fails) records **`skip`, never `ok`**: `ok_epoch` is the age the monitor keys on,
   so a drill that never replayed must not look like one that did. That is the same
