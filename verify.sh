@@ -68,22 +68,28 @@ head2() { printf '\n%s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
 head2 "Containers"
+# The inventory is the declaration, not a list here: install.sh renders every
+# deploy/*.container[.in], so that directory is what this host runs. A unit that
+# declares Type=oneshot has run to completion by the time a sweep starts, so it
+# is not a container to find up; everything else is checked. `--no-nodes` drops
+# stack.conf's CHAIN_UNITS (the deploy was told to skip them) and keeps the rest.
+containers=()
+for _f in "$REPO_DIR"/deploy/*.container "$REPO_DIR"/deploy/*.container.in; do
+    [ -f "$_f" ] || continue
+    if grep -qE '^Type=oneshot[[:space:]]*$' "$_f"; then
+        continue
+    fi
+    _c=$(basename "$_f"); _c="${_c%.in}"; _c="${_c%.container}"
+    if [ "$NO_NODES" = 1 ] && unit_in_set "$_c" "${CHAIN_UNITS[*]:-}"; then
+        continue
+    fi
+    containers+=("$_c")
+done
+unset _f _c
+[ "${#containers[@]}" -gt 0 ] \
+    || die "no container units found under $REPO_DIR/deploy (is this the checkout?)"
 if [ "$NO_NODES" = 1 ]; then
-    warn "chain daemons skipped by request; not checking bitcoind/monerod/lightningd/btcpay/nbxplorer/monero-wallet-btcpay"
-    containers=(
-        tor valkey searxng uptime-kuma nginx-proxy-manager
-        netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
-        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp crowdsec-mcp btcpay-mcp
-        postgres boltmesh-backend boltmesh-worker boltmesh-frontend
-    )
-else
-    containers=(
-        bitcoind monerod fulcrum btc-explorer xmr-explorer monero-wallet-btcpay lightningd btcpay nbxplorer
-        tor valkey searxng uptime-kuma nginx-proxy-manager
-        netcheck netcheck-host victoriametrics alertmanager node-exporter victoria-logs vector crowdsec
-        searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp crowdsec-mcp btcpay-mcp
-        postgres boltmesh-backend boltmesh-worker boltmesh-frontend
-    )
+    warn "daemon tier skipped by request; not checking ${CHAIN_UNITS[*]:-}"
 fi
 # The units that cannot define a health command are declared once, in
 # stack.conf's HEALTHLESS_UNITS (each with its reason): victoria-logs' image is

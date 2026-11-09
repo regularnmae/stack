@@ -10,8 +10,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 ## Invariants
 
 - **`install.sh` is the only installer.** Every env file is seeded and every unit
-  rendered there; a new service is a unit in its `UNITS` array, never a change in
-  an app repo. An env file's *shape* lives in `deploy/env/<app>/<file>.env.in`
+  rendered there; the unit inventory is the files in `deploy/` (`*.container`,
+  `*.container.in`, `*.network`, and the plain `*.service`/`*.timer`), so a new
+  service is a file there, never a change in an app repo. An env file's *shape* lives in `deploy/env/<app>/<file>.env.in`
   and is rendered by the same substitution list as the units (`render_to`).
 - **A re-render does not change a running container.** `install.sh` advances
   `units.rendered`; only `deploy.sh` and `rotate.sh` advance `units.applied`,
@@ -31,8 +32,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 ## The render, and what the host is running
 
 - **`install.sh` is the only installer:** every env file is seeded and every unit
-  rendered there. A new service means a unit added to its `UNITS` (or
-  `USER_UNITS`/`USER_TIMERS`) array plus env seeding — nothing in the app repos.
+  rendered there. A new service means a unit file in `deploy/` plus env seeding —
+  nothing in the app repos, and no list to add it to: `UNITS`, `USER_UNITS` and
+  `USER_TIMERS` are derived from the directory.
 
 - **Secret resolution order** is `secrets.env` → the installed unit
   (`flag_value`) → the daemon's config (`bitcoin_conf_value`) → generate. That
@@ -152,11 +154,11 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `verify.sh` reads instead of keeping its own copy. `scripts/healthcheck-lint.sh`
   is the gate: interval is 30 s (HTTP) or 60 s (daemons), retries 3 or 5 with a
   reason, timeout explicit and 5–20 s, an HTTP probe fails on non-2xx, discards
-  the body and bounds itself, every non-oneshot container unit is named in
-  `verify.sh`'s container inventory (the one list it cannot source), and a rule
-  is waived only by an inline
+  the body and bounds itself, and a rule is waived only by an inline
   `# health-lint: <code> <reason>` comment, printed on every run so exemptions
-  stay visible. Three decisions carry the reasoning:
+  stay visible. (The old HC009 — "every non-oneshot unit is named in
+  `verify.sh`" — is gone with the list it policed: both sides now derive that
+  inventory from `deploy/*.container`, so there is nothing to keep in step.) Three decisions carry the reasoning:
   **`HealthOnFailure=kill`, never `restart`** — podman's own restart leaves the
   unit active, so `NRestarts` does not move and `monitor.sh`'s restart delta
   cannot see a container flapping every 30 s; systemd's `Restart=always` is the

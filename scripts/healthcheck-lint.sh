@@ -31,11 +31,6 @@
 #          podman: the unit stays active and a container flapping every 30s
 #          reports "no unit restarted". monero-wallet-btcpay is the one exemption
 #          (red for a whole refresh; killing it restarts the refresh).
-#   HC009  every non-oneshot container unit is named in verify.sh's container
-#          inventory. That list is the one copy outside install.sh's UNITS
-#          (verify.sh runs on a host without the checkout, so it cannot source
-#          the installer), and a unit in one but not the other is a service
-#          nobody verifies.
 #   HC010  every unit in stack.conf's STATEFUL_UNITS sets [Container]
 #          StopTimeout= and [Service] TimeoutStopSec=, with at least 30 s of
 #          headroom on the systemd side. Podman's default is 10 s and systemd's
@@ -129,14 +124,6 @@ done
 
 printf 'Healthcheck contract (deploy/, %d templates)\n' "${#unit_files[@]}"
 
-# verify.sh's container inventory (both branches of its --no-nodes array).
-# One copy there is deliberate -- it runs on a host without this checkout -- so
-# this is what keeps it in step with the templates above.
-verify_units=$(awk '
-    /^[[:space:]]*containers=\(/ { inside = 1; next }
-    inside && /^[[:space:]]*\)/ { inside = 0 }
-    inside' "$REPO_DIR/verify.sh" | tr ' ' '\n' | sed '/^$/d' | sort -u)
-
 declare -A SEEN=()
 for f in "${unit_files[@]}"; do
     name=$(basename "$f")
@@ -148,19 +135,6 @@ for f in "${unit_files[@]}"; do
     hcmd=$(kv "$f" HealthCmd)
     oneshot=$(kv "$f" Type)
     onfail=$(kv "$f" HealthOnFailure)
-
-    # --- the verifier must know this unit -------------------------------
-    # deploy/root/* is the rootful tier: it lives in the system manager and
-    # verify.sh checks it with systemctl in its IDS section, not in the user
-    # podman inventory below.
-    case "$f" in
-        "$REPO_DIR"/deploy/root/*) root_tier=1 ;;
-        *)                         root_tier=0 ;;
-    esac
-    if [ "$oneshot" != "oneshot" ] && [ "$root_tier" = 0 ] \
-        && ! printf '%s\n' "$verify_units" | grep -qx "$name"; then
-        bad "$name" HC009 "not in verify.sh's container inventory"
-    fi
 
     # --- a durable unit is stopped, not killed ----------------------------
     # Checked before the health/oneshot branches: a durable unit is never

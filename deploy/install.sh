@@ -502,83 +502,36 @@ if [ "${BACKUP_RETENTION+x}" != x ] || [ "${#BACKUP_RETENTION[@]}" -eq 0 ]; then
     die "stack.conf must define BACKUP_RETENTION (the keep policy)"
 fi
 
-# Every unit is rendered: all of them reference either the data dir or the
-# config dir, so none is a plain symlink any more. Pairs are "source:target".
-UNITS=(
-    "npm-network.network:npm-network.network"
-    "netcheck.container:netcheck.container"
-    "netcheck-host.container:netcheck-host.container"
-    "nginx-proxy-manager.container:nginx-proxy-manager.container"
-    "valkey.container:valkey.container"
-    "searxng.container:searxng.container"
-    "bitcoind.container:bitcoind.container"
-    "monerod.container:monerod.container"
-    "fulcrum.container.in:fulcrum.container"
-    "btc-explorer.container:btc-explorer.container"
-    "xmr-explorer.container:xmr-explorer.container"
-    "tor.container:tor.container"
-    "lightningd.container.in:lightningd.container"
-    "nbxplorer.container:nbxplorer.container"
-    "btcpay.container:btcpay.container"
-    "monero-wallet-btcpay.container:monero-wallet-btcpay.container"
-    "btcpay-bootstrap.container:btcpay-bootstrap.container"
-    "searxng-mcp.container:searxng-mcp.container"
-    "bitcoin-node-mcp.container:bitcoin-node-mcp.container"
-    "monero-node-mcp.container:monero-node-mcp.container"
-    "monero-wallet-mcp.container:monero-wallet-mcp.container"
-    "lightning-mcp.container:lightning-mcp.container"
-    "fulcrum-mcp.container:fulcrum-mcp.container"
-    "victoria-logs-mcp.container:victoria-logs-mcp.container"
-    "victoriametrics-mcp.container:victoriametrics-mcp.container"
-    "crowdsec-mcp.container:crowdsec-mcp.container"
-    "btcpay-mcp.container:btcpay-mcp.container"
-    "postgres.container:postgres.container"
-    "uptime-kuma.container:uptime-kuma.container"
-    "boltmesh-backend.container:boltmesh-backend.container"
-    "boltmesh-worker.container:boltmesh-worker.container"
-    "boltmesh-frontend.container:boltmesh-frontend.container"
-    "postgres-dump.container:postgres-dump.container"
-    "backup.container:backup.container"
-    "victoriametrics.container:victoriametrics.container"
-    "alertmanager.container:alertmanager.container"
-    "node-exporter.container:node-exporter.container"
-    "victoria-logs.container:victoria-logs.container"
-    "vector.container:vector.container"
-    "crowdsec.container.in:crowdsec.container"
-)
+# Every unit is rendered. The inventory is the directory, not a list here: every
+# *.container and *.container.in under deploy/ is a Quadlet unit (the .in suffix
+# marks a template, the rendered target drops it) and the podman network is the
+# one .network. A hand-written list was a second copy of `ls deploy/` -- a new
+# unit had to be created and then typed again, and the copy could drift without
+# anything noticing. deploy/root/ is not in this glob: that tier is installed by
+# `install.sh --root`.
+deploy_entry_names() { # glob...
+    local f
+    for f in "$@"; do
+        [ -f "$f" ] && printf '%s\n' "$(basename "$f")"
+    done
+}
+mapfile -t UNITS < <(deploy_entry_names "$DEPLOY_DIR"/*.container \
+    "$DEPLOY_DIR"/*.container.in "$DEPLOY_DIR"/*.network | LC_ALL=C sort)
+[ "${#UNITS[@]}" -gt 0 ] || die "no units found in $DEPLOY_DIR"
 
-# Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir).
-# db-dump.service is here rather than in UNITS because it is a host job: the kuma
-# half is `podman exec` into the running container, which a container cannot do
-# (deploy/db-dump.service explains).
-USER_UNITS=(
-    "backup.timer"
-    "db-dump.service"
-    "backup-verify.service"
-    "backup-verify.timer"
-    "backup-verify-db.service"
-    "backup-verify-db.timer"
-    "monitor.service"
-    "monitor.timer"
-    "registrations.service"
-    "registrations.timer"
-    "metrics.service"
-    "metrics.timer"
-    "ids.service"
-    "ids.timer"
-)
-# The subset that is enabled --now. monitor.service and metrics.service have no
-# [Install] -- only their timers activate them -- so they must not be enabled on
-# their own.
-USER_TIMERS=(
-    "backup.timer"
-    "backup-verify.timer"
-    "backup-verify-db.timer"
-    "monitor.timer"
-    "registrations.timer"
-    "metrics.timer"
-    "ids.timer"
-)
+# Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir):
+# the same derivation over the two unit suffixes. db-dump.service is here rather
+# than in UNITS because it is a host job: the kuma half is `podman exec` into
+# the running container, which a container cannot do (deploy/db-dump.service
+# explains).
+mapfile -t USER_UNITS < <(deploy_entry_names "$DEPLOY_DIR"/*.service \
+    "$DEPLOY_DIR"/*.timer | LC_ALL=C sort)
+[ "${#USER_UNITS[@]}" -gt 0 ] || die "no user units found in $DEPLOY_DIR"
+
+# The subset that is enabled --now: the timers. monitor.service and
+# metrics.service have no [Install] -- only their timers activate them -- so
+# they must not be enabled on their own.
+mapfile -t USER_TIMERS < <(deploy_entry_names "$DEPLOY_DIR"/*.timer)
 
 # Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
 # The prefixes themselves are declared in stack.conf (CLN_READ_METHODS,
@@ -1858,10 +1811,9 @@ mkdir -p "$QUADLET_DIR"
 # Before the units: podman's event log is a host config, rendered once here
 # rather than flagged at every exec call site (see podman_events_conf).
 podman_events_conf
-for pair in "${UNITS[@]}"; do
-    src="$DEPLOY_DIR/${pair%%:*}"
-    unit="${pair##*:}"
-    render_unit_backedup "$src" "$QUADLET_DIR/$unit"
+for u in "${UNITS[@]}"; do
+    # An .in is a template; the rendered target drops the suffix.
+    render_unit_backedup "$DEPLOY_DIR/$u" "$QUADLET_DIR/${u%.in}"
 done
 log "rendered ${#UNITS[@]} units (mode 600)"
 
