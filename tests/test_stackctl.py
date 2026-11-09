@@ -805,14 +805,18 @@ class TestManifest(unittest.TestCase):
 
     def test_shell_emission_is_eval_safe_in_bash(self):
         # The contract load_manifest relies on: bash evaluates the emission and
-        # gets the same variable names stack.conf used to define.
+        # gets one array per column, index-aligned, plus the *_HOST scalars.
         script = (
             'set -euo pipefail; eval "$(PYTHONPATH=' + shlex_quote(ROOT + "/scripts")
             + ' python3 -m stackctl manifest shell ' + shlex_quote(MANIFEST) + ')"; '
-            'printf "%s\\n" "${#MCP_HOSTS[@]}" "$MCP_HOST" "${#ONION_SERVICES[@]}" '
-            '"${#KUMA_ADD_HOST_HOSTS[@]}" "$KUMA_STATUS_SLUG" "${MCP_HOSTS[0]}" '
-            '"${ONION_SERVICES[2]}" "$BOLTMESH_FRONTEND_HOST" "${#MCP_PROBES[@]}" '
-            '"${MCP_PROBES[0]}"'
+            'printf "%s\\n" "${#MCP_PREFIXES[@]}" "$MCP_HOST" "${#ONION_NAMES[@]}" '
+            '"${#KUMA_ADD_HOST_HOSTS[@]}" "$KUMA_STATUS_SLUG" "${MCP_PREFIXES[0]}" '
+            '"${MCP_CONTAINERS[0]}" "${MCP_PORTS[0]}" '
+            '"${ONION_NAMES[2]}" "${ONION_TARGETS[2]}" "${ONION_MIRRORS[2]}" '
+            '"${ONION_PATHS[2]}" "${ONION_CODES[2]}" '
+            '"$BOLTMESH_FRONTEND_HOST" "${#PROBE_TOKEN_VARS[@]}" '
+            '"${PROBE_TOKEN_VARS[0]}" "${PROBE_ARGS[0]}" '
+            '"${PROBE_NEEDS_NODES[1]}" "${PROBE_SPEND_VARS[3]}"'
         )
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              check=True).stdout.splitlines()
@@ -821,11 +825,20 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(out[2], "5")
         self.assertEqual(out[3], "6")       # mcp + status opt out of --add-host
         self.assertEqual(out[4], "stack")
-        self.assertEqual(out[5], "/searxng:searxng-mcp:8100")
-        self.assertEqual(out[6], "btc-explorer|10.89.0.243:3002|btc.boltmesh.net|/|200,401")
-        self.assertEqual(out[7], "boltmesh.net")
-        self.assertEqual(out[8], "10")
-        self.assertEqual(out[9], 'searxng-mcp|SEARXNG_MCP_TOKEN|get_time|{"tz":"UTC"}|0|')
+        self.assertEqual(out[5], "/searxng")
+        self.assertEqual(out[6], "searxng-mcp")
+        self.assertEqual(out[7], "8100")
+        self.assertEqual(out[8], "btc-explorer")
+        self.assertEqual(out[9], "10.89.0.243:3002")
+        self.assertEqual(out[10], "btc.boltmesh.net")
+        self.assertEqual(out[11], "/")
+        self.assertEqual(out[12], "200,401")
+        self.assertEqual(out[13], "boltmesh.net")
+        self.assertEqual(out[14], "10")
+        self.assertEqual(out[15], "SEARXNG_MCP_TOKEN")
+        self.assertEqual(out[16], '{"tz":"UTC"}')
+        self.assertEqual(out[17], "1")
+        self.assertEqual(out[18], "MONERO_MCP_SPEND_TOKEN")
 
     def test_real_manifest_agrees_with_agents_md(self):
         from stackctl import manifest
@@ -1023,7 +1036,9 @@ loopback_port = 8107
             m = manifest.load(path)
         out = m.shell()
         self.assertIn("MCP_HOST=mcp.example.net", out)
-        self.assertIn("MCP_HOSTS=(/one:one-mcp:8100)", out)
+        self.assertIn("MCP_PREFIXES=(/one)", out)
+        self.assertIn("MCP_CONTAINERS=(one-mcp)", out)
+        self.assertIn("MCP_PORTS=(8100)", out)
 
 
 if __name__ == "__main__":

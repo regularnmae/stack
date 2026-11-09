@@ -1190,23 +1190,24 @@ ensure_data_dirs() {
 
 # --- the service manifest -----------------------------------------------------
 # deploy/services.toml is the ONE declaration of the public surface: the
-# *_HOST domain names, MCP_HOSTS, ONION_SERVICES, the proxy hosts and the
-# status page's monitors (npm-hosts.sh and kuma-monitors.sh reconcile it
-# through their Python cores, scripts/stackctl/). stack.conf no longer
-# carries those lists; this helper is how a bash caller gets them back under
-# the SAME variable names it always sourced, by eval'ing the shell emission
-# of `python3 -m stackctl manifest shell` -- NAME='value' lines and array
-# assignments, nothing else. MCP_PROBES (the per-server probe/token table
-# verify.sh and scripts/rotate.sh consume) is the one emission with no
-# stack.conf predecessor. python3 is a bootstrap dependency (agent-mcp already
-# needed it).
+# *_HOST domain names, the MCP prefixes/containers/ports, the onion services,
+# the proxy hosts and the status page's monitors (npm-hosts.sh and
+# kuma-monitors.sh reconcile it through their Python cores, scripts/stackctl/).
+# stack.conf no longer carries those lists; this helper is how a bash caller
+# gets them back under the SAME variable names it always sourced, by eval'ing
+# the shell emission of `python3 -m stackctl manifest shell` -- NAME='value'
+# lines and array assignments, nothing else. The MCP table leaves as one array
+# per column (MCP_PREFIXES / MCP_CONTAINERS / MCP_PORTS, then the PROBE_*
+# columns aligned with MCP_CONTAINERS) and the onion table the same way
+# (ONION_NAMES / _TARGETS / _MIRRORS / _PATHS / _CODES), so no caller splits a
+# record apart. python3 is a bootstrap dependency (agent-mcp already needed it).
 #
 # The one thing it must never do is run inside stack.conf: bootstrap.sh
 # sources that file standalone (curl | bash, no checkout present), so
 # stack.conf stays plain data and the manifest load is each caller's own
 # explicit step, right after it sources stack.conf.
 #
-#   . "$REPO_DIR/stack.conf"; load_manifest     # then $MCP_HOSTS etc. exist
+#   . "$REPO_DIR/stack.conf"; load_manifest     # then $MCP_PREFIXES etc. exist
 load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
     local repo="${1:-${REPO_DIR:-}}" script_dir out
     [ -n "$repo" ] || die "load_manifest: no repository directory (REPO_DIR is unset)"

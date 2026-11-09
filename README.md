@@ -1817,7 +1817,7 @@ path = "/searxng"
 codes = [401]
 ```
 
-`deploy/install.sh` renders the emitted `ONION_SERVICES` into a marked block at the end of
+`deploy/install.sh` renders the declared onion table into a marked block at the end of
 `$DATA_DIR/tor/torrc` — the rest of that file (the control-password hash, the
 SOCKS policy) is still seeded once and never rewritten — and `./deploy.sh` hashes
 `torrc` alongside the units, so editing the tables and re-running it is all

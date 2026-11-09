@@ -4,7 +4,7 @@
 #   ./verify.sh                 # shallow: container health + the MCP endpoints
 #                               # are gated (401 without a token) and answer an
 #                               # authenticated initialize handshake; every
-#                               # onion service in ONION_SERVICES answers through
+#                               # onion service declared in services.toml answers
 #                               # tor too
 #   ./verify.sh --deep          # additionally call one read tool per endpoint,
 #                               # proving the path through to the daemon, and
@@ -39,8 +39,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
-# The public surface (the *_HOST names, MCP_HOSTS, ONION_SERVICES) is declared
-# in deploy/services.toml; stack.conf keeps the non-registry knobs.
+# The public surface (the *_HOST names, the MCP prefixes, the onion services) is
+# declared in deploy/services.toml; stack.conf keeps the non-registry knobs.
 load_manifest "$REPO_DIR"
 # The tokens live under the data dir now, so resolving it is how we find them.
 resolve_data_dir
@@ -258,25 +258,46 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "MCP endpoints"
-# name|token-var|deep-tool|deep-args|needs-nodes|spend-token-var
-# The list is declared with each server in deploy/services.toml ([mcp.*]) and
-# emitted by the manifest as MCP_PROBES (scripts/lib.sh's load_manifest), so a
-# server added there is probed here without a second table to keep in step. The
-# token file is the container's own token.env by convention. The name is the
-# container name: scripts/lib.sh decides where it is reached -- by name on
-# npm-network for every server but crowdsec-mcp, which runs on the host network
-# and is read through netcheck-host at 127.0.0.1:8113 (mcp_base / mcp_curl). It
-# also names the MCP_HOSTS entry whose loopback port nginx-proxy-manager fronts.
-# The last field is scripts/rotate.sh's; verify.sh does not use it.
-[ -n "${MCP_PROBES[*]:-}" ] \
-    || die "the manifest emitted no MCP_PROBES (run ./deploy.sh)"
+# The servers, their token variables, the one deep tool each answers and whether
+# it needs a chain are declared with each server in deploy/services.toml
+# ([mcp.*]) and emitted by the manifest as index-aligned arrays
+# (MCP_CONTAINERS / PROBE_TOKEN_VARS / PROBE_TOOLS / PROBE_ARGS /
+# PROBE_NEEDS_NODES / PROBE_SPEND_VARS), so a server added there is probed here
+# without a second table to keep in step. The token file is the container's own
+# token.env by convention. The name is the container name: scripts/lib.sh decides
+# where it is reached -- by name on npm-network for every server but crowdsec-mcp,
+# which runs on the host network and is read through netcheck-host at
+# 127.0.0.1:8113 (mcp_base / mcp_curl). The arrays are index-aligned, so
+# MCP_PORTS[$i] is that container's loopback publish -- the port
+# nginx-proxy-manager fronts. The spend column is scripts/rotate.sh's; verify.sh
+# does not use it.
+if [ "${PROBE_TOKEN_VARS+x}" != x ] || [ "${#MCP_CONTAINERS[@]}" -eq 0 ]; then
+    die "the manifest emitted no probe table (run ./deploy.sh)"
+fi
+# One check that the emission is not ragged: a column shorter than the others
+# would pair a container with another server's token, silently.
+manifest_columns_agree() {
+    local n
+    for n in "${#PROBE_TOKEN_VARS[@]}" "${#PROBE_TOOLS[@]}" "${#PROBE_ARGS[@]}" \
+             "${#PROBE_NEEDS_NODES[@]}" "${#PROBE_SPEND_VARS[@]}" \
+             "${#MCP_PREFIXES[@]}" "${#MCP_PORTS[@]}"; do
+        [ "$n" -eq "${#MCP_CONTAINERS[@]}" ] || return 1
+    done
+    return 0
+}
+manifest_columns_agree \
+    || die "the manifest emission is ragged (its columns differ in length)"
 
 # The token each container's endpoint needs, keyed by container name, so the
 # through-nginx-proxy-manager section below can reuse it.
 declare -A EP_ENV=() EP_VAR=()
 
-for e in "${MCP_PROBES[@]}"; do
-    IFS='|' read -r name var tool args needs_nodes _spend_var <<<"$e"
+for i in "${!MCP_CONTAINERS[@]}"; do
+    name="${MCP_CONTAINERS[$i]}"
+    var="${PROBE_TOKEN_VARS[$i]}"
+    tool="${PROBE_TOOLS[$i]}"
+    args="${PROBE_ARGS[$i]}"
+    needs_nodes="${PROBE_NEEDS_NODES[$i]}"
     envfile="$CONFIG_DIR/$name/token.env"
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"
@@ -347,11 +368,11 @@ head2 "MCP through nginx-proxy-manager"
 # public DNS and TLS exist. A configured host answers 401 without a token and a
 # serverInfo handshake with one; an unconfigured one (NPM's default host) does
 # neither, which is a warning rather than a failure until it is set up.
-if [ "${MCP_HOSTS+x}" != x ] || [ "${#MCP_HOSTS[@]}" -eq 0 ]; then
-    warn "MCP_HOSTS is not declared in deploy/services.toml; skipping the proxy checks"
+if [ "${MCP_PREFIXES+x}" != x ] || [ "${#MCP_PREFIXES[@]}" -eq 0 ]; then
+    warn "no MCP prefixes are declared in deploy/services.toml; skipping the proxy checks"
 else
-    for pair in "${MCP_HOSTS[@]}"; do
-        prefix="${pair%%:*}"; rest="${pair#*:}"; name="${rest%%:*}"
+    for i in "${!MCP_PREFIXES[@]}"; do
+        prefix="${MCP_PREFIXES[$i]}"; name="${MCP_CONTAINERS[$i]}"
         # Probe the public URL but connect to NPM itself (--connect-to), so this
         # works before public DNS exists and the certificate still validates:
         # SNI and Host are the real host, only the connection target changes.
@@ -450,14 +471,14 @@ else
     fi
 
     # servers.json is the skills' copy of the public surface: one URL per
-    # MCP_HOSTS prefix. A prefix that moved in the manifest and not here means a
+    # MCP prefix. A prefix that moved in the manifest and not here means a
     # skill calls a URL nginx-proxy-manager no longer serves, so compare the
     # resolved registry with the declaration -- using the CLI's own resolver,
     # never a second copy of the expansion rules. The host is compared
     # separately and only warns: a harness deliberately pointed at another stack
     # (AGENT_MCP_BASE_URL) is the operator's call, a missing prefix is not.
     if [ -r "$AGENT_DIR/lib/config.py" ] && command -v python3 >/dev/null 2>&1 \
-       && [ "${MCP_HOSTS+x}" = x ] && [ "${#MCP_HOSTS[@]}" -gt 0 ]; then
+       && [ "${MCP_PREFIXES+x}" = x ] && [ "${#MCP_PREFIXES[@]}" -gt 0 ]; then
         agent_urls=()
         while IFS= read -r url; do
             [ -n "$url" ] && agent_urls+=("$url")
@@ -466,17 +487,16 @@ else
                 "$AGENT_DIR/lib" 2>/dev/null
         )
         drift=()
-        for entry in "${MCP_HOSTS[@]}"; do
-            prefix="${entry%%:*}"
+        for prefix in "${MCP_PREFIXES[@]}"; do
             printf '%s\n' "${agent_urls[@]}" | grep -qE "^[a-z]+://[^/]+${prefix}$" \
                 || drift+=("$prefix")
         done
         if [ "${#drift[@]}" -gt 0 ]; then
-            bad "servers.json does not cover ${drift[*]} (did MCP_HOSTS change?); update $AGENT_DIR/servers.json"
-        elif [ "${#agent_urls[@]}" -ne "${#MCP_HOSTS[@]}" ]; then
-            bad "servers.json declares ${#agent_urls[@]} endpoint(s) for ${#MCP_HOSTS[@]} MCP_HOSTS prefix(es)"
+            bad "servers.json does not cover ${drift[*]} (did a manifest prefix change?); update $AGENT_DIR/servers.json"
+        elif [ "${#agent_urls[@]}" -ne "${#MCP_PREFIXES[@]}" ]; then
+            bad "servers.json declares ${#agent_urls[@]} endpoint(s) for ${#MCP_PREFIXES[@]} declared prefix(es)"
         else
-            pass "servers.json matches every MCP_HOSTS prefix"
+            pass "servers.json matches every declared MCP prefix"
         fi
         elsewhere=()
         for url in "${agent_urls[@]}"; do
@@ -489,7 +509,7 @@ else
             warn "the skills point at ${elsewhere[*]}, not https://$MCP_HOST (AGENT_MCP_BASE_URL in this shell?)"
         fi
     else
-        warn "servers.json not compared with MCP_HOSTS (no $AGENT_DIR clone, no python3, or no MCP_HOSTS)"
+        warn "servers.json not compared with the declared prefixes (no $AGENT_DIR clone, no python3, or none declared)"
     fi
 
     if [ "$DEEP" = 1 ]; then
@@ -504,21 +524,21 @@ fi
 # ---------------------------------------------------------------------------
 head2 "Onion services (tor)"
 # The same public surface without DNS or a certificate. tor publishes one hidden
-# service per ONION_SERVICES entry (stack.conf) and forwards it; the address is
-# read from tor's own data dir, because it is key material and not declared.
-# The probe goes through tor's SOCKS port from the netcheck container on
-# npm-network (torrc's SocksPolicy allows nothing else) and asks tor to resolve
-# the .onion name itself (--socks5-hostname), exactly as a client does. A fresh
-# service takes a minute to become reachable, so "no answer" is a warning.
-# The mcp entry expects 401: that proves the whole onion -> NPM -> container path
-# and the bearer-token gate, since NPM cannot match an onion by name (see
-# ONION_SERVICES).
+# service per [onion.*] entry and forwards it; the address is read from tor's own
+# data dir, because it is key material and not declared. The probe goes through
+# tor's SOCKS port from the netcheck container on npm-network (torrc's SocksPolicy
+# allows nothing else) and asks tor to resolve the .onion name itself
+# (--socks5-hostname), exactly as a client does. A fresh service takes a minute to
+# become reachable, so "no answer" is a warning. The mcp entry expects 401: that
+# proves the whole onion -> NPM -> container path and the bearer-token gate, since
+# NPM cannot match an onion by name (see [npm.onion_wildcard]).
 TOR_SOCKS="${TOR_SOCKS:-10.89.0.240:9050}"
-if [ "${ONION_SERVICES+x}" != x ] || [ "${#ONION_SERVICES[@]}" -eq 0 ]; then
-    warn "ONION_SERVICES is not declared in deploy/services.toml; skipping the onion checks"
+if [ "${ONION_NAMES+x}" != x ] || [ "${#ONION_NAMES[@]}" -eq 0 ]; then
+    warn "no onion services are declared in deploy/services.toml; skipping the onion checks"
 else
-    for entry in "${ONION_SERVICES[@]}"; do
-        IFS='|' read -r name _target mirrors path expect <<<"$entry"
+    for i in "${!ONION_NAMES[@]}"; do
+        name="${ONION_NAMES[$i]}"; mirrors="${ONION_MIRRORS[$i]}"
+        path="${ONION_PATHS[$i]}"; expect="${ONION_CODES[$i]}"
         addrfile="$DATA_DIR/tor/onion/$name/hostname"
         if [ ! -s "$addrfile" ]; then
             warn "onion $name ($mirrors): tor has published no address yet ($addrfile)"

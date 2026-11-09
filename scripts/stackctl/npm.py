@@ -112,7 +112,7 @@ class NpmApi:
 
 
 def mcp_locations(mcp_hosts: List[manifest.McpHost]) -> List[Dict[str, Any]]:
-    """One location per MCP_HOSTS entry, each rewritten onto that container's
+    """One location per [mcp.*] entry, each rewritten onto that container's
     /mcp. Three fields per entry: the container name is kept for the credential
     path (the endpoint list names its token.env), but NPM forwards to the
     loopback publish -- it is on the host network and cannot resolve a

@@ -86,8 +86,8 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 
 - **`tor` is also the onion publisher, and the onion side does not go through NPM
   the way the clearweb side does.** The `[onion.*]` tables in
-  `deploy/services.toml` are the declaration (emitted to bash as
-  `ONION_SERVICES`); `install.sh` rewrites only the marked region at the end of
+  `deploy/services.toml` are the declaration (emitted to bash as the
+  `ONION_*` arrays); `install.sh` rewrites only the marked region at the end of
   `torrc` so the hash and the `SocksPolicy` are never touched, and `deploy.sh`'s
   `unit_digest` hashes `torrc` so a changed declaration restarts tor. The
   `.onion` address is key material, not config: it comes from

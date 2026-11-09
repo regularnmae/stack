@@ -62,8 +62,8 @@ UNITS_APPLIED_DIGEST=""
 . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
-# The public surface (the *_HOST names, MCP_HOSTS, ONION_SERVICES) is declared
-# in deploy/services.toml; stack.conf keeps the non-registry knobs.
+# The public surface (the *_HOST names, the MCP prefixes, the onion services) is
+# declared in deploy/services.toml; stack.conf keeps the non-registry knobs.
 load_manifest "$REPO_DIR"
 
 # Fallbacks for a manifest that predates the log block, so the summary below
@@ -1070,10 +1070,9 @@ fi
 
 # The summary's prefix list is the manifest's, not a second copy: "/searxng" ->
 # "searxng", joined with "|" (empty when the manifest is old).
-mcp_prefixes=""
-for pair in ${MCP_HOSTS[@]+"${MCP_HOSTS[@]}"}; do
-    prefix="${pair%%:*}"
-    mcp_prefixes+="${mcp_prefixes:+|}${prefix#/}"
+mcp_prefix_list=""
+for prefix in ${MCP_PREFIXES[@]+"${MCP_PREFIXES[@]}"}; do
+    mcp_prefix_list+="${mcp_prefix_list:+|}${prefix#/}"
 done
 
 if [ "$SKIP_DAEMONS" = 1 ]; then
@@ -1142,10 +1141,11 @@ Stack deployed.
                     50002 (SSL, self-signed). Fulcrum indexes alongside
                     bitcoind and accepts wallets once its index has caught up
                     (podman logs fulcrum)
-  MCP over NPM:     https://$MCP_HOST/<${mcp_prefixes}>
+  MCP over NPM:     https://$MCP_HOST/<${mcp_prefix_list}>
                     once $DATA_DIR/config/npm/api.env has the NPM admin login
-  Onion (no DNS):   the same surface as http://<onion>.onion/ (ONION_SERVICES in
-                    deploy/services.toml); the addresses are printed below once
+  Onion (no DNS):   the same surface as http://<onion>.onion/ (the [onion.*]
+                    tables in deploy/services.toml); the addresses are printed
+                    below once
                     tor has published them
   Status page:      uptime-kuma on https://$UPTIME_KUMA_HOST, its monitors
                     declared in deploy/services.toml and reconciled
@@ -1187,10 +1187,10 @@ fi
 # The onion addresses are key material, not configuration (they appear only once
 # tor has started), so they cannot live in stack.conf or a README. Print them when
 # they exist; scripts/npm-hosts.sh prints the same list on its own.
-if [ "${ONION_SERVICES+x}" = x ] && [ "${#ONION_SERVICES[@]}" -gt 0 ]; then
+if [ "${ONION_NAMES+x}" = x ] && [ "${#ONION_NAMES[@]}" -gt 0 ]; then
     onion_lines=""
-    for entry in "${ONION_SERVICES[@]}"; do
-        IFS='|' read -r name _target mirrors _rest <<<"$entry"
+    for i in "${!ONION_NAMES[@]}"; do
+        name="${ONION_NAMES[$i]}"; mirrors="${ONION_MIRRORS[$i]}"
         addrfile="$DATA_DIR/tor/onion/$name/hostname"
         if [ -s "$addrfile" ]; then
             onion_lines="${onion_lines}  http://$(tr -d '\r\n' < "$addrfile")  ($mirrors)"$'\n'

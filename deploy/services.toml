@@ -3,18 +3,18 @@
 # This file owns every cross-cutting registry fact the stack has: the DNS
 # names it answers on, which loopback publishes nginx-proxy-manager forwards
 # to, the MCP path prefixes, the tor onion services, and the status page's
-# monitors. It replaced five parallel lists in stack.conf (MCP_HOSTS,
-# NPM_HOSTS, ONION_SERVICES, the monitor list and the *_HOST scalars), each of
-# which had to be edited in step with the others and with the table in
-# AGENTS.md -- the drift class the CI "service manifest" gate now checks.
+# monitors. It replaced the five tables stack.conf used to carry (the MCP
+# prefixes, the proxy hosts, the onion services, the monitor list and the *_HOST
+# scalars), each of which had to be edited in step with the others and with the
+# table in AGENTS.md -- the drift class the CI "service manifest" gate checks.
 #
 # Who reads it:
 #   * scripts/npm-hosts.sh and scripts/kuma-monitors.sh -- their Python cores
 #     (scripts/stackctl/) load it directly; the bash wrappers only pass its
 #     path. `python3 -m stackctl manifest shell` re-emits the same variable
-#     names the bash callers always sourced from stack.conf (MCP_HOSTS,
-#     ONION_SERVICES, every *_HOST, ...), via scripts/lib.sh's load_manifest,
-#     so deploy.sh, verify.sh and deploy/install.sh are unchanged consumers.
+#     names the bash callers always sourced from stack.conf (every *_HOST, plus
+#     one array per MCP and onion column), via scripts/lib.sh's load_manifest,
+#     so deploy.sh, verify.sh and deploy/install.sh keep reading the same names.
 #   * `python3 -m stackctl manifest check` (CI) validates the file itself and
 #     cross-checks it against AGENTS.md's interface table.
 #
@@ -104,9 +104,10 @@ kuma_add_host = false
 # `probe_args` are the one read-only tool that proves the server reaches its
 # upstream. `needs_nodes` skips the deep call under verify.sh --no-nodes, and
 # `spend_token_var` (only the two money servers have one) is the variable
-# scripts/rotate.sh rotates under --spend. The manifest emits them as
-# MCP_PROBES, so adding a server here adds its probe and its rotation target --
-# there is no second table in verify.sh or rotate.sh to keep in step.
+# scripts/rotate.sh rotates under --spend. The manifest emits them as the
+# PROBE_* columns aligned with MCP_CONTAINERS, so adding a server here adds its
+# probe and its rotation target -- there is no second table in verify.sh or
+# rotate.sh to keep in step.
 # ---------------------------------------------------------------------------
 
 [mcp.searxng]

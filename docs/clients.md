@@ -11,7 +11,8 @@
 - **Tokens are read from `$DATA_DIR/config/<server>/token.env` on every call**,
   never copied into `~/.config/agent-skills/env`.
 - **The URL prefixes are hardcoded in `servers.json`**; only the host comes from
-  `AGENT_MCP_BASE_URL`, and `verify.sh` fails when it disagrees with `MCP_HOSTS`.
+  `AGENT_MCP_BASE_URL`, and `verify.sh` fails when it disagrees with the
+  manifest's MCP prefixes.
 
 ## agent-skills
 
@@ -33,6 +34,6 @@
   `$AGENT_MCP_BASE_URL`, defaulting to `mcp.boltmesh.net`, the default
   `MCP_HOST`; a host that changed `MCP_HOST` must export it, and `verify.sh`
   warns when the two disagree), so `verify.sh` compares the resolved registry
-  with `MCP_HOSTS` and fails on the drift. `agent-mcp` is python3 (stdlib only),
+  with the declared MCP prefixes and fails on the drift. `agent-mcp` is python3 (stdlib only),
   which `bootstrap.sh` now installs for it.
 

@@ -87,8 +87,9 @@ RERENDERED=0
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 # The MCP server table (names, token variables, probe tool/args, spend token)
-# comes from deploy/services.toml via MCP_PROBES, so a server added there is a
-# rotation target here without a second list to keep in step.
+# comes from deploy/services.toml as the manifest's index-aligned arrays, so a
+# server added there is a rotation target here without a second list to keep in
+# step.
 load_manifest "$REPO_DIR"
 
 RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
@@ -254,8 +255,8 @@ edit_bitcoin_conf() { # key value
 }
 
 # torrc is seeded once, so the hash is replaced in place. Only that one line is
-# touched: the onion-service block at the end of the file belongs to
-# ONION_SERVICES and the SocksPolicy lines are hand-written.
+# touched: the onion-service block at the end of the file belongs to the
+# [onion.*] tables and the SocksPolicy lines are hand-written.
 set_torrc_hash() { # hashed-password
     local hash="$1" f="$DATA_DIR/tor/torrc" tmp mode
     [ -f "$f" ] || die "missing $f; run deploy/install.sh first"
@@ -697,25 +698,17 @@ apply_runes() {
 # for the client, a pointer at that file (the value is never printed, and
 # ~/.config/opencode/mcp.env already reads it from there at shell start).
 # The rotation targets and their token specs are the manifest's [mcp.*] table,
-# emitted as MCP_PROBES: container|read-token var|read tool|its args|needs-nodes|
-# spend-token var. The token file is $CONFIG_DIR/<container>/token.env by
-# convention, exactly as verify.sh reads it.
-TOKEN_SERVERS=()
-for _probe in "${MCP_PROBES[@]}"; do
-    IFS='|' read -r _container _var _tool _args _needs _spend <<<"$_probe"
-    TOKEN_SERVERS+=("$_container")
-done
-unset _probe _container _var _tool _args _needs _spend
+# emitted as index-aligned arrays: MCP_CONTAINERS / PROBE_TOKEN_VARS /
+# PROBE_TOOLS / PROBE_ARGS / PROBE_SPEND_VARS. The token file is
+# $CONFIG_DIR/<container>/token.env by convention, exactly as verify.sh reads it.
+TOKEN_SERVERS=(${MCP_CONTAINERS[@]+"${MCP_CONTAINERS[@]}"})
 
-# env-file | read-token var | a read tool it answers | its args | spend-token var
-token_spec() { # server
-    local probe container var tool args _needs spend
-    for probe in "${MCP_PROBES[@]}"; do
-        IFS='|' read -r container var tool args _needs spend <<<"$probe"
-        [ "$container" = "$1" ] || continue
-        printf '%s|%s|%s|%s|%s' "$CONFIG_DIR/$container/token.env" \
-            "$var" "$tool" "$args" "$spend"
-        return 0
+# The index of a server in those columns, or non-zero when it is not declared.
+# One lookup serves every field, because the columns are aligned.
+probe_index() { # server -> index
+    local i
+    for i in "${!MCP_CONTAINERS[@]}"; do
+        [ "${MCP_CONTAINERS[$i]}" = "$1" ] && { printf '%s' "$i"; return 0; }
     done
     return 1
 }
@@ -745,9 +738,14 @@ verify_token() { # server envfile readvar tool args [spend]
 }
 
 apply_token() {
-    local server="$1" spec envf readvar tool args spendvar var new
-    spec=$(token_spec "$server") || die "no bearer token for '$server' (servers: ${TOKEN_SERVERS[*]})"
-    IFS='|' read -r envf readvar tool args spendvar <<< "$spec"
+    local server="$1" i envf readvar tool args spendvar var new
+    i=$(probe_index "$server") \
+        || die "no bearer token for '$server' (servers: ${TOKEN_SERVERS[*]})"
+    envf="$CONFIG_DIR/$server/token.env"
+    readvar="${PROBE_TOKEN_VARS[$i]}"
+    tool="${PROBE_TOOLS[$i]}"
+    args="${PROBE_ARGS[$i]}"
+    spendvar="${PROBE_SPEND_VARS[$i]}"
     [ -f "$envf" ] || die "missing $envf; run deploy/install.sh first"
 
     var="$readvar"
@@ -1158,7 +1156,7 @@ fi
 case "$TARGET" in
     bitcoin-rpc|tor-control|runes|searxng-secret|postgres|boltmesh-keys|restic) ;;
     token:*)
-        token_spec "${TARGET#token:}" >/dev/null \
+        probe_index "${TARGET#token:}" >/dev/null \
             || die "unknown server '${TARGET#token:}' (servers: ${TOKEN_SERVERS[*]})"
         ;;
     *) die "unknown target: $TARGET (try --list)" ;;

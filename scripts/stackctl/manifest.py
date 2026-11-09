@@ -3,10 +3,10 @@
 # This file owns every cross-cutting registry fact the stack has -- the DNS
 # names it answers on, which loopback publishes nginx-proxy-manager forwards to,
 # the MCP path prefixes, the tor onion services, and the status page's monitors
-# -- so there is one declaration and no parallel lists. It replaced five lists in
-# stack.conf (MCP_HOSTS, NPM_HOSTS, ONION_SERVICES, KUMA_MONITORS and the *_HOST
-# scalars), each of which had to be edited in step with the others and with the
-# table in AGENTS.md.
+# -- so there is one declaration and no parallel lists. It replaced the five
+# tables stack.conf used to carry (the MCP prefixes, the proxy hosts, the onion
+# services, the status-page monitors and the *_HOST scalars), each of which had
+# to be edited in step with the others and with the table in AGENTS.md.
 #
 # Two audiences read the TOML, and neither sees a second grammar:
 #
@@ -175,22 +175,36 @@ class Manifest:
         self.kuma_loopback: int = 8107
 
     # --- the emission the bash callers eval -------------------------------
+    # Bash cannot read JSON, so each table leaves as one array per column,
+    # index-aligned: MCP_CONTAINERS[i] is the server PROBE_TOKEN_VARS[i] names.
+    # No field is packed into a delimited string, so nothing downstream has to
+    # take a record apart (and a probe argument may contain any character).
     def shell(self) -> str:
         _validate_probes(self)
         lines = []
         for host in self.hosts.values():
             lines.append(f"{host.env}={shlex.quote(host.domain)}")
         if self.mcp:
-            entries = " ".join(shlex.quote(f"{m.prefix}:{m.container}:{m.port}") for m in self.mcp)
-            lines.append(f"MCP_HOSTS=({entries})")
-            # Probe/token table: container|token-var|tool|args|needs-nodes|spend-var.
-            # The env file is the container's own token.env by convention, so it
-            # is not repeated here.
-            probes = " ".join(shlex.quote(_probe_entry(m)) for m in self.mcp)
-            lines.append(f"MCP_PROBES=({probes})")
+            lines.append(_array("MCP_PREFIXES", [m.prefix for m in self.mcp]))
+            lines.append(_array("MCP_CONTAINERS", [m.container for m in self.mcp]))
+            lines.append(_array("MCP_PORTS", [str(m.port) for m in self.mcp]))
+            # The probe/token columns, aligned with MCP_CONTAINERS. The env file
+            # is the container's own token.env by convention, so it is not
+            # repeated here.
+            lines.append(_array("PROBE_TOKEN_VARS", [m.token_var for m in self.mcp]))
+            lines.append(_array("PROBE_TOOLS", [m.probe_tool for m in self.mcp]))
+            lines.append(_array("PROBE_ARGS", [m.probe_args for m in self.mcp]))
+            lines.append(_array("PROBE_NEEDS_NODES",
+                                ["1" if m.needs_nodes else "0" for m in self.mcp]))
+            lines.append(_array("PROBE_SPEND_VARS",
+                                [m.spend_token_var for m in self.mcp]))
         if self.onion:
-            entries = " ".join(shlex.quote(_onion_entry(o)) for o in self.onion)
-            lines.append(f"ONION_SERVICES=({entries})")
+            lines.append(_array("ONION_NAMES", [o.name for o in self.onion]))
+            lines.append(_array("ONION_TARGETS", [o.target for o in self.onion]))
+            lines.append(_array("ONION_MIRRORS", [o.mirrors for o in self.onion]))
+            lines.append(_array("ONION_PATHS", [o.path for o in self.onion]))
+            lines.append(_array("ONION_CODES",
+                                [",".join(o.codes) for o in self.onion]))
         # The vhosts uptime-kuma's own monitors may resolve on the host
         # (install.sh renders --add-host=<domain>:host-gateway per entry):
         # every host whose [host.*] did not opt out.
@@ -203,6 +217,12 @@ class Manifest:
             lines.append(f"KUMA_STATUS_TITLE={shlex.quote(self.kuma_page.title)}")
             lines.append(f"KUMA_STATUS_GROUP={shlex.quote(self.kuma_page.group)}")
         return "\n".join(lines) + "\n"
+
+
+def _array(name: str, values: List[str]) -> str:
+    """One eval-safe bash array assignment; an empty value stays a placeholder
+    so every column keeps the same length."""
+    return f"{name}=({' '.join(shlex.quote(v) for v in values)})"
 
 
 # --- reading the TOML --------------------------------------------------------
@@ -234,26 +254,10 @@ def _number(value: Any, where: str, field: str, low: int, high: int) -> int:
     return value
 
 
-def _probe_entry(e: McpHost) -> str:
-    """One verify.sh probe record. `|` is the bash field separator, so the
-    fields must not contain one; probe_args is JSON and validated below. The
-    last field is the server's spend-token variable (empty for most), which
-    scripts/rotate.sh reads from the same record."""
-    return "|".join((
-        e.container, e.token_var, e.probe_tool, e.probe_args,
-        "1" if e.needs_nodes else "0", e.spend_token_var,
-    ))
-
-
-def _onion_entry(o: OnionService) -> str:
-    """One install.sh/verify.sh onion record: name|target|mirrors|path|codes."""
-    return "|".join((o.name, o.target, o.mirrors, o.path, ",".join(o.codes)))
-
-
 def _validate_probes(m: "Manifest") -> None:
-    """Every [mcp.*] must declare its probe: the probe table is consumed as a
-    complete list, and a server silently missing from it is exactly the drift
-    this manifest exists to prevent."""
+    """Every [mcp.*] must declare its probe: the probe columns are consumed as a
+    complete, index-aligned table, and a server silently missing from it is
+    exactly the drift this manifest exists to prevent."""
     for e in m.mcp:
         where = f"[mcp.{e.container}]"
         if not e.token_var:
@@ -263,8 +267,6 @@ def _validate_probes(m: "Manifest") -> None:
             die(f"deploy/services.toml: {where} token_var must be an env-var name")
         if not e.probe_tool:
             die(f"deploy/services.toml: {where} needs probe_tool")
-        if "|" in e.probe_args:
-            die(f"deploy/services.toml: {where} probe_args must not contain '|'")
         try:
             args = json.loads(e.probe_args)
         except ValueError:

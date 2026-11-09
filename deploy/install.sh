@@ -39,8 +39,8 @@ USER_UNIT_DIR="$CONFIG_HOME/systemd/user"
 . "$REPO_DIR/scripts/lib.sh"
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
-# The public surface (the *_HOST names, MCP_HOSTS, ONION_SERVICES) is declared
-# in deploy/services.toml; stack.conf keeps the non-registry knobs.
+# The public surface (the *_HOST names, the MCP prefixes, the onion services) is
+# declared in deploy/services.toml; stack.conf keeps the non-registry knobs.
 load_manifest "$REPO_DIR"
 # Where the backup job keeps its restic repository (mounted at /repo). Defined
 # in stack.conf; default here so install.sh works standalone too.
@@ -1261,26 +1261,25 @@ if command -v podman >/dev/null 2>&1; then
     ensure_local_image "$TOR_IMAGE" "$REPO_DIR/tor"
 fi
 
-# The onion services, rendered from ONION_SERVICES (deploy/services.toml). Tor's own
-# config is a hand-tuned file (the control-password hash is derived once and the
-# SocksPolicy is deliberate), so it is seeded once and never rewritten as a
-# whole. The hidden-service part is the exception: it is a *declaration*, so it
-# lives in a marked region that this installer rewrites on every run. Changing
-# ONION_SERVICES is therefore enough -- deploy.sh digests torrc alongside the
+# The onion services, rendered from the [onion.*] tables (deploy/services.toml).
+# Tor's own config is a hand-tuned file (the control-password hash is derived once
+# and the SocksPolicy is deliberate), so it is seeded once and never rewritten as
+# a whole. The hidden-service part is the exception: it is a *declaration*, so it
+# lives in a marked region that this installer rewrites on every run. Changing an
+# [onion.*] entry is therefore enough -- deploy.sh digests torrc alongside the
 # units and restarts tor when it changed.
-ONION_BEGIN="# >>> onion services (rendered by deploy/install.sh from ONION_SERVICES)"
+ONION_BEGIN="# >>> onion services (rendered by deploy/install.sh from [onion.*])"
 ONION_END="# <<< onion services"
 
 onion_stanzas() {
-    local entry name target _rest
-    [ "${ONION_SERVICES+x}" = x ] || return 0
-    for entry in "${ONION_SERVICES[@]}"; do
-        IFS='|' read -r name target _rest <<<"$entry"
+    local i
+    [ "${ONION_NAMES+x}" = x ] || return 0
+    for i in "${!ONION_NAMES[@]}"; do
         # HiddenServicePort applies to the HiddenServiceDir above it, and the
         # directory must exist or be creatable: the mount is there, tor makes the
         # per-service dir 700 itself.
-        printf 'HiddenServiceDir /var/lib/tor/onion/%s\n' "$name"
-        printf 'HiddenServicePort 80 %s\n' "$target"
+        printf 'HiddenServiceDir /var/lib/tor/onion/%s\n' "${ONION_NAMES[$i]}"
+        printf 'HiddenServicePort 80 %s\n' "${ONION_TARGETS[$i]}"
     done
 }
 
@@ -1288,18 +1287,8 @@ onion_stanzas() {
 # when absent (an adopted host predates it). Everything outside the markers --
 # the hash, the SOCKS policy, the log line -- is left byte for byte.
 sync_torrc_onions() { # torrc
-    local torrc="$1" tmp stanzas entry name target
+    local torrc="$1" tmp stanzas
     [ -s "$torrc" ] || return 0
-    # Validated here, in the main shell: a die inside $(onion_stanzas) would only
-    # end the subshell and quietly install no services at all.
-    if [ "${ONION_SERVICES+x}" = x ]; then
-        for entry in "${ONION_SERVICES[@]}"; do
-            IFS='|' read -r name target _ <<<"$entry"
-            if [ -z "$name" ] || [ -z "$target" ]; then
-                die "bad ONION_SERVICES entry: $entry (want \"name|target|mirrors|path|code\")"
-            fi
-        done
-    fi
     stanzas=$(onion_stanzas)
     tmp=$(mktemp "$torrc.XXXXXX")
     awk -v b="$ONION_BEGIN" -v e="$ONION_END" '
