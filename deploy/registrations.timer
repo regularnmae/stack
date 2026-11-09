@@ -1,0 +1,22 @@
+# The schedule for the BoltMesh signup watcher in deploy/registrations.service.
+#
+# Quadlet has no .timer type, so this is a plain systemd USER unit (like
+# monitor.timer). deploy/install.sh installs it to ~/.config/systemd/user/ and
+# runs `systemctl --user enable --now registrations.timer`; it activates
+# registrations.service.
+#
+# Every minute: one indexed SELECT against the users table, and the mail itself
+# is delayed ~30s more by Alertmanager's group_wait. Persistent=true catches up
+# after a reboot; the watermark makes that a no-op unless people signed up while
+# the host was down -- which is exactly when they should be mailed.
+[Unit]
+Description=Watch for new BoltMesh signups
+
+[Timer]
+OnCalendar=*:0/1
+RandomizedDelaySec=15s
+Persistent=true
+Unit=registrations.service
+
+[Install]
+WantedBy=timers.target

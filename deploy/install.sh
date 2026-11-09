@@ -538,6 +538,8 @@ USER_UNITS=(
     "backup-verify-db.timer"
     "monitor.service"
     "monitor.timer"
+    "registrations.service"
+    "registrations.timer"
     "metrics.service"
     "metrics.timer"
     "ids.service"
@@ -551,6 +553,7 @@ USER_TIMERS=(
     "backup-verify.timer"
     "backup-verify-db.timer"
     "monitor.timer"
+    "registrations.timer"
     "metrics.timer"
     "ids.timer"
 )
@@ -1871,6 +1874,10 @@ The monitor runs every 5 minutes (monitor.timer) and pushes its alert set to
   $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, and the dead-man's
   switch (MONITOR_PING_URL) is set in $CONFIG_DIR/monitoring/monitor.env.
   Prove the path with scripts/monitor.sh --test.
+BoltMesh signups are mailed one per registration (registrations.timer, every
+  minute): scripts/registrations.sh --dry-run shows what would be sent and
+  --test proves the severity=info route. The existing accounts are seeded as
+  already seen on the first run, so nothing historical is mailed.
 Metrics are collected every minute (metrics.timer) and stored for
   ${METRICS_RETENTION} in $DATA_DIR/monitoring/vm; read them at
   http://127.0.0.1:8428/vmui over an SSH tunnel (no public host, on purpose).

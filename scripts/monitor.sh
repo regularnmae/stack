@@ -134,6 +134,7 @@ MONITOR_IDS_MAX_AGE_MIN=$(monitor_var MONITOR_IDS_MAX_AGE_MIN)
 MONITOR_IDS_ALERT_WARN=$(monitor_var MONITOR_IDS_ALERT_WARN)
 MONITOR_BOUNCER_MAX_AGE_MIN=$(monitor_var MONITOR_BOUNCER_MAX_AGE_MIN)
 MONITOR_AUDIT_MAX_AGE_MIN=$(monitor_var MONITOR_AUDIT_MAX_AGE_MIN)
+MONITOR_REGISTRATIONS_MAX_AGE_MIN=$(monitor_var MONITOR_REGISTRATIONS_MAX_AGE_MIN)
 
 # Defaults live here, not only in monitor.env, so an older env file (one written
 # before these checks existed) still monitors. The helper and the one threshold
@@ -181,6 +182,10 @@ THRESH_ALERT_FOR=$(num_or "${MONITOR_ALERT_FOR:-}" 600)
 THRESH_BOUNCER_AGE_M=$(num_or "${MONITOR_BOUNCER_MAX_AGE_MIN:-}" 5)
 # The audit report runs every five minutes; four missed runs is a stopped timer.
 THRESH_AUDIT_AGE_M=$(num_or "${MONITOR_AUDIT_MAX_AGE_MIN:-}" 20)
+# The signup watcher runs every minute. Twenty missed runs is a stopped timer or
+# a host that cannot reach postgres. A warning, not a failure: nothing about the
+# site is wrong, only the notification that somebody signed up.
+THRESH_REG_AGE_M=$(num_or "${MONITOR_REGISTRATIONS_MAX_AGE_MIN:-}" 20)
 
 PROBLEMS=()
 WARNS=()
@@ -1002,6 +1007,31 @@ if command -v logger >/dev/null 2>&1 && command -v journalctl >/dev/null 2>&1; t
         fi
     else
         fail "the syslog socket is dead, so sshd/PAM/sudo events are dropped unrecorded (${auth_err:-logger failed})"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# The BoltMesh signup watcher (scripts/registrations.sh,
+# deploy/registrations.timer). Judged off its status file's ok_epoch, not the
+# timer: a unit can read "active" while every run fails. A warning rather than a
+# failure because nothing about the site is broken -- but this is the only thing
+# that mails a registration, so it must fail loudly enough to be noticed.
+# ---------------------------------------------------------------------------
+REG_STATUS_FILE="$AUDIT_DIR/registrations.status"
+if [ ! -f "$REG_STATUS_FILE" ]; then
+    soft "no signup watcher status yet (deploy/registrations.timer has not run)"
+else
+    status_verdict "$REG_STATUS_FILE"
+    if [ "$STATUS_RESULT" = fail ]; then
+        soft "the signup watcher is failing: ${STATUS_DETAIL:-see $AUDIT_DIR/registrations.log}"
+    elif [ -z "$STATUS_AGE_S" ]; then
+        soft "the signup watcher status has no ok_epoch yet"
+    elif [ "$(( STATUS_AGE_S / 60 ))" -gt "$THRESH_REG_AGE_M" ]; then
+        soft "the signup watcher has not run for $(( STATUS_AGE_S / 60 )) min (systemctl --user status registrations.timer)"
+    elif [ "$(env_value "$REG_STATUS_FILE" skipped)" = 1 ]; then
+        ok "signups: watcher live, skipped (no BoltMesh app tier on this host)"
+    else
+        ok "signups: watcher live, $(env_value "$REG_STATUS_FILE" new) new in the last run"
     fi
 fi
 

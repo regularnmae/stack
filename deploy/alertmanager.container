@@ -49,10 +49,11 @@ User=0
 # deploy/examples/monitoring/alertmanager.yml.example and owned by the operator
 # from then on, because it holds the SMTP credential.
 #
-# The DIRECTORY is mounted, not the file. Alertmanager watches the config path
-# and reloads on change, but a single-file bind mount keeps the inode it opened,
-# so an edited file behind a file mount would never be read (the same trap
-# victoriametrics.container documents for scrape.yml).
+# The DIRECTORY is mounted, not the file, so an atomic replace (an editor's
+# write-temp-then-rename) does not leave the container reading a deleted inode.
+# That does NOT buy an automatic reload: v0.34 has no config file watcher, so an
+# edit takes effect only after `curl -X POST http://127.0.0.1:9093/-/reload`
+# (or SIGHUP) -- see the example config's header.
 Volume=@CONFIG_DIR@/monitoring/alertmanager:/etc/alertmanager:ro,z
 
 # Silences and the notification log. Regenerable (losing a silence un-mutes an

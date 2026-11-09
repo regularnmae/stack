@@ -802,6 +802,20 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet mo
 else
     warn "monitor.timer is not active (systemctl --user status monitor.timer)"
 fi
+# The signup watcher is the one unit that only *notifies*: losing it breaks no
+# service, so a missing or stopped timer is a warning here and not a failure.
+# scripts/monitor.sh separately warns on a stale registrations.status.
+REG_TIMER="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/registrations.timer"
+if [ -f "$REG_TIMER" ]; then
+    pass "registrations.timer installed"
+else
+    warn "registrations.timer is not installed (run deploy/install.sh); signups are not mailed"
+fi
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet registrations.timer 2>/dev/null; then
+    pass "registrations.timer is active"
+else
+    warn "registrations.timer is not active (systemctl --user status registrations.timer)"
+fi
 AUDIT_DIR="$DATA_DIR/audit"
 if [ -d "$AUDIT_DIR" ]; then
     pass "audit dir present ($AUDIT_DIR)"

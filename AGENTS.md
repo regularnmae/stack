@@ -39,6 +39,7 @@ credentials.
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
 ./scripts/logs.sh --since 1h        # cross-service log search (LogsQL; UI on :9428)
+./scripts/registrations.sh --dry-run # what the BoltMesh signup watcher would mail
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract (the CI gate)
 ./scripts/btcpay-wallet.sh          # import the view-only BTCPay Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / verify / inspect

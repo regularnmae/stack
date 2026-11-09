@@ -1036,6 +1036,14 @@ check the data path are in `docs/units.md`, "Healthchecks follow a contract".
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
   `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
+- `scripts/registrations.sh` — one alert per **BoltMesh signup**, from
+  `deploy/registrations.timer` every minute. It reads the app's `users` table
+  (`podman exec postgres psql`) rather than a log line, keeps a
+  `(created_at, id)` watermark so a failed push is retried instead of lost, and
+  seeds it on first run so the accounts that already exist are not mailed. This
+  is an event, not a fault: it does not go through `monitor.sh`, and
+  Alertmanager routes `severity="info"` to a receiver that sends no "recovered"
+  mail. Run it by hand with `--dry-run` or `--test`.
 - `scripts/spend-audit.sh` — the spend tripwire (below); also runnable alone.
 
 The monitor reads the daemons and the host **directly**; it never queries the
@@ -1066,6 +1074,15 @@ numbers in the annotation), and nothing is pushed until it has been failing for
 `MONITOR_ALERT_FOR` (600s, two sweeps). A recovery is pushed explicitly (an
 `endsAt` in the past) on the next sweep that sees it, so recoveries are prompt
 and a monitor that dies cannot fake one.
+
+**Events ride the same path but not the same state machine.** A BoltMesh signup
+is not a fault, so it never enters `monitor.sh`: `scripts/registrations.sh`
+pushes it once with `severity="info"`, a per-signup `signup` label and an
+`endsAt` ten minutes out. The config's `severity="info"` sub-route groups per
+signup (`group_by: ['signup']`) and delivers to `stack-signups`, which sets
+`send_resolved: false` — otherwise every signup would also mail a meaningless
+"recovered". `MONITOR_ALERTMANAGER_URL=off` turns the push off for both, and the
+signups stay in `$DATA_DIR/audit/registrations.log`.
 
 **Mail is off until you fill in
 `$DATA_DIR/config/monitoring/alertmanager/alertmanager.yml`** (mode 600, seeded

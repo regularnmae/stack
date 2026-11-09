@@ -925,6 +925,13 @@ if [ -n "$ONLY" ]; then
         # once now. monitor.service is oneshot and takes no arguments.
         sync_units
         start_unit monitor
+    elif [ "$ONLY" = registrations ]; then
+        # The signup watcher (scripts/registrations.sh): run one pass now rather
+        # than waiting for the next minute. A hand run of the script is the way to
+        # see what it would mail (`--dry-run`) or to prove the channel
+        # (`--test`); this branch is the "check now" the timer already does.
+        sync_units
+        start_unit registrations
     elif [ "$ONLY" = btcpay ]; then
         # btcpay's restart belongs after postgres and nbxplorer are started, so
         # the digest pass leaves it to start_btcpay. The databases, plugin

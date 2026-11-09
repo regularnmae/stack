@@ -4,7 +4,8 @@ How a fault becomes a page: the host-side sweep, the Alertmanager hop, and the
 one place metrics and alerting touch. Read this before touching
 `scripts/monitor.sh`, `monitor.env.example`, `alertmanager.yml`, or
 `scripts/metrics.sh`. The operator narrative is README's "Monitoring & the spend
-tripwire".
+tripwire". Signups are the one event on this path rather than a fault; they are
+produced by `scripts/registrations.sh` (see "Events are not faults").
 
 ## Invariants
 
@@ -18,6 +19,10 @@ tripwire".
 - **A failed delivery is read back on the next sweep**, because the alert path
   cannot report itself.
 - **The alert path is the host's own `curl`/`jq`, never `net_curl`.**
+- **Events ride the alert path but never the monitor's state machine.** A
+  signup is not a condition that clears: it is pushed once, from its own timer,
+  with `severity="info"` and its own label, and ends by `endsAt`. The monitor's
+  hold-down and explicit resolution would turn one event into two mails.
 
 ## The monitor
 
@@ -38,7 +43,8 @@ tripwire".
   that check is the only thing keeping a new threshold discoverable. It carries
   the host checks (disk, inodes, disk saturation,
   backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
-  hottest sensor, a stale metrics textfile, the syslog socket) and the
+  hottest sensor, a stale metrics textfile, the syslog socket, the signup
+  watcher's freshness) and the
   chain/daemon checks (a
   `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
   peers/channels, monerod's lag, the wallet's lag).
@@ -96,6 +102,54 @@ tripwire".
   `User=0`, which under rootless podman is the login user (same as
   `victoriametrics`), not an escalation. Proving the path end to end is
   `scripts/monitor.sh --test`.
+
+- **Editing `alertmanager.yml` needs an explicit reload.** Alertmanager v0.34
+  ships no config-file watcher (the process holds no inotify fd at all: verified
+  on this host), so an edit — even an atomic write/rename — changes nothing
+  until `curl -X POST http://127.0.0.1:9093/-/reload` (or SIGHUP), and
+  `alertmanager_config_last_reload_successful` is the proof that it took. The
+  comments in `alertmanager.container` and the example used to claim otherwise,
+  which is exactly how a route can be added and silently not exist.
+
+## Events are not faults
+
+- **A registration is an event, so it gets its own producer and its own route.**
+  `scripts/registrations.sh` (host script, `deploy/registrations.timer` every
+  minute) reads new rows from BoltMesh's `users` table through
+  `podman exec postgres psql` — the row is the record; the app's one journal
+  line (`User registered successfully: ID <uuid>`, in
+  `app/auth/services/registration.py`) carries neither username nor email, and an
+  OAuth signup (`app/auth/services/oauth.py`) writes no such line at all. It is
+  not folded into `monitor.sh` because every monitor section is a condition that
+  clears: the flap damper would hold a signup for `MONITOR_ALERT_FOR` and the
+  explicit resolution would mail a second time.
+- **Each signup is pushed once, with its own label and its own group.** The
+  alert is `alertname=boltmesh_signup`, `severity=info`, plus `signup=<uuid>`;
+  without that per-signup label Alertmanager sees one label set and folds a
+  second signup into the first. The `severity="info"` sub-route sets
+  `group_by: ['signup']` for the same reason one level lower: with the inherited
+  `group_by: ['severity']`, a signup could be folded into a group whose
+  notification was already sent, and — this was observed while testing — a group
+  whose notification log entry survived an Alertmanager restart held the next
+  signup until `group_interval`, after which an alert that had already passed its
+  `endsAt` was gone and mailed nothing. A unique group key has no such history.
+  `endsAt` is ten minutes out, so it fires once and clears itself.
+  `alertmanager.yml` routes `severity="info"` to `stack-signups`, whose
+  `send_resolved: false` is load-bearing: the default receiver mails
+  resolutions, and every registration would otherwise arrive with a meaningless
+  "recovered".
+- **The watermark is the state machine, and it is `(created_at, id)`.**
+  `$DATA_DIR/audit/registrations.status` holds the last row pushed; ids are
+  UUIDs, so the pair is what orders two rows sharing a microsecond. A failed
+  push leaves the watermark alone (so the mail is late, never lost) and the
+  *first* run seeds it from the newest existing row, because deploying this must
+  not mail the accounts that already exist. `--dry-run` shows what would be sent;
+  `--test` proves the `info` route without touching the watermark.
+- **A dead watcher is a warning, not a page.** The sweep reads the status
+  file's `ok_epoch` against `MONITOR_REGISTRATIONS_MAX_AGE_MIN` (20, i.e. twenty
+  missed runs) and warns; the site is fine, only the notification is missing.
+  `--skip-apps` hosts have no postgres unit at all, so the watcher records
+  `skipped=1` instead of failing every minute.
 
 ## Metrics are history
 

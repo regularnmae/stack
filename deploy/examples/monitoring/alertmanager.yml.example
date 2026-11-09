@@ -13,8 +13,14 @@
 #                        alerts are grouped into one mail, what inhibits what,
 #                        and where it is delivered.
 #
-# Alertmanager watches this path and reloads on change, so an edit needs no
-# restart. Validate before saving (a bad config is refused and the old one keeps
+# Alertmanager does NOT watch this file (v0.34 has no config file watcher; there
+# is no inotify fd on the process and an edit changes nothing until you say so).
+# Reload it explicitly, then confirm the reload took:
+#
+#   curl -X POST http://127.0.0.1:9093/-/reload
+#   curl -s http://127.0.0.1:9093/metrics | grep config_last_reload_successful
+#
+# Validate before saving (a bad config is refused and the old one keeps
 # running, which is silent until you look):
 #
 #   podman exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
@@ -80,6 +86,24 @@ route:
   # mail" path. Without it, one lost mail means the fault is silent until the
   # next state change.
   repeat_interval: 4h
+  routes:
+    # Registrations are EVENTS, not faults (scripts/registrations.sh). Each one
+    # is pushed once, with its own `signup` label, and carries an endsAt ten
+    # minutes out so it cannot accumulate into an active alert list. That also
+    # means the resolve is automatic -- which is why this sub-route exists: the
+    # default receiver sends resolved mail, and every signup would produce a
+    # second "recovered" message that means nothing.
+    - receiver: stack-signups
+      # One aggregation group per signup: `signup` is the unique id, so a new
+      # registration is never folded into an earlier group's notification window,
+      # and the notification log's restart dedupe (a group already notified
+      # within repeat_interval) can never match a later signup. This is what made
+      # the difference in testing: with the inherited group_by ['severity'], a
+      # signup that arrived after a restart was held by the old group's nflog
+      # entry until group_interval, and one that ended before that never mailed.
+      group_by: ['signup']
+      matchers:
+        - severity = "info"
 
 receivers:
   - name: stack-email
@@ -94,6 +118,15 @@ receivers:
     #     send_resolved: true
     #     # The default HTML/text templates list every alert in the group with
     #     # its annotations. Customise with `html:` / `text:` if you want.
+
+  # Signature-less events (BoltMesh signups today). Same mailbox unless you want
+  # them apart -- point `to:` somewhere else and they will not mix with pages.
+  # send_resolved MUST stay false: the alert ends by its own endsAt, and a
+  # resolved mail per signup is exactly the noise this route exists to stop.
+  - name: stack-signups
+    # email_configs:
+    #   - to: you@example.com
+    #     send_resolved: false
 
 # Inhibition: one real fault usually produces several warnings -- a full disk
 # makes every chain look stale, a dead node makes every MCP check look slow. A
