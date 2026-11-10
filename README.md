@@ -479,106 +479,68 @@ rebuilt and the state comes out of the backup repository: see
 ## Backup & restore
 
 `install.sh` installs a nightly, encrypted [restic](https://restic.net) backup of
-the things in `$DATA_DIR` that cannot be re-downloaded:
+everything in `$DATA_DIR` that cannot be re-downloaded:
 
-- `cln/` — the CLN node identity, channel state and onion keys
+- `cln/` — the CLN identity, channel state and onion keys
 - `btcpay/` — BTCPay's datadir, the pinned Monero plugin and the view-only wallet
-- `tor/` — `torrc` and the onion services' keys, which are what make every
-  `.onion` address stable (see [Tor onion services](#tor-onion-services))
+- `tor/` — `torrc` and the onion services' keys (see [Tor onion services](#tor-onion-services))
 - `config/` — every token, rune and secret
 - `npm/` — nginx-proxy-manager's config and TLS material
-- `audit/` — the monitor's log and the spend tripwire baselines (see
-  [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire)), plus the
-  unit digests (`units.rendered`/`units.applied`)
-- `uptime-kuma/` — the status page's own state (its monitors, history and login;
-  UI-configured, see [Status page](#status-page)), minus the live datadir
-- `postgres-dump/` — `pg_dumpall` of the BoltMesh database, taken by
-  `deploy/postgres-dump.container` immediately before each backup run
-- `npm-dump/` — NPM's SQLite database, copied through SQLite's online backup
-  API by `scripts/db-dump.sh` immediately before each run
-- `uptime-kuma-dump/` — kuma's embedded-MariaDB database as a `mariadb-dump
-  --single-transaction`, written by the same job
+- `audit/` — the monitor's log, the spend baselines and the unit digests
+- `uptime-kuma/` — the status page's state (see [Status page](#status-page)), minus
+  the live datadir
+- `postgres-dump/`, `npm-dump/`, `uptime-kuma-dump/` — the three live databases as
+  dumps, taken immediately before each run
 
-**Every live database is a dump, never a file copy.** The three of them —
-BoltMesh's Postgres cluster (`postgres/`), NPM's `npm/data/database.sqlite` and
-kuma's `uptime-kuma/mariadb/` datadir — are deliberately **excluded** from the
-snapshot (`BACKUP_EXCLUDES` in `stack.conf`), for the same reason: a file-by-file
-copy of something a daemon is writing is only crash-recoverable, and restic reads
-each file at its own instant, so even a tree that would recover from a crash
-image can come back with a redo log and data pages from different moments. Two
-host jobs write the dumps just before restic starts (`postgres-dump.service`,
-`db-dump.service`); each validates its output and only then renames it into
-place, so a failed dump leaves the previous copy rather than a torn one.
-`monitor.timer` fails on a dump that stops being refreshed.
+The chains, the Electrum index, `searxng/`, `bin/` and the raw `postgres/` cluster
+are excluded: large, and regenerable. The live databases are **dumps, never file
+copies** — a file-by-file copy of something a daemon is writing is only
+crash-recoverable. `docs/backup.md` carries that reasoning, the set's declaration
+(`BACKUP_PATHS`/`BACKUP_EXCLUDES` in `stack.conf`) and what each drill proves.
 
-The chains (`bitcoin/`, `monero/`), the Electrum index (`fulcrum/`), `searxng/`,
-`bin/` (rewritten by every deploy), the two explorers (stateless, RPC-only) and
-the raw `postgres/` cluster are deliberately **excluded**: they are large and
-regenerable, so restic never walks them.
+Run it by hand:
 
-That set is declared **once**, as `BACKUP_PATHS` in `stack.conf` — and what
-restic must skip inside it once too, as `BACKUP_EXCLUDES` (the live database
-files and the root-owned IDS baseline). `install.sh`
-renders both into the job's mounts and its `Exec=`, and `scripts/backup.sh` derives
-its own mounts, restic arguments and restore prompt from the same arrays — so a
-hand run copies exactly what the nightly run copies, and adding a directory is a
-one-line edit in `stack.conf` rather than four edits in two files.
+```sh
+./deploy.sh --only backup                 # the nightly job, now
+./scripts/backup.sh backup                # ... and refresh the dumps first
+./scripts/backup.sh list                  # snapshots in the repository
+./scripts/backup.sh ls latest             # what one snapshot holds
+./scripts/backup.sh check                 # repository integrity
+./scripts/backup.sh restore <snap>        # the whole set, in place
+./scripts/backup.sh unlock                # after a killed run
+```
 
-- `deploy/backup.container` — the one-shot job (a Quadlet unit, rendered like
-  the rest).
-- `deploy/backup.timer` — the schedule (`*-*-* 03:30:00`, plus 30 min of
-  jitter). Quadlet has no `.timer` type, so this is an ordinary systemd **user**
-  unit at `~/.config/systemd/user/backup.timer`, enabled by `install.sh`.
-- `deploy/backup-verify.service` + `deploy/backup-verify.timer` — the weekly
-  restore drill (below), also plain user units.
-- `deploy/backup-verify-db.service` + `deploy/backup-verify-db.timer` — the
-  monthly database drill (below), the run that proves the `pg_dumpall` replays.
-- `deploy/db-dump.service` — `scripts/db-dump.sh` before each run: NPM's SQLite
-  copy and kuma's `mariadb-dump`. A plain user unit because the kuma half is
-  `podman exec` into the running container, which a container cannot do.
-  `./deploy.sh --only db-dump` runs it by hand.
-- `scripts/backup.sh` — run it by hand and inspect what you have:
-  `backup | init | list | ls | check | verify | verify-db | forget | restore <snap> | unlock`.
-  `ls [<snap>]` lists the paths inside a snapshot, which is how you prove a
-  given run really holds the database dumps and not just the wallet. `backup`
-  also refreshes the same dumps the units do (it starts
-  `postgres-dump.service` and `db-dump.service` when installed), because a hand
-  run has none of the unit's `Wants=` ordering.
-- `./deploy.sh --only backup` runs the job once, now.
+`backup.timer` runs at 03:30 with 30 minutes of jitter; `db-dump.service` (or the
+`backup` action above) writes the dumps just before it. The repository is
+`$STACK_BACKUP_DIR` (default `$HOME/data-backup`) mounted at `/repo` — outside
+`$DATA_DIR`, so wiping the data dir leaves it alone. A same-disk repository does
+not survive the disk: for real disaster recovery point `RESTIC_REPOSITORY` in
+`config/backup/backup.env` at an offsite target (`s3:`, `b2:`, `sftp:`).
 
-The repository defaults to the host directory `$STACK_BACKUP_DIR` (default
-`$HOME/data-backup`, from `stack.conf`) mounted at `/repo`. It sits outside
-`$DATA_DIR`, so wiping the data dir leaves it alone — but a same-disk repo will
-not survive the disk itself. For real disaster recovery point `RESTIC_REPOSITORY`
-in `$DATA_DIR/config/backup/backup.env` at an offsite target (`s3:`, `b2:`,
-`sftp:`) — restic works with all of them.
-
-**Keep a copy of `RESTIC_PASSWORD` (same file) somewhere other than the data
-disk.** It encrypts the whole repository: no password, no restore. The helper
-reads the repository and password from the **environment first**, then the file,
-which is what makes recovery possible at all — the backed-up `backup.env` lives
-inside the repository, so it cannot be the only source of the key that opens it.
+**Keep `RESTIC_PASSWORD` somewhere other than the data disk.** It encrypts the
+whole repository: no password, no restore. `scripts/backup.sh` reads
+`RESTIC_REPOSITORY`/`RESTIC_PASSWORD` from the environment first and the file
+second — the `backup.env` it would read lives inside the repository it opens.
 
 ### Disaster recovery
 
-Four things decide whether a bad day costs an afternoon or a week: the
-repository is **off the data disk**, `RESTIC_PASSWORD` is **off the host**, the
-Monero seed is **on paper**, and you restore **before** running `./deploy.sh`.
-The runbooks below assume all four; the last one covers losing them.
+Four things decide whether a bad day costs an afternoon or a week: the repository
+is **off the data disk**, `RESTIC_PASSWORD` is **off the host**, the Monero seed is
+**on paper**, and you restore **before** running `./deploy.sh`. The runbooks below
+assume all four; the last one covers losing them.
 
 #### Before you need it
 
 - `RESTIC_REPOSITORY` and `RESTIC_PASSWORD`, in a password manager or on paper.
-  They encrypt and locate everything else; without them nothing here is
-  recoverable. Point the repository at an offsite target (`s3:`, `b2:`,
-  `sftp:`) — a same-disk repository survives deletion, not the disk.
+  They locate and decrypt everything else. Point the repository at an offsite
+  target (`s3:`, `b2:`, `sftp:`) — a same-disk repository survives deletion, not
+  the disk.
 - The Monero **25-word seed**, written down when the wallet was created. The
-  wallet file is in the backup, but the seed is what survives losing both.
+  wallet file is in the backup; the seed is what survives losing both.
 - An SSH key that can clone the private `boltmesh-labs` repos, and DNS for the
   public hostnames (nginx-proxy-manager requests their certificates).
-- Nothing else: `config/`, `tor/onion/`, `cln/` and the wallet all come out of
-  the repository, and `scripts/backup.sh` reads the location and password from
-  the environment first for exactly this reason.
+- Nothing else: `config/`, `tor/onion/`, `cln/` and the wallet all come out of the
+  repository.
 
 #### Pick the runbook
 
@@ -592,8 +554,7 @@ The runbooks below assume all four; the last one covers losing them.
 #### State is wrong, disk is fine
 
 Restoring **in place** is safe as long as nothing is writing to the directories
-being replaced, so stop the daemons that own them — they are the ones whose
-data is in the backup set:
+being replaced, so stop the daemons that own them:
 
 ```sh
 systemctl --user stop lightningd btcpay nbxplorer monero-wallet-btcpay tor nginx-proxy-manager uptime-kuma
@@ -605,11 +566,9 @@ systemctl --user stop lightningd btcpay nbxplorer monero-wallet-btcpay tor nginx
 ./verify.sh --deep
 ```
 
-`restore` writes the whole set, which is the right default: the snapshot is the
-source of truth, and a partly-restored host is how you get two versions of the
-same secret. For one path only — a lost `tor/onion/`, a corrupted
+For one path only — a lost `tor/onion/`, a corrupted
 `config/stack/secrets.env` — mount just that directory and ask restic for just
-that path (the environment file supplies the repository, password and cache):
+that path:
 
 ```sh
 podman run --rm \
@@ -620,20 +579,16 @@ podman run --rm \
 ```
 
 Then restart what reads it (`./deploy.sh` for config, `./deploy.sh --only tor`
-for the onion keys) and re-mint the runes with `./configure.sh --only runes`
-(the restored `config/` carries runes the node may no longer know). Keep the
-single-directory mount: a target of `/` with the
-whole data dir mounted is an in-place restore of everything, which is the
-previous runbook.
+for the onion keys). Re-mint the runes with `./configure.sh --only runes`: the
+restored `config/` carries runes the node may no longer know. Keep the
+single-directory mount — a target of `/` with the whole data dir mounted is an
+in-place restore of everything, which is the previous runbook.
 
 #### Replay the live databases
 
-The three live databases are in the snapshot as dumps, not as files, so a restore
-leaves the servers with nothing to open: BoltMesh's Postgres comes back as
-`postgres-dump/all.sql`, NPM's as `npm-dump/database.sqlite`, kuma's as
-`uptime-kuma-dump/kuma.sql`. The Postgres replay is [step 5 of the next
-runbook](#the-data-disk-is-gone-or-a-new-host) (it needs the cluster `deploy.sh`
-starts). The other two:
+The three live databases are in the snapshot as dumps, so a restore leaves the
+servers with nothing to open. Postgres's `postgres-dump/all.sql` is replayed in
+[step 5 of the next runbook](#the-data-disk-is-gone-or-a-new-host). The other two:
 
 NPM's copy is a consistent single file — stop NPM, put it in place, start it:
 
@@ -643,9 +598,8 @@ install -m 600 "$DATA_DIR/npm-dump/database.sqlite" "$DATA_DIR/npm/data/database
 systemctl --user start nginx-proxy-manager
 ```
 
-kuma's is SQL, so it needs a datadir to import into. `./deploy.sh` has already
-had kuma initialise one (empty); replace it with a fresh datadir carrying the
-dump, then let kuma start on it:
+kuma's is SQL, so it needs a datadir to import into. `./deploy.sh` has already had
+kuma initialise one (empty); replace it with a fresh datadir carrying the dump:
 
 ```sh
 systemctl --user stop uptime-kuma
@@ -670,20 +624,17 @@ systemctl --user start uptime-kuma
 ```
 
 `mariadb-install-db` builds the system tables the dump deliberately does not
-carry, and the dump recreates the `kuma` database and its tables (28 of them on
-this host). `scripts/backup.sh verify --with-db` runs the same import, so a drill
-that passes is a rehearsal of this step. Both replays are confirmed by
-`./verify.sh --deep` and by the status page/proxy hosts actually serving.
-The `pg_dumpall` half is drilled monthly by `backup-verify-db.timer`, because
-that is the import a restore cannot be rehearsed without.
+carry; the dump recreates the `kuma` database and its tables.
+`./scripts/backup.sh verify --with-db` runs the same import, so a passing drill is
+a rehearsal of this step. Confirm both replays with `./verify.sh --deep` and by
+the status page and proxy hosts actually serving.
 
 #### The data disk is gone (or a new host)
 
 Order is load-bearing: **restore, then deploy.** `install.sh` seeds
-`bitcoin.conf` and `torrc` once and never overwrites them, so a `./deploy.sh`
-that runs first writes a *fresh* RPC password into `bitcoin.conf`, and the
-restored `config/stack/secrets.env` then disagrees with the daemon. Restoring
-first means every seed-once file is derived from the snapshot.
+`bitcoin.conf` and `torrc` once and never overwrites them, so a `./deploy.sh` that
+runs first writes a *fresh* RPC password into `bitcoin.conf`, and the restored
+`config/stack/secrets.env` then disagrees with the daemon.
 
 1. Rebuild the host and the data disk, then get this repo:
 
@@ -694,8 +645,7 @@ first means every seed-once file is derived from the snapshot.
    ```
 
 2. Open the repository **from the environment** (there is no `backup.env` on a
-   fresh host — that is why the order is environment first), and prove the
-   password before writing anything:
+   fresh host), and prove the password before writing anything:
 
    ```sh
    export RESTIC_REPOSITORY=s3:…   # or /repo, or the path of a copied repository
@@ -703,26 +653,22 @@ first means every seed-once file is derived from the snapshot.
    ./scripts/backup.sh list        # a snapshot list here means the repo and key are right
    ```
 
-3. Restore into the data dir. Setting `STACK_DATA_DIR` for this one command
-   both places the files and remembers the answer, so `deploy.sh` will not
-   prompt later:
+3. Restore into the data dir. Setting `STACK_DATA_DIR` for this one command both
+   places the files and remembers the answer, so `deploy.sh` will not prompt:
 
    ```sh
    STACK_DATA_DIR=/data/stack ./scripts/backup.sh restore latest -y
    ```
 
-   It writes `cln/`, `btcpay/`, `tor/`, `config/`, `npm/`, `audit/`,
-   `uptime-kuma/`, `postgres-dump/`, `npm-dump/` and `uptime-kuma-dump/`, and
-   hands bitcoind's directory back to the image uid, so bitcoind opens it
-   directly.
+   It writes the whole set and hands bitcoind's directory back to the image uid,
+   so bitcoind opens it directly.
 
-4. Deploy. This adopts the restored secrets (never overwriting an existing
-   file), seeds `bitcoin.conf`/`torrc` from them, builds the images, and
-   reconciles the proxy hosts (the status page is UI-configured, so the
-   restore covers it). `./configure.sh` then does the work that needs the
-   restored daemons up: it proves the restored CLN
-   runes with `checkrune` (minting new ones if the node does not know them) and
-   writes `config/btcpay/backend.env` from the bootstrap state.
+4. Deploy and configure. `deploy.sh` adopts the restored secrets (never
+   overwriting an existing file), seeds `bitcoin.conf`/`torrc` from them, builds
+   the images and reconciles the proxy hosts. `configure.sh` does the work that
+   needs the restored daemons up: it proves the restored CLN runes with
+   `checkrune` (minting new ones if the node does not know them) and writes
+   `config/btcpay/backend.env` from the bootstrap state.
 
    ```sh
    ./deploy.sh
@@ -740,28 +686,25 @@ first means every seed-once file is derived from the snapshot.
    ```
 
    The dump was taken with `pg_dumpall --clean --if-exists`, so it recreates the
-   `vpndb` database itself. It also carries the role, which already exists on a
-   host whose `postgres/` was just initialised with the same credentials:
-   `psql` reports those role errors (`already exists`, or a role it will not
-   drop while you are connected as it), carries on because it is not run with
-   `ON_ERROR_STOP`, and the database load is what matters. Confirm the schema
-   landed with `podman exec postgres psql -U vpnuser -d vpndb -c '\dt'`, then
-   migrate: the dump is as old as the snapshot, and the code is not.
+   `vpndb` database itself. It also carries the role, which already exists on the
+   freshly initialised cluster: `psql` reports those role errors, carries on
+   because it is not run with `ON_ERROR_STOP`, and the database load is what
+   matters. Confirm the schema with
+   `podman exec postgres psql -U vpnuser -d vpndb -c '\dt'`, then migrate — the
+   dump is as old as the snapshot, the code is not.
 
-6. Replay the other two databases the same way — NPM's `database.sqlite` and
-   kuma's MariaDB. Both are dumps in the snapshot, and the containers `deploy.sh`
-   started have empty databases of their own by now: see [Replay the live
-   databases](#replay-the-live-databases).
+6. Replay the other two — NPM's `database.sqlite` and kuma's MariaDB: see
+   [Replay the live databases](#replay-the-live-databases).
 
 7. Check it with [After any recovery](#after-any-recovery). The chains and
-   Fulcrum start from zero — see [What comes back](#what-comes-back-what-re-downloads)
-   for what that costs in time.
+   Fulcrum start from zero — see
+   [What comes back](#what-comes-back-what-re-downloads) for what that costs.
 
 #### The host was compromised
 
-Assume every secret in the snapshot is known to whoever had the host: restoring
-it is the fastest way back, not a recovery. Follow the runbook above, then treat
-every credential as burned:
+Assume every secret in the snapshot is known to whoever had the host: restoring is
+the fastest way back, not a recovery. Follow the runbook above, then treat every
+credential as burned:
 
 ```sh
 ./scripts/rotate.sh --list            # what this repo can rotate
@@ -769,61 +712,44 @@ every credential as burned:
 ./scripts/rotate.sh <target>          # write, re-render, restart, prove
 ```
 
-That covers every target `--list` shows: the RPC passwords, the CLN runes, the
-MCP tokens, SearXNG's key, the postgres role, BoltMesh's keys and the restic
-key. There is no wallet target any more: BTCPay's Monero wallet is imported
-view-only from an address and a view key, has no password, and its wallet RPC
-runs with `--disable-rpc-login`, so the file holds nothing to rotate. Two
-behaviours matter on a host that was just restored:
+That covers every target `--list` shows. There is no wallet target: BTCPay's
+Monero wallet is imported view-only and has no password. `boltmesh-keys` requires
+`--yes` (it ends every session and invalidates every node token), and `restic`
+writes the new password before adding the key, so a run that dies in between
+leaves two working keys, never none.
 
-- `boltmesh-keys` requires `--yes`: it ends every BoltMesh session and
-  invalidates every node token and outstanding bootstrap secret.
-- `restic` writes the new password to `backup.env` before adding the key, proves
-  it, promotes it, and only then removes the superseded one, so a run that dies
-  in between leaves two working keys, not none — and the repository never needs
-  a password that exists only in memory.
+What rotation cannot fix:
 
-What rotation cannot fix, and what to do instead:
-
-- **The view-only wallet's history.** `btcpay/xmr-wallet` can leak the view key
-  and the address — no spend key was ever on this host, so the funds are not at
-  risk — but every transaction the wallet can see is then public, and so is the
-  fact that this host holds it. A new seed is the only way out: move the funds
-  to it, then re-import the view-only wallet from the new address/view key
-  (`scripts/btcpay-wallet.sh`). The restored file is burned.
-- **CLN's `hsm_secret`**, which is the node's signing key. Treat the channels as
-  lost: force-close them yourself so the funds land in a wallet you control, and
-  open new channels from a fresh node.
+- **The view-only wallet's history.** `btcpay/xmr-wallet` can leak the view key and
+  the address — no spend key was ever here, so funds are not at risk — but every
+  transaction it can see is then public. Move the funds to a new seed and re-import
+  the view-only wallet from it (`scripts/btcpay-wallet.sh`).
+- **CLN's `hsm_secret`**, the node's signing key. Treat the channels as lost:
+  force-close them so the funds land in a wallet you control, and open new channels
+  from a fresh node.
 - **The old snapshots.** Rotating the restic key protects new snapshots; the old
   password still opens everything already in the repository. Start a fresh
-  repository, or accept that the old snapshots are readable.
-- **The onion addresses.** Nothing rotates them; if the old keys must be
-  considered public, delete `tor/onion/<name>/` so tor generates new ones, then
-  tell every client — the address is the key.
-- **Anything the tokens grant outside this stack** — revoke those at the
-  provider.
+  repository, or accept that the old ones are readable.
+- **The onion addresses.** Nothing rotates them; delete `tor/onion/<name>/` so tor
+  generates new ones, then tell every client — the address is the key.
+- **Anything the tokens grant outside this stack** — revoke those at the provider.
 
 #### When a piece is missing
 
-- **The repository is gone** and there is no offsite copy: nothing in it is
-  recoverable. The stack comes back with new identities — a new CLN node, new
-  onion addresses, a new wallet (funds only from the seed) — and every token
-  re-issued, so every client must be updated. This is the case `s3:`/`b2:`
-  exists to prevent.
-- **`RESTIC_PASSWORD` is gone**: the repository is unreadable. No recovery, no
-  workaround.
-- **`tor/onion/` is gone**, the rest restored: every `.onion` address changes.
-  The wildcard `*.onion` proxy host keeps working, but clients holding the old
-  address do not.
+- **The repository is gone**, no offsite copy: nothing in it is recoverable. The
+  stack comes back with new identities — a new CLN node, new onion addresses, a
+  new wallet (funds only from the seed) — and every token re-issued.
+- **`RESTIC_PASSWORD` is gone**: the repository is unreadable. No recovery.
+- **`tor/onion/` is gone**, the rest restored: every `.onion` address changes. The
+  wildcard `*.onion` proxy host keeps working; clients holding the old address do
+  not.
 - **`cln/` is gone**, `config/` restored: a new node identity. The runes in
-  `config/lightning-mcp/node.env` are dead; `./configure.sh` proves them with
-  `checkrune` and mints new ones, and the MCP servers restart with the new
-  values. The channels are gone with the `hsm_secret` — CLN has no seed phrase,
-  which is why `cln/` is the most valuable directory in the set.
+  `config/lightning-mcp/node.env` are dead; `./configure.sh` mints new ones. The
+  channels are gone with the `hsm_secret` — CLN has no seed phrase, which is why
+  `cln/` is the most valuable directory in the set.
 - **`btcpay/` is gone**, `config/` restored: re-run `./configure.sh --only btcpay`.
-  The datadir's protection keys and the plugin are recreated, the store is in
-  Postgres, and `scripts/btcpay-wallet.sh` re-imports the view-only wallet from
-  the address/view key in `config/btcpay/xmr-wallet.env`.
+  The datadir's keys and the plugin are recreated, the store is in Postgres, and
+  `scripts/btcpay-wallet.sh` re-imports the view-only wallet.
 
 #### What comes back, what re-downloads
 
@@ -844,39 +770,18 @@ What rotation cannot fix, and what to do instead:
 | `postgres/` | no | a new cluster, then the dump is replayed into it |
 | the bitcoind wallet | no | a new empty descriptor wallet (export a `.dat` if you keep funds there) |
 
-Rough order of magnitude on a rotational disk: bitcoind validation is days to
-weeks, monerod a few days, Fulcrum's index weeks. All three run at the same
-time, and none of them blocks the wallet, CLN, BoltMesh or the MCP surface from
-coming up — the stack is *serving* long before it is *synced*.
+Rough order of magnitude on a rotational disk: bitcoind validation days to weeks,
+monerod a few days, Fulcrum's index weeks. All three run at once, and none blocks
+the wallet, CLN, BoltMesh or the MCP surface from coming up — the stack is
+*serving* long before it is *synced*.
 
-> **Consistency:** the job snapshots `cln/` and the wallet while their daemons
-> are running. CLN's `hsm_secret` and `emergency.recover` are static and restore
-> cleanly even if `lightningd.sqlite3` is torn, so the worst case is a
-> force-close and on-chain recovery, not lost funds; the wallet is written
-> periodically, so a live copy is safe in practice.
->
-> The three live *databases* are not treated that way: Postgres, NPM's SQLite db
-> and kuma's MariaDB are excluded from the file set and come back as dumps taken
-> immediately before the backup (see [Backup & restore](#backup--restore)). NPM
-> and kuma therefore need one replay step after a restore, which [Replay the live
-> databases](#replay-the-live-databases) gives.
->
-> "Safe" means *funds*: a wallet cache is a cache. One captured while the wallet
-> was rebuilding, or torn mid-write, is rejected when it is loaded, and the
-> wallet then rescans from its restore height — hours, not minutes, with the RPC
-> unavailable until it finishes (the daemons report it as unhealthy, and
-> `scripts/monitor.sh` says so). The keys file is the part that matters, and it
-> always restores.
->
-> The hours are the daemon's fault, not the wallet's: `monerod`'s RPC answers in
-> seconds rather than milliseconds while it syncs (measured on this host during
-> the Bitcoin/Monero/Fulcrum catch-up: 5.8 s for a six-block
-> `get_block_headers_range`, 10 s for `get_info`), and a rescan is a long series
-> of such calls, with `--untrusted-daemon` adding the wallet's own verification
-> instead of a shortcut. Expect it to bind only at the end, and note that the
-> refresh logs at INFO while the unit leaves `wallet.wallet2` at WARNING —
-> `podman logs` shows nothing until `Binding on 0.0.0.0:18083`. Do not restart it
-> to "check": every restart throws the pass away.
+> **Consistency:** the job snapshots `cln/` and the wallet while their daemons run.
+> CLN's `hsm_secret` and `emergency.recover` are static and restore cleanly even if
+> `lightningd.sqlite3` is torn, so the worst case is a force-close and on-chain
+> recovery, not lost funds. "Safe" means *funds*: a wallet cache captured
+> mid-rebuild is rejected when loaded, and the wallet rescans — unavailable RPC
+> until it finishes, which `monitor.sh` reports. The keys file always restores.
+> Do not restart a wallet to "check" it: every restart throws away the pass.
 
 #### After any recovery
 
@@ -887,56 +792,26 @@ coming up — the stack is *serving* long before it is *synced*.
 ./scripts/backup.sh verify          # the new repository restores too
 ```
 
-Then look at the things a sweep cannot judge:
+Then the things a sweep cannot judge:
 
-- `podman exec lightningd lightning-cli listpeerchannels` — are the channels
-  back, and in the state you expect?
-- `systemctl --user list-timers` — backup, drill, monitor and metrics all
-  scheduled; `./scripts/backup.sh list` shows the nightly job writing again.
+- `podman exec lightningd lightning-cli listpeerchannels` — are the channels back,
+  in the state you expect?
+- `systemctl --user list-timers` — backup, drill, monitor and metrics scheduled;
+  `./scripts/backup.sh list` shows the nightly job writing again.
 - the `.onion` addresses match what clients hold (`./deploy.sh` and
   `scripts/npm-hosts.sh` print them).
-- the credential invariants — `scripts/rotate.sh --status` shows whether only
-  the rune pair in `lightning-mcp/node.env` is live and whether bitcoind's
-  `rpcpassword` matches `secrets.env`. A rotation is reconciled rather than
-  journaled, so the remedy for a mismatch is re-running that target.
-- the spend baseline: `audit/` came back from the snapshot, so if anything
-  happened after it, `scripts/spend-audit.sh --rebaseline` is the deliberate
-  "this is known-good now" act.
+- `scripts/rotate.sh --status` — only the rune pair in
+  `lightning-mcp/node.env` is live, and bitcoind's `rpcpassword` matches
+  `secrets.env`.
+- `audit/` came back from the snapshot, so if anything happened after it,
+  `scripts/spend-audit.sh --rebaseline` is the deliberate "known-good now" act.
 
 ### Verifying the backups
 
-A nightly snapshot that has never been opened is a hope, not a backup, so a
-second timer opens one:
-
-- `deploy/backup-verify.timer` runs `scripts/backup.sh verify` every Sunday at
-  05:30 (plus up to 30 min of jitter) — two hours after the nightly job, so it
-  proves a *fresh* snapshot and cannot collide with the backup's restic lock.
-- The drill reads a slice of the repository's pack data
-  (`restic check --read-data-subset=n/4`, rotating, so the whole repository is
-  read every four weeks), restores the snapshot into `$DATA_DIR/backup-verify`
-  with `restic restore --verify`, and asserts that every directory in
-  `BACKUP_PATHS` came back non-empty along with the markers in
-  `BACKUP_VERIFY_PATHS` (`cln/bitcoin/hsm_secret`, the BTCPay Monero plugin's
-  DLL, `tor/onion`, `config/stack/secrets.env`, the three dumps — the wallet
-  itself only becomes a marker once the operator's view key has imported it).
-- Presence is not consistency, so the dumps are checked by content too: the
-  `pg_dumpall` and `mariadb-dump` completion trailers (a dump killed mid-write is
-  still a valid SQL prefix), `PRAGMA quick_check` on the restored SQLite copy,
-  and a freshness check — each dump's mtime (restic preserves mtimes) must fall
-  inside the snapshot's own run, so a dump job that has been failing for months
-  while restic kept copying the last good file fails the drill instead of passing
-  on the marker.
-- It never touches the live data dirs: only the repository, restic's cache and
-  the scratch target are mounted, and that tree is removed on every exit path.
-  A restore larger than `BACKUP_VERIFY_MAX_MB` (5 GiB) or one that does not fit
-  in the free space is skipped and recorded as such rather than attempted.
-- The verdict lands in `$DATA_DIR/audit/backup-verify.status` (result, snapshot
-  id, file and byte counts, and the last *success*). `scripts/monitor.sh` fails
-  on a failed drill and on a last success older than
-  `MONITOR_BACKUP_VERIFY_MAX_AGE_H` (192 h by default), so a drill that keeps
-  skipping is an alert rather than a green tick.
-
-Run it by hand:
+A nightly snapshot that has never been opened is a hope, not a backup, so a second
+timer opens one. `backup-verify.timer` runs `scripts/backup.sh verify` every Sunday
+at 05:30, two hours after the nightly job so it proves a *fresh* snapshot and
+cannot collide with the backup's restic lock:
 
 ```sh
 ./scripts/backup.sh verify              # check + restore + assertions
@@ -946,39 +821,30 @@ Run it by hand:
 ./deploy.sh --only backup-verify        # what the timer does
 ```
 
-What it proves is the mechanics: the password opens the repository, the pack
-data is intact, a snapshot restores, and the files that matter are inside it.
-What it does **not** prove is what only a real recovery exercises — that an
-*offsite* repository is reachable (the default one is on the same disk, so a
-drill against it survives nothing the disk does not), that the restored wallet
-opens and re-syncs, or that the daemons come up on the restored state. That is
-what the walkthrough above is for, and it is worth running once against a spare
-host rather than trusting a green drill.
+It reads a quarter of the repository's pack data (rotating, so the whole thing is
+read every four weeks), restores into `$DATA_DIR/backup-verify`, and asserts every
+`BACKUP_PATHS` entry and every `BACKUP_VERIFY_PATHS` marker came back non-empty.
+The dumps are checked by content too (trailers, `PRAGMA quick_check`, and an mtime
+inside the snapshot's own run), because presence is not consistency. The live data
+dirs are never mounted, and the verdict lands in
+`$DATA_DIR/audit/backup-verify.status` — a file, not an exit code, because that is
+what `scripts/monitor.sh` reads. A drill that keeps skipping (over
+`BACKUP_VERIFY_MAX_MB`, or short of free space) fails on the age of its last
+success rather than looking green.
+
+What it proves is mechanics: the password opens the repository, the pack data is
+intact, a snapshot restores, and the files that matter are inside it. What it does
+**not** prove: that an offsite repository is reachable, that the restored wallet
+opens and re-syncs, or that the daemons come up on the restored state. That is the
+walkthrough above, and it is worth running once against a spare host rather than
+trusting a green drill. `docs/backup.md` has the drill's design.
 
 ### Proving the database dump replays
 
-The mechanics above never say the SQL *applies*: every file can be present and
-every trailer intact while `pg_dumpall`'s output is unloadable. So a second
-drill owns that claim, and it runs monthly:
-
-- `deploy/backup-verify-db.timer` runs `scripts/backup.sh verify-db` on the
-  first Wednesday at 06:30 (plus up to 30 min of jitter) — 24 h clear of the
-  weekly drill and its restic lock.
-- It restores **only** the snapshot's `postgres-dump/` (a few MiB, not the whole
-  set) into `$DATA_DIR/backup-verify-db`, checks the dump's header, completion
-  trailer and mtime against the snapshot's own run, then replays it into a
-  throwaway `postgres` and asserts the databases it creates hold tables.
-- It restores a subset rather than the whole set, so it has no
-  `BACKUP_VERIFY_MAX_MB` gate — the proof cannot stop existing because the set
-  grew.
-- It is allowed to pull the `postgres` image, which the weekly drill
-  deliberately never does. A pull that fails (registry down) is recorded as a
-  *skip*, not a failure: it says nothing about the dump. The status file's age
-  check is what turns a run of skips into an alert.
-- The verdict lands in `$DATA_DIR/audit/backup-verify-db.status`, a file of its
-  own so neither drill's result can mask the other's age. `scripts/monitor.sh`
-  fails on a failed replay and on a last success older than
-  `MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H` (1080 h, 45 days — one missed monthly run).
+Every file can be present and every trailer intact while `pg_dumpall`'s output is
+unloadable, so a second drill owns that claim, monthly:
+`backup-verify-db.timer` runs `scripts/backup.sh verify-db` on the first Wednesday
+at 06:30.
 
 ```sh
 ./scripts/backup.sh verify-db           # what the timer does
@@ -987,167 +853,101 @@ drill owns that claim, and it runs monthly:
 ./deploy.sh --only backup-verify-db     # run it now
 ```
 
-The full drill — restore everything, then replay the two SQL dumps (postgres and
-kuma) — is still available on demand:
+It restores only the snapshot's `postgres-dump/`, checks the dump's header,
+completion trailer and mtime, then replays it into a throwaway `postgres` and
+asserts the databases hold tables. A failed pull is recorded as a *skip*, not a
+failure: a registry that will not answer says nothing about the dump, and the
+status file's age check is what turns a run of skips into an alert. The verdict is
+`$DATA_DIR/audit/backup-verify-db.status`, a file of its own so neither drill's
+result can mask the other's age.
+
+The full drill — restore everything, then replay both SQL dumps — is still
+available on demand:
 
 ```sh
 ./scripts/backup.sh verify --with-db
 ```
 
-That restores as usual and then replays `postgres-dump/all.sql` into a throwaway
-`postgres` container and `uptime-kuma-dump/kuma.sql` into a throwaway MariaDB
-started from the uptime-kuma image (the same server version that wrote it),
-asserting each produces tables. The postgres database name is not hardcoded:
-whatever the dump creates is discovered and counted. If an image the replay needs
-is missing or cannot be pulled, the run records a **skip**, not a pass: the
-file-level checks did pass, but a skip must not reset the last-success age the
-monitor alerts on. It is also a rehearsal of
-[Replay the live databases](#replay-the-live-databases), which is the step a real
-recovery needs.
-
-What the replay still does not prove: that the data is *usable* (roles,
-extensions, row-level security — it counts tables), that `boltmesh-backend` boots
-on the replayed cluster (that is `./configure.sh --only boltmesh` after a
-restore, which runs `alembic upgrade head`), or anything about the offsite copy.
+That replays `postgres-dump/all.sql` into a throwaway `postgres` and
+`uptime-kuma-dump/kuma.sql` into a throwaway MariaDB from the uptime-kuma image
+(the same server version that wrote it), asserting each produces tables. If an
+image the replay needs cannot be pulled, the run records a **skip**, not a pass.
+It is also a rehearsal of [Replay the live databases](#replay-the-live-databases).
 
 ## Monitoring & the spend tripwire
 
-Nothing in the stack pages on its own: a container has a healthcheck and
-`Restart=always` (so a crash restarts), but a crash-loop, an offline channel, a
-stalled chain or a spend is otherwise silent. `install.sh` installs a monitor
-that closes that gap.
+Nothing pages on its own: a container has a healthcheck and `Restart=always`, but a
+crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
+`install.sh` installs a monitor that closes that gap.
 
-The healthchecks themselves follow a contract: every container unit either
-defines one or is declared healthless in `stack.conf` with a reason, and
-`./scripts/healthcheck-lint.sh` fails the build when a unit drifts from it
-(explicit interval/start/retries/timeout, a bounded HTTP probe, and
-`HealthOnFailure=kill` so the restart is systemd's and the monitor's restart
-counter can see it). A failing probe reads `Up … (unhealthy)` in `podman ps`, so
-`verify.sh` classifies the health suffix rather than the `Up` and fails on it --
-`scripts/monitor.sh` carries its FAIL lines, so a red container is not merely a
-warning. The rules, the two exemptions and why a probe must not check the data
-path are in `docs/units.md`, "Healthchecks follow a contract".
-
-- `scripts/monitor.sh` — runs every five minutes from
-  `deploy/monitor.timer`. Read-only: it starts nothing and rewrites no config.
-  It runs `verify.sh` for the container/MCP base checks and adds the ones
-  nothing else does — bitcoind freshness, **Fulcrum's Electrum index** (the tip
-  it serves against bitcoind's height), CLN peers and **offline channels**, the
-  Monero wallet's lag behind `monerod`, the host itself (disk and inode space,
-  disk saturation, backup age, the pre-backup dump freshness, certificate
-  expiry, units that crash-looped
-  since the last sweep, the schedules that produce all of it (the backup,
-  drill, dump, metrics, signup and monitor timers), the metrics collector going
-  quiet, the log pipeline going quiet, journald's persistence and podman's
-  event backend, a live CLN rune the stack does not reference, and bitcoind's
-  RPC password disagreeing with `secrets.env`), the public vhosts through
-  nginx-proxy-manager (certificate, proxy host and loopback publish — the
-  continuous public-surface check the UI-owned status page no longer provides)
-  — then the spend tripwire.
-- `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
-  unit (Quadlet has no `.timer` type) and its one-shot service, installed to
-  `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
-- `scripts/registrations.sh` — one alert per **BoltMesh signup**, from
-  `deploy/registrations.timer` every minute. It reads the app's `users` table
-  (`podman exec postgres psql`) rather than a log line, keeps a
-  `(created_at, id)` watermark so a failed push is retried instead of lost, and
-  seeds it on first run so the accounts that already exist are not mailed. This
-  is an event, not a fault: it does not go through `monitor.sh`, and
-  Alertmanager routes `severity="info"` to a receiver that sends no "recovered"
-  mail. Run it by hand with `--dry-run` or `--test`.
-- `scripts/spend-audit.sh` — the spend tripwire (below); also runnable alone.
+- `scripts/monitor.sh` — every five minutes from `deploy/monitor.timer`.
+  Read-only: it starts nothing and rewrites no config. It runs `verify.sh` for the
+  container/MCP base checks and adds the ones nothing else does: chain freshness
+  (bitcoind, Fulcrum's Electrum tip against bitcoind's height, `monerod`, the
+  wallet's lag), CLN peers and offline channels, host space/inodes/I/O/disk
+  saturation, backup and dump age, certificate expiry, restart deltas, the
+  schedules themselves, the metrics and log pipelines going quiet, journald
+  persistence and podman's event backend, live runes the stack does not reference,
+  bitcoind's RPC password against `secrets.env`, the public vhosts through
+  nginx-proxy-manager — then the spend tripwire.
+- `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user** unit
+  (Quadlet has no `.timer` type), like `backup.timer`.
+- `scripts/registrations.sh` — one alert per **BoltMesh signup**, every minute. It
+  reads the app's `users` table, keeps a `(created_at, id)` watermark so a failed
+  push is retried, and seeds it on first run. An event, not a fault: it does not go
+  through `monitor.sh`. Run it by hand with `--dry-run` or `--test`.
+- `scripts/spend-audit.sh` — the tripwire (below).
 
 The monitor reads the daemons and the host **directly**; it never queries the
-metrics store. That is deliberate: alerting must not depend on the pipeline that
-exists to draw graphs of itself, so VictoriaMetrics can be down, wedged or
-deleted without silencing an alert.
+metrics store, so the pipeline can be down without silencing an alert. The
+healthcheck contract it relies on — and why a probe must not touch the data path —
+is `docs/units.md`, "Healthchecks follow a contract"; the alert path's design is
+`docs/alerting.md`.
 
 **The monitor decides *what* is wrong; Alertmanager decides *when* to say it.**
-`deploy/alertmanager.container` (`prom/alertmanager`, loopback `:9093`, no
-public host — reach it over `ssh -L 9093:127.0.0.1:9093`) is on the alert path
-for exactly the jobs bash did badly:
-
-  - **grouping and repeats** — one mail per severity group, and a still-firing
-    alert is repeated every `repeat_interval` (4h) instead of being mailed once
-    and forgotten;
-  - **inhibition** — a critical on a host mutes its warnings, so a full disk
-    does not also page "every chain looks stale";
-  - **silences** — a maintenance window is a first-class object (UI or
-    `amtool`), not a commented-out check;
-  - **delivery failures are visible** — `alertmanager_notifications_failed_total`
-    is read back by the next sweep, which fails the heartbeat. A fire-and-forget
-    `podman run` could never report that its own mail did not leave.
-
-What stays in `scripts/monitor.sh` is the one thing Alertmanager cannot do,
-because it only sees what is pushed at it: the **flap damper**. Each check
-section becomes one alert (stable `alertname`/`service` labels, the changing
-numbers in the annotation), and nothing is pushed until it has been failing for
-`MONITOR_ALERT_FOR` (600s, two sweeps). A recovery is pushed explicitly (an
-`endsAt` in the past) on the next sweep that sees it, so recoveries are prompt
-and a monitor that dies cannot fake one.
-
-**Events ride the same path but not the same state machine.** A BoltMesh signup
-is not a fault, so it never enters `monitor.sh`: `scripts/registrations.sh`
-pushes it once with `severity="info"`, a per-signup `signup` label and an
-`endsAt` ten minutes out. The config's `severity="info"` sub-route groups per
-signup (`group_by: ['signup']`) and delivers to `stack-signups`, which sets
-`send_resolved: false` — otherwise every signup would also mail a meaningless
-"recovered". `MONITOR_ALERTMANAGER_URL=off` turns the push off for both, and the
-signups stay in `$DATA_DIR/audit/registrations.log`.
+`deploy/alertmanager.container` (`prom/alertmanager`, loopback `:9093`, no public
+host: `ssh -L 9093:127.0.0.1:9093`) owns grouping, repeat intervals, inhibition,
+silences and delivery, and reports failed deliveries back to the next sweep. What
+stays in `monitor.sh` is the one thing it cannot do — the **flap damper**, because
+it only sees what is pushed at it: an alert is held until
+`MONITOR_ALERT_FOR` (600s, two sweeps), and a recovery is pushed explicitly.
 
 **Mail is off until you fill in
 `$DATA_DIR/config/monitoring/alertmanager/alertmanager.yml`** (mode 600, seeded
 from `deploy/examples/monitoring/alertmanager.yml.example`; uncomment
 `email_configs` and set `global.smtp_*`). Until then Alertmanager accepts alerts
-and delivers nothing; `scripts/monitor.sh` warns with "alerting is inert" in the
-journal (the mail path is what is missing), and nothing fails on a fresh host.
-Prove the whole path with `scripts/monitor.sh --test`.
+and delivers nothing, and `monitor.sh` says so in the journal. Prove the path with
+`scripts/monitor.sh --test`. `smtp_smarthost` is the **submission** server, not the
+recipient's domain — a provider relay, not a residential IP, or the mail lands in
+spam for want of SPF, DKIM and a matching PTR.
 
-The SMTP facts worth knowing: `smtp_smarthost` is the **submission** server, not
-the recipient's domain (`smtp.gmail.com:587` with an App Password works, and is
-the same server Apprise's `mailto://user:app-password@gmail.com` was built on).
-A host that is not a mail server, or one that accepts mail without
-authentication from a residential IP, is how alert mail ends up rejected or in
-spam — no SPF, no DKIM, no matching PTR. A provider relay carries all three.
+`$DATA_DIR/config/monitoring/monitor.env` (mode 600) holds the two things only you
+can set:
 
-`$DATA_DIR/config/monitoring/monitor.env` (mode 600) still holds:
+- `MONITOR_ALERTMANAGER_URL` — default `http://127.0.0.1:9093`; `off` keeps alerts
+  in the journal only.
+- `MONITOR_PING_URL` — a dead-man's-switch heartbeat (a healthchecks.io ping URL):
+  `curl` on success, `<url>/fail` with the failure list. This is the only thing
+  that notices when the **whole host** is down, which is why it is not an email —
+  and it also fails when the alert push fails, so a broken mail path is never
+  silent. Set the check's period to the timer interval.
 
-  - `MONITOR_ALERTMANAGER_URL` — default `http://127.0.0.1:9093`; `off` keeps
-    alerts in the journal only.
-  - `MONITOR_PING_URL` — a dead-man's-switch heartbeat (a healthchecks.io ping
-    URL): a plain `curl` hits the URL on success and `<url>/fail` with the
-    failure list on failure. This is the only thing that notices when the
-    **whole host** is down, which is why it is not an email — a host that is not
-    running cannot send one. It also fails when the alert push fails or
-    Alertmanager reports a failed delivery, so a broken mail path is never
-    silent. Set the check's period to the timer interval (5 minutes).
-
-With no heartbeat the monitor still runs and records to
-`$DATA_DIR/audit/audit.log`, and the sweep reports whether every schedule —
-including its own timer — is installed and active. The host checks' thresholds
-are the same file
-(`MONITOR_DISK_FREE_PCT`, `MONITOR_IO_UTIL_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
-`MONITOR_DUMP_MAX_AGE_H`, `MONITOR_CERT_MIN_DAYS`, `MONITOR_RESTART_MAX`,
-`MONITOR_METRICS_MAX_AGE_S`,
-`MONITOR_FULCRUM_LAG_BLOCKS`, `MONITOR_BTC_MIN_PEERS`, `MONITOR_MEMPOOL_MB`,
-`MONITOR_XMR_LAG_BLOCKS`, `MONITOR_NET_DROP`, `MONITOR_TEMP_MAX`,
-`MONITOR_LOGS_MAX_AGE_S`, `MONITOR_ALERT_FOR`, …);
-each falls back to its default in the script, so a monitor.env written before a
-check existed still monitors.
+The thresholds are the same file (`MONITOR_DISK_FREE_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
+`MONITOR_ALERT_FOR`, …); each falls back to its default in the script, so an env
+file written before a check existed still monitors. With no heartbeat the sweep
+still runs and records to `$DATA_DIR/audit/audit.log`.
 
 ### Metrics and history
 
-Alerting tells you *that* something is wrong. These two units answer *when it
-started, how bad it got and whether it is improving* — the questions a chain
-sync on one shared disk actually raises ("how fast was the IBD at 03:00?", "when
-did the Monero RPC wedge?").
+Alerting tells you *that* something is wrong; these answer *when it started, how
+bad it got and whether it is improving*.
 
 | | |
 | --- | --- |
-  | `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION` in `stack.conf`), `127.0.0.1:8428` |
-| `node-exporter` | the host: disk space, inodes, I/O saturation, memory, load, NIC bandwidth/errors, temperatures — plus the **textfile collector**, which is how the stack's own numbers get in |
-| `scripts/metrics.sh` (`deploy/metrics.timer`, every minute) | writes `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, bitcoind's peer count and mempool, Fulcrum's Electrum reachability, the tip it serves and its lag behind bitcoind, CLN peers/offline channels, `monerod`'s restricted-RPC **reachability** and its lag behind `target_height`, the wallet's lag, each managed unit's systemd restart counter, and every running container's CPU seconds, memory working set, pids and network bytes |
-| `scripts/monitor.sh` (every five minutes) | writes `monitor.prom` beside it: backup age and snapshot count, verify failures, spend trips, sweep timestamp |
+| `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION`), `127.0.0.1:8428` |
+| `node-exporter` | the host: disk, inodes, I/O saturation, memory, load, NIC, temperatures — plus the **textfile collector**, which is how the stack's own numbers get in |
+| `scripts/metrics.sh` (every minute) | `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, peers and mempool, Fulcrum's Electrum reachability and lag, CLN peers/offline channels, `monerod`'s RPC reachability and lag, the wallet's lag, restart counters, per-container CPU/memory/pids/network |
+| `scripts/monitor.sh` (every five) | `monitor.prom` beside it: backup age and count, verify failures, spend trips, sweep timestamp |
 
 **Read it over an SSH tunnel, by design:**
 
@@ -1155,91 +955,31 @@ did the Monero RPC wedge?").
 ssh -L 8428:127.0.0.1:8428 you@host      # then http://127.0.0.1:8428/vmui
 ```
 
-`vmui` has no authentication of its own, and every public host in this stack is
-a declared proxy host and TLS-terminated — so the metrics store publishes on
-the host's **loopback only** and adds nothing to the firewall. If you want it on
-the LAN, put it behind `nginx-proxy-manager` with basic auth *and* declare it as
-a proxy host; don't publish it directly.
+`vmui` has no authentication of its own, so the store publishes on the host's
+loopback only. To put it on the LAN, front it with nginx-proxy-manager *with basic
+auth* and declare it as a proxy host; do not publish it directly.
 
-Three consequences worth knowing:
+Two consequences worth knowing:
 
-- **`$DATA_DIR/monitoring` is not in the backup set.** It is history, not state:
-  losing it costs you the graphs, and nothing else. Same reasoning as
-  `fulcrum/` and `searxng/`.
-- **`monerod`'s health is its process, not its RPC.** The unit probes
-  `/proc/1/comm`, like Fulcrum's, because the restricted-RPC handler blocks for
-  a minute or more while a `--block-sync-size` batch holds the chain lock — a
-  probe that curled `/get_height` failed three times in a row about once an
-  hour and had a syncing full node restarted mid-batch each time.
-  `stack_xmr_rpc_up` is the series that says whether the RPC actually answers,
-  and `scripts/monitor.sh` names it when it does not (a warning during the sync
-  grace, a failure without `MONITOR_GRACE_SYNC=1`).
-- **The textfile is a permissions trap.** `node-exporter` runs as uid 65534 (a
-  subuid under rootless podman), so it owns neither the directory nor the files.
-  Both writers chmod the directory `0755` and the files `0644`; if you ever see
-  graphs stop while the containers are healthy, check that first: the sweep
-  distinguishes the writer ("metrics collector is stale") from the exporter
-  ("node-exporter serves no `stack_*` series", the 0600 case), and
-  `ls -l $DATA_DIR/monitoring/textfile` names the permission.
+- **`$DATA_DIR/monitoring` is not in the backup set.** History, not state.
+- **The textfile is a permissions trap.** `node-exporter` runs as uid 65534, so it
+  owns neither the directory nor the files; both writers chmod `0755`/`0644`. If
+  graphs stop while the containers are healthy, check that first — the sweep
+  distinguishes "metrics collector is stale" from "node-exporter serves no `stack_*`
+  series", and `ls -l $DATA_DIR/monitoring/textfile` names the permission.
 
 ### Logs and history
 
-journald is the source: podman's default log driver writes every container's
-stdout there, and the host scripts (`monitor.sh`, `metrics.sh`, `ids.sh`,
-`backup.sh`) log there too — so no unit needed a logging change to be
-collected. What was missing was search across services and any history at all:
-journald was **volatile** (a 32 MB ring in `/run`), so a reboot erased the only
-record. Three pieces fix that:
+journald is the source: podman's log driver writes every container's stdout there,
+and the host scripts log there too. What was missing was search across services
+and any history at all, so `bootstrap.sh` makes journald persistent and bounded
+(`/var/log/journal`, 2 GB, 7 days), `vector` ships it to `victoria-logs`
+continuously (one cursor per batch, so a restart resumes), and the store keeps 14
+days (`LOGS_RETENTION`) or 10 GiB (`LOGS_MAX_BYTES`).
 
-| | |
-| --- | --- |
-| `bootstrap.sh` | makes journald persistent and bounded (`/var/log/journal`, 2 GB, 7 days), so `podman logs` works across a reboot |
-| `vector` | ships the journal to `victoria-logs` continuously; it checkpoints one cursor per batch, so a restart resumes instead of replaying |
-| `victoria-logs` | the store and the LogsQL UI: 14 days (`LOGS_RETENTION`) or 10 GiB (`LOGS_MAX_BYTES`), whichever comes first |
-
-Two things never reach journald, so `vector` reads them as files: Suricata's
-`eve.json` (the sensor writes a file, not stdout, and its alerts arrive labelled
-`unit=suricata.service`) and **nginx-proxy-manager's access and error logs**.
-The second is the one that answers questions about a *request* — NPM terminates
-TLS, so what a client asked for is in those files and nowhere else, and CrowdSec
-reads the same directory only for as long as logrotate keeps it (two days plain,
-four more gzipped). Shipping them means:
-
-```sh
-# who is probing, and what they asked for
-./scripts/logs.sh --since 24h --container nginx-proxy-manager --grep '\.env|\.git/'
-# upstream failures -- these are the entries the error log contributes
-./scripts/logs.sh --since 7d --container nginx-proxy-manager --priority err
-```
-
-The MCP edge's own 401s are in there too (`--grep 'mcp.boltmesh.net.* 401'`).
-Rotated `*.log.1.gz` files are not re-read (the store already has them; a
-restart would duplicate the day), so the store's 14 days and logrotate's 6 cover
-different windows rather than the same one twice.
-
-Podman's **own** events are deliberately not part of that stream: every exec and
-every healthcheck run used to write to the journal (4,000+ lines and 1.8 MB an
-hour on this host — two lines per exec, one per check), which is noise in a
-search. `deploy/install.sh` points podman's event log at a bounded file
-(`~/.config/containers/containers.conf`, `events_logger = "file"`, ~8 hours of
-ring, gone at reboot), and `sudo ./bootstrap.sh` writes the same setting for
-root's own podman, which is what the sensor's healthchecks use. `podman events`
-still reads it, and `scripts/logs.sh` never has to be searched past it.
-`scripts/monitor.sh` checks both and warns if the user-side one is lost.
-
-One consequence for an operator: **`podman logs -f` no longer works.** Follow
-uses podman's *events* stream to learn that a container died, so with events in a
-file podman refuses rather than hang (`using --follow with the journald
---log-driver but without the journald --events-backend (file) is not supported`).
-`podman logs` without `-f` is unaffected, and there are two follows that work:
-
-```sh
-journalctl -f CONTAINER_NAME=bitcoind          # the journal itself; priority included
-./scripts/logs.sh --follow --container bitcoind   # the store, labelled, searchable
-```
-
-Search it from the CLI — this is the cross-service timeline that used to mean
-five `podman logs -f` windows:
+Two things never reach journald and are read as files: Suricata's `eve.json` and
+**nginx-proxy-manager's access and error logs** — the second is what answers a
+question about a *request*, because NPM terminates TLS:
 
 ```sh
 ./scripts/logs.sh --since 30m                        # everything, labelled
@@ -1251,92 +991,43 @@ five `podman logs -f` windows:
 ./scripts/logs.sh --health                           # is anything still arriving?
 ```
 
-Two sources beyond the journal are worth knowing about:
+`--follow` is the one to use: **`podman logs -f` no longer works**, because follow
+reads podman's events stream and that stream is a file now (see below).
+`journalctl -f CONTAINER_NAME=bitcoind` is the other.
 
-- **Suricata's `eve.json`** is a root-owned file, not stdout, so `vector` reads it
-  as a file and labels it `unit=suricata.service`. Alerts, anomalies and their
-  surrounding DNS/TLS/HTTP events are therefore in the same timeline as the
-  proxy and the app tier — `./scripts/logs.sh --since 6h --grep '^ALERT'`
-  answers "what was happening when that signature fired".
-- **BoltMesh's backend and worker** log structured JSON to stdout. `vector`
-  parses it for those two containers: the human message becomes the log line,
-  and `level`/`logger` become searchable fields (`level:warning
-  logger:app.tasks.gateway_health_check`). The app's level also replaces
-  journald's, which is always `info` for stdout — without that,
-  `--priority warning` would silently miss every BoltMesh warning.
+Podman's own events stay out of the journal on purpose: every exec and every
+healthcheck run would otherwise be two lines, and `install.sh` points podman's
+event log at a bounded file (root's own podman via `bootstrap.sh`). `podman events`
+still reads it; `monitor.sh` warns if the setting is lost. `docs/logs.md` has the
+whole pipeline, including why the setting cannot be a per-call flag.
 
-…or open the LogsQL UI over an SSH tunnel, exactly like `vmui`:
+Read the store in the UI over an SSH tunnel (`ssh -L 9428:127.0.0.1:9428`, then
+`/select/vmui`), or through `victoria-logs-mcp` (`/logs` on the MCP host, one
+bearer token) with the same bounded read-only surface. `victoriametrics-mcp`
+(`/metrics`) does the same for PromQL, and its `get_stack_status` answers "what is
+broken?" in one call. Neither store is a proxy host, and both stay on loopback
+because every line every container wrote is in the log store, tokens included.
 
-```sh
-ssh -L 9428:127.0.0.1:9428 you@host      # then http://127.0.0.1:9428/select/vmui
-```
-
-`victoria-logs` publishes on the host's **loopback only**: it has no
-authentication of its own, and every log line every container wrote is in it
-(including any token someone echoed). It is not a proxy host and adds nothing
-to the firewall — if you ever want it on the LAN, put it behind NPM with basic
-auth *and* declare it, the same rule as `vmui`.
-
-A client reads the history through `victoria-logs-mcp` instead: the store stays
-loopback-only, and the MCP server (`/logs` on the MCP host, one bearer token)
-runs LogsQL over the same data with a bounded, read-only tool surface.
-
-The metrics side has the same arrangement: `victoriametrics-mcp` (`/metrics`
-on the MCP host, its own bearer token) runs PromQL over the store's read-only
-API, so `vmui` stays an SSH-tunnel view and the store stays out of
-the proxy tier. Its `get_metrics_health` reads the same textfile heartbeat the
-monitor does, so "the graph has a gap" and "the collector died" are
-distinguishable from an agent. Its `get_stack_status` answers the wider
-question in one call: Alertmanager's live alerts plus the verify, chain and job
-series, with a single verdict.
-
-`crowdsec` has an exposition of its own on `127.0.0.1:6060`, pinned to loopback
-for the same reason (`deploy/crowdsec/config.yaml.local`), and its one reader is
-`crowdsec-mcp` — `get_engine_health` folds it into decisions per scenario,
-detection counters and the agent's heartbeat age. Nothing scrapes it into
-VictoriaMetrics; if that history is ever wanted, the host script that writes
-the textfile collector is the path, because the metrics container cannot reach
-host loopback.
-
-Two consequences worth knowing:
-
-- **`$DATA_DIR/logs` is not in the backup set.** It is history, not state, like
-  the metrics store: losing it costs the history, and the journal's own 7 days
-  cover a restore.
-- **The monitor makes exactly one query against a store, and it is this one.**
-  It asks "has anything arrived in the last 15 minutes?", because the failure
-  that matters is the silent one (all three units read "active" while nothing
-  is shipping). A dead store therefore *adds* an alert; every other check still
-  reads the daemons and the host directly, so the pipeline can never silence
-  one. The same `--health` call also proves the nginx-proxy-manager **file**
-  source is being read, by comparing its access log's mtime with the store's
-  newest `npm_access` entry — both quiet is a quiet site, a written file with no
-  entries is a broken source.
-
-No Grafana, for logs either: `vmui` and VictoriaLogs' own LogsQL UI answer the
-two questions ("how did it move" and "what did it say"), and one less container
-on a disk that is the stack's bottleneck is worth more than dashboards.
+**`$DATA_DIR/logs` is not in the backup set** — history, not state; the journal's
+own 7 days cover a restore.
 
 ### The spend tripwire
 
-Spending is **off** (`ENABLE_SPENDING=0`) on both money servers, and the
-tripwire is what makes that impossible to change or spend, silently:
+Spending is **off** (`ENABLE_SPENDING=0`) on both money servers, and the tripwire
+makes that impossible to change or spend silently:
 
 1. **Policy drift.** `scripts/spend-audit.sh` keeps a hash baseline
    (`$DATA_DIR/audit/spend-baseline.tsv`) of both `spend.env` files, both token
-   files and `lightning-mcp/node.env` (the spend rune). Any edit or removal
-   trips, and `ENABLE_SPENDING` is asserted to read `0` on every run whatever
-   the baseline says. A trip repeats until you accept the change with
-   `./scripts/spend-audit.sh --rebaseline` (a deliberate act).
-2. **Activity.** It reads outgoing payments (`lightning listpays`) and outgoing
-   transfers (monero-wallet `get_transfers`, outgoing only) through the **read**
-   tokens and diffs them against `$DATA_DIR/audit/outgoing-baseline.txt`. A new
-   outgoing entry trips — independent of what the servers log.
+   files and `lightning-mcp/node.env`. Any edit or removal trips, and
+   `ENABLE_SPENDING` is asserted `0` on every run whatever the baseline says. A
+   trip repeats until you accept it with `./scripts/spend-audit.sh --rebaseline`.
+2. **Activity.** It reads outgoing payments (`lightning listpays`) and transfers
+   (monero-wallet `get_transfers`, outgoing only) through the **read** tokens and
+   diffs them against `$DATA_DIR/audit/outgoing-baseline.txt`.
 
-Trips are appended to `$DATA_DIR/audit/spend.log` (so there is a record even
-with no alert configured) and folded into the monitor's alert and heartbeat. It
-is **not** a gate: it cannot stop a spend, only make one impossible to miss.
-`audit/` is part of the [backup set](#backup--restore).
+Trips are appended to `$DATA_DIR/audit/spend.log` and folded into the monitor's
+alert and heartbeat. It is **not** a gate: it cannot stop a spend, only make one
+impossible to miss. `audit/` is in the [backup set](#backup--restore).
 
 ## Intrusion detection
 
@@ -1352,47 +1043,36 @@ while the request itself exists only in NPM's access log:
 That rootful unit is the one exception to "everything runs rootless", and it is
 why `bootstrap.sh` is a **two-pass** install: the sensor's config references the
 data dir, which does not exist until `./deploy.sh` has run. The first bootstrap
-prints a notice; re-running it after the first deploy installs the sensor, and
-restarts it, so a changed `suricata.yaml` is actually applied instead of only
-rendered. The rendered unit lives in `/etc/containers/systemd/`, its config in
-`/etc/stack-ids/`, and `./verify.sh` compares every file the root tier renders
-against `deploy/root/`, warning per file when one has drifted.
+prints a notice; re-running it installs the sensor and restarts it. The rendered
+unit lives in `/etc/containers/systemd/`, its config in `/etc/stack-ids/`, and
+`./verify.sh` compares every root-tier file against `deploy/root/`.
 
 ### What each can and cannot see
 
-* **Suricata** sees the LAN NIC and the host loopback — the latter is where each
-  MCP server's plaintext HTTP and the daemon RPC ports live. It cannot see the
-  rootless container bridge (a rootful sensor cannot enter the user's network
-  namespace), it cannot see inside TLS, and it has no client address on the
-  re-originated loopback leg NPM opens to each app: that request is
-  `127.0.0.1 -> 127.0.0.1`, which is why everything on `lo` is whitelisted
-  before a scenario sees it. Its external alerts are a decision source — a
-  second, alert-only `alerts.json` (not `eve.json`) is read by CrowdSec, which
-  bans the policy sids and three distinct ET severity 1/2 signatures.
-* **CrowdSec** sees every request NPM served, which is the whole attack surface
-  of the public vhosts. It cannot attribute anything on the `.onion` vhosts: tor
-  forwards to `host.containers.internal`, so NPM logs the host's own address for
-  every onion visitor. It also reads the sensor's alert feed; the two sources
-  meet in the same LAPI, and the bouncer still applies every decision.
+* **Suricata** sees the LAN NIC and the host loopback (where each MCP server's
+  plaintext HTTP and the daemon RPC ports live). It cannot see the rootless
+  container bridge (a rootful sensor cannot enter the user's network namespace),
+  inside TLS, or a client address on the re-originated loopback leg NPM opens — so
+  everything on `lo` is whitelisted before a scenario sees it. Its external alerts
+  feed CrowdSec, which bans the policy sids and three ET severity 1/2 signatures.
+* **CrowdSec** sees every request NPM served, the whole attack surface of the
+  public vhosts. It cannot attribute anything on the `.onion` vhosts: tor forwards
+  to `host.containers.internal`, so NPM logs the host's own address for every
+  onion visitor.
 
-It is **detection then enforcement**: CrowdSec's decisions — from NPM's log and
-from the sensor's external alerts — are applied to nftables by `stack-bouncer`
-(below). Nothing in the *packet* path is inline — enforcement happens at the
-kernel's input hook, with per-entry timeouts, so a sensor crash cannot be an
-outage; a bad rules reload can only feed a wrong decision, which the bouncer's
-own refusals bound.
-
-It is also **local only**: `DISABLE_ONLINE_API=true` means no console
-enrolment, no community blocklist and no telemetry leaving the host. The cost is
-that a known-bad address is only banned here after it has misbehaved here.
+**Detection then enforcement**: decisions reach nftables through `stack-bouncer`,
+never inline in the packet path, so a sensor crash cannot be an outage. It is also
+**local only** (`DISABLE_ONLINE_API=true`): no console enrolment, no community
+blocklist, no telemetry — the cost is that a known-bad address is banned here only
+after it misbehaves here. The attribution limits and the two privilege domains are
+`docs/ids.md`, "What the sensor can attribute, and what it can ban".
 
 ### Enforcement
 
-Decisions are applied by `stack-bouncer` — a root oneshot on a one-minute timer
-(`deploy/root/bouncer.sh`, installed to `/etc/stack-ids/`). CrowdSec runs with
-host networking, so it polls the LAPI on the host's own loopback
-(`127.0.0.1:8080`, key-gated: an unauthenticated request gets 403) — there is no
-published port between root and the decisions — and writes one nftables set:
+`stack-bouncer` is a root oneshot on a one-minute timer (`deploy/root/bouncer.sh`).
+CrowdSec runs with host networking, so it polls the LAPI on the host's own loopback
+(`127.0.0.1:8080`, key-gated: an unauthenticated request gets 403) and writes one
+nftables table:
 
 ```
 table inet stack_bans
@@ -1403,52 +1083,32 @@ table inet stack_bans
 
 Each element carries the decision's own duration as an nft timeout, so a ban
 expires even if everything above it dies. The set is refreshed wholesale every
-minute in one transaction — the LAPI's list is the truth — which also means
+minute in one transaction — the LAPI's list is the truth — so
 `nft flush table inet stack_bans` cannot unban anyone permanently.
 
-There is no upstream bouncer image any more (`crowdsecurity/cs-firewall-bouncer`
-answers *access denied*), and the packaged one would be a second daemon outside
-this repo's control. CrowdSec keeps the hard half (decision lifecycle, TTLs,
-dedup); this is the plumbing, in two small files you can read (`bouncer.sh` for
-the apply, `ipguard.py` for the address guard).
-
 ```sh
-sudo /etc/stack-ids/bouncer.sh --dry-run    # the rules it would apply; writes nothing, not even the status file
+sudo /etc/stack-ids/bouncer.sh --dry-run    # the rules it would apply; writes nothing
 sudo nft list table inet stack_bans         # who is banned right now
 systemctl stop stack-bouncer.timer          # the kill switch: detection keeps working
 ```
 
-Three properties worth knowing:
+Three properties:
 
 * **Never bans the operator.** `ipguard.py` refuses private space, the podman
-  network, and every address the host itself holds — checked at run time, so a
-  DHCP change cannot produce a self-ban. Banning `192.168.1.112` would cut the
-  `.onion` proxies, the status page and your own SSH session at once.
-  It also refuses **`STACK_WAN_IP`** (`stack.conf`), which is *not* an address
-  the host holds: the router holds it. A LAN client that uses a public name
-  resolves it, leaves through the router and comes back through NAT loopback,
-  arriving as that one source IP, and `stack/http-authfail` bans five 401s in
-  ten seconds. Three from one client in one second is on this host's own log.
-  The Uptime-Kuma monitors no longer take that path — they resolve their vhosts
-  through the container's host gateway, except the one public canary — so this
-  should now be rare, but a LAN browser using the public name still looks like
-  it. The refusal is deliberately at the bouncer and **not** in the whitelist:
-  the decision still exists, still shows in `cscli decisions`, still pages —
-  only the drop is skipped, so `audit/bouncer.status` reports `skipped=1` and
-  `banned=0` means "your own egress is tripping a rule", not a quiet host.
-  `verify.sh` warns when the declaration disagrees with the address NPM actually
-  logs for the canary (a WAN change, or a CDN in front of the site).
+  network, every address the host holds (checked at run time, so a DHCP change
+  cannot self-ban), and **`STACK_WAN_IP`** from `stack.conf` — the router holds
+  that one, and a LAN client using a public name arrives as it through NAT
+  loopback, where `stack/http-authfail` bans five 401s in ten seconds. The refusal
+  is at the bouncer, **not** in the whitelist: the decision still exists and still
+  pages, only the drop is skipped, so `skipped=1` means "your own egress is
+  tripping a rule", not a quiet host.
 * **Fails open in the safe direction.** An unreachable LAPI or a non-JSON answer
-  leaves the existing bans alone (it never reads "no decisions" as "unban
-  everything"), and a failed `nft -f` rolls back atomically. The address guard
-  is the other direction on purpose: if it cannot classify (python3 missing, an
-  unparsable `STACK_WAN_IP`), nothing is applied and the status file says why —
-  guessing is how the operator gets banned.
-* **Its key is never regenerated.** `CROWDSEC_BOUNCER_KEY` in
-  `config/stack/secrets.env` is registered into the LAPI by the crowdsec
-  container at start; a new value leaves the old bouncer registered and
-  enforcement silently dead. `scripts/monitor.sh` fails on a stale
-  `audit/bouncer.status` for exactly that reason.
+  leaves existing bans alone, and a failed `nft -f` rolls back. The address guard
+  is the other direction on purpose: if it cannot classify, nothing is applied and
+  the status file says why.
+* **Its key is never regenerated.** `CROWDSEC_BOUNCER_KEY` is registered into the
+  LAPI by the crowdsec container at start; a new value leaves the old bouncer
+  registered and enforcement silently dead.
 
 ### Reading it
 
@@ -1462,215 +1122,147 @@ tail -f $DATA_DIR/ids/suricata/eve.json | jq 'select(.event_type=="alert")'
 ./scripts/logs.sh --since 6h --unit suricata.service   # the same alerts, searchable
 ```
 
-The same read state reaches an agent over MCP at
-`https://mcp.boltmesh.net/crowdsec` (`crowdsec-mcp`): `list_decisions`,
-`check_ip` and `get_engine_health`. It holds a **second, read-only bouncer key**
-(`CROWDSEC_MCP_BOUNCER_KEY`, registered as `BOUNCER_KEY_mcp`), so its pulls are
-attributed on their own in `cs_lapi_bouncer_requests_total` and
-`podman exec crowdsec cscli bouncers delete mcp` revokes it without touching
-enforcement. Deliberately absent: alerts (they need a *machine* credential,
-which can also create and delete decisions — i.e. ban and unban) and any
-ban/unban tool. It sees active decisions only, so "why was that address blocked
-this morning" is `cscli alerts list` / the log store, not a tool.
+The same read state reaches an agent at `https://mcp.boltmesh.net/crowdsec`
+(`crowdsec-mcp`): `list_decisions`, `check_ip`, `get_engine_health`. It holds a
+**second, read-only bouncer key**, so its pulls are attributable and
+`cscli bouncers delete mcp` revokes it without touching enforcement. Deliberately
+absent: alerts (they need a machine credential that can also ban and unban) and any
+ban/unban tool — it sees active decisions only.
 
-eve.json is also shipped into the log store (`vector` reads it as a file; see
-[Logs and history](#logs-and-history)), so an alert can be read next to what
-nginx-proxy-manager, the daemons and BoltMesh were doing at the same moment
-instead of in a separate `tail`.
-
-`ids.status` also carries `eve=ok|missing|unreadable|na`. The alert count is a
-report, not a page, but it is only a report if the file was read: when the
-sensor is `active` and `eve.json` is missing or unreadable (permissions,
-SELinux, a missing `jq`), the roll-up fails instead of leaving `alerts=0` and
-advancing `ok_epoch`.
-
-`deploy/ids.timer` runs the roll-up every five minutes at `*:2/5` — deliberately
-between the monitor's sweeps — and `scripts/monitor.sh` alerts on a stale or
-failed status, so a sensor that dies quietly cannot look healthy. Alert counts
-are a *warning*, not a page: one Suricata alert needs a human to read it, and the
-rate is in VictoriaMetrics (`stack_ids_alerts`).
+`ids.status` carries `eve=ok|missing|unreadable|na`: the alert count is a report
+only if the file was read, so a missing or unreadable `eve.json` fails the roll-up
+instead of leaving `alerts=0`. `ids.timer` runs at `*:2/5`, between the monitor's
+sweeps, and the monitor alerts on a stale or failed status. Counts are a *warning*,
+not a page; the rate is in VictoriaMetrics (`stack_ids_alerts`). eve.json is in the
+log store too (see [Logs and history](#logs-and-history)), so an alert reads next
+to what the proxy, the daemons and BoltMesh were doing at that moment.
 
 ### The whitelist is load-bearing
 
 `deploy/crowdsec/parsers/s02-enrich/stack-whitelists.yaml` exists because a naive
-threshold is a self-inflicted outage on this host, not a false positive:
-
-* the onion proxies and Uptime-Kuma's self-checks are logged as the host's **own**
-  address (`192.168.1.112` / the WAN IP), so banning it would take every onion
-  service and the status page down at once;
-* Uptime-Kuma probes every monitor on its page once a minute, including a
-  permanent 401 on the token-gated ones;
-* the podman network (`10.89.0.0/24`) and the LAN are internal by definition.
+threshold here is a self-inflicted outage, not a false positive: the onion proxies
+and Uptime-Kuma's self-checks are logged as the host's **own** address, Uptime-Kuma
+probes every monitor once a minute including a permanent 401 on the token-gated
+ones, and the podman network and the LAN are internal by definition.
 
 Read that file before tightening a scenario. `./verify.sh` replays a sample
-access-log line through `cscli explain` on every sweep, because a change to NPM's
-`log_format` would otherwise disable detection silently.
+access-log line through `cscli explain` every sweep, because a change to NPM's
+`log_format` would otherwise disable detection silently. Every entry is a *plain
+string match*, so it is written per octet — and an entry one octet too short is a
+silent widening, not a syntax error. A whitelisted event is dropped in
+`s02-enrich` before the scenarios, so it never becomes a decision and `cscli
+metrics`' whitelisted count is the only trace; that is why the sweep asserts both
+directions (a public address in the LAN's range must not be whitelisted, while the
+LAN's own must be).
 
-Every entry in that file is a *plain string match*, so it is written per octet —
-and an entry one octet too short is a silent widening, not a syntax error. The
-LAN's `172.16.0.0/12` was once `startsWith '172.2'`, which also covers
-`172.2.0.0/16` and `172.200.0.0/14`: ~4.4M public addresses reported as
-`whitelisted`. Worse, a whitelisted event is dropped in `s02-enrich` *before* the
-scenarios, so it never becomes a decision — `cscli decisions list --all` will not
-show it, and `cscli metrics`' whitelisted count is the only trace. That is why
-the sweep now asserts both directions: a public `172.220.10.5` must not be
-whitelisted, while `172.18.0.5` and Uptime-Kuma's user agent must be.
-
-Two survivors of a real scan are worth knowing about: `93.123.109.247`
-(`tlm-scanner/2.0`, ~7,500 requests, 100% 404, `/.git/…` and traversal probes)
-was probing this host before the sensor existed, and the `default-host` vhost
-exists only to answer that kind of traffic — any request to it is worth a look.
+The `default-host` vhost exists only to answer scanners, so any request to it is
+worth a look.
 
 ### Resources and retention
 
 ~650 MB RSS for Suricata with the full ET Open ruleset (refreshed at container
-start, best effort — a host without internet starts on the twelve local rules),
-~150 MB for CrowdSec, and nothing measurable for the bouncer (one nft
-transaction a minute). Suricata only rotates a `filename` containing a strftime
-template, and ours are static, so the host's `logrotate` does it: a stack-owned
-`/etc/logrotate.d/stack-ids` renames `eve.json` and `alerts.json`, creates new
-files, and SIGHUPs the sensor to reopen them, keeping `IDS_RETENTION_DAYS` (14)
-compressed rotations. `eve.json` is ~50 MB/day, so that is the budget the data
-disk must cover. `$DATA_DIR/ids` is regenerable and stays out of the backup set.
+start, best effort), ~150 MB for CrowdSec, nothing measurable for the bouncer.
+Suricata only rotates a `filename` containing a strftime template, and ours are
+static, so the host's `logrotate` does it from `/etc/logrotate.d/stack-ids`,
+keeping `IDS_RETENTION_DAYS` (14) compressed rotations. `eve.json` is ~50 MB/day,
+so that is the budget the data disk must cover; `$DATA_DIR/ids` is regenerable and
+stays out of the backup set.
 
 ### Rate limiting (the onion's only defence)
 
-Every visitor to a `.onion` vhost reaches NPM as the host's **own** address, so
-no IP-based control — ban, fail2ban, CrowdSec — can touch them individually.
-What is left is a global brake, and that is `stack_onion`: a request-rate zone
-keyed on `$server_name` rather than the client address, at 60 r/s with a 120
-burst. The clearweb vhosts get `stack_ip` keyed on the real address (30 r/s,
-burst 60) plus `stack_conn` (40 concurrent).
-
-The MCP host gets **`limit_conn` only**, never `limit_req`: it is JSON-RPC (a
-client legitimately bursts) and its `GET /mcp` is a long-lived SSE stream, where
-a request-rate limit either does nothing or cuts healthy clients.
+Every visitor to a `.onion` vhost reaches NPM as the host's **own** address, so no
+IP-based control can touch them individually. What is left is a global brake,
+`stack_onion`: a request-rate zone keyed on `$server_name` rather than the client
+address, at 60 r/s with a 120 burst. The clearweb vhosts get `stack_ip` keyed on
+the real address (30 r/s, burst 60) plus `stack_conn` (40 concurrent). The MCP host
+gets **`limit_conn` only**, never `limit_req`: it is JSON-RPC, where a client
+legitimately bursts, and its `GET /mcp` is a long-lived SSE stream.
 
 The zones are declared in `deploy/npm/http.conf`, seeded to
-`$DATA_DIR/npm/data/nginx/custom/http.conf` — the one NPM directory that is never
-regenerated. The directives themselves are per host, in the `advanced_config`
-field `scripts/npm-hosts.sh` sends, because which limit applies depends on what
-the vhost is. Measured on this host: a 100-request burst produced 16 × `503`
-while a normal page load was unaffected.
+`$DATA_DIR/npm/data/nginx/custom/http.conf` — the one NPM directory never
+regenerated. The directives are per host, in the `advanced_config` field
+`scripts/npm-hosts.sh` sends.
 
 ### Host integrity
 
-`auditd` was already running on this host with an **empty** `rules.d` — a daemon
-watching nothing. `deploy/root/audit.rules` now watches the files this repo never
-writes: the account databases, `sudoers`, `sshd_config`, `auditd.conf`, and the
-stack's own `secrets.env` and `hsm_secret`. `stack-audit.timer` turns the
-root-only log into `$DATA_DIR/audit/auditd.status`, which the monitor pages on.
+`deploy/root/audit.rules` watches the files this repo never writes: the account
+databases, `sudoers`, `sshd_config`, `auditd.conf`, and the stack's own
+`secrets.env` and `hsm_secret`. `stack-audit.timer` turns the root-only log into
+`$DATA_DIR/audit/auditd.status`, which the monitor pages on.
 
-Four things about it are worth knowing:
+Two facts decide how you read that status:
 
-* **Directory watches do not work on this kernel.** `-w /etc/sudoers.d/ -p wa`
-  (with and without the trailing slash, and the `-a always,exit -F dir=…` form)
-  produces no record for a file created inside it, while the same watch on a file
-  fires normally. Entry creation — a new unit file, a new sudoers drop-in, a new
-  cron job, the classic persistence moves — is therefore covered by a **hash diff**
-  in the same report: every file under `/etc/systemd/system`,
-  `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d`,
-  `/etc/ssh/sshd_config.d` and `/etc/audit/rules.d` is hashed each run, and
-  anything new, changed or **removed** is counted and named (deletions compare
-  paths, so a modified file is not counted twice). That also survives
-  environments where audit is unavailable.
-* **The ruleset is checked as state, not as an event.** `install.sh --root`
-  removes and re-adds every `stack_` watch on each run, so `op=remove_rule`
-  events cannot tell a deploy from tampering — and the kernel never writes the
-  `op=del_rule` an earlier version grepped for. The report compares the rendered
-  `/etc/audit/rules.d/60-stack.rules` with `auditctl -l` (`watches=N/M` in the
-  status), pages on a missing rules file or a shortfall, and counts as events
-  only removals of rules that are **not** the stack's. A remove+re-add inside a
-  single five-minute window is the one case neither half sees.
-* Events carry a **key** (`stack_hard` for host-level config the repo never
-  writes, `stack_data` for the stack's secrets), and only `stack_hard` fails the
-  sweep. Rotation and deploys touch the data-dir files on purpose; a monitor that
-  pages on its own deploy stops being read.
-* **On this host the kernel audit subsystem is inert.** It initializes disabled
-  (`audit: initializing netlink subsys (disabled)`, `audit_enabled=0` in dmesg)
-  and, although `auditctl -s` then reports `enabled 1`, no kernel record is ever
-  written — not even the `CONFIG_CHANGE` for loading the rules at boot. That
-  survives a reboot, so it is not leftover state. The rules stay loaded (they are
-  correct if the host is ever booted with auditing on), the report says
-  `audit=inert` in its status and the sweep says so in plain words, and the
-  **hash diff is the live check** — which is why it is the part that has to be
-  right.
+* **Directory watches do not work on this kernel**, so entry creation — a new unit
+  file, a sudoers drop-in, a cron job — is covered by a **hash diff** of
+  `/etc/systemd/system`, `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d`,
+  `/etc/ssh/sshd_config.d` and `/etc/audit/rules.d`. Anything new, changed or
+  removed is counted and named.
+* **The ruleset is checked as state, not as an event.** `install.sh --root` removes
+  and re-adds every `stack_` watch on each run, so `op=remove_rule` events cannot
+  tell a deploy from tampering; the report compares `60-stack.rules` with
+  `auditctl -l`. Events carry a **key** — `stack_hard` for host config the repo
+  never writes, `stack_data` for the stack's secrets — and only `stack_hard` fails
+  the sweep, because rotation and deploys touch the data-dir files on purpose.
+
+**On this host the kernel audit subsystem is inert**: it initializes disabled and
+never writes a record, even though `auditctl -s` then reports `enabled 1`. The rules
+stay loaded (correct if the host is ever booted with auditing on), the status says
+`audit=inert`, and the **hash diff is the live check**. `docs/ids.md` covers the
+rest, including the one case neither half sees.
 
 ## Status page
 
-`uptime-kuma` serves a public status page on
-`https://status.boltmesh.net` (`[host.status]` in `deploy/services.toml`,
-proxied by nginx-proxy-manager like every public hostname). It complements the
-monitor above, not replaces it: the monitor is the host-side, alert-only sweep,
-while the status page watches the same public surface for visitors.
+`uptime-kuma` serves a public status page on `https://status.boltmesh.net`
+(`[host.status]` in `deploy/services.toml`). It complements the monitor, not
+replaces it: the monitor is the host-side, alert-only sweep, while the page watches
+the same public surface for visitors.
 
-**The page is UI-authored, not declared.** Its monitors, the page and the
-page's layout are created and edited in kuma's own UI (the setup wizard's
-account); nothing reconciles them, and nothing host-side holds a kuma
-credential any more. That is a deliberate reversal: the reconciler this replaced only ever
-touched its declared fields and preserved everything the UI had tuned, which
-meant the UI was already the source of truth — it cost a socket.io client, a
-pinned venv and a CI step to say so. The monitors are now data, so they live in
-kuma's embedded MariaDB and come back with the
-[backup](#backup--restore) (`uptime-kuma-dump/`). [Proxy hosts
-(nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager) is the contrast: those
-*are* declared and reconciled, because NPM's admin API replaces a whole host
-object and the UI has no safe way to share ownership of one.
+**The page is UI-authored, not declared.** Its monitors, the page and its layout are
+created in kuma's own UI (the setup wizard's account); nothing reconciles them, and
+nothing host-side holds a kuma credential. The monitors are therefore data: they
+live in kuma's embedded MariaDB and come back with the
+[backup](#backup--restore) (`uptime-kuma-dump/`). [Proxy hosts](#proxy-hosts) is
+the contrast — those *are* declared and reconciled, because NPM's admin API
+replaces a whole host object and the UI has no safe way to share ownership of one.
 
-`docs/proxy.md` lists the checks the public surface expects and the two traps
-that are easy to get wrong in the UI (a token-gated endpoint answering `401`
-counts as up; adding a **TCP-port** monitor still requires accepted status
-codes, because kuma validates the field before it looks at the type). Fulcrum's
-`50001` is the one TCP-port monitor — Electrum is raw TCP, so it cannot be
-probed as a URL — and it watches the **published** port wallets use
-(`host.containers.internal:50001`), not the container. A port monitor proves
-the socket accepts a connection and nothing more; whether the index behind it
-is current is what `verify.sh --deep` and `scripts/monitor.sh` read (above).
+`docs/proxy.md` lists the checks the public surface expects and the two traps that
+are easy to get wrong in the UI (a token-gated endpoint answering `401` counts as
+up; a **TCP-port** monitor still needs accepted status codes). Fulcrum's `50001` is
+the one TCP-port monitor, and it watches the **published** port wallets use — a
+port monitor proves the socket accepts a connection, and whether the index behind
+it is current is what `verify.sh --deep` and `monitor.sh` read.
 
-The host side of those monitors is still the repo's: `deploy/install.sh`
-renders `--add-host=<vhost>:host-gateway` into the uptime-kuma unit for every
-`[host.*]` with `kuma_add_host = true`, so the checks resolve their vhosts on
-the host instead of hairpinning through the router and arriving as the WAN
-address. And `scripts/monitor.sh` now probes every clearweb vhost through NPM
-on loopback itself, which is the continuous public-surface check the status
-page used to be the only one for — the page stays for visitors, the sweep is
+The host side is still the repo's: `install.sh` renders
+`--add-host=<vhost>:host-gateway` for every `[host.*]` with `kuma_add_host = true`,
+so the checks resolve their vhosts on the host instead of hairpinning through the
+router and arriving as the WAN address. And `monitor.sh` probes every clearweb
+vhost through NPM on loopback itself — the page stays for visitors, the sweep is
 what pages.
 
-The page's **notifications** stay UI-configured too — kuma embeds Apprise, so
-its targets are chosen once in its own settings. That is the *status page's*
-channel, not the alerting path: the stack's own alerts go monitor → Alertmanager
-→ mail (above), and the two are independent on purpose, so a kuma that dies
+The page's **notifications** stay UI-configured too (kuma embeds Apprise). That is
+the *status page's* channel, not the alerting path: the stack's alerts go monitor →
+Alertmanager → mail, and the two are independent on purpose, so a kuma that dies
 with the host does not take the pager with it.
 
-Notes:
-
-- **No tokens enter kuma's database.** Every monitor checks the public surface
-  (a token-gated endpoint answering 401 counts as up); the authenticated MCP
-  handshakes stay in `verify.sh`/`monitor.sh`.
-- Its state (`$DATA_DIR/uptime-kuma`, including the embedded MariaDB it runs in
-  v2) is part of the [backup set](#backup--restore) — as a `mariadb-dump`, not a
-  copy of the live datadir.
-- `verify.sh` checks the dashboard through nginx-proxy-manager and by container
-  name on `npm-network`, and probes the published page's public data endpoint.
-- The websockets it serves for its dashboard are why `[npm.status]` carries
-  the `ws` flag.
+- **No tokens enter kuma's database.** Every monitor checks the public surface; the
+  authenticated handshakes stay in `verify.sh`/`monitor.sh`.
+- Its state (`$DATA_DIR/uptime-kuma`, embedded MariaDB included) is in the backup
+  set as a `mariadb-dump`, not a copy of the live datadir.
+- Its dashboard uses websockets, which is why `[npm.status]` carries the `ws` flag.
 
 ## Proxy hosts
 
 nginx-proxy-manager is the stack's only LAN-facing HTTP unit, so every public
-hostname is a proxy host in NPM. (Fulcrum's raw Electrum ports `50001`/`50002`
-are the deliberate non-HTTP exception; see [What runs](#what-runs).) They are
-declared in the `[npm.*]` tables of `deploy/services.toml` — a `host`
-reference (or a literal `domain` for the `*.onion` wildcard), a `forward` and
-`flags` — and reconciled from this
-repo by `scripts/npm-hosts.sh` through the NPM admin API on `127.0.0.1:81` (NPM
-binds it on the host network): a host already serving the domain is updated in
-place, otherwise it is created, and a Let's Encrypt certificate is requested for
-any host that has none. The hostnames themselves are the `[host.*]` tables
-there, each with an operator env override (`BOLTMESH_FRONTEND_HOST`,
-`MCP_HOST`, ...). `./deploy.sh` runs it after the app tier (so a fresh host
-deploys before the admin login exists), and `./deploy.sh --only npm-hosts`
-re-applies it after a change.
+hostname is a proxy host in NPM. (Fulcrum's `50001`/`50002` are the deliberate
+non-HTTP exception; see [What runs](#what-runs).) They are declared in the
+`[npm.*]` tables of `deploy/services.toml` — a `host` reference (or a literal
+`domain` for the `*.onion` wildcard), a `forward` and `flags` — and reconciled by
+`scripts/npm-hosts.sh` through the NPM admin API on `127.0.0.1:81`: a host already
+serving the domain is updated in place, otherwise it is created, and a Let's
+Encrypt certificate is requested for any host that has none. The hostnames
+themselves are the `[host.*]` tables, each with an operator env override
+(`BOLTMESH_FRONTEND_HOST`, `MCP_HOST`, ...). `./deploy.sh` runs it after the app
+tier; `./deploy.sh --only npm-hosts` re-applies it after a change.
 
 ```toml
 [npm.frontend]
@@ -1682,29 +1274,18 @@ flags = ["ws", "block"]
 host = "mcp"
 forward = "127.0.0.1:8100"
 flags = ["mcp", "force-ssl", "http2"]
-
-[npm.onion_wildcard]
-# The onion side of the MCP surface. tor's mcp hidden service reaches NPM
-# with the client's Host header, which nobody knows at install time, so the
-# wildcard is the only possible domain -- and the only onion host that needs
-# NPM at all. No force-ssl, no certificate: tor already encrypts.
-domain = "*.onion"
-forward = "127.0.0.1:8100"
-flags = ["mcp"]
 ```
 
-Each entry has a `host` (a `[host.*]` key) or a literal `domain`, a `forward`
-of `[scheme://]host:port` (scheme defaults to `http`; `https` for an upstream
-that speaks TLS, if one is ever added) and a `flags` list: `force-ssl`
-(redirect `:80` to `:443`), `http2`, `ws` (websocket upgrade), `block` (block
-common exploits) and `mcp`. The forward host is always `127.0.0.1`: it is
-the loopback publish of the unit the host fronts — NPM runs on the host network
-and cannot resolve a container name. `--dry-run` prints the API payloads without
-changing anything, and `--prune` additionally **deletes** hosts and certificates
-that the manifest does not declare — the only destructive mode.
+`forward` is `[scheme://]host:port` (scheme defaults to `http`) and is always
+`127.0.0.1`: NPM runs on the host network and cannot resolve a container name, so
+it reaches the unit's loopback publish. The flags are `force-ssl` (redirect `:80`
+to `:443`), `http2`, `ws` (websocket upgrade), `block` (common exploits) and `mcp`.
+`--dry-run` prints the API payloads without changing anything; `--prune`
+additionally **deletes** hosts and certificates the manifest does not declare — the
+only destructive mode.
 
-The credentials for the API are in `$DATA_DIR/config/npm/api.env` (mode 600,
-seeded by `deploy/install.sh`):
+The credentials are in `$DATA_DIR/config/npm/api.env` (mode 600, seeded by
+`install.sh`):
 
 ```sh
 NPM_EMAIL=you@example.com
@@ -1713,9 +1294,9 @@ NPM_PASSWORD=…        # the password you set on the NPM UI's first visit (81)
 
 ### The MCP host
 
-Every MCP server speaks the Streamable HTTP transport at `/mcp` (the SDK's
-default). Rather than one hostname per server, they share one, each on a **path
-prefix** (`mcp` flag above):
+Every MCP server speaks Streamable HTTP at `/mcp`. Rather than one hostname per
+server, they share one, each on a **path prefix** (`mcp` flag above) that maps onto
+the upstream `/mcp`, so `/mcp` never appears in a client's URL:
 
 | Public URL | NPM forwards to |
 | --- | --- |
@@ -1730,47 +1311,33 @@ prefix** (`mcp` flag above):
 | `https://mcp.boltmesh.net/crowdsec` | `127.0.0.1:8113` (host network: the app's own bind) |
 | `https://mcp.boltmesh.net/btcpay` | `127.0.0.1:8114` |
 
-Each prefix maps onto the upstream `/mcp`, so the `/mcp` never appears in a
-client's URL. The host is `[host.mcp]` and the prefixes are the `[mcp.*]`
-tables in `deploy/services.toml`; each entry carries `prefix`, `container` and
-`port`, where the port is that
-server's loopback publish (the container name is kept because it also names the
-`token.env` that is the prefix's credential). `crowdsec-mcp` is the one
-exception: it runs on the host network (its upstream LAPI is a loopback bind a
-bridge container cannot reach) and binds `127.0.0.1:8113` itself, so its "port"
-is the app's own bind rather than a publish — same URL for a client, but
-host-side probes go through `netcheck-host`. Each server's bearer token still
-gates it (the tokens are the `token.env` files under
-`$DATA_DIR/config/<server>/`). The host's nginx config turns buffering off and
-sets a long read timeout, because Streamable HTTP answers with `text/event-stream`
-and a buffered SSE body just hangs the MCP client.
+The prefixes are the `[mcp.*]` tables, each carrying `prefix`, `container` and
+`port` (the container name also names the `token.env` that is the prefix's
+credential). `crowdsec-mcp` is the exception: it runs on the host network, binds
+`127.0.0.1:8113` itself, and host-side probes go through `netcheck-host`. The host's
+nginx config turns buffering off and sets a long read timeout, because Streamable
+HTTP answers with `text/event-stream` and a buffered SSE body just hangs the client.
 
-`/btcpay` is the read-only front door to BTCPay's Greenfield API: stores,
-invoices and their per-rail payment state, the on-chain wallet, rates and
-payment requests. Its BTCPay credential is a store-scoped key with four
-`canview*` permissions, minted by `btcpay-bootstrap` and kept in
-`config/btcpay/bootstrap.env` — never the admin key and never the backend's
-write-capable runtime key — so it cannot create or refund an invoice, pay out,
-generate a receiving address or broadcast. `get_btcpay_health` reports the
-key's label and permissions when a tool returns 403, and marks the key
-`degraded` if one of the four is missing; preimages, the API-key echo and
-connection strings are redacted from every answer.
+`/btcpay` is the read-only front door to BTCPay's Greenfield API. Its credential is
+a store-scoped key with four `canview*` permissions, minted by `btcpay-bootstrap`
+and kept in `config/btcpay/bootstrap.env` — never the admin key and never the
+backend's write-capable one — so it cannot create or refund an invoice, pay out,
+generate an address or broadcast. `get_btcpay_health` reports the key's permissions
+when a tool returns 403, and preimages, the API-key echo and connection strings are
+redacted from every answer.
 
-Each declared host needs its DNS pointing here and `:80` reachable for the
-HTTP-01 challenge; set `NPM_REQUEST_CERT=0` to leave TLS to the UI instead.
-`./verify.sh` checks the MCP path a client takes — the public URL connected to
-NPM itself (`--connect-to`), following its redirect to `:443` once TLS is on, so
-it works before public DNS exists.
+Each declared host needs its DNS pointing here and `:80` reachable for the HTTP-01
+challenge; `NPM_REQUEST_CERT=0` leaves TLS to the UI instead. `./verify.sh` checks
+the path a client takes — the public URL connected to NPM itself (`--connect-to`),
+following its redirect to `:443` once TLS is on, so it works before public DNS.
 
 ### Agent skills (harnesses without MCP)
 
-The [`agent-skills`](https://github.com/regularnmae/agent-skills) repo wraps
-those same ten endpoints as eleven skills plus `agent-mcp`, a small stdlib-only
-MCP client, for harnesses that do not speak MCP: Codex, a plain shell, CI, a
-script. `./deploy.sh` clones it into `$BUILD_DIR/agent-skills` and runs its
-`install.sh`, which links each skill into the harnesses this host actually has
-(`~/.config/opencode`, `~/.codex`, `~/.claude`) and puts `agent-mcp` in
-`~/.local/bin`:
+The [`agent-skills`](https://github.com/regularnmae/agent-skills) repo wraps the same
+endpoints as eleven skills plus `agent-mcp`, a stdlib-only MCP client, for harnesses
+that do not speak MCP: Codex, a plain shell, CI. `./deploy.sh` clones it into
+`$BUILD_DIR/agent-skills` and runs its `install.sh`, which links each skill into the
+harnesses this host has and puts `agent-mcp` in `~/.local/bin`:
 
 ```sh
 agent-mcp bitcoin-node get_blockchain_info
@@ -1778,31 +1345,23 @@ agent-mcp lightning decode bolt11=<invoice>
 agent-mcp bitcoin-node --list
 ```
 
-It is not a service — no unit, no container, no port, nothing in the backup set,
-and `--skip-agent-skills` leaves a host that only serves untouched. It adds no
-credential either: `servers.json` expands `$AGENT_MCP_BASE_URL` (default
-`https://mcp.boltmesh.net`, i.e. the default `MCP_HOST`) and reads each server's
-token straight from `$DATA_DIR/config/<server>/token.env` on every call, so
-`scripts/rotate.sh` needs no second step and no copy can go stale. A host that
-changed `MCP_HOST` exports `AGENT_MCP_BASE_URL` to match; `./verify.sh` warns
-when the two disagree. The skills are read-only by construction, because the
-servers they call are.
-
-The path prefixes live in that registry rather than being derived from
-the manifest, so moving one means editing both — `./verify.sh` fails on the
-drift. A harness that already has the native MCP tools (this host's OpenCode,
-via `~/.config/opencode/opencode.json`) should keep using them; each skill says
-so, and they exist for everything else.
+It is not a service — no unit, no container, no port, nothing in the backup set, and
+`--skip-agent-skills` leaves a host that only serves untouched. It adds no
+credential either: `servers.json` expands `$AGENT_MCP_BASE_URL` and reads each
+server's token from `$DATA_DIR/config/<server>/token.env` on every call, so
+`rotate.sh` needs no second step and no copy can go stale. A host that changed
+`MCP_HOST` exports `AGENT_MCP_BASE_URL` to match; `./verify.sh` warns when the two
+disagree. The prefixes live in that registry rather than being derived from the
+manifest, so moving one means editing both — `./verify.sh` fails on the drift.
 
 ## Tor onion services
 
-The public hostnames are also published as Tor v3 onion services, from the
-`tor` unit that already exists (lightningd's SOCKS proxy and CLN's own onion
-client). There is no extra container and nothing to open in the firewall: a
-hidden service is made of a few lines in `torrc` and outbound connections, which
-the stack already makes.
+The public hostnames are also published as Tor v3 onion services, from the `tor`
+unit that already exists (lightningd's SOCKS proxy and CLN's own onion client).
+No extra container, nothing to open in the firewall: a hidden service is a few
+lines in `torrc` and outbound connections.
 
-The declaration is the `[onion.*]` tables in `deploy/services.toml`:
+The declaration is the `[onion.*]` tables:
 
 ```toml
 [onion.boltmesh]
@@ -1818,23 +1377,21 @@ path = "/searxng"
 codes = [401]
 ```
 
-`deploy/install.sh` renders the declared onion table into a marked block at the end of
-`$DATA_DIR/tor/torrc` — the rest of that file (the control-password hash, the
-SOCKS policy) is still seeded once and never rewritten — and `./deploy.sh` hashes
-`torrc` alongside the units, so editing the tables and re-running it is all
-it takes to add, remove or retarget a service. (The `[onion.*]` key is the
-`HiddenServiceDir` name under `$DATA_DIR/tor/onion/`: renaming it is a new
-onion address, not a rename.)
+`install.sh` renders the table into a marked block at the end of
+`$DATA_DIR/tor/torrc` — the rest of that file (the control-password hash, the SOCKS
+policy) is seeded once and never rewritten — and `deploy.sh` hashes `torrc`
+alongside the units, so editing the tables and re-running it adds, removes or
+retargets a service. The `[onion.*]` key is the `HiddenServiceDir` name under
+`$DATA_DIR/tor/onion/`: renaming it is a new onion address, not a rename.
 
-The address itself is key material, not configuration: tor writes it to
-`$DATA_DIR/tor/onion/<name>/` (mounted at `/var/lib/tor/onion`, mode 700), which
-is part of the [backup set](#backup--restore). Restore those keys and the
-addresses come back; lose them and every address changes.
+The address itself is key material: tor writes it to `$DATA_DIR/tor/onion/<name>/`
+(mode 700), which is in the [backup set](#backup--restore). Restore the keys and
+the addresses come back; lose them and every address changes.
 
-tor logs a `ControlPort ... non-local address` warning at startup. That is
-expected: lightningd drives the statictor service through
-`10.89.0.240:9051`, which is not loopback. The port is protected by
-`HashedControlPassword` and is reachable only from `npm-network`.
+tor logs a `ControlPort ... non-local address` warning at startup. Expected:
+lightningd drives the statictor service through `10.89.0.240:9051`, which is not
+loopback; the port is protected by `HashedControlPassword` and reachable only from
+`npm-network`.
 
 ```sh
 cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
@@ -1848,141 +1405,119 @@ cat "$DATA_DIR"/tor/onion/*/hostname   # what each service is called
 | `api` | the BoltMesh API | `http://<addr>.onion/health`, `/v1` → `10.89.0.242:8000` |
 | `btc-explorer` | BTC RPC Explorer | `http://<addr>.onion/` → `10.89.0.243:3002` |
 | `xmr-explorer` | MoneroBlock | `http://<addr>.onion/style.css` → `10.89.0.244:31312` |
-| `mcp` | the ten MCP servers | `http://<addr>.onion/<searxng\|bitcoin\|monero\|monero-wallet\|lightning\|fulcrum\|logs\|metrics\|crowdsec\|btcpay>` → NPM's `*.onion` host |
+| `mcp` | the ten MCP servers | `http://<addr>.onion/<prefix>` → NPM's `*.onion` host |
 
-All but the MCP host forward to a container's pinned IP (the units set `IP=`):
-tor validates the target when it starts, so a name for a container that has not
-started yet would keep tor down. The MCP host cannot use an IP target — it is
-ten servers split by *path*, which only nginx-proxy-manager does, and NPM is on
-the host network, where a container has no route (`10.89.0.1:80` is refused from
-`npm-network`). The one reachable name is `host.containers.internal` (pasta's
-host gateway, added by podman), so the mcp onion forwards there and NPM matches
-the wildcard `*.onion` proxy host. A wildcard is required because **tor cannot
-rewrite the `Host` header** and the address is not known when the proxy hosts are
-declared. That host is the only one without a certificate: tor already encrypts
-and authenticates the onion, Let's Encrypt cannot issue for `.onion`, and the
-hidden service reaches NPM over plain HTTP — `scripts/npm-hosts.sh` skips TLS for
-it on purpose.
+All but the MCP host forward to a container's pinned IP (the units set `IP=`), which
+tor validates at start. The MCP host cannot: it is ten servers split by *path*,
+which only nginx-proxy-manager does, and NPM is on the host network, where a
+container has no route. The one reachable name is `host.containers.internal`
+(pasta's host gateway), so the mcp onion forwards there and NPM matches the
+wildcard `*.onion` proxy host — a wildcard because **tor cannot rewrite the `Host`
+header** and the address is not known when the proxy hosts are declared. That host
+is the only one without a certificate: tor already encrypts and authenticates the
+onion, Let's Encrypt cannot issue for `.onion`, and the hidden service reaches NPM
+over plain HTTP — `npm-hosts.sh` skips TLS for it on purpose.
 
-**What a browser can and cannot do over onion.** The API and the MCP servers are
-fully usable: point a client at the `.onion` address and everything above still
-holds, bearer tokens included (`verify.sh` proves the 401 gate through the onion).
-The BoltMesh SPA is not, on its own: `VITE_API_URL` is baked into the bundle at
-build time as `https://api.boltmesh.net/v1` and the refresh cookie is `Secure`,
-so a DNS-less browser loads the shell but cannot reach the API. An onion-native
-SPA means rebuilding it with the onion origin (`BOLTMESH_API_HOST=`) and adding
-the frontend's onion origin to `CORS_ALLOW_ORIGINS` in
-`$DATA_DIR/config/boltmesh/app.env` — a separate decision, not something the
-hidden service can do by itself.
+**What a browser can do over onion.** The API and the MCP servers are fully usable:
+point a client at the `.onion` address and everything above still holds, bearer
+tokens included (`verify.sh` proves the 401 gate through the onion). The BoltMesh
+SPA is not, on its own: `VITE_API_URL` is baked at build time and the refresh
+cookie is `Secure`, so a DNS-less browser loads the shell but cannot reach the API.
+An onion-native SPA means rebuilding it with the onion origin (`BOLTMESH_API_HOST=`)
+and adding that origin to `CORS_ALLOW_ORIGINS` in `boltmesh/app.env`.
 
 The onion checks therefore live in `./verify.sh` (it fetches each address through
-tor's SOCKS port); the status page cannot do them, because uptime-kuma has no
-SOCKS egress.
+tor's SOCKS port); the status page cannot do them, because uptime-kuma has no SOCKS
+egress.
 
 ## BoltMesh
 
 The application tier — `postgres`, `boltmesh-backend`, `boltmesh-worker` and
-`boltmesh-frontend` — is deployed by the same `./deploy.sh` as everything else,
-from the `boltmesh-labs` GitHub org (`GITHUB_ORG_BOLTMESH` in `stack.conf`). It
-is the one part of the stack that is not an MCP server, so it is built by its
-own step (`deploy_boltmesh` in `deploy.sh`): the images need a build target and
-`VITE_*` build arguments the generic app path does not pass.
+`boltmesh-frontend` — is deployed by the same `./deploy.sh` as everything else, from
+the `boltmesh-labs` GitHub org (`GITHUB_ORG_BOLTMESH` in `stack.conf`). It is the
+one part of the stack that is not an MCP server, so it has its own build step
+(`deploy_boltmesh`): the images need a build target and `VITE_*` build arguments the
+generic app path does not pass.
 
-Those two repos are **private** (the `$GITHUB_ORG` ones are public), so they are
-cloned over **SSH**, not HTTPS: the host must authenticate to GitHub as a user
-with access (`ssh -T git@github.com` must greet you). `deploy.sh` exports
-`GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"`, so a
-missing key is a clear error rather than a username prompt hanging the deploy.
-Set `GITHUB_SSH_HOST` to an `~/.ssh/config` alias if `git@github.com` is not the
-key's host. An existing HTTPS checkout is re-pointed at the SSH URL on the next
-run.
+Those two repos are **private**, so they are cloned over **SSH**: the host must
+authenticate to GitHub as a user with access (`ssh -T git@github.com` must greet
+you). `deploy.sh` exports `GIT_TERMINAL_PROMPT=0` and
+`GIT_SSH_COMMAND="ssh -o BatchMode=yes"`, so a missing key is a clear error rather
+than a prompt hanging the deploy. Set `GITHUB_SSH_HOST` to an `~/.ssh/config` alias
+if `git@github.com` is not the key's host; an existing HTTPS checkout is re-pointed
+on the next run.
 
-It does not bring its own chains. The backend is pointed at BTCPay, which
-fronts the stack's own `lightningd` (CLN) and the view-only Monero wallet:
+It does not bring its own chains: the backend is pointed at BTCPay, which fronts the
+stack's own `lightningd` and the view-only Monero wallet.
 
 | Value | Source |
 | --- | --- |
 | `DATABASE_URL`, `POSTGRES_*` | `$DATA_DIR/config/boltmesh/db.env` (generated) |
 | `SECRET_KEY`, `REFRESH_SECRET_KEY`, `NODE_SECRET_KEY`, `BOOTSTRAP_SECRET_PEPPER` | `$DATA_DIR/config/boltmesh/secrets.env` (generated) |
-| `BTCPAY_URL`, `BTCPAY_API_KEY`, `BTCPAY_STORE_ID`, `BTCPAY_WEBHOOK_SECRET` | `$DATA_DIR/config/btcpay/backend.env` — written by `configure.sh` from the bootstrap state; the runtime key is store-scoped (invoice create/read/modify, store settings) |
+| `BTCPAY_URL`, `BTCPAY_API_KEY`, `BTCPAY_STORE_ID`, `BTCPAY_WEBHOOK_SECRET` | `$DATA_DIR/config/btcpay/backend.env` — written by `configure.sh` from the bootstrap state; the runtime key is store-scoped |
 | URLs, CORS, OAuth, SMTP, `GITHUB_REPO`/`GITHUB_TOKEN` | `$DATA_DIR/config/boltmesh/app.env` — **operator-editable**, fill it in before first use |
 
 ### Before it works
 
-0. (once per host) The `boltmesh-labs` repos are private, so the host needs
-   GitHub **SSH** access before the first `./deploy.sh`: `ssh -T git@github.com`
-   must greet you. Without it the clone fails fast with a clear error (git is
-   not allowed to prompt).
-1. Point `boltmesh.net` and `api.boltmesh.net` at the host (`[host.frontend]`
-   / `[host.api]` in `deploy/services.toml`), and make `:80` reachable for the
-   Let's Encrypt challenge.
+1. Point `boltmesh.net` and `api.boltmesh.net` at the host (`[host.frontend]` /
+   `[host.api]`), and make `:80` reachable for the Let's Encrypt challenge.
 2. Fill in `$DATA_DIR/config/npm/api.env` with the NPM admin login and re-run
-   `./deploy.sh --only npm-hosts`: the two hosts (`boltmesh.net` →
-   `127.0.0.1:8106`, `api.boltmesh.net` → `127.0.0.1:8105`) come
-   from the manifest's proxy hosts, each with its own TLS certificate.
-3. Fill in `$DATA_DIR/config/boltmesh/app.env` (OAuth client id/secret, SMTP,
-   the agent `GITHUB_TOKEN`) and register
-   `https://api.boltmesh.net/v1/auth/google/callback` and `…/github/callback`
-   in the provider consoles — `API_BASE_URL` is the base of every redirect_uri.
-4. Re-run `./deploy.sh` (or `./deploy.sh --only boltmesh`). `VITE_API_URL` is
-   baked into the frontend bundle at build time, so a hostname change means a
-   rebuild, not an env edit.
+   `./deploy.sh --only npm-hosts`: the two hosts (`boltmesh.net` → `127.0.0.1:8106`,
+   `api.boltmesh.net` → `127.0.0.1:8105`) come from the manifest, each with its own
+   certificate.
+3. Fill in `$DATA_DIR/config/boltmesh/app.env` (OAuth client id/secret, SMTP, the
+   agent `GITHUB_TOKEN`) and register
+   `https://api.boltmesh.net/v1/auth/google/callback` and `…/github/callback` in the
+   provider consoles — `API_BASE_URL` is the base of every redirect_uri.
+4. Re-run `./deploy.sh` (or `./deploy.sh --only boltmesh`). `VITE_API_URL` is baked
+   into the frontend bundle at build time, so a hostname change means a rebuild.
 
-The database is dumped (`pg_dumpall`) into `$DATA_DIR/postgres-dump/` by
-`postgres-dump.container` immediately before each restic run, and the dump — not
-the raw cluster — is what the [backup set](#backup--restore) holds.
+The database is dumped (`pg_dumpall`) into `$DATA_DIR/postgres-dump/` immediately
+before each restic run; the dump, not the raw cluster, is what the
+[backup set](#backup--restore) holds.
 
 ## How secrets are kept out of git
 
-No secret is committed. Everything real is generated or adopted on the host,
-under `$DATA_DIR/config/`, mode 600.
+No secret is committed. Everything real is generated or adopted on the host, under
+`$DATA_DIR/config/`, mode 600.
 
-- **`$DATA_DIR/config/stack/secrets.env`** holds the node secrets (bitcoind RPC
-  user and password, Tor service password), `BTCPAY_DB_PASSWORD` (the `btcpay`
-  role in the Postgres cluster), `CROWDSEC_BOUNCER_KEY` and
-  `CROWDSEC_MCP_BOUNCER_KEY`, both of which are append-only and must never be
-  regenerated — the crowdsec container registers those exact keys in its LAPI at
-  start (as the `firewall` and `mcp` bouncers), so a new value silently leaves
-  enforcement dead, or `crowdsec-mcp` answering 403. It
-  is resolved in the order **`secrets.env` → the currently-installed unit → the
-  daemon's own config → generate**, so adopting the deploy on a running host
-  changes no credential. Keep it with the data: it is what opens Postgres, the
-  nodes and the bouncer's LAPI. There is no wallet password — BTCPay's plugin
-  wallet is imported view-only and its wallet RPC runs with
-  `--disable-rpc-login`.
-- **Per-app env files**
-  (`$DATA_DIR/config/<name>/{token,upstream,spend,node}.env`) hold the bearer
-  tokens, upstream credentials, spend policy and CLN runes. The unit reads them
-  with `EnvironmentFile=`; their shapes are `deploy/env/<name>/<file>.env.in`,
-  rendered by `install.sh` (seed-once, except the machine-owned `lapi.env` and
-  the view-only wallet's `upstream.env`). The files install.sh does not render
-  are documented in `deploy/examples/<name>/`.
-- **`$DATA_DIR/config/btc-explorer/btc-explorer.env`** holds the BTC
-  explorer's bitcoind RPC credentials and its Fulcrum endpoint. The unit reads
-  it with `EnvironmentFile=` (the explorer has no other configuration).
-- **`$DATA_DIR/config/npm/api.env`** holds the nginx-proxy-manager admin login
-  that `scripts/npm-hosts.sh` uses to reconcile every proxy host
-  through the API on `81` (or an API token instead). The Python core reads the
-  file itself, so no credential ever reaches an argv that `ps` can read.
+- **`config/stack/secrets.env`** holds the node secrets (bitcoind RPC user and
+  password, Tor service password), `BTCPAY_DB_PASSWORD` (the `btcpay` role in the
+  Postgres cluster) and the two CrowdSec bouncer keys — which are append-only and
+  must never be regenerated, because the crowdsec container registers those exact
+  values in its LAPI at start. Resolved in the order **`secrets.env` → the
+  installed unit → the daemon's own config → generate**, so adopting the deploy on
+  a running host changes no credential. There is no wallet password: BTCPay's
+  plugin wallet is imported view-only and its RPC runs with `--disable-rpc-login`.
+- **`config/<name>/{token,upstream,spend,node,lapi}.env`** hold the bearer tokens,
+  upstream credentials, spend policy and CLN runes. Units read them with
+  `EnvironmentFile=`; their shapes are `deploy/env/<name>/<file>.env.in`, rendered by
+  `install.sh` (seed-once, except the machine-owned `lapi.env` and the view-only
+  wallet's `upstream.env`). What `install.sh` does not render is documented in
+  `deploy/examples/<name>/`.
+- **`config/btc-explorer/btc-explorer.env`** — that explorer's bitcoind RPC
+  credentials and Fulcrum endpoint; the explorer has no other configuration.
+- **`config/npm/api.env`** — the nginx-proxy-manager admin login
+  `scripts/npm-hosts.sh` reconciles through (or an API token). The Python core reads
+  the file itself, so no credential reaches an argv `ps` can read.
 
 **Quadlet does not expand environment variables in `Exec=`**, which is why
-`lightningd`, `fulcrum` and `crowdsec` are *rendered* from
-`deploy/*.container.in` by `install.sh` (substituting `@PLACEHOLDERS@`). Every
-unit is rendered the same way — the secret-free ones only substitute
-`@DATA_DIR@`/`@CONFIG_DIR@` — so no unit is a symlink. The rendered units are
-mode 600 and never enter git. The BTCPay wallet deliberately uses the
-`btcpayserver/monero` image: the `simple-monero-wallet-rpc` image forces
-`127.0.0.1` unless `--rpc-login` is on the command line, and the plugin hardcodes
-empty credentials.
+`lightningd`, `fulcrum` and `crowdsec` are *rendered* from `deploy/*.container.in`
+by `install.sh`. Every unit is rendered that way — the secret-free ones only
+substitute `@DATA_DIR@`/`@CONFIG_DIR@` — so no unit is a symlink, and rendered
+units are mode 600 and never enter git. The BTCPay wallet deliberately uses the
+`btcpayserver/monero` image: the alternative forces `127.0.0.1` unless
+`--rpc-login` is on the command line, and the plugin hardcodes empty credentials.
 
-`bitcoind` keeps its RPC credentials in its own `bitcoin.conf`, which
-`install.sh` seeds on a fresh host and hands to the image uid. It is edited
-through the container: `podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf`.
+`bitcoind` keeps its RPC credentials in its own `bitcoin.conf`, seeded once and
+handed to the image uid: `podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf`.
+`docs/credentials.md` has the invariants behind all of this and why spending stays
+off.
 
 ### Rotating a credential
 
-`scripts/rotate.sh` changes one credential and brings every consumer of it along
-in dependency order:
+`scripts/rotate.sh` changes one credential and brings every consumer along in
+dependency order:
 
 ```sh
 ./scripts/rotate.sh --list                  # the targets and what each one touches
@@ -2000,100 +1535,35 @@ in dependency order:
 | `bitcoin-rpc` | `bitcoind`'s RPC password (and `--user`) | bitcoind, then fulcrum, lightningd, bitcoin-node-mcp, btc-explorer |
 | `tor-control` | Tor's control password (lightningd's statictor) | tor, then lightningd |
 | `runes` | the CLN runes: lightning-mcp's read/spend pair | lightning-mcp |
-| `token:<server>` | one MCP server's bearer token (`--spend` rotates a money server's spend token instead) | that server |
+| `token:<server>` | one MCP server's bearer token (`--spend` for a money server's spend token) | that server |
 | `searxng-secret` | SearXNG's `settings.yml` `secret_key` | searxng |
 | `postgres` | the `vpnuser` role's password (`ALTER ROLE`) | postgres → BoltMesh |
 | `boltmesh-keys` | the four signing keys/node pepper (`--yes`: ends every session and node token) | BoltMesh |
-| `restic` | the backup repository's key (`key add` → verify → `key remove`, `--yes`) | nothing |
+| `restic` | the repository's key (`key add` → verify → `key remove`, `--yes`) | nothing |
 
-None of it is scheduled. These credentials are also held by clients outside the
+None of it is scheduled: these credentials are also held by clients outside the
 stack (an MCP client's config, a wallet, nginx-proxy-manager), so a rotation on a
-timer would break them silently; it is an operator action, and the entry it
-leaves in `$DATA_DIR/audit/rotation.log` is the record (never a value).
-
-Three things make it more than an env-file edit, and `rotate.sh` is built around
-them:
-
-- **Part of each credential lives in a file `install.sh` never refreshes.**
-  `bitcoin.conf`, `torrc` and the per-app `upstream.env`/`btc-explorer.env` are
-  seeded once, so the script edits them in place (`bitcoin.conf` from inside the
-  container, only the `HashedControlPassword` line of `torrc`) *and* rewrites
-  `secrets.env` and the rest, so the next install renders the same value. A
-  rotation is never just one file.
-- **A re-render does not change a running container.** Every target restarts its
-  own dependents in order and waits for podman's health, so a credential the
-  daemon has not picked up cannot look rotated. A target that re-rendered
-  (`bitcoin-rpc`, `tor-control`) then advances the applied-unit baseline
-  (`$DATA_DIR/audit/units.applied`), so the next deploy does not bounce the units
-  it just restarted; if the re-render changed a unit the rotation does not
-  restart, it leaves the baseline alone and says so.
-- **Revocation is last, and it is a set comparison rather than a remembered
-  id.** The CLN runes are minted, proved with `checkrune`, put in
-  `lightning-mcp/node.env`, proven again through the server with `getinfo`, and
-  only then is *every other live rune whose method set is exactly one of
-  `stack.conf`'s* blacklisted with `destroyrune`. A failed swap therefore leaves
-  the old rune working instead of leaving the server unable to read the node,
-  and a successful one cannot leave a forgotten key behind — which is what a
-  remembered id can do, and did (five live leftovers, two of them spend-capable,
-  on the host this was written for). A rune minted for something else keeps its
-  methods and is never touched. `runes` rehashes only `node.env` in the spend
-  baseline, so the tripwire does not report a rotation as policy drift.
-- **A token rotation proves the new half.** The new bearer token has to answer a
-  real tool call. The "and the old one is refused" probe is deliberately gone:
-  the server holds exactly one token, and by the time the file is rewritten the
-  old value exists nowhere on the host to test. Nothing prints a token: the
-  clients that hold one read it from `$DATA_DIR/config/<server>/token.env`
-  (`~/.config/opencode/mcp.env` does exactly that at shell start), so a new
-  shell is all a client needs. A *spend* token is only exercised by a spend
-  call, which the script never makes — it proves the server reloaded and keeps
-  serving, and says so.
-- **A secret that lives in a database is changed there first.** `postgres`
-  runs `ALTER ROLE … PASSWORD` through psql on stdin, then rewrites `db.env`
-  (`POSTGRES_PASSWORD` *and* the `DATABASE_URL` that embeds it) and `dump.env`,
-  restarts postgres so its own environment agrees, and only counts it done when
-  the role authenticates **over the podman network** — the image's `pg_hba.conf`
-  trusts `127.0.0.1`, so a loopback probe succeeds with any password. The
-  nightly `pg_dumpall` carries the role's new hash; a dump taken before the
-  rotation would restore the old one.
-- **`restic` writes the new password down before the repository learns it.**
-  `RESTIC_PASSWORD_NEXT` goes into `backup.env` first, then `key add` (skipped
-  when that password already opens the repo), then `restic snapshots` as the
-  proof, then promotion to `RESTIC_PASSWORD`, then removal of every superseded
-  key. Add-before-remove means a crash leaves two working keys, not zero; the
-  write-ahead file means it never leaves the repository openable only by a
-  password nobody holds. Both passwords reach the container as 0600 files in the
-  rotation dir (mounted at `/rot`), never on a command line. Note that
-  `scripts/backup.sh` reads `RESTIC_PASSWORD` from the **environment first**, so
-  a shell that exports the old value keeps using it until you update it.
-- **`boltmesh-keys` is a logout button wearing a rotation's clothes.** It rewrites
-  `SECRET_KEY`/`REFRESH_SECRET_KEY` (every session ends), `NODE_SECRET_KEY` and
-  `BOOTSTRAP_SECRET_PEPPER` (every registered server and outstanding bootstrap
-  secret stops verifying), and requires `--yes`.
+timer would break them silently. The record is
+`$DATA_DIR/audit/rotation.log` — never a value.
 
 **If a run dies half-way, run the same target again.** Nothing is journaled and
 there is no `--resume`: every target either rewrites every copy of its credential
-(`bitcoin.conf` and `secrets.env`, `torrc` and its hash, `token.env`, `db.env`,
-the BoltMesh keys) or reconciles a declared end state against the authority that
-holds it (the rune set, the repository's keys), so a second run converges from
-whatever state the first one left:
+or reconciles a declared end state against the authority that holds it (the rune
+set, the repository's keys), so a second run converges from whatever the first left.
+A re-run also refuses to restart a daemon that already carries the new value, so
+finishing an interrupted rotation costs a verification, not a second outage.
+`--status` shows the window a crash can leave open; `--force` skips the preflight
+(an unhealthy daemon, or a nightly backup in flight).
 
 ```sh
 ./scripts/rotate.sh --status        # rune set, bitcoin.conf vs secrets.env, last 10 runs
 ./scripts/rotate.sh <target>        # finish a half-applied rotation
-./scripts/rotate.sh <target> --yes  # when the target demands --yes (boltmesh-keys, restic)
+./scripts/rotate.sh <target> --yes  # when the target demands it (boltmesh-keys, restic)
 ```
 
-A re-run also refuses to restart a daemon that already carries the new value — it
-reads the container's own command line or environment — so finishing a rotation
-that was interrupted after the restart costs a verification, not a second outage.
-That check only covers what a process exposes: bitcoind, tor and searxng read a
-config file, and postgres consumes its password only at `initdb`, so those are
-always restarted. The window a crash can leave behind (bitcoind's file on the new
-password, its clients on the old one) is what `--status` and the monitor's
-`bitcoin.conf` check look for.
-
-`--force` skips the preflight (an unhealthy daemon, or a nightly backup in
-flight, which would otherwise snapshot one side of a credential pair).
+The design — why a rotation is never one file, why revocation is a set comparison
+rather than a remembered id, and the write-ahead order for the restic key — is in
+`docs/credentials.md`, "Rotation".
 
 ## Layout
 
