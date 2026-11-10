@@ -961,22 +961,18 @@ case "$cmd" in
             # An unobtainable image is a skip, not a verdict -- and not an `ok`
             # either: ok_epoch is the age monitor.sh reads, so a drill that could
             # not replay must not reset it. Both helpers report that as rc 2.
-            rrc=0
-            verify_replay_dump "$root" || rrc=$?
-            case "$rrc" in
-                0) ;;
-                2) replay_skips="postgres: $replay_skip_detail" ;;
-                *) verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
-                   die "$replay_detail" ;;
-            esac
-            rrc=0
-            verify_replay_kuma_dump "$root" || rrc=$?
-            case "$rrc" in
-                0) ;;
-                2) replay_skips="${replay_skips:+$replay_skips; }kuma: $replay_skip_detail" ;;
-                *) verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
-                   die "$replay_detail" ;;
-            esac
+            for pair in postgres:verify_replay_dump kuma:verify_replay_kuma_dump; do
+                engine="${pair%%:*}"
+                helper="${pair#*:}"
+                rrc=0
+                "$helper" "$root" || rrc=$?
+                case "$rrc" in
+                    0) ;;
+                    2) replay_skips="${replay_skips:+$replay_skips; }$engine: $replay_skip_detail" ;;
+                    *) verify_status fail "$replay_detail" "$snap_id" "$files" "$total_bytes" "$subset"
+                       die "$replay_detail" ;;
+                esac
+            done
         fi
 
         if [ -n "$replay_skips" ]; then
