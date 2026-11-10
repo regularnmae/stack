@@ -25,37 +25,33 @@
 #
 #   ./deploy.sh && ./configure.sh
 #
-# Ordering is still load-bearing: the daemons are started before the MCP
-# servers that read them, and a changed definition is applied by the phase that
-# rebuilt its image. Chain sync takes hours to days; a service that is not
-# answering yet is configure.sh's problem, and a later run finishes it.
+# Ordering is load-bearing: the daemons are started before the MCP servers that
+# read them, and a changed definition is applied by the phase that rebuilt its
+# image. A service that is not answering yet is configure.sh's problem.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
-# Where deploy/install.sh renders the units. Read here to compare a running
-# container's network mode with the one its unit asks for (see sync_npm_network);
-# the rendered-unit digests themselves come from scripts/lib.sh's unit_digest,
-# which defaults to this path.
+# Where deploy/install.sh renders the units (docs/units.md). Read here to
+# compare a running container's network mode with its unit's (sync_npm_network);
+# unit digests come from scripts/lib.sh's unit_digest, which defaults to this
+# path.
 QUADLET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
 # Set by restart_changed_units when nginx-proxy-manager's unit changed.
 NPM_UNIT_CHANGED=0
-# The units this run has actually restarted (or started from a new definition),
-# space-delimited with a leading space (" bitcoind tor "). A phase that restarts
-# its own unit records it here; units_commit compares it with the changed set so
-# the baseline never claims a restart that did not happen, and refresh_image_unit
-# skips a unit the digest pass just restarted.
+# The units this run restarted, space-delimited with a leading space (" bitcoind
+# tor "). units_commit compares it with the changed set so the baseline never
+# claims a restart that did not happen; refresh_image_unit skips a unit the
+# digest pass already restarted.
 APPLIED_UNITS=" "
-# The unit stems whose rendered definition differs from the applied baseline,
-# and the subset that was active when the digest pass ran. The app phases consult
-# the first so a changed unit is restarted by the phase that owns it (after its
-# build) instead of twice; units_commit consults the second so an active changed
-# unit that no phase applied keeps the baseline where it is.
+# Unit stems whose rendered definition differs from the applied baseline, and
+# the subset active when the digest pass ran. A changed unit is restarted by the
+# phase that owns it, after its build, never twice.
 CHANGED_UNITS=""
 CHANGED_ACTIVE_UNITS=""
-# The digest set this run last reconciled with the running containers, and
-# whether install.sh ran at all (the agent-skills branch runs no installer and
-# must not record a baseline it never applied). units_commit reads both.
+# The digest set last reconciled with the running containers, and whether
+# install.sh ran at all (the agent-skills branch runs no installer, so it must
+# not record a baseline it never applied).
 UNITS_SYNCED=0
 UNITS_APPLIED_DIGEST=""
 # shellcheck source=stack.conf
@@ -66,20 +62,16 @@ UNITS_APPLIED_DIGEST=""
 # declared in deploy/services.toml; stack.conf keeps the non-registry knobs.
 load_manifest "$REPO_DIR"
 
-# Fallbacks for a manifest that predates the log block, so the summary below
-# still prints something true (install.sh carries the same defaults, and a
-# rendered unit must not fail on a stale checkout).
+# Fallbacks for a manifest that predates the log block: install.sh carries the
+# same defaults, and a rendered unit must not fail on a stale checkout.
 LOGS_RETENTION="${LOGS_RETENTION:-14d}"
 LOGS_MAX_BYTES="${LOGS_MAX_BYTES:-10GiB}"
 
-# git must never prompt mid-deploy: on a host with no credentials that is a
-# one-time setup step, not a question, and a prompt would hang the run.
-# BatchMode makes ssh fail fast too (no passphrase or host-key prompt). An
-# operator-provided GIT_SSH_COMMAND wins.
+# git must never prompt mid-deploy -- a prompt would hang the run; BatchMode
+# makes ssh fail fast too. An operator-provided GIT_SSH_COMMAND wins.
 export GIT_TERMINAL_PROMPT=0
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
-# Appended to a fetch failure. The public $GITHUB_ORG repos clone over HTTPS,
-# but the private boltmesh-labs ones need SSH.
+# Appended to a fetch failure: the private boltmesh-labs repos need SSH.
 GIT_CRED_HINT="git could not authenticate (it is not allowed to prompt). The $GITHUB_ORG_BOLTMESH repos are private: run 'ssh -T $GITHUB_SSH_HOST' -- it must greet you -- then re-run ./deploy.sh"
 ONLY=""
 DO_BOOTSTRAP=0
@@ -87,9 +79,8 @@ DO_AGENT_SKILLS=1
 SKIP_APPS=0
 SKIP_DAEMONS=0
 
-# The two blockchain explorers. Their images are built from this repo (not
-# pulled), so they are deployed like the app tier -- after the daemons they
-# read -- and only when their image is missing, unless --only forces a rebuild.
+# The two blockchain explorers: built from this repo, not pulled, so they deploy
+# after the daemons they read and rebuild only when --only asks.
 EXPLORER_UNITS=(btc-explorer xmr-explorer)
 
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
@@ -137,13 +128,10 @@ preflight() {
         warn "net.ipv4.ip_unprivileged_port_start=$portstart: nginx-proxy-manager cannot bind 80/443/81. Run ./bootstrap.sh."
     fi
 
-    # Choose where the stack keeps its data (asked once, then remembered) and
-    # make sure it is usable: owned by us (containers write as this uid) and
-    # labelled for containers. deploy.sh never uses sudo -- bootstrap.sh owns
-    # the privileged host setup, and a data dir we cannot prepare is a clear
-    # error from lib.sh rather than an implicit prompt here. resolve_data_dir
-    # only persists the answer, which it skips on a dry run; creating/labelling
-    # the dirs is a real change.
+    # deploy.sh never uses sudo: bootstrap.sh owns the privileged host setup,
+    # and a data dir we cannot prepare is an error from lib.sh, never an
+    # implicit prompt. resolve_data_dir only persists the answer (skipped on a
+    # dry run); creating and labelling the dirs is a real change.
     resolve_data_dir
     log "data directory: $DATA_DIR"
     if [ "$DRY_RUN" = 1 ]; then
@@ -157,11 +145,9 @@ preflight() {
 # ---------------------------------------------------------------------------
 # 1. fetch the application repos
 # ---------------------------------------------------------------------------
-# One repo, cloned or fast-forwarded into $BUILD_DIR/<dir> from <url>. git must
-# never prompt (GIT_TERMINAL_PROMPT/GIT_SSH_COMMAND are exported below): on a
-# host without credentials that is a one-time setup step, and a prompt would
-# hang the deploy. The remote URL is re-set on every run so a checkout that was
-# first cloned over a different protocol (HTTPS -> SSH) heals itself.
+# One repo, cloned or fast-forwarded into $BUILD_DIR/<dir> from <url>. The
+# remote URL is re-set on every run, so a checkout first cloned over another
+# protocol (HTTPS vs SSH) heals itself.
 fetch_repo() { # url dir label
     local url="$1" dir="$2" label="$3"
     if [ -d "$dir/.git" ]; then
@@ -195,14 +181,11 @@ install_units() {
 
 # install.sh + the digest comparison, for every `--only` branch. A re-render is
 # not an application -- a running container keeps the definition it started with
-# -- so a branch that calls install.sh alone would rewrite every other rendered
-# unit and leave the next full deploy with nothing to compare against. The
-# baseline is now the render that was last *applied*, persisted in
-# $DATA_DIR/audit/units.applied (units_baseline), so a branch still has to
-# restart every unit whose definition changed. The baseline is advanced at the
-# end of the branch (units_commit), not here: a branch whose own restart fails
-# must not record success. Defined before units_baseline/restart_changed_units
-# (which it calls) on purpose: bash resolves those at call time.
+# (docs/units.md) -- so the baseline is the render last *applied*
+# ($DATA_DIR/audit/units.applied, see units_baseline), advanced at the end of
+# the branch by units_commit: a branch whose own restart fails must not record
+# success. Defined before the functions it calls on purpose: bash resolves those
+# at call time.
 sync_units() {
     local before after
     before=$(units_baseline)
@@ -213,54 +196,48 @@ sync_units() {
     UNITS_SYNCED=1
     # restart_changed_units only flags nginx-proxy-manager: its restart has to
     # follow the proxy-host rewrite (sync_npm_network says why). A --only branch
-    # does not rewrite the hosts, so restarting it here could leave NPM unable to
-    # resolve the hosts it saved -- say so instead, and let `--only npm-hosts`
-    # or a full deploy do it in the right order.
+    # does not rewrite the hosts, so leave it to `--only npm-hosts` or a full
+    # deploy, in the right order.
     if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ]; then
         warn "nginx-proxy-manager's unit changed; its restart is deferred -- run ./deploy.sh (or ./deploy.sh --only npm-hosts) to apply it"
     fi
-    # Last, and here rather than in the --only prologue: install.sh runs inside
-    # install_units above and *rebuilds* the netcheck image when its Containerfile
-    # changed, so a refresh before it compares the container with the old image,
-    # finds them equal and does nothing -- the new bits then waited a whole
-    # deploy. It also keeps `--only monitor` on a fresh host from starting
-    # netcheck before its image exists. Every branch that probes calls this
-    # function first; agent-skills is the one that does not need it (agent-mcp
-    # is a host binary).
+    # Last, not in the --only prologue: install.sh runs inside install_units and
+    # *rebuilds* the netcheck image when its Containerfile changed, so a refresh
+    # before it compares against the old image, finds them equal and does
+    # nothing. It also keeps `--only monitor` on a fresh host from starting
+    # netcheck before its image exists. agent-skills is the one branch that does
+    # not need it.
     ensure_netcheck
 }
 
-# Record the render this run applied. Called at the end of a full deploy and of
-# every --only branch that ran install.sh; never on a dry run, and never after a
-# failure (set -e stops the script before this line), because a baseline that
-# advances past a restart that did not happen is exactly the silent-stale-config
-# bug this manifest exists to prevent.
+# Record the render this run applied: at the end of a full deploy and of every
+# --only branch that ran install.sh, never on a dry run, and never after a
+# failure. A baseline that advances past a restart that did not happen is the
+# silent-stale-config bug this manifest exists to prevent.
 units_commit() {
     local now unit pending=""
     [ "$DRY_RUN" = 0 ] || return 0
     [ "$UNITS_SYNCED" = 1 ] || return 0
-    # A render that happened after the digest pass (none does today; install.sh
-    # is also runnable by hand) can change a definition without going through
-    # restart_changed_units. Catch it up before recording, so the manifest never
-    # claims more than was applied. Every phase has run by now, so a changed
-    # unit still unapplied has no owner left: clear DEFER_UNITS and let the
-    # digest pass restart it.
+    # install.sh is also runnable by hand, so a render can land after the digest
+    # pass and change a definition without restart_changed_units seeing it.
+    # Catch it up before recording. Every phase has run by now, so a changed
+    # unit still unapplied has no owner left: clear DEFER_UNITS and restart it
+    # here.
     now=$(unit_digest)
     if [ "$now" != "$UNITS_APPLIED_DIGEST" ]; then
         DEFER_UNITS=""
         restart_changed_units "$UNITS_APPLIED_DIGEST" "$now"
         UNITS_APPLIED_DIGEST="$now"
     fi
-    # nginx-proxy-manager's restart is deferred to sync_npm_network (which clears
-    # the flag). A branch that did not reach it must not record NPM's new unit as
-    # applied: the next full deploy is what restarts it.
+    # A branch that did not reach sync_npm_network must not record NPM's new
+    # unit as applied: the next full deploy is what restarts it.
     if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ]; then
         warn "not recording the applied-unit baseline: nginx-proxy-manager's unit is still unapplied"
         return 0
     fi
-    # A changed unit that was active when the digest pass ran had to be restarted
-    # to apply its definition. If no phase did that, the baseline must stay where
-    # it is -- recording it would hide the drift until the next restart.
+    # A changed unit that was active had to be restarted to apply its
+    # definition. If no phase did, the baseline stays put: recording it hides
+    # the drift.
     for unit in $CHANGED_ACTIVE_UNITS; do
         unit_applied "$unit" || pending="$pending$unit "
     done
@@ -275,9 +252,9 @@ units_commit() {
 # ---------------------------------------------------------------------------
 # what changed, and what this run applied
 # ---------------------------------------------------------------------------
-# The digest pass records the changed set once; every later phase asks these
-# instead of keeping its own copy. mark_* are idempotent because a unit can be
-# named by two rendered files (tor.container and the torrc digest).
+# The digest pass records the changed set once; every later phase asks these.
+# mark_* are idempotent because one unit can be named by two rendered files
+# (tor.container and the torrc digest).
 unit_was_changed() { unit_in_set "$1" "$CHANGED_UNITS"; }
 unit_applied() { unit_in_set "$1" "$APPLIED_UNITS"; }
 mark_changed() { unit_was_changed "$1" || CHANGED_UNITS="$CHANGED_UNITS$1 "; }
@@ -286,9 +263,8 @@ mark_changed_active() {
 }
 mark_applied() { unit_applied "$1" || APPLIED_UNITS="$APPLIED_UNITS$1 "; }
 
-# Is the container running the image currently tagged IMAGE? refresh_image_unit
-# asks the same question; the app phases need it separately because they build
-# first and then decide whether a restart is needed at all.
+# Is the container running the image currently tagged IMAGE? The app phases need
+# it separately because they build first, then decide whether to restart at all.
 image_is_running() { # container image
     local name="$1" image="$2" running current
     podman container exists "$name" 2>/dev/null || return 1
@@ -299,15 +275,11 @@ image_is_running() { # container image
 
 # Restart a unit only when this run changed it: its rendered definition differs
 # from the baseline, or it runs an image older than the tag now points at. A
-# phase that rebuilt an unchanged image would otherwise take every app down for
-# nothing; a unit the digest pass deferred is still restarted here, after the
-# build that produced its bits. An unchanged but stopped unit is started (a
-# no-op when it is already active). Nothing here waits for health: that is
-# ./verify.sh's (and monitor.timer's) job, not the deploy's.
+# rebuilt but unchanged image would otherwise take every app down for nothing.
+# An unchanged, stopped unit is started. Nothing here waits for health.
 restart_applied() { # unit image [force]
     local unit="$1" image="$2" force="${3:-0}"
-    # A phase earlier in this run may have restarted it already (the digest
-    # pass): one restart per run.
+    # An earlier phase (the digest pass) may have restarted it: one per run.
     if [ "$force" = 0 ] && unit_applied "$unit" \
         && systemctl --user is-active --quiet "$unit.service" 2>/dev/null \
         && image_is_running "$unit" "$image"; then
@@ -324,12 +296,12 @@ restart_applied() { # unit image [force]
 }
 
 # .container only, never *.network: a network cannot be restarted under the
-# containers that use it. A oneshot unit is inactive and gets skipped by the
-# is-active check; a unit that is not running yet is started later, in order, by
-# start_infra/start_daemons -- restarting it here would jump that order (e.g.
-# lightningd before bitcoind). nginx-proxy-manager is only flagged: its restart
-# has to follow the proxy-host rewrite (sync_npm_network). A unit in DEFER_UNITS
-# is skipped entirely: the phase that rebuilt its image restarts it.
+# containers using it. A oneshot unit is inactive and skipped by the is-active
+# check; a unit not running yet is started later, in dependency order, by
+# start_infra/start_daemons -- restarting it here would jump that order
+# (lightningd before bitcoind). nginx-proxy-manager is only flagged
+# (sync_npm_network), and a unit in DEFER_UNITS is skipped: the phase that
+# rebuilt its image restarts it.
 restart_changed_units() { # before-digest after-digest
     local before="$1" after="$2" unit
     local -a changed=()
@@ -345,11 +317,9 @@ restart_changed_units() { # before-digest after-digest
                 && mark_changed_active "$unit"
             continue
         fi
-        # DEFER_UNITS is set by a branch that rebuilds the unit's image and
-        # restarts it itself (the `--only <app>` path, see deploy_app): a
-        # restart here would be an outage with the old bits and a second one
-        # seconds later. The full deploy defers the app tier and the explorers
-        # for the same reason.
+        # DEFER_UNITS is set by the branch that rebuilds this unit's image and
+        # restarts it itself (deploy_app): a restart here would be an outage on
+        # the old bits and a second one seconds later.
         if unit_in_set "$unit" "${DEFER_UNITS:-}"; then
             systemctl --user is-active --quiet "$unit.service" 2>/dev/null \
                 && mark_changed_active "$unit"
@@ -378,12 +348,9 @@ start_unit() { log "starting $1.service"; run systemctl --user start "$1.service
 restart_unit() { log "restarting $1.service"; run systemctl --user restart "$1.service"; }
 
 # A locally-built image can be rebuilt while its unit stays byte-identical: that
-# is the whole point of install.sh's Containerfile label, and no unit digest can
-# see it (the definition did not change). A bare ./deploy/install.sh therefore
-# leaves the old container running the old bits. So compare what the container
-# is actually running with the image on disk and restart when they differ --
-# `start` alone is a no-op on an active unit, which is what would otherwise keep
-# the old bits forever.
+# is the point of install.sh's Containerfile label, and no unit digest can see
+# it (the definition did not change), so a bare ./deploy/install.sh leaves the
+# old container on the old bits. Compare what it runs with the image on disk.
 refresh_image_unit() { # container image -> restart when the container is older
     local name="$1" image="$2"
     [ "$DRY_RUN" = 0 ] || return 0
@@ -408,9 +375,8 @@ refresh_image_unit() { # container image -> restart when the container is older
 
 # BTCPay loads the Monero plugin assemblies at start and keeps the copy it
 # mapped, so replacing the DLL on disk does nothing until the container is
-# recreated -- and its unit is unchanged by a plugin bump. Same question as
-# refresh_image_unit, answered against a file: is what the process loaded older
-# than what install.sh staged?
+# recreated -- and its unit is unchanged by a plugin bump (docs/btcpay.md). Same
+# question as refresh_image_unit, answered against a file.
 btcpay_plugin_newer() {
     local dll="$DATA_DIR/btcpay/Plugins/$BTCPAY_PLUGIN_ID/$BTCPAY_PLUGIN_ID.dll"
     local started mtime
@@ -427,11 +393,10 @@ btcpay_plugin_newer() {
     [ "$mtime" -gt "$started" ]
 }
 
-# Make sure the podman network exists before anything joins it. The quadlet
-# unit can be left "active (exited)" while the network itself is gone (e.g. the
-# network was removed by hand), and systemd will not re-run it, so a plain
-# start of a dependent unit fails. Recreate it from the unit (which pins the
-# subnet the tor IP and the rpcallowip/SocksPolicy allowlists rely on).
+# Make sure the podman network exists before anything joins it. The quadlet unit
+# can be left "active (exited)" while the network itself is gone (removed by
+# hand) and systemd will not re-run it. Recreate it from the unit, which pins
+# the subnet the tor IP and the rpcallowip/SocksPolicy allowlists rely on.
 ensure_network() {
     if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] ensure npm-network exists\n'; return 0; fi
     if podman network exists npm-network 2>/dev/null; then
@@ -446,11 +411,10 @@ ensure_network() {
     fi
 }
 
-# The `--only` branches run their checks (verify.sh inside the monitor sweep,
-# npm-hosts) through the two curl clients, and never reach
-# start_infra. Called at the end of sync_units -- after
-# install.sh has had its chance to rebuild the image, and before the branch's own
-# work -- so `./deploy.sh --only monitor` on a freshly booted host finds them up.
+# The `--only` branches run their checks through the two curl clients and never
+# reach start_infra. Called at the end of sync_units, after install.sh had its
+# chance to rebuild the image, so `--only monitor` on a freshly booted host
+# finds them up.
 ensure_netcheck() {
     [ "$DRY_RUN" = 1 ] && return 0
     # A rebuilt image would otherwise never reach the running container (start
@@ -465,52 +429,44 @@ ensure_netcheck() {
 # ---------------------------------------------------------------------------
 start_infra() {
     ensure_network
-    # The curl clients every host-side check execs into. First, because the
-    # checks that read a service by name (verify.sh, the MCP handshakes) all go
-    # through them, and
-    # refresh_image_unit because install.sh rebuilds the image in place: a
-    # `start` on an already-active unit would keep the old bits.
+    # The curl clients every host-side check execs into: first, because the
+    # checks that read a service by name (verify.sh, the MCP handshakes) go
+    # through them, and refreshed because install.sh rebuilds the image in place
+    # -- `start` on an already-active unit would keep the old bits.
     refresh_image_unit netcheck "$NETCHECK_IMAGE"
     start_unit netcheck
     refresh_image_unit netcheck-host "$NETCHECK_IMAGE"
     start_unit netcheck-host
-    # Monitoring first: it depends on nothing, it is cheap, and starting it
-    # before the daemons is what puts a whole initial sync in the history
-    # instead of beginning mid-way through it.
+    # Monitoring first: it depends on nothing, and starting it before the daemons
+    # captures the whole initial sync in the metrics history.
     start_unit node-exporter
     start_unit victoriametrics
-    # Alertmanager: the monitor pushes into it, and the monitor's first sweep
-    # may land before this line, so starting it here (a start is a no-op when
-    # active) keeps a fresh host from logging "Alertmanager unreachable" on its
-    # very first run.
+    # Alertmanager: the monitor pushes into it, so start it before the first
+    # sweep (a start is a no-op when active).
     start_unit alertmanager
-    # The log pipeline: journald -> vector -> victoria-logs. Same reasoning as
-    # the metrics store -- it depends on nothing, and starting it before the
-    # daemons is what captures their first minutes. vector buffers and retries
-    # if the store is not up yet, so the order inside this pair is not gating.
+    # The log pipeline: journald -> vector -> victoria-logs (docs/logs.md). It
+    # depends on nothing, so it starts before the daemons; vector buffers and
+    # retries, so the order inside this pair is not gating.
     start_unit victoria-logs
     start_unit vector
     # tor first: lightningd requires it and addresses it by its pinned IP. Its
-    # image is the one install.sh rebuilds in place, so bounce it first when the
-    # container predates the image (see refresh_image_unit).
+    # image is rebuilt in place, so refresh it before starting.
     refresh_image_unit tor "$TOR_IMAGE"
     start_unit tor
     if [ "$SKIP_DAEMONS" = 0 ]; then
         start_unit bitcoind
         start_unit monerod
-        # Fulcrum indexes from bitcoind's RPC and follows it through IBD: it
-        # retries the connection itself, so it is started here rather than
-        # gated on a wait. It opens its Electrum ports once caught up.
+        # Fulcrum indexes from bitcoind's RPC and follows it through IBD; it
+        # retries the connection itself, so it is not gated on a wait.
         start_unit fulcrum
     fi
     start_unit valkey
     start_unit searxng
     start_unit uptime-kuma
     start_unit nginx-proxy-manager
-    # CrowdSec reads nginx-proxy-manager's access log, so it starts after the
-    # proxy does (the log directory is NPM's). Nothing gates on it: a crowdsec
-    # that fails to start leaves detection off, not the site down, and
-    # scripts/monitor.sh reports the stale status.
+    # CrowdSec reads nginx-proxy-manager's access log (NPM's directory), so it
+    # starts after the proxy. Nothing gates on it: a crowdsec that fails to
+    # start leaves detection off, not the site down (docs/ids.md).
     start_unit crowdsec
 
     if [ "$SKIP_DAEMONS" = 1 ]; then
@@ -524,13 +480,12 @@ start_infra() {
 start_daemons() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping the chain daemons (--skip-daemons)"; return 0; fi
 
-    # The lightningd image's entrypoint stays alive as PID 1 even after the
-    # daemon dies (e.g. its bcli plugin backed into a bitcoind that was still
-    # loading its wallet), so the quadlet unit reads "active" and systemd's
-    # Restart=always never sees anything to restart. The unit's
-    # HealthOnFailure=kill is what ends that container now; this check stays as
-    # the fallback for one created before that line existed, since an active
-    # unit whose healthcheck reports unhealthy is exactly that zombie.
+    # The lightningd image's entrypoint stays alive as PID 1 after the daemon
+    # dies (its bcli plugin backed into a bitcoind still loading its wallet), so
+    # the unit reads "active" and Restart=always never fires. The unit's
+    # HealthOnFailure=kill ends that container; this check is the fallback for
+    # one created before that line existed, since an active unit reporting
+    # unhealthy is exactly that zombie.
     if [ "$DRY_RUN" = 0 ] && systemctl --user is-active --quiet lightningd.service \
         && [ "$(podman inspect -f '{{.State.Health.Status}}' lightningd 2>/dev/null)" = unhealthy ]; then
         warn "lightningd container is up but the daemon is dead inside; restarting it"
@@ -538,19 +493,17 @@ start_daemons() {
     else
         start_unit lightningd
     fi
-    # The CLN runes need a lightningd that answers. That wait and the installer
-    # re-run that mints them are ./configure.sh's job, not the deploy's.
+    # The CLN runes need a lightningd that answers: that wait and the re-run
+    # that mints them are ./configure.sh's job.
 }
 
 # ---------------------------------------------------------------------------
 # 5b. BTCPay: the settlement tier the BoltMesh backend talks to
 # ---------------------------------------------------------------------------
-# The BTCPay/NBXplorer/Monero-wallet units are rendered by install.sh. This
-# function only starts them, in dependency order. The work that needs them
-# answering -- the btcpay role and databases, the view-only plugin wallet, the
-# store bootstrap and the env files the backend and btcpay-mcp read -- is
-# ./configure.sh's job. A DB-less NBXplorer/BTCPay starts now and comes up on
-# its next systemd restart once configure.sh has created the databases.
+# install.sh renders the BTCPay/NBXplorer/Monero-wallet units; this only starts
+# them, in dependency order. The work that needs them answering -- the btcpay
+# role and databases, the view-only plugin wallet, the store bootstrap, the env
+# files -- is ./configure.sh's (docs/btcpay.md).
 start_btcpay() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping BTCPay (--skip-daemons)"; return 0; fi
     if [ "$DRY_RUN" = 1 ]; then
@@ -565,19 +518,15 @@ start_btcpay() {
     local btcpay_active=0 btcpay_applied=0
     systemctl --user is-active --quiet btcpay.service 2>/dev/null && btcpay_active=1
     if start_unit btcpay; then btcpay_applied=1; else warn "btcpay did not start"; fi
-    # btcpay is deferred by the digest pass (its restart belongs here, after
-    # postgres/nbxplorer are started), so a changed unit is applied now rather
-    # than left on the old definition until the next run. A failed restart is
-    # not "applied": units_commit must keep the baseline where it is.
+    # btcpay is deferred by the digest pass: its restart belongs here, after
+    # postgres/nbxplorer. A failed restart is not "applied".
     if [ "$btcpay_active" = 1 ] && unit_was_changed btcpay && ! unit_applied btcpay; then
         log "btcpay.service changed; restarting it to pick up the new unit"
         if restart_unit btcpay; then btcpay_applied=1; else warn "btcpay did not restart"; btcpay_applied=0; fi
     fi
     [ "$btcpay_applied" = 0 ] || mark_applied btcpay
-    # A plugin bump is a file in the plugin directory, so no unit digest notices
-    # it and `start` is a no-op on an already-active container: compare what is
-    # loaded with what is on disk, the same call refresh_image_unit makes for an
-    # image. This covers `--only btcpay` too, which never reaches unit_digest.
+    # A plugin bump is a file, so no unit digest notices it: compare what is
+    # loaded with what is on disk. This covers `--only btcpay` too.
     if btcpay_plugin_newer; then
         log "the BTCPay Monero plugin on disk is newer than the running container; restarting btcpay"
         restart_unit btcpay || warn "btcpay did not restart"
@@ -597,10 +546,8 @@ deploy_app() { # repo [force]
     log "building $image"
     run podman build -t "$image" "$dir" \
         || { warn "$r did not build; keeping the running image"; return 1; }
-    # Every unit here sets HealthCmd/HealthInterval (the MCP servers probe their
-    # own /mcp with an authenticated initialize), but health is the verdict
-    # ./verify.sh and monitor.timer read -- the deploy does not wait for it.
-    # A plain `--only <app>` forces the restart: the operator asked for it.
+    # Health is ./verify.sh's and monitor.timer's verdict, not the deploy's;
+    # it never waits. A plain `--only <app>` forces the restart.
     if [ "$force" = 1 ]; then
         restart_unit "$r" || { warn "$r did not restart"; return 1; }
         mark_applied "$r"
@@ -619,11 +566,10 @@ deploy_apps() {
 # ---------------------------------------------------------------------------
 # 6b. the BoltMesh app tier (postgres + backend + worker + frontend)
 # ---------------------------------------------------------------------------
-# Not deploy_app: the BoltMesh repos live in a second org and, while they ship a
-# Containerfile, the frontend needs an explicit build target and VITE_* build
-# args (inlined into the bundle at build time) that deploy_app does not pass.
-# The private boltmesh-labs repos are fetched over SSH (GITHUB_SSH_HOST), unlike
-# the public $GITHUB_ORG ones. Same repo:dir pairs as stack.conf.
+# Not deploy_app: the BoltMesh repos live in a second org, and the frontend
+# needs an explicit build target and VITE_* build args (inlined into the bundle
+# at build time) that deploy_app does not pass. The private boltmesh-labs repos
+# are fetched over SSH (GITHUB_SSH_HOST); same repo:dir pairs as stack.conf.
 fetch_boltmesh() { # every BOLTMESH_REPOS entry ("repo:dir" pairs)
     mkdir -p "$BUILD_DIR"
     local pair repo dir
@@ -634,8 +580,8 @@ fetch_boltmesh() { # every BOLTMESH_REPOS entry ("repo:dir" pairs)
     done
 }
 
-# Prefer Containerfile (the stack's contract); Dockerfile is the pre-rename
-# name, kept working so a host that pinned an older checkout still builds.
+# Prefer Containerfile (the stack's contract); Dockerfile is the old name, kept
+# so a host pinned to an older checkout still builds.
 boltmesh_containerfile() { # dir
     if [ -f "$1/Containerfile" ]; then printf '%s' "$1/Containerfile"; else printf '%s' "$1/Dockerfile"; fi
 }
@@ -665,8 +611,8 @@ build_boltmesh_frontend() {
 deploy_boltmesh() { # [force]
     local force="${1:-0}"
     # Failures warn and return 0, exactly like deploy_apps: the deploy brings up
-    # as much as it can and verify.sh reports what is actually broken, so one
-    # bad build does not abort the rest of the run (or a --dry-run).
+    # what it can and verify.sh reports what is broken, so one bad build does
+    # not abort the run.
     fetch_boltmesh
 
     if ! build_boltmesh_backend; then
@@ -679,12 +625,10 @@ deploy_boltmesh() { # [force]
 
     start_unit postgres || warn "postgres did not start"
     # The migrations are ./configure.sh's job: they need a postgres that
-    # answers, and deploy.sh does not wait. The API/worker are started here
-    # regardless, so a run that never reaches configure.sh serves against a
-    # missing schema.
+    # answers, and deploy.sh does not wait. The API/worker start regardless, so
+    # a run that never reaches configure.sh serves against a missing schema.
 
-    # Backend and worker share one image; the frontend has its own. Each unit is
-    # restarted only when its definition changed or its image is newer.
+    # Backend and worker share one image; the frontend has its own.
     restart_applied boltmesh-backend localhost/boltmesh-backend:latest "$force" \
         || warn "boltmesh-backend did not restart"
     restart_applied boltmesh-worker localhost/boltmesh-backend:latest "$force" \
@@ -697,11 +641,9 @@ deploy_boltmesh() { # [force]
 # 6b-bis. the blockchain explorers
 # ---------------------------------------------------------------------------
 # BTC RPC Explorer and MoneroBlock are local images (btc-explorer/ and
-# xmr-explorer/ Containerfiles), not pulled ones, so they are built here like
-# the app tier rather than by install.sh. They read the daemons over RPC, so
-# they come after start_daemons; they are built only when the image is missing
-# (a rebuild is --only). Nothing here is secret: the BTC unit reads its RPC
-# credentials from an EnvironmentFile install.sh seeded.
+# xmr-explorer/ Containerfiles), so they are built here rather than by
+# install.sh, after the daemons they read. Nothing here is secret: the BTC unit
+# reads its RPC credentials from an EnvironmentFile install.sh seeded.
 explorer_image() { # name -> the local image tag
     case "$1" in
         btc-explorer) printf '%s' "$BTC_EXPLORER_IMAGE" ;;
@@ -714,9 +656,9 @@ build_explorer() { # name [force]
     local name="$1" force="${2:-0}" dir="$REPO_DIR/$1" image
     image=$(explorer_image "$name") || { warn "unknown explorer: $name"; return 1; }
     [ -f "$dir/Containerfile" ] || { warn "$name has no Containerfile"; return 1; }
-    # "exists" is not enough: a digest bump changes only the Containerfile, so
-    # an unlabelled or label-mismatched image is the old bits under the same
-    # local tag. See scripts/lib.sh's image_is_current.
+    # "exists" is not enough: a digest bump changes only the Containerfile, so a
+    # stale label means the old bits under the same local tag
+    # (scripts/lib.sh's image_is_current).
     if [ "$force" = 0 ] && image_is_current "$image" "$dir/Containerfile"; then
         log "$image is current"
         return 0
@@ -738,12 +680,10 @@ deploy_explorers() {
         return 0
     fi
 
-    # Build first, then decide what needs a restart. An unchanged explorer is
-    # started (a no-op when active) and left alone; only a changed unit or a
+    # Build first, then decide what needs a restart: only a changed unit or a
     # rebuilt image costs an outage. xmr-explorer panics while monerod is still
-    # opening its LMDB, but its unit retries every RestartSec, so the deploy
-    # starts it and leaves the recovery to systemd (and the verdict to
-    # ./verify.sh) instead of waiting on monerod's restricted RPC.
+    # opening its LMDB, but its unit retries every RestartSec, so leave recovery
+    # to systemd instead of waiting on monerod's restricted RPC.
     local name image
     for name in "${EXPLORER_UNITS[@]}"; do
         build_explorer "$name" \
@@ -763,13 +703,10 @@ deploy_explorers() {
 # 6c. the nginx-proxy-manager proxy hosts
 # ---------------------------------------------------------------------------
 # Not a unit: nginx-proxy-manager already serves. Every backend it fronts
-# publishes its port on the host's loopback, where NPM (on the host network)
-# forwards -- so this only configures NPM, through its admin API, to serve the
-# hosts declared in NPM_HOSTS. It runs before the explorers so their proxy hosts
-# exist even while their images build: NPM does not connect to a loopback
-# upstream until a request arrives. It self-skips with a one-line note when
-# $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
-# before the admin login exists.
+# publishes on the host's loopback, where NPM (on the host network) forwards, so
+# this only writes the hosts declared in NPM_HOSTS through NPM's admin API
+# (docs/proxy.md). It self-skips when $DATA_DIR/config/npm/api.env has no
+# credentials, so a fresh host deploys before the admin login exists.
 configure_npm_hosts() {
     if [ "$DRY_RUN" = 1 ]; then
         printf '  [dry-run] %s\n' "$REPO_DIR/scripts/npm-hosts.sh"
@@ -782,13 +719,12 @@ configure_npm_hosts() {
 # ---------------------------------------------------------------------------
 # 6d. nginx-proxy-manager's network mode
 # ---------------------------------------------------------------------------
-# A unit change is not picked up by an already-running container, so a host that
-# served from the old published-port layout keeps doing so until NPM restarts.
-# That restart must come *after* the rewrite above and never before: NPM's nginx
-# resolves every upstream at start and refuses to come up when a saved host names
-# something it cannot resolve -- on the host network, a container name. That also
-# takes the admin API on :81 down (same nginx), leaving the rewrite with nothing
-# to talk to, so the order is load-bearing.
+# A running container keeps its old unit, so NPM serves the old layout until it
+# restarts -- and that restart must come *after* the rewrite above, never
+# before: nginx resolves every upstream at start and refuses to come up when a
+# saved host names something it cannot resolve (on the host network, a container
+# name). That would also take the admin API on :81 down, leaving the rewrite
+# with nothing to talk to (docs/proxy.md).
 sync_npm_network() {
     local want got why=""
     want=$(sed -n 's/^Network=//p' "$QUADLET_DIR/nginx-proxy-manager.container" 2>/dev/null | head -n1 || true)
@@ -821,17 +757,16 @@ sync_npm_network() {
 # 6e. agent tooling: the skills + `agent-mcp`, for harnesses without MCP
 # ---------------------------------------------------------------------------
 # Not a service: agent-skills ships no Containerfile and starts no container, so
-# it is deliberately absent from APP_REPOS (deploy_app would bail on the missing
-# Containerfile). Its install.sh links eleven skills into whichever harnesses exist
-# under $HOME (~/.config/opencode, ~/.codex, ~/.claude) and drops agent-mcp in
-# ~/.local/bin -- the only thing a deploy writes outside $DATA_DIR, hence
-# --skip-agent-skills for a host that only serves.
+# it is absent from APP_REPOS (deploy_app would bail on the missing
+# Containerfile). Its install.sh links the skills into whichever harnesses exist
+# under $HOME and drops agent-mcp in ~/.local/bin -- the only thing a deploy
+# writes outside $DATA_DIR, hence --skip-agent-skills (docs/clients.md).
 #
-# No --from-opencode: servers.json reads each server's token straight from
+# No --from-opencode: servers.json reads each server's token from
 # $DATA_DIR/config/<server>/token.env, so seeding ~/.config/agent-skills/env
-# would only create a copy that goes stale on the next token rotation. The
-# read-only handshake that proves the path through $MCP_HOST needs the stack to
-# be answering, so it lives in ./configure.sh, not here.
+# would only create a copy that goes stale on the next rotation. The handshake
+# that proves the path through $MCP_HOST needs the stack answering, so it lives
+# in ./configure.sh.
 agent_skills_dir() { printf '%s/%s' "$BUILD_DIR" "$AGENT_SKILLS_REPO"; }
 
 fetch_agent_skills() {
@@ -851,9 +786,9 @@ install_agent_skills() {
 # ---------------------------------------------------------------------------
 # 7. firewalld
 # ---------------------------------------------------------------------------
-# bootstrap.sh opens FIREWALL_PORTS: it owns every privileged host setting, so
-# deploy.sh stays rootless here. Querying firewalld needs privilege, so this can
-# only report on it, never check it -- a notice, not a gate.
+# bootstrap.sh opens FIREWALL_PORTS -- it owns every privileged host setting, so
+# deploy.sh stays rootless. Querying firewalld needs privilege, so this can only
+# report, never check: a notice, not a gate.
 note_firewall() {
     if ! command -v firewall-cmd >/dev/null 2>&1; then
         warn "firewall-cmd not found; run ./bootstrap.sh to open ${FIREWALL_PORTS[*]}/tcp"
@@ -871,66 +806,60 @@ preflight
 
 if [ -n "$ONLY" ]; then
     # A hand-removed network would make every restart below fail; recreate it
-    # from the unit exactly as the full deploy does. The curl clients are started
-    # by sync_units, not here: install.sh rebuilds their image, so starting them
-    # before it would compare against the old one.
+    # from the unit, as the full deploy does. The curl clients are started by
+    # sync_units, after install.sh had its chance to rebuild their image.
     ensure_network
     if unit_in_set "$ONLY" "${APP_REPOS[*]}"; then
-        # deploy_app rebuilds the image and restarts the unit itself, so let
-        # restart_changed_units leave this one alone rather than restart it
-        # twice -- once with the old bits, once with the new.
+        # deploy_app rebuilds the image and restarts the unit itself, so the
+        # digest pass must leave this one alone: a restart there is an outage on
+        # the old bits.
         DEFER_UNITS=" $ONLY "
         fetch_repos "$ONLY"
         sync_units
-        # An explicit --only is a request to redeploy: force the restart even
-        # when the image and the unit are unchanged.
+        # An explicit --only is a request to redeploy: force the restart.
         deploy_app "$ONLY" 1
     elif [ "$ONLY" = backup ]; then
-        # A one-shot job: install.sh has just (re)enabled the timer; this also
-        # runs it once now instead of waiting for the schedule.
+        # A one-shot job: install.sh has (re)enabled the timer; run it once now.
         sync_units
         start_unit backup
     elif [ "$ONLY" = backup-verify ]; then
-        # The weekly restore drill (scripts/backup.sh verify): run one now rather
-        # than waiting for Sunday. It reads only the repository, so it is safe on
-        # a host whose stack is serving; the verdict lands in
-        # $DATA_DIR/audit/backup-verify.status.
+        # The weekly restore drill (scripts/backup.sh verify), now. It reads
+        # only the repository, so it is safe on a serving host; the verdict
+        # lands in $DATA_DIR/audit/backup-verify.status (docs/backup.md).
         sync_units
         start_unit backup-verify
     elif [ "$ONLY" = backup-verify-db ]; then
         # The monthly database drill (scripts/backup.sh verify-db): replay the
-        # snapshot's postgres dump into a throwaway cluster now rather than
-        # waiting for the first Wednesday. Same safety property as the restore
-        # drill -- the live data dirs are never mounted -- and it may pull the
-        # postgres image, which the weekly drill deliberately does not. The
-        # verdict lands in $DATA_DIR/audit/backup-verify-db.status.
+        # snapshot's postgres dump into a throwaway cluster. Same safety
+        # property -- the live data dirs are never mounted -- and it may pull
+        # the postgres image, which the weekly drill does not. Verdict in
+        # $DATA_DIR/audit/backup-verify-db.status.
         sync_units
         start_unit backup-verify-db
     elif [ "$ONLY" = monitor ]; then
-        # Like backup: install.sh has (re)enabled monitor.timer; run the sweep
-        # once now. monitor.service is oneshot and takes no arguments.
+        # Like backup: install.sh has (re)enabled monitor.timer; run one sweep.
+        # monitor.service is oneshot and takes no arguments.
         sync_units
         start_unit monitor
     elif [ "$ONLY" = registrations ]; then
-        # The signup watcher (scripts/registrations.sh): run one pass now rather
-        # than waiting for the next minute. A hand run of the script is the way to
-        # see what it would mail (`--dry-run`) or to prove the channel
-        # (`--test`); this branch is the "check now" the timer already does.
+        # The signup watcher (scripts/registrations.sh): run one pass now. To
+        # see what it would mail or prove the channel, run the script by hand
+        # (`--dry-run`, `--test`).
         sync_units
         start_unit registrations
     elif [ "$ONLY" = btcpay ]; then
-        # btcpay's restart belongs after postgres and nbxplorer are started, so
-        # the digest pass leaves it to start_btcpay. The databases, plugin
-        # wallet, bootstrap and env files are ./configure.sh --only btcpay.
+        # btcpay's restart belongs after postgres and nbxplorer, so the digest
+        # pass leaves it to start_btcpay. The databases, plugin wallet,
+        # bootstrap and env files are ./configure.sh --only btcpay.
         DEFER_UNITS=" btcpay "
         sync_units
         start_btcpay
         log "next: ./configure.sh --only btcpay  # databases, plugin wallet, bootstrap, envs"
     elif [ "$ONLY" = boltmesh ]; then
-        # The whole app tier: fetch, build, start. Individual members (postgres,
-        # boltmesh-backend/-worker/-frontend) fall through to the generic branch
-        # below, which restarts the one unit. The migrations are ./configure.sh
-        # --only boltmesh (they need a ready postgres).
+        # The whole app tier: fetch, build, start. Individual members fall
+        # through to the generic branch below, which restarts the one unit. The
+        # migrations are ./configure.sh --only boltmesh (they need a ready
+        # postgres).
         DEFER_UNITS=" boltmesh-backend boltmesh-worker boltmesh-frontend "
         sync_units
         deploy_boltmesh 1
@@ -938,8 +867,7 @@ if [ -n "$ONLY" ]; then
     elif [ "$ONLY" = explorers ]; then
         # Both explorer images, rebuilt even if they exist (their Containerfiles
         # are the only place their versions live). Deferred so the digest pass
-        # does not restart them once with the old image before this branch
-        # rebuilds and restarts them.
+        # does not restart them on the old image first.
         DEFER_UNITS=" ${EXPLORER_UNITS[*]} "
         sync_units
         for name in "${EXPLORER_UNITS[@]}"; do
@@ -948,7 +876,7 @@ if [ -n "$ONLY" ]; then
             mark_applied "$name"
         done
     elif [ "$ONLY" = btc-explorer ] || [ "$ONLY" = xmr-explorer ]; then
-        # One explorer: rebuild its image and restart only that unit. The
+        # One explorer: rebuild its image and restart only that unit; the
         # generic branch below would skip the build and keep the old image.
         DEFER_UNITS=" $ONLY "
         sync_units
@@ -956,25 +884,24 @@ if [ -n "$ONLY" ]; then
         restart_unit "$ONLY" || warn "$ONLY did not restart"
         mark_applied "$ONLY"
     elif [ "$ONLY" = npm-hosts ]; then
-        # Re-apply the proxy hosts after a manifest change, or after filling
-        # in $DATA_DIR/config/npm/api.env. Touches no container of its own, but
-        # this is the one branch that owns nginx-proxy-manager's deferred
-        # restart -- rewrite the hosts first, then let sync_npm_network apply a
-        # changed unit (it says why the order is load-bearing).
+        # Re-apply the proxy hosts after a manifest change, or after filling in
+        # $DATA_DIR/config/npm/api.env. This is the one branch that owns
+        # nginx-proxy-manager's deferred restart: rewrite the hosts first, then
+        # let sync_npm_network apply a changed unit (it says why the order
+        # matters).
         sync_units
         configure_npm_hosts
         sync_npm_network
     elif [ "$ONLY" = agent-skills ]; then
-        # Client-side tooling only: no unit, no data dir, no secret -- it reads
-        # the tokens the stack already wrote and links the skills into the
-        # harnesses installed under $HOME.
+        # Client-side tooling only: no unit, no secret -- it reads the tokens
+        # the stack already wrote and links the skills into the harnesses under
+        # $HOME.
         fetch_agent_skills
         install_agent_skills || true
     else
         sync_units
-        # sync_units may already have restarted it because its rendered
-        # definition changed; a second restart is a second outage for one edit,
-        # so only restart when it did not.
+        # sync_units may already have restarted it; a second restart is a second
+        # outage for one edit, so only restart when it did not.
         if unit_applied "$ONLY"; then
             log "$ONLY.service was restarted to pick up its new unit; not restarting it again"
         else
@@ -989,12 +916,11 @@ fi
 
 fetch_repos
 # The app tier and the explorers are restarted by the phase that owns them,
-# after its build, so the early digest pass leaves them alone: a unit that is
-# both changed and rebuilt would otherwise be restarted twice (once on the old
-# bits, once on the new). btcpay's restart belongs in start_btcpay, after
-# postgres and nbxplorer are started. Only units whose phase will actually run
-# are deferred -- with --skip-apps or --skip-daemons the digest pass applies
-# their unit changes as before.
+# after its build, so the early digest pass leaves them alone: a unit both
+# changed and rebuilt would otherwise be restarted twice (once on the old bits).
+# btcpay's restart belongs in start_btcpay. Only units whose phase will run are
+# deferred -- with --skip-apps or --skip-daemons the digest pass applies their
+# changes.
 DEFER_UNITS=" "
 [ "$SKIP_APPS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${APP_REPOS[*]} boltmesh-backend boltmesh-worker boltmesh-frontend "
 [ "$SKIP_DAEMONS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${EXPLORER_UNITS[*]} btcpay "
@@ -1006,16 +932,15 @@ UNITS_APPLIED_DIGEST="$units_after"
 UNITS_SYNCED=1
 start_infra
 start_daemons
-# A BTCPay failure is a tier failure, not a deploy failure: the rest of the
-# stack still deploys and ./verify.sh (or the monitor) names what is down. A
-# bare call would let `set -e` abort before units_commit and leave the baseline
-# stale, so the next run would restart everything again.
+# A BTCPay failure is a tier failure, not a deploy failure: the rest still
+# deploys and ./verify.sh names what is down. A bare call would let `set -e`
+# abort before units_commit and leave the baseline stale.
 start_btcpay || warn "BTCPay did not come up; continuing -- run ./verify.sh"
 [ "$SKIP_APPS" = 1 ] || deploy_apps
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
 # Configure the proxy hosts before the explorers: their images are local builds,
-# and the rest of the public surface must not wait for them. The explorer hosts
-# point at loopback ports, so NPM starts fine before the containers do.
+# and the rest of the public surface must not wait for them. NPM does not
+# connect to a loopback upstream until a request arrives.
 configure_npm_hosts
 sync_npm_network
 if [ "$DO_AGENT_SKILLS" = 1 ]; then
@@ -1026,11 +951,9 @@ else
 fi
 deploy_explorers
 note_firewall
-# Record the definitions this deploy applied. The manifest says which unit files
-# the containers were started from, not whether the stack is healthy: health is
-# ./verify.sh's and the monitor's job, and a tier that warns must not withhold
-# the baseline -- otherwise every re-run would bounce units that are already
-# current.
+# Record the definitions this deploy applied: which unit files the containers
+# were started from, not whether the stack is healthy. A tier that warns must
+# not withhold the baseline -- every re-run would bounce units that are current.
 units_commit
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -1044,8 +967,8 @@ else
     agent_skills_summary="not installed (--skip-agent-skills)"
 fi
 
-# The summary's prefix list is the manifest's, not a second copy: "/searxng" ->
-# "searxng", joined with "|" (empty when the manifest is old).
+# The prefix list is the manifest's, not a second copy: "/searxng" -> "searxng",
+# joined with "|" (empty when the manifest is old).
 mcp_prefix_list=""
 for prefix in ${MCP_PREFIXES[@]+"${MCP_PREFIXES[@]}"}; do
     mcp_prefix_list+="${mcp_prefix_list:+|}${prefix#/}"
@@ -1159,9 +1082,9 @@ running service. Next, once the daemons answer:
 EOF
 fi
 
-# The onion addresses are key material, not configuration (they appear only once
-# tor has started), so they cannot live in stack.conf or a README. Print them when
-# they exist; scripts/npm-hosts.sh prints the same list on its own.
+# The onion addresses are key material, not configuration (they exist only once
+# tor has started), so they cannot live in stack.conf or a README. Print them
+# when they exist; scripts/npm-hosts.sh prints the same list on its own.
 if [ "${ONION_NAMES+x}" = x ] && [ "${#ONION_NAMES[@]}" -gt 0 ]; then
     onion_lines=""
     for i in "${!ONION_NAMES[@]}"; do
