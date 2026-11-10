@@ -5,12 +5,14 @@
 ipv4_prefix = 32
 ipv6_prefix = 48
 
-# NPM sits in front of searxng, proxying it as searxng:8080 on npm-network, and
-# searxng publishes no host port of its own. trusted_proxies stays empty on
-# purpose: the limiter counts the connecting peer rather than an X-Forwarded-For
-# header a client could spoof. NPM's traffic arrives from npm-network, which is
-# already pass-listed below, so normal use is unaffected.
-trusted_proxies = []
+# NPM runs on the host network and forwards to the published loopback port
+# 127.0.0.1:8082 (deploy/searxng.container); podman rewrites that connection's
+# source to searxng's own npm-network address, so the peer is 10.89.0.x and the
+# client is whatever NPM appended to X-Forwarded-For. Trusting the npm-network
+# range is what makes the limiter count clients at all: a peer outside it has
+# its X-Forwarded-For discarded, and for a trusted peer the rightmost address
+# that is not itself trusted wins -- so entries a client prepends are ignored.
+trusted_proxies = ['10.89.0.0/24']
 
 [botdetection.ip_limit]
 filter_link_local = true
@@ -19,10 +21,11 @@ link_token = false
 [botdetection.ip_lists]
 block_ip = []
 pass_ip = [
-  # NPM reaches searxng as searxng:8080 on npm-network, and so do the host-side
-  # checks (scripts/lib.sh's net_curl); nothing arrives from the host's own
-  # loopback any more, since searxng publishes no port.
+  # Reached only by npm-network peers that call searxng directly -- searxng-mcp
+  # and the host-side probes in scripts/lib.sh's net_curl. NPM's forwarded
+  # requests arrive as the real client (trusted_proxies above), so this range
+  # does not exempt web traffic.
   '10.89.0.0/24',
-  '127.0.0.0/8',        # loopback inside the netns
+  '127.0.0.0/8',        # in-netns loopback only (the unit's own HealthCmd)
 ]
 pass_searxng_org = true
