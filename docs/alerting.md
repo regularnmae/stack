@@ -104,7 +104,9 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   (4) **A delivery failure cannot report itself.** `alertmanager_notifications_failed_total`
   is read back on the next sweep and turned into a failure; the heartbeat is
   pushed *after* the alert push and fails when the push failed, so "all checks
-  pass but you cannot be told" is a page rather than a silent host.
+  pass but you cannot be told" is a page rather than a silent host. A sweep
+  that cannot read `/metrics` leaves the stored counter untouched, so the
+  outage is not later misread as a burst of delivery failures.
   (5) **The alert path is the host's own `curl` (and `jq`), not
   `net_curl`.** Alertmanager is a `127.0.0.1` bind and the heartbeat an
   outbound POST, so making them from a container would put the host's only

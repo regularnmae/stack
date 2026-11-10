@@ -1324,18 +1324,25 @@ else
         fail "Alertmanager does not answer at $am_url/-/healthy: alerts are going nowhere (the heartbeat carries this one)"
     fi
     # Cumulative since the process started, so a restart (a smaller number) is
-    # not a failure; only a growth since the last sweep is.
-    am_failed=$(curl -fsS -m 5 "$am_url/metrics" 2>/dev/null \
-        | awk '/^alertmanager_notifications_failed_total\{/ {s += $NF} END {printf "%d", s + 0}')
-    am_prev=$(cat "$ALERT_FAILED_FILE" 2>/dev/null) || am_prev=""
-    if [ -n "$am_failed" ]; then
-        if [ -n "$am_prev" ] && [ "$am_failed" -gt "$am_prev" ]; then
-            am_ok=0
-            fail "Alertmanager failed to deliver $((am_failed - am_prev)) notification(s) since the last sweep (SMTP or receiver; podman logs alertmanager)"
+    # not a failure; only a growth since the last sweep is. A failed read must
+    # leave the stored number alone: awk on an empty body prints 0, which would
+    # erase it and turn the next successful read into a fake burst.
+    if [ "$am_code" = 200 ]; then
+        am_metrics=$(curl -fsS -m 5 "$am_url/metrics" 2>/dev/null) || am_metrics=""
+        if [ -n "$am_metrics" ]; then
+            am_failed=$(printf '%s\n' "$am_metrics" \
+                | awk '/^alertmanager_notifications_failed_total\{/ {s += $NF} END {printf "%d", s + 0}')
+            am_prev=$(cat "$ALERT_FAILED_FILE" 2>/dev/null) || am_prev=""
+            if [ -n "$am_prev" ] && [ "$am_failed" -gt "$am_prev" ]; then
+                am_ok=0
+                fail "Alertmanager failed to deliver $((am_failed - am_prev)) notification(s) since the last sweep (SMTP or receiver; podman logs alertmanager)"
+            fi
+            printf '%s\n' "$am_failed" > "$ALERT_FAILED_FILE" 2>/dev/null || true
+            [ "$am_ok" = 1 ] && ok "Alertmanager answers, and nothing failed to deliver since the last sweep"
+        else
+            soft "Alertmanager answers /-/healthy but /metrics did not; delivery failures could not be checked this sweep"
         fi
-        printf '%s\n' "$am_failed" > "$ALERT_FAILED_FILE" 2>/dev/null || true
     fi
-    [ "$am_ok" = 1 ] && ok "Alertmanager answers, and nothing failed to deliver since the last sweep"
     # The config on disk is operator-owned and hand-edited. Alertmanager keeps
     # running the last good config when it refuses a new one, so an invalid edit is
     # silent until the next restart -- a warning: the running path still works.
