@@ -45,6 +45,19 @@ except ImportError:  # pragma: no cover - the host bootstrap installs 3.12
 _FLAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _CONTAINER_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# A [host.*] env name is emitted as `NAME=domain` ahead of every array, so one
+# that collides with a name the emission itself defines is silently overwritten
+# below it (the override stops working), and a shell special would clobber the
+# caller's own environment inside the eval.
+_RESERVED_ENVS = frozenset({
+    "MCP_PREFIXES", "MCP_CONTAINERS", "MCP_PORTS",
+    "PROBE_TOKEN_VARS", "PROBE_TOOLS", "PROBE_ARGS",
+    "PROBE_NEEDS_NODES", "PROBE_SPEND_VARS",
+    "ONION_NAMES", "ONION_TARGETS", "ONION_MIRRORS", "ONION_PATHS", "ONION_CODES",
+    "NPM_DOMAINS", "KUMA_ADD_HOST_HOSTS", "KUMA_STATUS_SLUG",
+    "PATH", "IFS", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME",
+    "ENV", "BASH_ENV", "PS1", "PS4", "CDPATH", "GLOBIGNORE", "SHELLOPTS",
+})
 # tor's HiddenServicePort target: a name or address and a numeric port.
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_.-]+:[0-9]+$")
 _MAX_PORT = 65535
@@ -227,6 +240,13 @@ def _number(value: Any, where: str, field: str, low: int, high: int) -> int:
     return value
 
 
+def _bool(table: dict, field: str, where: str, default: bool) -> bool:
+    value = table.get(field, default)
+    if not isinstance(value, bool):
+        die(f"deploy/services.toml: {where} {field} must be true or false")
+    return value
+
+
 def _validate_probes(m: "Manifest") -> None:
     """Every [mcp.*] must declare its probe: the probe columns are consumed as a
     complete, index-aligned table, and a server silently missing from it is
@@ -274,12 +294,24 @@ def load(path: str) -> Manifest:
 
     # --- the hosts, in file order, env overrides applied -------------------
     domains: Dict[str, str] = {}
+    envs: Dict[str, str] = {}
     for key, table in _table(data, "host").items():
         where = f"[host.{key}]"
         if not isinstance(table, dict):
             die(f"deploy/services.toml: {where} must be a table")
         domain = _text(table, "domain", where)
-        env = str(table.get("env", key.upper()))
+        env = table.get("env", key.upper())
+        if not isinstance(env, str) or not _ENV_RE.fullmatch(env):
+            die(f"deploy/services.toml: {where} env must be an env-var name "
+                f"(like {key.upper()})")
+        if env in _RESERVED_ENVS:
+            die(f"deploy/services.toml: {where} env '{env}' is a name the "
+                f"emission itself sets; pick another")
+        if env in envs:
+            die(f"deploy/services.toml: {where} and [host.{envs[env]}] both "
+                f"read ${env}; one would overwrite the other")
+        envs[env] = key
+        kuma_add_host = _bool(table, "kuma_add_host", where, True)
         # The operator override: a non-empty $<env> wins, like ${VAR:-default}.
         domain = os.environ.get(env) or domain
         if not domain:
@@ -288,7 +320,7 @@ def load(path: str) -> Manifest:
             die(f"deploy/services.toml: {where} and [host.{domains[domain]}] "
                 f"both serve {domain}")
         domains[domain] = key
-        m.hosts[key] = Host(key, domain, env, bool(table.get("kuma_add_host", True)))
+        m.hosts[key] = Host(key, domain, env, kuma_add_host)
 
     # --- the MCP servers ----------------------------------------------------
     seen_prefixes: Dict[str, str] = {}
@@ -324,12 +356,10 @@ def load(path: str) -> Manifest:
         for field in ("token_var", "probe_tool", "probe_args", "spend_token_var"):
             if not isinstance(table.get(field, ""), str):
                 die(f"deploy/services.toml: {where} {field} must be a string")
-        if not isinstance(table.get("needs_nodes", False), bool):
-            die(f"deploy/services.toml: {where} needs_nodes must be true or false")
         entry.token_var = table.get("token_var", "")
         entry.probe_tool = table.get("probe_tool", "")
         entry.probe_args = table.get("probe_args", "{}")
-        entry.needs_nodes = table.get("needs_nodes", False)
+        entry.needs_nodes = _bool(table, "needs_nodes", where, False)
         entry.spend_token_var = table.get("spend_token_var", "")
         m.mcp.append(entry)
 

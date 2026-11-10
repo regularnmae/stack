@@ -637,6 +637,62 @@ target = "noport"
 mirrors = "a"
 """, "is not host:port")
 
+    def test_host_table_is_checked_like_the_mcp_one(self):
+        # A quoted boolean is a string, not a bool: `bool("false")` is True, so
+        # an unchecked read turned status/mcp back into --add-host hosts.
+        from stackctl import manifest
+
+        def bad(name, host_body, needle):
+            path = self.write(name, host_body)
+            msg = die_msg(manifest.load, path)
+            self.assertIsNotNone(msg, f"{name} was accepted")
+            self.assertIn(needle, msg)
+
+        bad("quoted-bool.toml", """
+[host.a]
+domain = "a.example"
+kuma_add_host = "false"
+""", "kuma_add_host must be true or false")
+
+        # The env name is emitted as `NAME=domain` and then eval'ed: a name the
+        # shell cannot parse must fail here, naming the table, not in bash.
+        bad("bad-env.toml", """
+[host.a]
+domain = "a.example"
+env = "MCP HOST"
+""", "env must be an env-var name")
+
+        bad("reserved-env.toml", """
+[host.a]
+domain = "a.example"
+env = "NPM_DOMAINS"
+""", "is a name the emission itself sets")
+
+        bad("dup-env.toml", """
+[host.a]
+domain = "a.example"
+env = "SHARED_HOST"
+[host.b]
+domain = "b.example"
+env = "SHARED_HOST"
+""", "both read $SHARED_HOST")
+
+        # The positive side: the opt-out actually removes the host from the
+        # --add-host list install.sh renders.
+        ok = self.write("kuma-optout.toml", """
+[host.a]
+domain = "a.example"
+[host.b]
+domain = "b.example"
+kuma_add_host = false
+[npm.a]
+host = "a"
+forward_host = "127.0.0.1"
+forward_port = 8100
+""")
+        out = manifest.load(ok).shell()
+        self.assertIn("KUMA_ADD_HOST_HOSTS=(a.example)", out)
+
     def test_probe_fields_are_required_and_valid(self):
         from stackctl import manifest
         base = """
