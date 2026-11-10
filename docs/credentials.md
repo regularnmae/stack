@@ -54,7 +54,9 @@ token on a command line.
   two of them spend-capable, on this host. `restic` writes
   `RESTIC_PASSWORD_NEXT` into `backup.env` *before* `key add`, promotes it, then
   removes the superseded keys, so no crash leaves the repository openable only
-  by a password nobody holds; the spend baseline is rehashed per file rather
+  by a password nobody holds (and it refuses without a snapshot inside
+  `MONITOR_BACKUP_MAX_AGE_H`, 36h, or while a backup is running — `--force`
+  overrides both); the spend baseline is rehashed per file rather
   than `--rebaseline`d, and `rotation.log` records the act without the value. A
   re-run also skips a restart when the container's own PID 1 already carries the
   value (`container_runs_secret` for argv, `container_env_is` for an

@@ -414,6 +414,16 @@ rehash_audit() { # file...
     log "rehashed the rotated file(s) in the spend baseline"
 }
 
+# A nightly backup taken mid-rotation would carry one side of a credential
+# pair. The restore would recover a config that cannot open what it points at,
+# which is worse than waiting. Shared because a target that health-checks
+# nothing (restic) still has to refuse.
+require_no_backup() {
+    if [ "$FORCE" = 0 ] && systemctl --user is-active --quiet backup.service 2>/dev/null; then
+        die "a backup is running right now; a snapshot taken mid-rotation is not restorable. Wait for it (systemctl --user status backup.service), or --force"
+    fi
+}
+
 # --- preflight --------------------------------------------------------------
 require_healthy() { # container...
     local c st
@@ -433,12 +443,7 @@ require_healthy() { # container...
                 ;;
         esac
     done
-    # A nightly backup taken mid-rotation would carry one side of a credential
-    # pair. The restore would recover a config that cannot open what it points
-    # at, which is worse than waiting.
-    if [ "$FORCE" = 0 ] && systemctl --user is-active --quiet backup.service 2>/dev/null; then
-        die "a backup is running right now; a snapshot taken mid-rotation is not restorable. Wait for it (systemctl --user status backup.service), or --force"
-    fi
+    require_no_backup
     command -v systemctl >/dev/null 2>&1 || die "systemctl is required (rootless podman user units)"
 }
 
@@ -475,6 +480,25 @@ preflight_target() { # target
             [ -f "$BACKUP_ENV" ] || die "missing $BACKUP_ENV; run deploy/install.sh first"
             if [ "$DRY_RUN" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
                 die "the restic password is the only key to the backups; re-run with --yes"
+            fi
+            require_no_backup
+            # A rotation is only as good as the restore point behind it: with no
+            # recent snapshot the repository itself is the unproven thing, and
+            # the new key would only be proven against it. The threshold is the
+            # monitor's own "the backup stopped running" line (env, then
+            # monitor.env, like monitor_var).
+            backup_max_h="${MONITOR_BACKUP_MAX_AGE_H:-}"
+            [ -n "$backup_max_h" ] || backup_max_h=$(env_value "$CONFIG_DIR/monitoring/monitor.env" MONITOR_BACKUP_MAX_AGE_H)
+            case "$backup_max_h" in ''|*[!0-9]*) backup_max_h=36 ;; esac
+            age=$(backup_age_h || true)
+            if [ -z "$age" ] || [ "$age" -gt "$backup_max_h" ]; then
+                if [ "$FORCE" = 1 ] || [ "$DRY_RUN" = 1 ]; then
+                    say "no backup in the last ${backup_max_h}h (${age:+${age}h old}${age:-unreadable}); continuing"
+                else
+                    die "the newest restic snapshot is ${age:+${age}h old}${age:-unreadable}; take one first: ./deploy.sh --only backup (or --force)"
+                fi
+            else
+                say "newest restic snapshot is ${age}h old"
             fi
             ;;
     esac
