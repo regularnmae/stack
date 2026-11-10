@@ -1,55 +1,42 @@
 # stack — agent notes
 
-This repo is the **single owner of the runtime**: the scripts below and every
-unit the host runs. The application repos (the ten `*-mcp` servers in the table
-below, and BoltMesh's `backend`/`frontend`) ship only code, tests, CI and a
-`Containerfile` — a unit or env file changes here. `README.md` is the operator
-narrative; the invariants and traps live in `docs/`, one file per subsystem —
+This repo is the **single owner of the runtime**: these scripts and every unit
+the host runs. The ten `*-mcp` servers and BoltMesh's `backend`/`frontend` ship
+only code, tests, CI and a `Containerfile`; a unit or env file changes here.
+`README.md` is the operator narrative, `docs/` owns each subsystem's invariants —
 read that one before changing the area.
 
 ## The one rule that shapes everything
 
-**Quadlet does not expand environment variables in `Exec=`** — `EnvironmentFile=`
-/`Environment=` reach the container's environment, not the daemon's argv, so a
-secret cannot reach `--bitcoin-rpcpassword` etc. from an env file. So **every
-unit is rendered** by `install.sh` from `deploy/*.container[.in]`, substituting
-`@DATA_DIR@`/`@CONFIG_DIR@` (plain user units also `@REPO_DIR@`); `lightningd`,
-`fulcrum` and `crowdsec` additionally substitute `@PLACEHOLDERS@` from
-`config/stack/secrets.env`. Rendered units are mode 600, never committed, never
-symlinks: never move a secret onto a committed `.container`. Env files are
-rendered the same way from `deploy/env/<app>/<file>.env.in`, which carry
-`@PLACEHOLDER@`s and never a value: never paste a real token into one. The
-BTCPay wallet uses `btcpayserver/monero` on purpose — its entrypoint binds
-`0.0.0.0` only with `--rpc-login` on argv, and the plugin hardcodes empty
-credentials.
+**Quadlet does not expand environment variables in `Exec=`**, so every unit is
+*rendered* by `deploy/install.sh` from `deploy/*.container[.in]`, and an env
+file's shape is a `deploy/env/<app>/*.env.in` template: `@PLACEHOLDER@`s only,
+never a value. What is rendered is mode 600 and never committed, so never put a
+secret on a committed `.container` or a token in a `.env.in`. `docs/units.md`
+owns the render, the digest and the secret resolution.
 
 ## Commands
 
 ```sh
-./bootstrap.sh                      # bare host -> podman, linger, sysctl, firewall ports, dirs
-./deploy.sh                         # fetch repos, build, start/restart (never waits)
-./configure.sh                      # second step: waits for each service, then runes/
-                                    # wallet/BTCPay state/BoltMesh migrations
-./deploy.sh --only <name>           # one service; --dry-run to plan
-./deploy.sh --only backup           # run the backup job now
-./deploy.sh --only db-dump          # refresh the two live-database dumps now
-./deploy.sh --only backup-verify    # run the restore drill now (weekly on a timer)
-./deploy.sh --only npm-hosts        # (re)reconcile every proxy host in nginx-proxy-manager
-./deploy.sh --only agent-skills     # re-link the skills + agent-mcp into the harnesses
+./bootstrap.sh                      # bare host -> podman, linger, sysctl, firewall, dirs
+./deploy.sh                         # fetch, build, start/restart (never waits); --dry-run plans
+./configure.sh                      # second step: waits, then runes/wallet/BTCPay/BoltMesh
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
+./deploy.sh --only <name>           # one service; backup, db-dump, backup-verify, npm-hosts
+                                    # and agent-skills are jobs of their own
 ./scripts/logs.sh --since 1h        # cross-service log search (LogsQL; UI on :9428)
 ./scripts/registrations.sh --dry-run # what the BoltMesh signup watcher would mail
-./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract (the CI gate)
-./scripts/docs-lint.sh              # every README/docs section reference still resolves
-PYTHONPATH=scripts python3 -m stackctl units check   # README's "What runs" against the units
 ./scripts/btcpay-wallet.sh          # import the view-only BTCPay Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / verify / inspect
-./scripts/ids.sh -v                 # the IDS roll-up, by hand (ids.timer runs it every 5 min)
+./scripts/ids.sh -v                 # the IDS roll-up by hand (ids.timer: every 5 min)
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
-./scripts/rotate.sh --list          # credentials this repo can rotate (+ --dry-run)
-./scripts/rotate.sh --status        # credential invariants (runes, RPC password), last 10 runs
-shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint; CI pins v0.11.0
+./scripts/rotate.sh --list          # --list/--status/--dry-run; one target per run
+# the CI gates, each runnable on its own
+./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract
+./scripts/docs-lint.sh              # every README/docs section reference resolves
+PYTHONPATH=scripts python3 -m stackctl units check  # README's "What runs" vs the units
+shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # CI pins v0.11.0
 ```
 
 `--only victoria-logs`, `vector`, `tor` and `crowdsec` have no case in the
@@ -60,13 +47,10 @@ dispatch on purpose: they are ordinary restarts that `install.sh` re-renders and
 
 A comment earns its place only if it changes what the next reader does: it names
 a trap (something that looks wrong and is not) or points at the `docs/` file
-that owns the reasoning. Measurements, what a design used to be, and how much
-noise it saved belong in the commit message and `docs/`, not beside code that
-must be re-read. Keep the trap, drop the history around it: past tense is not
-grounds for deletion if the thing it warns about can still happen.
-
-Two comment forms behave like code: a script's leading `#` block is its
-`--help` (`usage_header` prints it verbatim, so it stays one contiguous block
+that owns the reasoning. Measurements and what a design used to be belong in the
+commit message and `docs/`, not beside code that must be re-read; keep the trap,
+drop the history around it. Two forms behave like code: a script's leading `#`
+block is its `--help` (`usage_header` prints it verbatim, so it stays contiguous
 from line 2), and `# shellcheck source=`/`disable=` are directives.
 
 ## Invariants and traps
@@ -84,9 +68,10 @@ from line 2), and `# shellcheck source=`/`disable=` are directives.
 
 ## Interface contract with the app repos
 
-The ten MCP servers never read a stack path, a config file or a data dir — only
-these variables. The app repos' docs own their *meaning*; this repo owns how they
-get set. A container name, port or variable name changes on both sides at once.
+The MCP servers read only env vars — never a stack path, config file or data dir —
+so a container name, port or variable name changes on both sides at once.
+`deploy/services.toml` is the declaration; the table below is the copy
+`manifest check --agents` holds to it.
 
 | Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | On npm-network | NPM target | Bind + health |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -101,18 +86,12 @@ get set. A container name, port or variable name changes on both sides at once.
 | `crowdsec-mcp` | `crowdsec-mcp` / `localhost/crowdsec-mcp:latest` | `token.env`, `lapi.env` | CrowdSec LAPI, `127.0.0.1:8080` | **— (`Network=host`)** | `127.0.0.1:8113` | `127.0.0.1:8113` (host net), `/health` |
 | `btcpay-mcp` | `btcpay-mcp` / `localhost/btcpay-mcp:latest` | `token.env`, `upstream.env` | `btcpay:49392` | `btcpay-mcp:8000` | `127.0.0.1:8114` | `0.0.0.0:8000`, `/health` |
 
-None is LAN-reachable: NPM terminates TLS and is the sole client path, `NPM
-target` is each unit's `PublishPort=127.0.0.1:<port>:…`. `crowdsec-mcp` alone is
-`Network=host` (its LAPI is a loopback bind a bridge cannot reach), binding
-`127.0.0.1:8113` itself, probed via `netcheck-host`. See `docs/proxy.md`.
+`NPM target` is each unit's `PublishPort=`; NPM terminates TLS and is the only
+client path, so nothing here is LAN-reachable (`docs/proxy.md`).
 
-The variables the apps read (names and defaults are the app repos' contract) are
-`SEARXNG_URL`/`SEARXNG_MCP_TOKEN`, `BITCOIN_RPC_{URL,USER,PASSWORD}`/
-`BITCOIN_MCP_TOKEN`, `MONERO_RPC_{URL,USER,PASSWORD}`/`MONERO_MCP_TOKEN`,
-`MONERO_WALLET_RPC_{URL,USER,PASSWORD}`/`MONERO_MCP_TOKEN`/`MONERO_MCP_SPEND_TOKEN`,
-`LIGHTNING_{REST_URL,RUNE,SPEND_RUNE,TLS_INSECURE,CA_CERT}`/`LIGHTNING_MCP_{TOKEN,SPEND_TOKEN}`,
-`FULCRUM_URL`/`FULCRUM_MCP_TOKEN`, plus `MCP_HOST`/`MCP_PORT`, `ENABLE_SPENDING`
-and the spend caps. They are compiler-baked upstream, so a rename breaks the server.
+The env an app reads is what its unit names: `deploy/env/<app>/*.env.in`, the
+`<X>_MCP_TOKEN` that `seed_token_env` mints, and stray `Environment=` literals.
+Names are compiler-baked upstream, so a rename breaks the server.
 
 ### The BoltMesh app tier
 
