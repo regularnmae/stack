@@ -965,7 +965,8 @@ fi
 # hidden-service part is a *declaration*, so it lives in a marked region this
 # installer rewrites on every run; deploy.sh digests torrc alongside the units and
 # restarts tor when it changed.
-ONION_BEGIN="# >>> onion services (rendered by deploy/install.sh from [onion.*])"
+ONION_MARK="# >>> onion services"
+ONION_BEGIN="$ONION_MARK (rendered by deploy/install.sh from [onion.*])"
 ONION_END="# <<< onion services"
 
 onion_stanzas() {
@@ -983,13 +984,18 @@ onion_stanzas() {
 # Replace the marked region in torrc with the current declaration, appending it
 # when absent (an adopted host predates it). Everything outside the markers --
 # the hash, the SOCKS policy, the log line -- is left byte for byte.
+#
+# The block is identified by the marker's prefix, not the whole line: the
+# description after it has been renamed once already, and an exact match left the
+# older block in place with no terminator -- two HiddenServiceDir stanzas for the
+# same directory, which tor refuses to start on.
 sync_torrc_onions() { # torrc
     local torrc="$1" tmp stanzas
     [ -s "$torrc" ] || return 0
     stanzas=$(onion_stanzas)
     tmp=$(mktemp "$torrc.XXXXXX")
-    awk -v b="$ONION_BEGIN" -v e="$ONION_END" '
-        $0 == b { inblock = 1; next }
+    awk -v b="$ONION_MARK" -v e="$ONION_END" '
+        index($0, b) == 1 { inblock = 1; next }
         $0 == e { inblock = 0; next }
         inblock { next }
         { print }
