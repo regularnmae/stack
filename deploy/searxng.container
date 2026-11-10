@@ -1,7 +1,6 @@
-# The SearXNG instance search_web queries. Owned by this repo so the MCP
-# server can be deployed whole. Its settings live in @DATA_DIR@/searxng;
-# deploy/install.sh seeds them (json format + valkey) only on a fresh
-# host -- see deploy/searxng/settings.yml.
+# The SearXNG instance search_web queries. Its settings live in
+# @DATA_DIR@/searxng; install.sh seeds them (json format + valkey) only on a
+# fresh host -- see deploy/searxng/settings.yml.
 [Unit]
 Description=SearXNG Metasearch Engine
 After=network-online.target npm-network-network.service valkey.service
@@ -13,24 +12,21 @@ Image=docker.io/searxng/searxng:2026.10.29-cff884f98
 Network=npm-network.network
 
 # Loopback only: nginx-proxy-manager runs on the host network, so host 8082 is
-# how it reaches SearXNG (the [npm.*] tables of deploy/services.toml). 8082 rather than 8080
-# because crowdsec's LAPI owns host 8080 -- that unit runs on the host network,
-# so its socket is the host's own and stack-bouncer reads it without a published
-# port (see deploy/crowdsec.container.in). Binding 127.0.0.1 keeps it off the
-# LAN -- the firewall opens nothing for it, and NPM is still the only way in for
-# a client. The MCP server reaches it as searxng:8080 on npm-network.
+# how it reaches SearXNG. 8082 rather than 8080 because crowdsec's LAPI owns
+# host 8080 -- that unit runs on the host network, so its socket is the host's
+# own and stack-bouncer reads it without a published port. The MCP server
+# reaches SearXNG as searxng:8080 on npm-network.
 PublishPort=127.0.0.1:8082:8080
 
-# Image entrypoint generates a default settings.yml with a
-# random secret_key on first start if the mount is empty.
-# :z label required (SELinux enforcing host), same as monerod.
+# The image entrypoint generates a default settings.yml with a random
+# secret_key on first start if the mount is empty.
 Volume=@DATA_DIR@/searxng:/etc/searxng:z
 
-# The rate limiter is ON (settings.yml) -- it needs valkey, which is why
-# Requires=valkey.service above. Image defaults would leave it off.
+# The rate limiter is ON (settings.yml), which is what needs valkey; the image
+# defaults would leave it off.
 
 # The image ships no HEALTHCHECK; SearXNG exposes /healthz for exactly this.
-# wget is present in the image (curl is not).
+# wget is present (curl is not).
 HealthCmd=wget -q -T 4 -t 1 -O /dev/null http://127.0.0.1:8080/healthz
 HealthInterval=30s
 HealthTimeout=10s

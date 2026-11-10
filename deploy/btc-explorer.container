@@ -1,9 +1,6 @@
-# Quadlet unit for BTC RPC Explorer, the Bitcoin explorer served at
-# $BTC_EXPLORER_HOST (the [npm.*] tables of deploy/services.toml). It is stateless: the chain is
-# read from the stack's own bitcoind over RPC and address history from Fulcrum
-# over the Electrum protocol, so it adds no index and no data directory. Its
-# configuration (the RPC credentials and the Fulcrum endpoint) is a
-# secret-bearing EnvironmentFile seeded by install.sh.
+# Quadlet unit for BTC RPC Explorer. It is stateless: the chain is read from
+# the stack's own bitcoind over RPC and address history from Fulcrum over
+# Electrum, so it adds no index and no data directory.
 #
 # Not a .container.in: the credentials reach the container through
 # EnvironmentFile=, not through Exec=, so Quadlet's no-expansion-in-Exec rule
@@ -24,13 +21,11 @@ Network=npm-network.network
 IP=10.89.0.243
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# on host 8108 (the [npm.*] tables of deploy/services.toml). The firewall opens nothing for it, so
-# NPM (which terminates TLS) stays the only way in for a client.
+# on host 8108, and the firewall opens nothing for it.
 PublishPort=127.0.0.1:8108:3002
 
-# BTCEXP_BITCOIND_* (the RPC credentials) and BTCEXP_ELECTRUM_SERVERS (Fulcrum
-# on npm-network). Seeded by deploy/install.sh from the stack's own secrets;
-# never committed.
+# BTCEXP_BITCOIND_* (the RPC credentials) and BTCEXP_ELECTRUM_SERVERS, seeded
+# by install.sh from the stack's own secrets; never committed.
 EnvironmentFile=@CONFIG_DIR@/btc-explorer/btc-explorer.env
 
 # The app has no dedicated health endpoint; / renders the RPC-backed home page.

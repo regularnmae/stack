@@ -1,11 +1,10 @@
-# TEMPLATE -- do not symlink this file. deploy/install.sh renders it into
+# TEMPLATE -- do not symlink this file. install.sh renders it into
 # ~/.config/containers/systemd/lightningd.container (mode 600), substituting
-# the @PLACEHOLDERS@ with values from $DATA_DIR/config/stack/secrets.env.
+# the @PLACEHOLDERS@ from $DATA_DIR/config/stack/secrets.env.
 #
-# Exec= cannot expand environment variables (Quadlet does not do that), and
-# lightningd needs its secrets as arguments, so the unit is generated with the
-# secret in place rather than keeping it on a committed static unit. The
-# rendered file is the only copy and never enters git.
+# Exec= cannot expand environment variables (Quadlet does not do that) and
+# lightningd needs its secrets as arguments, so the secret is rendered in place
+# rather than kept on a committed unit. The rendered file is the only copy.
 [Unit]
 Description=Core Lightning Daemon
 After=bitcoind.service tor.service
@@ -17,32 +16,28 @@ Image=docker.io/elementsproject/lightningd:v26.06.9
 Network=npm-network.network
 
 # Lightning P2P is deliberately NOT published: 9735 on 0.0.0.0 would advertise
-# this host's real IP to every peer and defeat Tor; peers use the statictor
-# onion service instead. clnrest binds 3010 inside the container for
-# lightning-mcp (which is the supported external surface); it is not published
-# on the host and has no NPM host.
+# this host's real IP to every peer and defeat Tor, which is why peers use the
+# statictor onion service. clnrest binds 3010 in-container for lightning-mcp
+# and is not published.
 
 # Volume mount using @DATA_DIR@/cln. `:z` (shared), not `:Z` (private): the
 # backup container mounts the same directory read-only, and two containers may
 # not share a path one labels private -- whichever starts last would relabel it
-# and lock the other out. bitcoind and BTCPay's datadir already use `:z`.
+# and lock the other out.
 Volume=@DATA_DIR@/cln:/root/.lightning:z
 
 # Map host bitcoind directory into CLN
 Volume=@DATA_DIR@/bitcoin:/root/.bitcoin:z
 
-# Stop gracefully, not at podman's 10 s default: CLN commits its database and
-# gives the plugins a bounded time to exit on SIGTERM. The 2026-11-03 SIGKILL
-# here was the entrypoint outliving a dead lightningd, not a slow shutdown --
-# either way the container must be allowed to finish rather than be killed at
-# 10 s (docs/units.md, "A durable unit is stopped, not killed"). `[Service]
-# TimeoutStopSec` must stay above this by 30 s.
+# Graceful stop, not podman's 10 s default: CLN commits its database and gives
+# the plugins a bounded time to exit on SIGTERM. TimeoutStopSec below stays 30
+# s above this (docs/units.md, "A durable unit is stopped, not killed").
 StopTimeout=60
 
-# Exec arguments connecting to bitcoind and tor.
-# NOTE: --proxy expects an IP address (it does not accept a hostname) and
-# --always-use-proxy=true suppresses DNS lookups, so Tor must be addressed by
-# its pinned IP 10.89.0.240 (set in tor.container) rather than "tor".
+# Exec arguments connecting to bitcoind and tor. NOTE: --proxy expects an IP
+# address (it does not accept a hostname) and --always-use-proxy=true
+# suppresses DNS lookups, so Tor must be addressed by its pinned IP 10.89.0.240
+# (set in tor.container) rather than "tor".
 Exec=--network=bitcoin \
      --bitcoin-rpcconnect=bitcoind \
      --bitcoin-rpcport=8332 \
@@ -57,17 +52,15 @@ Exec=--network=bitcoin \
      --always-use-proxy=true \
      --bind-addr=0.0.0.0:9735
 
-# The image's entrypoint.sh stays alive as PID 1 even after lightningd dies
-# (e.g. bcli timed out while bitcoind was still opening its wallet), so the
-# unit reported "active" while the daemon -- and clnrest, which lightning-mcp
-# needs -- was gone. The healthcheck makes that failure
-# visible; HealthOnFailure=kill makes it terminal, so the container exits and
-# Restart=always below recreates it. podman's man page says the same thing:
-# inside a unit prefer kill/stop over restart, and let systemd's restart policy
-# be the one that acts.
+# The image's entrypoint.sh stays alive as PID 1 after lightningd dies (bcli
+# timing out while bitcoind opened its wallet), so the unit read "active" with
+# the daemon and clnrest gone. The healthcheck makes that visible and
+# HealthOnFailure=kill makes it terminal, so Restart=always below recreates it
+# -- podman's man page says the same: inside a unit prefer kill/stop and let
+# systemd's restart policy act.
 #
-# Deliberately NOT on the BTCPay wallet: its healthcheck is red by design for as
-# long as the wallet is refreshing, and killing it would restart that refresh.
+# Deliberately NOT on the BTCPay wallet: its healthcheck is red by design while
+# the wallet refreshes, and killing it would restart that refresh.
 HealthCmd=lightning-cli getinfo
 HealthInterval=60s
 HealthTimeout=15s

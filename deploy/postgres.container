@@ -1,9 +1,8 @@
-# Quadlet unit for the BoltMesh database. deploy/install.sh renders this into
-# ~/.config/containers/systemd/, where quadlet turns it into postgres.service.
+# Quadlet unit for the BoltMesh database.
 #
-# The cluster is the one piece of BoltMesh state that cannot be recreated, so
-# it is the only app-tier data dir: the nightly backup takes a pg_dumpall of it
-# (deploy/postgres-dump.container), not a raw copy of a live PGDATA.
+# The cluster is the one piece of BoltMesh state that cannot be recreated: the
+# nightly backup takes a pg_dumpall (deploy/postgres-dump.container), never a
+# raw copy of a live PGDATA.
 [Unit]
 Description=BoltMesh PostgreSQL
 After=network-online.target npm-network-network.service
@@ -16,28 +15,27 @@ Network=npm-network.network
 
 # Only the backend/worker reach it, as postgres:5432 on npm-network, so it
 # publishes nothing. The image's PGDATA is /var/lib/postgresql/18/docker, a
-# subdirectory of the mount point (the same layout the BoltMesh compose file
-# used). `:z` because the host runs SELinux enforcing.
+# subdirectory of the mount point. `:z` because the host runs SELinux
+# enforcing.
 Volume=@DATA_DIR@/postgres:/var/lib/postgresql:z
 
 # POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD, plus the DATABASE_URL the
-# backend reads (same password). deploy/install.sh writes it (mode 600); the
-# server ignores DATABASE_URL.
+# backend reads (same password); the server ignores DATABASE_URL.
 EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 
-# Stop gracefully, not at podman's 10 s default: a fast shutdown runs a final
-# checkpoint, and a SIGKILL mid-checkpoint is WAL replay on the next start
-# (measured here: ~2 s, docs/units.md, "A durable unit is stopped, not killed").
-# `[Service] TimeoutStopSec` must stay above this by 30 s.
+# Graceful stop, not podman's 10 s default: a fast shutdown runs a final
+# checkpoint, and a SIGKILL mid-checkpoint is WAL replay on the next start.
+# TimeoutStopSec below stays 30 s above it (docs/units.md, "A durable unit is
+# stopped, not killed").
 StopTimeout=60
 
 # The image ships no HEALTHCHECK. Probe over TCP rather than the Unix socket so
-# the check is meaningful and needs no shell or environment expansion -- a
-# $VAR here would be expanded by the systemd generator, not the container.
+# the check is meaningful and needs no shell or environment expansion -- a $VAR
+# here would be expanded by the systemd generator, not the container.
 #
 # 5 retries, not 3: after a crash, postgres answers only once WAL replay
-# finishes, and 3 probes (90s) can kill it mid-recovery -- the one state where a
-# restart makes the next start slower, not faster.
+# finishes, and 3 probes (90 s) can kill it mid-recovery -- the one state where
+# a restart makes the next start slower.
 # health-lint: HC005 5 retries -- crash recovery (WAL replay) outlasts 3 probes
 HealthCmd=pg_isready -h 127.0.0.1 -U vpnuser -d vpndb
 HealthInterval=30s

@@ -2,10 +2,8 @@
 #
 # Quadlet has no .timer type (its extensions are .container, .volume, .network,
 # .pod, .kube, .image, .build and .artifact), so this is a plain systemd USER
-# unit, not a rendered quadlet. deploy/install.sh installs it to
-# ~/.config/systemd/user/backup.timer and runs `systemctl --user enable
-# backup.timer`; it activates the backup.service that Quadlet generates from
-# backup.container.
+# unit. install.sh installs it and enables it --user; it activates the
+# backup.service that Quadlet generates from backup.container.
 [Unit]
 Description=Nightly encrypted backup of the stack's irreplaceable state
 

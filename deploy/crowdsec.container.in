@@ -1,32 +1,22 @@
 # CrowdSec: the behaviour engine that turns nginx-proxy-manager's access logs
-# and Suricata's external alerts into decisions. Rootless and ordinary -- it
-# reads files, it never touches the wire, so it needs none of the privileges
-# Suricata does.
+# and Suricata's external alerts into decisions. Rootless: it reads files,
+# never the wire.
 #
-# Two sources with different reach: NPM's log is the attributable request (it
-# exists inside TLS, which the sensor cannot read), and Suricata's alert feed is
-# the wire half (plain-HTTP payloads, and ports NPM never sees). The `.onion`
-# path is the one where neither gives a client -- tor forwards to
-# host.containers.internal, so every visitor is the host's own address and
-# scripts/ids.sh reports on it instead.
+# Two sources with different reach: NPM's log is the attributable request
+# (inside TLS, where the sensor cannot see it), Suricata's alert feed is the
+# wire half (plain HTTP, and ports NPM never sees). Neither gives a client on
+# the `.onion` path -- tor forwards to host.containers.internal, so every
+# visitor is the host's own address.
 #
-# Local only, by decision: DISABLE_ONLINE_API=true means no console enrolment,
-# no CAPI community blocklist, and no telemetry leaving this host. Every
-# decision is derived from this host's own logs.
+# Local only: DISABLE_ONLINE_API=true means no console, no CAPI blocklist and
+# no telemetry leaving this host.
 #
-# THIS FILE IS A TEMPLATE (.container.in): deploy/install.sh substitutes
-# @CROWDSEC_BOUNCER_KEY@ from $DATA_DIR/config/stack/secrets.env. It carries a
-# secret because the LAPI must know the key the bouncer presents, so it follows
-# the same rule as the other three secret-bearing units -- never a committed
-# .container, never an env file (Quadlet does not expand variables in Exec=).
+# THIS FILE IS A TEMPLATE (.container.in): install.sh substitutes the two
+# @..._BOUNCER_KEY@s from $DATA_DIR/config/stack/secrets.env, so it carries a
+# secret and is never a committed .container (docs/ids.md).
 #
-# Enforcement: decisions are applied by `stack-bouncer` (deploy/root/bouncer.sh,
-# a root oneshot on a timer), which polls this container's LAPI on the host's
-# loopback and writes an nftables set with per-entry timeouts. There is no
-# official firewall bouncer IMAGE any more (docker.io/crowdsecurity/cs-firewall-bouncer
-# answers "access denied"), and the packaged one would be a second daemon outside
-# this repo's control -- so the applier is ours, and CrowdSec keeps the part that
-# is hard (decision lifecycle, TTLs, dedup).
+# Enforcement is `stack-bouncer` (deploy/root/bouncer.sh), a root oneshot on a
+# timer that polls this LAPI on the host's loopback and writes an nftables set.
 [Unit]
 Description=CrowdSec (local detection from nginx-proxy-manager logs)
 After=network-online.target
@@ -36,61 +26,45 @@ Wants=network-online.target
 ContainerName=crowdsec
 Image=docker.io/crowdsecurity/crowdsec:v1.8.2
 # Host networking on purpose. The LAPI has to be reachable by stack-bouncer,
-# which runs as *root on the host*, and this host's rootless podman keeps the
-# npm-network bridge inside its own network namespace: a container address
-# (10.89.0.x) is not routable from the host, so a pinned IP would not help. The
-# only other way in is a published port -- and that publish is a `rootlessport`
-# process owned by no unit. On 2026-11-02 one of those vanished mid-run: the
-# container kept running, host 8081 simply stopped listening, and enforcement
-# was silently off for 7h39m until the monitor caught the stale bouncer status.
-# On the host network the LAPI is a plain loopback socket that lives and dies
-# with the container, so nothing unsupervised sits between root and the
-# decisions. config.yaml.local pins it to 127.0.0.1:8080; it stays key-gated (a
-# request without the bouncer key gets 403) and it never reaches the LAN. The
-# host network also gives the first-boot hub install its outbound path.
+# which runs as *root on the host*, and rootless podman keeps the npm-network
+# bridge in its own netns: a container address is not routable from the host,
+# and a published port would put a `rootlessport` process owned by no unit in
+# between. config.yaml.local pins it to 127.0.0.1:8080 and it stays key-gated.
 Network=host
 
-# CrowdSec keeps its own config here: the image's entrypoint seeds
-# /etc/crowdsec from /staging on first start and installs the hub items named in
-# the environment below. A volume, not an anonymous dir, so a restart does not
-# re-download the hub index and the parser set survives.
+# CrowdSec keeps its own config here: the entrypoint seeds /etc/crowdsec from
+# /staging on first start and installs the hub items named below. A volume, not
+# an anonymous dir, so a restart does not re-download the hub index.
 Volume=@DATA_DIR@/ids/crowdsec/etc:/etc/crowdsec:z
-# Its sqlite decisions DB and hub datafiles. Regenerable (the decisions are a
-# cache of the last few hours of logs): outside BACKUP_PATHS.
+# Its sqlite decisions DB and hub datafiles. Regenerable, so outside
+# BACKUP_PATHS.
 Volume=@DATA_DIR@/ids/crowdsec/data:/var/lib/crowdsec/data:z
 
-# nginx-proxy-manager's access logs -- the attributable half of this container.
-# NPM writes them as container root, which is this same user under rootless
-# podman, so a read-only bind needs no relabel and no ownership change.
+# nginx-proxy-manager's access logs -- the attributable half. NPM writes them
+# as container root (this same user under rootless podman), so :ro needs no
+# relabel.
 Volume=@DATA_DIR@/npm/data/logs:/var/log/npm:ro
 
-# Suricata's alert-only feed (the second eve-log output in
-# deploy/root/suricata/suricata.yaml), the wire half. The PARENT is mounted, not
-# ids/suricata: mounting the subdirectory here would make podman create it as
-# this user on a host that has not run `sudo ./bootstrap.sh`, handing the
-# rootful sensor a user-owned directory to write into -- the same trap
-# vector.container documents. `:ro` without `:z` because the files are
-# root-owned and already carry container_file_t from the sensor's own :z mount;
-# a rootless relabel of them would fail (and a default_t file is unreadable,
-# which is why install.sh --root sets the label on alerts.json explicitly).
+# Suricata's alert-only feed (the second eve-log output in suricata.yaml), the
+# wire half. The PARENT is mounted, not ids/suricata: mounting the subdirectory
+# would make podman create it as this user on a host that has not run the root
+# pass, handing the rootful sensor a user-owned directory. `:ro` without `:z`
+# because the files are root-owned and already labelled by the sensor's own :z
+# mount.
 Volume=@DATA_DIR@/ids:/ids:ro
 
-# This repo's parser and scenarios, rendered by deploy/install.sh into
-# $CONFIG_DIR/ids/crowdsec/ so the install-path tokens (@CONFIG_DIR@ and
-# friends) resolve. Individual file binds, not a directory mount: /etc/crowdsec
-# belongs to the image's entrypoint, which seeds it and installs hub items into
-# the same tree, and it only skips its seeding when
-# config.yaml/local_api_credentials.yaml are absent -- which stays true because
-# nothing below touches those two files.
+# This repo's parser and scenarios, rendered by install.sh into
+# $CONFIG_DIR/ids/crowdsec/. Individual file binds, not a directory mount:
+# /etc/crowdsec belongs to the entrypoint, which only skips its seeding when
+# config.yaml/local_api_credentials.yaml are absent -- true, because nothing
+# here touches those two files.
 Volume=@CONFIG_DIR@/ids/crowdsec/acquis.d/stack.yaml:/etc/crowdsec/acquis.d/stack.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/acquis.d/suricata.yaml:/etc/crowdsec/acquis.d/suricata.yaml:ro,z
-# config.yaml.local lowers the log level of the LAPI and the agent; upstream
-# reads it merged on top of config.yaml. It is not config.yaml, so the
-# entrypoint still seeds /etc/crowdsec (see above).
+# Merged on top of config.yaml, and not config.yaml itself, so the entrypoint
+# still seeds /etc/crowdsec.
 Volume=@CONFIG_DIR@/ids/crowdsec/config.yaml.local:/etc/crowdsec/config.yaml.local:ro,z
 # Where ban durations are decided (a scenario's `duration:` is ignored in 1.8).
-# The file carries the stock IP/Range profiles too; the seeded copy is left
-# alone by the entrypoint's `rsync --ignore-existing`.
+# The entrypoint's `rsync --ignore-existing` leaves the seeded copy alone.
 Volume=@CONFIG_DIR@/ids/crowdsec/profiles.yaml:/etc/crowdsec/profiles.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/parsers/s01-parse/stack-npm.yaml:/etc/crowdsec/parsers/s01-parse/stack-npm.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/parsers/s02-enrich/stack-whitelists.yaml:/etc/crowdsec/parsers/s02-enrich/stack-whitelists.yaml:ro,z
@@ -99,37 +73,28 @@ Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-authfail.yaml:/etc/crowdse
 Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-http-flood.yaml:/etc/crowdsec/scenarios/stack-http-flood.yaml:ro,z
 Volume=@CONFIG_DIR@/ids/crowdsec/scenarios/stack-suricata.yaml:/etc/crowdsec/scenarios/stack-suricata.yaml:ro,z
 
-# The machine name the agent registers under in its own LAPI. Stable, so a
-# re-created container keeps its credentials.
+# Stable, so a re-created container keeps its credentials.
 Environment=CUSTOM_HOSTNAME=stack-ids
-# No console, no community blocklist, no telemetry -- see the header.
 Environment=DISABLE_ONLINE_API=true
 # WAL keeps the sqlite writer from blocking the agent's output routine.
 Environment=USE_WAL=true
-# Registers the bouncer and its key in this LAPI on start (the image's entrypoint
-# reads BOUNCER_KEY_<name> and calls `cscli bouncers add` when the name is absent).
-# The name must match nothing else: stack-bouncer authenticates as "firewall".
+# Registers the bouncer and its key in this LAPI on start; the name must match
+# what stack-bouncer authenticates as.
 Environment=BOUNCER_KEY_firewall=@CROWDSEC_BOUNCER_KEY@
-# The MCP server's own key ("mcp"): a second bouncer, read-only by nature, whose
-# pulls are attributable in cs_lapi_bouncer_requests_total and which can be
-# deleted on its own (`cscli bouncers delete mcp`) without touching enforcement.
-# Same never-regenerate rule as the firewall key -- the entrypoint only adds a
-# bouncer when the name is absent, so a changed value would leave the old key
-# registered and the new one answered with 403.
+# The MCP server's own key: a second, read-only bouncer, deletable without
+# touching enforcement. Same never-regenerate rule as the firewall key -- the
+# entrypoint only adds a bouncer when the name is absent, so a changed value
+# leaves the old key registered and answers the new one with 403.
 Environment=BOUNCER_KEY_mcp=@CROWDSEC_MCP_BOUNCER_KEY@
-# The base parsers the acquisitions need. Everything stack-specific is the file
-# mounts above; these three are generic and come from the hub: non-syslog turns
-# a raw log line into an event, dateparse-enrich turns evt.StrTime into evt.Time
-# (the leaky buckets in our scenarios are time-based, so without it every
-# decision would be instant), and suricata-logs' EVE node parses alerts.json
-# into source_ip/signature_id/severity. Its filter matches the acquisition's
-# `type: suricata-evelogs` label, which non-syslog copies into
-# evt.Parsed.program -- a rename on either side turns enforcement off silently,
-# which is what verify.sh's explain probe catches.
+# The generic hub parsers the acquisitions need: non-syslog turns a raw line
+# into an event, dateparse-enrich turns evt.StrTime into evt.Time (the
+# scenarios' leaky buckets are time-based), and suricata-logs parses
+# alerts.json. Its filter matches the acquisition's `type: suricata-evelogs`
+# label, which non-syslog copies into evt.Parsed.program -- a rename on either
+# side turns enforcement off silently, which verify.sh's explain probe catches.
 Environment="PARSERS=crowdsecurity/syslog-logs crowdsecurity/dateparse-enrich crowdsecurity/suricata-logs"
 
-# LAPI reachable and the agent answering: `cscli lapi status` is the one command
-# that proves the DB, the API and the credentials together.
+# `cscli lapi status` proves the DB, the API and the credentials together.
 HealthCmd=/usr/local/bin/cscli -c /etc/crowdsec/config.yaml lapi status
 HealthInterval=60s
 HealthTimeout=15s
@@ -143,10 +108,6 @@ HealthStartPeriod=180s
 TimeoutStartSec=300
 
 [Install]
-# WITHOUT THIS the unit never starts at boot: Quadlet generates the .service, but
-# it is pulled in through this [Install] (the generator only creates the symlink
-# target). Every other container in deploy/ has the same section -- this one was
-# missing it, so after the first reboot crowdsec simply was not running, and
-# stack-bouncer failed every minute with "LAPI unreachable" (which is how it was
-# noticed: enforcement failing loudly, not silently).
+# Without this the unit never starts at boot: the generator creates the
+# .service but pulls it in through this section. See docs/units.md.
 WantedBy=default.target

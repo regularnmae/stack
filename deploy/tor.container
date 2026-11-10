@@ -1,10 +1,7 @@
-# Quadlet unit for Tor, used by lightningd for its onion service and to
-# reach the network over a proxy, and by the stack itself as an onion-service
-# *publisher* (the public surface without DNS or Let's Encrypt). No secrets:
-# tor's own configuration (including the control-port password hash) lives in
-# $DATA_DIR/tor/torrc, which is outside the repo and never committed, and the
-# hidden services' keys live in $DATA_DIR/tor/onion (see ONION_SERVICES in
-# stack.conf).
+# Quadlet unit for Tor, used by lightningd for its onion service and to reach
+# the network over a proxy, and by the stack as an onion-service *publisher*.
+# No secrets: torrc (including the control-port password hash) lives in
+# $DATA_DIR/tor/torrc and the hidden services' keys in $DATA_DIR/tor/onion.
 [Unit]
 Description=Tor SOCKS5 & Control Proxy + onion services
 After=network-online.target npm-network-network.service
@@ -13,39 +10,36 @@ Before=lightningd.service
 
 [Container]
 ContainerName=tor
-# Prebuilt image with tor already installed (see ../tor/Containerfile).
 Image=localhost/tor:local
 Network=npm-network.network
 
 # lightningd runs with --always-use-proxy=true, which suppresses DNS lookups,
-# so it cannot resolve the "tor" container name. Tor therefore needs a
-# stable address that is referenced by IP.
+# so it cannot resolve the "tor" container name: tor needs a stable address
+# referenced by IP.
 PodmanArgs=--ip=10.89.0.240
 
-# No PublishPort: neither the SOCKS port nor the control port is exposed to the
-# host. lightningd reaches tor at 10.89.0.240:9050 on npm-network (the pinned
-# PodmanArgs IP below), and torrc's SocksPolicy would reject a connection from
-# the host's loopback anyway.
-# torrc and the onion keys below are both shared with the backup container,
-# which mounts $DATA_DIR/tor read-only: `:z` (shared), never `:Z` (private).
-# A private label would make restic skip the file, and restic's exit 3 then
-# skips `restic forget` -- retention stops silently. It buys nothing anyway:
-# rootless podman applies no per-container MCS category, so every container
-# writes as the same host user.
+# No PublishPort: neither the SOCKS nor the control port is exposed to the
+# host. lightningd reaches tor at 10.89.0.240:9050 on npm-network, and torrc's
+# SocksPolicy would reject a connection from the host's loopback anyway. torrc
+# and the onion keys are both shared with the backup container, which mounts
+# $DATA_DIR/tor read-only: `:z` (shared), never `:Z` (private). A private label
+# makes restic skip the file, and restic's exit 3 then skips `restic forget`,
+# so retention stops silently. It buys nothing: rootless podman applies no
+# per-container MCS category, so every container writes as the same host user.
 Volume=@DATA_DIR@/tor/torrc:/etc/tor/torrc:ro,z
 
-# The hidden services' onion keys. Losing this directory does not break the
-# stack, but it does change every .onion address, so it is part of the backup
-# set. Tor creates each <name> subdirectory mode 700 itself; install.sh creates
-# the parent 700 so nothing can list the names.
+# The hidden services' onion keys. Losing them does not break the stack, but it
+# changes every .onion address, so they are in the backup set. Tor creates each
+# <name> subdirectory mode 700 itself; install.sh creates the parent 700 so
+# nothing can list the names.
 Volume=@DATA_DIR@/tor/onion:/var/lib/tor/onion:z
 
 Exec=tor -f /etc/tor/torrc
 
-# The tor image ships no HEALTHCHECK. Probe the SOCKS listener lightningd
-# depends on, but from the container's own pinned podman IP: torrc's
-# SocksPolicy allows only 10.89.0.0/24, so a probe from 127.0.0.1 is
-# rejected and logs a denial every interval. busybox nc -z is in the image.
+# The image ships no HEALTHCHECK. Probe the SOCKS listener lightningd depends
+# on, but from the container's own pinned IP: torrc's SocksPolicy allows only
+# 10.89.0.0/24, so a probe from 127.0.0.1 is rejected and logs a denial every
+# interval. busybox nc -z is in the image.
 HealthCmd=nc -z 10.89.0.240 9050
 HealthInterval=30s
 HealthTimeout=10s

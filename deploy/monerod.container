@@ -1,6 +1,6 @@
 # Quadlet unit for the Monero full (archival) node. No secrets: the restricted
-# RPC runs without a login, and standard RPC (18081) is bound to loopback inside
-# the container and never reachable from the network.
+# RPC runs without a login, and standard RPC (18081) stays on loopback
+# in-container.
 [Unit]
 Description=Monero Node
 After=network-online.target npm-network-network.service
@@ -11,52 +11,37 @@ ContainerName=monerod
 Image=ghcr.io/sethforprivacy/simple-monerod:v0.18.5.4
 Network=npm-network.network
 
-# Same policy as bitcoind: no ports published to the host.
-# P2P (18080) is outbound-only, which is enough to sync; the
-# restricted RPC (18089) stays inside npm-network, so nothing on
-# the LAN can reach it even though it binds 0.0.0.0 in-container.
+# Same policy as bitcoind: no ports published. P2P is outbound-only, which is
+# enough to sync, and the restricted RPC stays inside npm-network even though
+# it binds 0.0.0.0 in-container.
 #PublishPort=18080:18080
 #PublishPort=18089:18089
 
-# The image's entrypoint runs as root only long enough to re-own
-# this directory for its monero user (uid 1000 in-container, host
-# uid 525287 via /etc/subuid), then drops privileges via su-exec.
-# The directory can therefore be created as $USER -- unlike
-# bitcoind, no chown dance is needed.
+# The entrypoint runs as root only long enough to re-own this directory for its
+# monero user (host uid 525287 via /etc/subuid), then drops privileges via
+# su-exec, so it can be created as $USER -- unlike bitcoind, no chown dance.
 Volume=@DATA_DIR@/monero:/home/monero/.bitmonero:z
-# The BTCPay plugin's block callback. monerod runs it on every new block; the
-# script refreshes the plugin wallet and pokes BTCPay's Monero callback so a
-# paid invoice is rescanned without waiting for BTCPay's next poll.
-#
-# install.sh stages it under the data dir on every run: this unit must not
-# depend on the checkout being at the same path, because monerod only fails at
-# its *next start*, on a missing bind source. Edit the repo copy
-# (deploy/btcpay/monero-notify.sh) and deploy.
+# The BTCPay plugin's block callback, run on every new block: it refreshes the
+# plugin wallet and pokes BTCPay's Monero callback so a paid invoice is
+# rescanned without waiting for the next poll. install.sh stages it under the
+# data dir on every run -- monerod only fails at its *next start*, on a missing
+# bind source. Edit the repo copy (deploy/btcpay/monero-notify.sh) and deploy.
 Volume=@DATA_DIR@/bin/monero-notify.sh:/notify-block.sh:ro,z
 
-# Stop gracefully, not at podman's 10 s default. monerod's SIGTERM path closes
-# LMDB (`Deinitializing core...`); on this host that flush has never finished
-# inside 10 s, and on 2026-11-08 16:21 the SIGKILL itself took 34 s to be
-# honoured -- uninterruptible I/O on the rotational data disk, a 150 GB DB --
-# with the unit taking 44 s to stop. 300 s is the one value that is not a guess:
-# the full flush has never been observed to complete (docs/units.md, "A durable
-# unit is stopped, not killed"). `[Service] TimeoutStopSec` must stay above
-# this by 30 s, or systemd kills the cgroup first.
+# Graceful stop, not podman's 10 s default. monerod's SIGTERM path closes LMDB
+# (`Deinitializing core...`), which on a large DB over a rotational disk does
+# not finish in 10 s. TimeoutStopSec below stays 30 s above it, or systemd
+# kills the cgroup first (docs/units.md, "A durable unit is stopped, not
+# killed", has the measurements).
 StopTimeout=300
 
-# NOTE: Exec= replaces the image CMD, so the image's default flags
-# must be restated verbatim, with our additions appended.
-# (--non-interactive is prepended by the entrypoint itself.)
-#
-# --block-sync-size: the compiled default is 20
-# (BLOCKS_SYNCHRONIZING_DEFAULT_COUNT). Every batch is one download span, one
-# verify pass and one LMDB transaction, so a larger batch amortises that setup.
-# It is not free to raise: at 200 this node downloaded ~1 MB/s for 25 minutes
-# and committed nothing -- height frozen, data.mdb untouched, no error logged --
-# so the value stays within what the span scheduler completes between
-# announcements. Measured here, archival sync at 58% on XFS over a rotational
-# disk: 20 -> 56 blocks/min, 50 -> 64-67 blocks/min, the daemon's own estimate
-# falling from 22-24 days to ~16. Only initial sync is affected.
+# NOTE: Exec= replaces the image CMD, so the image's default flags must be
+# restated verbatim, with our additions appended (the entrypoint prepends
+# --non-interactive itself). --block-sync-size above the compiled default of 20
+# amortises one download span, verify pass and LMDB transaction over more
+# blocks; it is not free to raise, because a batch larger than the span
+# scheduler completes between announcements stalls the sync with nothing
+# logged.
 Exec=--rpc-restricted-bind-ip=0.0.0.0 \
      --rpc-restricted-bind-port=18089 \
      --no-igd --no-zmq --enable-dns-blocklist \
@@ -65,29 +50,15 @@ Exec=--rpc-restricted-bind-ip=0.0.0.0 \
      --block-notify=/notify-block.sh
 
 # Liveness is the process itself: the entrypoint execs monerod as PID 1, so
-# this is the whole check, exactly like Fulcrum's (deploy/fulcrum.container.in).
-# It is deliberately NOT the image's /healthcheck.sh, which curls the
-# restricted RPC: that probe asserts the *data* path, and monerod's RPC
-# handler legitimately blocks. The chain lock is held across a whole
-# --block-sync-size batch, so /get_height stalls while a batch is prepared and
-# committed -- measured here with a 60s budget: the TCP connect took 88us and
-# the response never arrived, three probes in a row. With HealthRetries=3 and
-# HealthOnFailure=kill that is a full node restarted roughly once an hour,
-# mid-sync, each restart throwing away the batch in flight: 6 unhealthy
-# transitions and 8 container instances in six hours on this host.
-#
-# The other failure direction is why it is not a socket check either. After
-# such a kill the daemon re-opens LMDB before it binds the RPC and refuses
-# connections for as long as that takes (134s measured after a mid-batch kill,
-# 0.5s after a clean one), so `nc -z` would put the same kill switch on a
-# different trigger with only HealthStartPeriod between a slow reopen and a
-# restart loop.
-#
-# The functional checks live outside the unit: scripts/metrics.sh emits
-# stack_xmr_rpc_up from a 5s-bounded probe every minute, scripts/monitor.sh
-# names an RPC that does not answer, and verify.sh --deep reads the node
-# through the MCP. Replacing any of those with a data probe here is a
-# regression, not a fix (docs/units.md, "Healthchecks follow a contract").
+# this is the whole check, exactly like Fulcrum's
+# (deploy/fulcrum.container.in). Deliberately NOT the image's /healthcheck.sh,
+# which curls the restricted RPC: that asserts the *data* path, and the handler
+# legitimately blocks while the chain lock is held across a --block-sync-size
+# batch, so the check kills a node mid-sync. A socket check is no better --
+# after such a kill the daemon re-opens LMDB before it binds and refuses
+# connections until then. The functional checks live outside the unit:
+# metrics.sh's stack_xmr_rpc_up, monitor.sh's RPC verdict and verify.sh --deep
+# (docs/units.md, "Healthchecks follow a contract").
 HealthCmd=sh -c 'grep -qx monerod /proc/1/comm'
 HealthInterval=60s
 HealthTimeout=15s

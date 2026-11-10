@@ -1,18 +1,16 @@
 # The weekly restore drill for the nightly backup, run by backup-verify.timer.
 #
-# A plain systemd USER unit, like monitor.service: the drill is a host script
-# (scripts/backup.sh verify) that starts a throwaway restic container, not a
-# container of its own. deploy/install.sh renders it into
-# ~/.config/systemd/user/; it has no [Install] because only the timer activates
-# it.
+# A plain systemd USER unit: the drill is a host script (scripts/backup.sh
+# verify) that starts a throwaway restic container. install.sh renders it into
+# ~/.config/systemd/user/; no [Install], because only the timer activates it.
 #
 # Deliberately NOT part of backup.container: a failed drill must not make the
-# nightly backup look broken, and the drill reads only the repository -- it runs
-# fine on a host whose stack is down, which is exactly when a restore matters.
+# nightly backup look broken, and the drill reads only the repository -- it
+# runs fine on a host whose stack is down, which is exactly when a restore
+# matters.
 #
-# It writes its verdict to $DATA_DIR/audit/backup-verify.status; that file, not
-# this unit's exit code, is what scripts/monitor.sh alerts on (a failed oneshot
-# unit is otherwise just a line in `systemctl --user status`).
+# Its verdict goes to $DATA_DIR/audit/backup-verify.status; that file, not this
+# unit's exit code, is what monitor.sh alerts on.
 [Unit]
 Description=Weekly restore drill for the stack's restic backup
 # Only needed for an offsite RESTIC_REPOSITORY (s3:, b2:, sftp:).
@@ -22,10 +20,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=@REPO_DIR@/scripts/backup.sh verify
-# The drill restores roughly the size of the backup set, and the data disk is
-# rotational with both chains writing to it: yield to them. Not the `idle` class:
-# on a host whose disk is never idle that starves the drill instead of delaying
-# it.
+# The drill restores roughly the size of the backup set on a rotational disk
+# both chains are writing: yield to them. Not the `idle` class -- on a host
+# whose disk is never idle that starves the drill instead of delaying it.
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

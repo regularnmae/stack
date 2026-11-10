@@ -1,9 +1,7 @@
-# Quadlet unit for the BoltMesh SPA. deploy.sh builds this image with
-# `--target prod` and the three VITE_* build args, so the bundle is static and
-# the VITE_API_URL is baked in at build time -- changing the API hostname means
-# re-running deploy.sh, not editing a unit. deploy/install.sh renders this into
-# ~/.config/containers/systemd/, where quadlet turns it into
-# boltmesh-frontend.service.
+# Quadlet unit for the BoltMesh SPA. deploy.sh builds this image with `--target
+# prod` and the three VITE_* build args, so the bundle is static and
+# VITE_API_URL is baked in at build time -- changing the API hostname means
+# re-running deploy.sh, not editing a unit.
 [Unit]
 Description=BoltMesh frontend (static SPA served by nginx)
 After=network-online.target npm-network-network.service
@@ -18,14 +16,13 @@ Network=npm-network.network
 # a fresh host. Keep it unique (tor itself is .240).
 IP=10.89.0.241
 
-# No env files: the app reads no runtime config, the VITE_* values are inlined
-# into the bundle at build time. The image runs nginx on :80 with the SPA
-# fallback from frontend/deploy/nginx.conf.
+# No env files: the VITE_* values are inlined into the bundle at build time.
+# The image runs nginx on :80 with the SPA fallback from
+# frontend/deploy/nginx.conf.
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# SPA on host 8106 (the [npm.*] tables of deploy/services.toml) -- it can no longer resolve the
-# container name. Bind 127.0.0.1: the firewall opens nothing for it, so NPM
-# (which terminates TLS) stays the only way in for a client.
+# SPA on host 8106 -- it cannot resolve the container name -- and the firewall
+# opens nothing for it.
 PublishPort=127.0.0.1:8106:80
 
 # nginx:alpine has no curl but does have busybox wget.

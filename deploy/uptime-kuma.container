@@ -1,10 +1,7 @@
-# Quadlet unit for Uptime-Kuma, the public status page. Owned by this repo so
-# the whole stack deploys whole. Its state (monitors, history, login and an
-# EMBEDDED MARIADB -- kuma v2 does not use sqlite any more) lives in
-# @DATA_DIR@/uptime-kuma; everything else is configured in its web UI -- this
-# unit reads no config file and no secret, so it is the one unit with no env
-# file. install.sh renders this into ~/.config/containers/systemd/, where quadlet
-# turns it into uptime-kuma.service.
+# Quadlet unit for Uptime-Kuma, the public status page. Its state (monitors,
+# history, login and an EMBEDDED MARIADB -- kuma v2 dropped sqlite) lives in
+# @DATA_DIR@/uptime-kuma and everything else is configured in its web UI, which
+# is why this is the one unit with no env file.
 [Unit]
 Description=Uptime-Kuma (public status page)
 After=network-online.target npm-network-network.service
@@ -16,49 +13,42 @@ Image=docker.io/louislam/uptime-kuma:2
 Network=npm-network.network
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# server on host 8107 (the [npm.*] tables of deploy/services.toml) -- it can no longer resolve the
-# container name. Bind 127.0.0.1: the firewall opens nothing for it, so NPM
-# (which terminates TLS) stays the only way in for a client.
+# on host 8107 (the [npm.*] tables of deploy/services.toml) -- it cannot
+# resolve the container name. The firewall opens nothing for it, so NPM (which
+# terminates TLS) stays the only way in for a client.
 PublishPort=127.0.0.1:8107:3001
 
-# The monitors resolve the public vhosts *here*, not on the internet. host-gateway
-# is pasta's 169.254.1.2 (the host's side of the container link), so a check
-# reaches nginx-proxy-manager directly: no trip through the router's NAT
-# loopback, no 93.177.140.197 as its source, and the certificate still validates
-# because the URL (and its SNI) is unchanged. Without this, seven monitors at
-# 60 s were the top source in both NPM's access log and Suricata's eve.json, all
-# wearing the operator's WAN address -- 89,766 handshakes in eight days.
+# The monitors resolve the public vhosts *here*, not on the internet.
+# host-gateway is pasta's 169.254.1.2, so a check reaches nginx-proxy-manager
+# directly: no trip through the router's NAT loopback, and the certificate
+# still validates because the URL (and its SNI) is unchanged.
 #
 # MCP_HOST is deliberately absent: its monitor is the one canary that still
 # leaves the host, and verify.sh reads that source address to notice a WAN
-# change. deploy/install.sh builds the list from the service manifest
-# (deploy/services.toml, load_manifest), so a host rename cannot leave a
-# stale entry here.
+# change. install.sh builds the list from the service manifest, so a host
+# rename cannot leave a stale entry here.
 PodmanArgs=@KUMA_ADD_HOSTS@
 
-# kuma's embedded MariaDB, its own sqlite-era leftovers and the uploaded images.
-# The top level is written by container root (= the host user under rootless
-# podman), so install.sh only mkdirs it; mariadb/ and run/ inside are owned by
-# kuma's in-image uid (host subuid 525287), which is why the restore runbook
-# chowns the datadir it recreates.
+# kuma's embedded MariaDB, its own sqlite-era leftovers and the uploaded
+# images. The top level is written by container root (= the host user), so
+# install.sh only mkdirs it; mariadb/ and run/ inside are owned by kuma's
+# in-image uid (host subuid 525287), which is why the restore runbook chowns
+# the datadir it recreates.
 #
-# The live mariadb/ datadir is NOT part of the backup set (stack.conf's
-# BACKUP_EXCLUDES): restic would copy a tree MariaDB is writing, one file at a
-# time, which is how a restore gets a redo log that disagrees with its data
-# pages. scripts/db-dump.sh takes `mariadb-dump --single-transaction` into
-# $DATA_DIR/uptime-kuma-dump/kuma.sql instead, and the restore runbook imports
-# it. `run/` (socket + pid) is excluded for the same "not state" reason.
-# :z label required (SELinux enforcing host), same as monerod.
+# The live mariadb/ datadir is NOT in the backup set (BACKUP_EXCLUDES): restic
+# would copy a tree MariaDB is writing one file at a time. scripts/db-dump.sh
+# takes `mariadb-dump --single-transaction` into
+# $DATA_DIR/uptime-kuma-dump/kuma.sql, and the restore runbook imports it.
+# `run/` is excluded for the same "not state" reason.
 Volume=@DATA_DIR@/uptime-kuma:/app/data:z
 
-# `extra/healthcheck` is the Go binary the image ships for exactly this; it
-# GETs http://127.0.0.1:3001 inside the container. The long start period
-# matters: on a version bump kuma migrates its database before it opens :3001.
+# `extra/healthcheck` is the Go binary the image ships for exactly this.
 #
-# 5 retries, not 3, for a related reason: the migration is not bounded by the
-# start period when a large DB is being upgraded, and 3 failed probes would kill
-# the container between the migration and the first answer.
-# health-lint: HC005 5 retries -- a schema migration can outlast a 3-probe window
+# 5 retries, not 3: a version bump migrates the database before it opens :3001,
+# and the migration is not bounded by the start period, so 3 failed probes
+# would kill the container between the migration and the first answer.
+# health-lint: HC005 5 retries -- a schema migration can outlast a 3-probe
+# window
 HealthCmd=extra/healthcheck
 HealthInterval=60s
 HealthTimeout=15s

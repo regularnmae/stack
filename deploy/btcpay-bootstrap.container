@@ -1,11 +1,10 @@
 # Quadlet unit for the one-shot BTCPay bootstrap. Store-level configuration
 # (admin account, API keys, store, BTC-LN/XMR-CHAIN methods, webhook) lives in
 # BTCPay's database, so every fresh instance needs this before the backend can
-# create invoices. The script is idempotent and writes generated secrets back to
-# the environment file it also reads (mode 600 under $CONFIG_DIR/btcpay).
-# backend.env (what the backend consumes) is written by configure.sh from that
-# state, so a manual bootstrap re-run must be followed by
-# `./configure.sh --only btcpay` when a new runtime key was minted.
+# create invoices. The script is idempotent and writes generated secrets back
+# to the file it also reads (mode 600 under $CONFIG_DIR/btcpay). backend.env is
+# written by configure.sh from that state, so a manual re-run that minted a new
+# runtime key must be followed by `./configure.sh --only btcpay`.
 #
 # No [Install]: configure.sh starts it after BTCPay is healthy, and a re-run is
 # how the XMR method is enabled once the view-only wallet exists.
@@ -20,10 +19,10 @@ Image=docker.io/library/python:3.13-alpine
 Network=npm-network.network
 
 # The state file is both input (admin email/password, URL, webhook) and output
-# (admin key, runtime key, store id, webhook secret). Mount the whole directory
+# (admin key, runtime key, store id, webhook secret): mount the whole directory
 # so the script's atomic replace stays inside the mount. The script itself is
-# staged under $DATA_DIR/bin by install.sh rather than read from the checkout
-# (see monerod.container): edit scripts/btcpay_bootstrap.py and deploy.
+# staged under $DATA_DIR/bin by install.sh, never read from the checkout --
+# edit scripts/btcpay_bootstrap.py and deploy.
 Volume=@CONFIG_DIR@/btcpay:/state:z
 Volume=@DATA_DIR@/bin/btcpay_bootstrap.py:/bootstrap.py:ro,z
 EnvironmentFile=@CONFIG_DIR@/btcpay/bootstrap.env

@@ -3,41 +3,37 @@
 #
 # A plain systemd USER unit, like backup-verify.service: the drill is a host
 # script (scripts/backup.sh verify-db) that starts a throwaway restic container
-# and then a throwaway postgres, not a container of its own. deploy/install.sh
-# renders it into ~/.config/systemd/user/; it has no [Install] because only the
+# and then a throwaway postgres, not a container of its own. install.sh renders
+# it into ~/.config/systemd/user/, and it has no [Install] because only the
 # timer activates it.
 #
-# Why this is a second drill and not a flag on the weekly one: the weekly run
-# proves restic mechanics and file presence, and `verify --with-db` is manual so
-# that run can stay deterministic -- no image pull in its path. This is the one
-# run that proves postgres-dump/all.sql actually REPLAYS into a cluster, and it
-# pays for that by being allowed to pull the postgres image. Keeping the two
-# apart is what stops the pull dependency from leaking into the weekly drill.
+# A second drill rather than a flag on the weekly one: the weekly run proves
+# restic mechanics and file presence and stays deterministic, with no image
+# pull in its path -- this is the one run that proves postgres-dump/all.sql
+# actually REPLAYS into a cluster, and it pays for that by being allowed to
+# pull the postgres image.
 #
-# It writes its verdict to $DATA_DIR/audit/backup-verify-db.status, a file of its
-# own (the weekly drill's age must not be masked by this one's result, or the
-# reverse); that file, not this unit's exit code, is what scripts/monitor.sh
-# alerts on -- a failed oneshot unit is otherwise just a line in
-# `systemctl --user status`.
+# It writes its verdict to $DATA_DIR/audit/backup-verify-db.status, a file of
+# its own so neither drill's age masks the other's; that file, not this unit's
+# exit code, is what monitor.sh alerts on -- a failed oneshot is otherwise just
+# a line in `systemctl --user status`.
 [Unit]
 Description=Monthly database restore drill (postgres dump replay)
 # For the image pull and, should the repository ever be moved offsite, restic's
-# own egress. The weekly drill needs this only for the latter.
+# own egress.
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=@REPO_DIR@/scripts/backup.sh verify-db
-# It restores a few MiB rather than the whole set, so it is cheap -- but it still
-# runs on the data disk both chains are writing to: yield to them. Not the `idle`
-# class: on a host whose disk is never idle that starves the drill instead of
-# delaying it.
+# Cheap -- a few MiB, not the whole set -- but it still runs on the data disk
+# both chains are writing to: yield to them. Not the `idle` class: on a host
+# whose disk is never idle that starves the drill instead of delaying it.
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-# A pull, a small restore and a throwaway postgres. Generous, not infinite: a
-# hung podman run must not sit in the journal for a day. A timeout is not a
-# silent stop either -- the script's exit trap records a failed verdict, so a
-# hung drill cannot read as a green one.
+# Generous, not infinite: a hung podman run must not sit in the journal for a
+# day, and a timeout is not a silent stop -- the script's exit trap records a
+# failed verdict, so a hung drill cannot read as a green one.
 TimeoutStartSec=2700

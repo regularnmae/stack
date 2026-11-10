@@ -1,14 +1,13 @@
 # The intrusion-detection roll-up, run by ids.timer.
 #
-# A plain systemd USER unit, like monitor.service and metrics.service: this is a
-# host script that reads the sensor's log and asks the rootless crowdsec
-# container for its decisions, so it needs no root itself.
+# A plain systemd USER unit: a host script that reads the sensor's log and asks
+# the rootless crowdsec container for its decisions, so it needs no root
+# itself.
 #
-# It reports rather than acts: the status file it writes is what
-# scripts/monitor.sh pages on, and the same file carries the counters into the
-# metrics textfile. Nothing here blocks anything -- enforcement is
-# `stack-bouncer`'s job (deploy/root/bouncer.sh, a root oneshot on a one-minute
-# system timer, driven by the LAPI over 127.0.0.1:8080).
+# It reports rather than acts: the status file it writes is what monitor.sh
+# pages on, and the same file carries the counters into the metrics textfile.
+# Enforcement is stack-bouncer's job, a root oneshot driven by the LAPI over
+# 127.0.0.1:8080.
 [Unit]
 Description=Roll up the IDS state (suricata alerts, crowdsec decisions)
 After=network-online.target
@@ -17,6 +16,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=@REPO_DIR@/scripts/ids.sh
-# Reading a tail of eve.json and one cscli call; a hung docker exec must not
-# pile runs up behind the next tick.
+# Reading a tail of eve.json and one cscli call; a hung exec must not pile runs
+# up behind the next tick.
 TimeoutStartSec=60

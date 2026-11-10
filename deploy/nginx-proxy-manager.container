@@ -1,38 +1,30 @@
-# Quadlet unit for nginx-proxy-manager (NPM).
-#
-# Owned by this repo: NPM is the one service in the stack that had no home in
-# version control before. deploy/install.sh renders this into
-# ~/.config/containers/systemd/ and creates its data dirs under $DATA_DIR/npm.
+# Quadlet unit for nginx-proxy-manager (NPM). install.sh renders it and creates
+# its data dirs under $DATA_DIR/npm.
 #
 # Serves 80/443 (proxied sites) and 81 (the admin UI) on the LAN. Binding :80
 # rootless needs net.ipv4.ip_unprivileged_port_start<=80, which bootstrap.sh
 # sets. Its SQLite database and TLS material live in
-# $DATA_DIR/npm/{data,letsencrypt}; back those up -- install.sh never overwrites them.
+# $DATA_DIR/npm/{data,letsencrypt}, which install.sh never overwrites.
 #
 # Network=host, and NOT a PublishPort, because a rootless published port is
 # forwarded by rootlessport: a userspace proxy that dials the container over a
-# fresh connection from inside the rootless network namespace, so NPM saw its
-# own address (10.89.0.5) as $remote_addr for every request -- real client IPs
-# never reached its logs, its fail2ban surface or the X-Forwarded-For it sets
-# on the way to the app tier. Only pasta (Podman >= 6.0,
-# rootless_port_forwarder="pasta") preserves the source IP for a published port
-# on a user-defined network, and that is not in Rocky 10's podman 5.8 yet.
+# fresh connection from inside the rootless namespace, so NPM saw its own
+# address as $remote_addr for every request and real client IPs never reached
+# its logs, its fail2ban surface or the X-Forwarded-For it sets on the way to
+# the app tier. Only pasta preserves the source IP for a published port, and
+# that is not in Rocky 10's podman 5.8 yet.
 #
 # On the host network NPM's own nginx binds :80/:443/:81, so the client's
-# address is the client's. The price is reachability: NPM is no longer a peer on
-# npm-network, so it cannot resolve a container name. Every unit it proxies to
-# therefore publishes its port on the host's loopback (PublishPort=127.0.0.1:...)
-# and NPM_HOSTS/MCP_HOSTS in stack.conf name 127.0.0.1, not the container. The
-# loopback binds are invisible to the LAN -- the firewall opens nothing for them
-# and NPM is still the only way in for a client.
+# address is the client's. The price is reachability: NPM is no longer a peer
+# on npm-network and cannot resolve a container name, so every unit it proxies
+# to publishes on the host's loopback (PublishPort=127.0.0.1:...). Those binds
+# are invisible to the LAN and NPM is still the only way in for a client.
 #
-# NPM IS the request path for every service: it terminates TLS, and the MCP
-# bearer tokens gate the services behind it. The proxy hosts -- the BoltMesh,
-# SearXNG and explorer web hosts and the one path-prefix host serving the five
-# MCP servers -- are declared in NPM_HOSTS (stack.conf) and reconciled by
-# scripts/npm-hosts.sh, which reads the admin API on 127.0.0.1:81; its
-# credentials come from $DATA_DIR/config/npm/api.env. Those hosts live in the
-# SQLite database below, not in this repo.
+# NPM IS the request path for every service: it terminates TLS and the MCP
+# bearer tokens gate what is behind it. The proxy hosts are declared once in
+# deploy/services.toml and reconciled by scripts/npm-hosts.sh through the admin
+# API on 127.0.0.1:81; they live in the SQLite database below, not in this
+# repo.
 [Unit]
 Description=Nginx Proxy Manager
 After=network-online.target
@@ -42,17 +34,16 @@ ContainerName=nginx-proxy-manager
 Image=docker.io/jc21/nginx-proxy-manager:2.16.0
 Network=host
 
-# Volume mounts with :z (shared) for SELinux labelling. Shared, not private
-# (:Z): the backup container mounts these same directories read-only, and a
-# path one container labels private cannot be shared with another.
+# :z (shared) for SELinux labelling, not :Z: the backup container mounts these
+# same directories read-only, and a path one container labels private cannot be
+# shared.
 Volume=@DATA_DIR@/npm/data:/data:z
 Volume=@DATA_DIR@/npm/letsencrypt:/etc/letsencrypt:z
 
-# Environment settings.
 Environment=DISABLE_IPV6=true
 
 # The image ships no HEALTHCHECK; curl is present (wget is not). The admin UI
-# on 81 answering proves NPM's nginx/node are alive rather than wedged.
+# on 81 answering proves NPM's nginx and node are alive rather than wedged.
 HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:81/
 HealthInterval=30s
 HealthTimeout=10s

@@ -4,9 +4,9 @@
 # one writes nftables, which needs CAP_NET_ADMIN.
 #
 # Every minute: CrowdSec's scenarios are leaky buckets over 10 s windows, so a
-# decision usually exists within seconds of the traffic that caused it. A minute
-# of extra exposure on a vhost that nginx already rate-limits is a fine trade for
-# not running nft four times as often.
+# decision usually exists within seconds of the traffic that caused it, and a
+# minute of extra exposure on a rate-limited vhost is cheaper than running nft
+# four times as often.
 [Unit]
 Description=Run stack-bouncer every minute
 

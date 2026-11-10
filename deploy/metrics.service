@@ -1,18 +1,17 @@
 # The stack metrics collector, run by metrics.timer.
 #
-# A plain systemd USER unit, not a Quadlet: this is a host script that reads the
+# A plain systemd USER unit, not a Quadlet: a host script that reads the
 # daemons (podman exec/net_curl, the MCP endpoints) and writes a Prometheus
-# textfile for node-exporter to serve. deploy/install.sh renders it into
-# ~/.config/systemd/user/ and enables metrics.timer -- the timer activates this,
-# so there is no [Install] section.
+# textfile for node-exporter to serve. install.sh enables metrics.timer, which
+# activates this, so there is no [Install].
 #
-# It changes nothing: it starts no unit, rewrites no config, and its only output
-# is $DATA_DIR/monitoring/textfile/stack.prom. A failed run leaves the previous
+# It changes nothing: its only output is
+# $DATA_DIR/monitoring/textfile/stack.prom. A failed run leaves the previous
 # file in place, which is why monitor.sh alerts on that file going stale.
 [Unit]
 Description=Collect the stack's metrics into node-exporter's textfile
-# The MCP endpoints and the backup repository may be remote, but the run is
-# local; ordering only avoids a boot-time race with the containers.
+# The endpoints may be remote, but the run is local; ordering only avoids a
+# boot-time race with the containers.
 After=network-online.target
 Wants=network-online.target
 

@@ -1,7 +1,5 @@
-# Quadlet unit for the BoltMesh API (FastAPI under gunicorn). deploy/install.sh
-# renders this into ~/.config/containers/systemd/, where quadlet turns it into
-# boltmesh-backend.service. The arq worker runs the same image (see
-# boltmesh-worker.container).
+# Quadlet unit for the BoltMesh API (FastAPI under gunicorn). The arq worker
+# runs the same image (see boltmesh-worker.container).
 [Unit]
 Description=BoltMesh API (FastAPI/gunicorn)
 After=network-online.target npm-network-network.service postgres.service
@@ -15,32 +13,28 @@ Network=npm-network.network
 # the range unique, tor is .240).
 IP=10.89.0.242
 
-# Four env files, all OUTSIDE this repo under $DATA_DIR/config/boltmesh/
-# (mode 600), written by deploy/install.sh so no secret is committed:
-#   db.env      -- POSTGRES_* and DATABASE_URL
-#   secrets.env -- the JWT signing keys and the bootstrap pepper
-#   app.env     -- operator-editable: URLs, CORS, OAuth, SMTP, TTLs
-#   btcpay/backend.env -- the BTCPay store URL, runtime key, store id and
-#                  webhook secret, written by configure.sh from
-#                  btcpay/bootstrap.env after the bootstrap job runs
+# Four env files, all OUTSIDE this repo under $DATA_DIR/config/boltmesh/ (mode
+# 600), so no secret is committed:   db.env      -- POSTGRES_* and DATABASE_URL
+# secrets.env -- the JWT signing keys and the bootstrap pepper   app.env     --
+# operator-editable: URLs, CORS, OAuth, SMTP, TTLs   btcpay/backend.env -- the
+# BTCPay store URL, runtime key, store id and webhook                  secret,
+# written by configure.sh after the bootstrap job runs
 EnvironmentFile=@CONFIG_DIR@/boltmesh/db.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/secrets.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/app.env
 EnvironmentFile=@CONFIG_DIR@/btcpay/backend.env
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# API on host 8105 (the [npm.*] tables of deploy/services.toml) -- it can no longer resolve the
-# container name. Bind 127.0.0.1: the firewall opens nothing for it, so NPM
-# (TLS) stays the only way in for a client. The app serves /health (deep:
-# database + valkey), which is what the HealthCmd below gates on and what
-# verify.sh reads through scripts/lib.sh's net_curl.
+# on host 8105 -- it cannot resolve the container name -- and the firewall
+# opens nothing for it, so NPM is the only way in. /health is deep (database +
+# valkey), which is what verify.sh reads through net_curl.
 PublishPort=127.0.0.1:8105:8000
 
 # No HealthOnFailure (one of the two probed units without it), because this
-# probe is DEEP: it includes postgres and valkey, which is a readiness question,
-# not "is this process alive". Killing the app on a database blip turns one
-# outage into a restart loop that pages as an app fault; verify.sh's BoltMesh
-# section reads the same /health every monitor sweep and pages on the cause.
+# probe is DEEP: it includes postgres and valkey, a readiness question, not "is
+# this process alive". Killing the app on a database blip turns one outage into
+# a restart loop that pages as an app fault; verify.sh reads the same /health
+# and pages on the cause.
 # health-lint: HC008 deep health includes db+cache; verify.sh pages on it
 HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:8000/health
 HealthInterval=30s

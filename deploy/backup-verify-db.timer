@@ -1,26 +1,23 @@
 # The schedule for the database drill in backup-verify-db.service.
 #
 # Quadlet has no .timer type, so this is a plain systemd USER unit (like
-# backup.timer). deploy/install.sh installs it to ~/.config/systemd/user/ and
-# runs `systemctl --user enable --now backup-verify-db.timer`; it activates
-# backup-verify-db.service.
+# backup.timer); install.sh installs it and enables it --user.
 [Unit]
 Description=Monthly database restore drill for the stack's restic backup
 
 [Timer]
-# First Wednesday at 06:30, with the usual jitter. `Wed *-*-01..07` is systemd's
-# "first Wednesday" -- systemd-analyze calendar normalises it -- and the choice
-# is deliberate twice over: a monthly-on-the-1st expression can land on a
-# Sunday, and the weekly restore drill starts at 05:30 with up to 30 min of
-# jitter and up to two hours of runtime, so the two would collide on the
-# repository lock. This is 24h+ clear of it, and clear of the nightly backup at
+# First Wednesday at 06:30. `Wed *-*-01..07` is systemd's "first Wednesday",
+# and the choice avoids two collisions: a monthly-on-the-1st expression can
+# land on a Sunday, and the weekly drill starts at 05:30 with up to 30 min of
+# jitter and up to two hours of runtime, so the two would fight over the
+# repository lock. This is 24h+ clear of it, and of the nightly backup at
 # 03:30.
 OnCalendar=Wed *-*-01..07 06:30:00
 RandomizedDelaySec=30m
-# Persistent=true catches up a run missed while the host was off -- which also
-# means a host deployed after the first Wednesday runs one immediately. That is
-# harmless (the live data dirs are never mounted) and worth keeping: it proves
-# the replay path on the host that just got it.
+# Persistent=true catches up a run missed while the host was off, which means a
+# host deployed after the first Wednesday runs one immediately -- harmless,
+# since the live data dirs are never mounted, and it proves the replay path on
+# the new host.
 Persistent=true
 Unit=backup-verify-db.service
 

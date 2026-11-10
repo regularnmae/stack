@@ -1,7 +1,6 @@
 # Quadlet unit for the BoltMesh background worker (arq): invoice settlement and
 # the subscription lifecycle. Same image as boltmesh-backend, different
-# command. deploy/install.sh renders this into ~/.config/containers/systemd/,
-# where quadlet turns it into boltmesh-worker.service.
+# command.
 [Unit]
 Description=BoltMesh background worker (arq)
 After=network-online.target npm-network-network.service postgres.service boltmesh-backend.service
@@ -18,14 +17,14 @@ EnvironmentFile=@CONFIG_DIR@/boltmesh/secrets.env
 EnvironmentFile=@CONFIG_DIR@/boltmesh/app.env
 EnvironmentFile=@CONFIG_DIR@/btcpay/backend.env
 
-# The worker serves no HTTP port. The app image's CMD is gunicorn, so the
-# command is replaced rather than appended.
+# The app image's CMD is gunicorn, so the command is replaced rather than
+# appended.
 Exec=arq app.worker.WorkerSettings
 
 # The worker serves no port, so liveness is the file its own cron refreshes
-# every 60s (freshness threshold 180s, in app/worker.py). `find` is the whole
-# probe: exit 0 when the file was modified in the last 3 minutes, 1 otherwise.
-# No $VARS here -- the systemd generator would expand them, not the container.
+# every 60 s (freshness threshold 180 s, in app/worker.py). `find` is the whole
+# probe: exit 0 when the file was modified in the last 3 minutes. No $VARS here
+# -- the systemd generator would expand them, not the container.
 HealthCmd=find /tmp/arq-worker-liveness -mmin -3
 HealthInterval=60s
 HealthTimeout=10s

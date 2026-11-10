@@ -1,13 +1,12 @@
 # Quadlet unit for MoneroBlock, the Monero explorer served at
-# $XMR_EXPLORER_HOST (the [npm.*] tables of deploy/services.toml). It is read-only and stateless:
-# blocks, transactions and network info come from monerod's restricted RPC
-# (18089) -- there is no chain mount, no LMDB reader, and no local index. It has
-# no env file and no directory in the backup set.
+# $XMR_EXPLORER_HOST. It is read-only and stateless: blocks, transactions and
+# network info come from monerod's restricted RPC -- no chain mount, no LMDB
+# reader, no local index, no env file, nothing in the backup set.
 #
-# The container IP is pinned because tor's onion target is this address, and tor
-# validates a HiddenServicePort target when it starts -- before this container
-# may exist on a fresh host. Keep it unique (tor .240, boltmesh .241/.242,
-# btc-explorer .243).
+# The container IP is pinned because tor's onion target is this address, and
+# tor validates a HiddenServicePort target when it starts -- before this
+# container may exist on a fresh host. Keep it unique (tor .240, boltmesh
+# .241/.242, btc-explorer .243).
 [Unit]
 Description=MoneroBlock (trustless Monero block explorer)
 After=network-online.target npm-network-network.service monerod.service
@@ -21,21 +20,19 @@ Network=npm-network.network
 IP=10.89.0.244
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# on host 8109 (the [npm.*] tables of deploy/services.toml). NPM terminates TLS and is the only
-# way in for a client.
+# on host 8109, and it terminates TLS.
 PublishPort=127.0.0.1:8109:31312
 
 # The image's ENTRYPOINT is `moneroblock`, so Exec= supplies only its flags.
-# --daemon points at the restricted RPC port monerod publishes on npm-network
-# (the unrestricted one is never exposed). MoneroBlock prepends http:// when the
-# daemon URL has no scheme.
+# --daemon is the restricted RPC port (the unrestricted one is never exposed),
+# and MoneroBlock prepends http:// when the URL has no scheme.
 Exec=--bind=0.0.0.0:31312 --daemon=monerod:18089
 
 # /style.css is the static stylesheet: a 200 proves the listener without
 # touching monerod. The home page calls get_info/get_block_headers_range, and
-# while monerod is in initial sync its restricted RPC can be slow enough that
-# the page times out; verify.sh checks the home page separately and warns rather
-# than fails in that window.
+# monerod's restricted RPC can be slow enough during initial sync that the page
+# times out -- verify.sh checks the home page separately and warns rather than
+# fails there.
 HealthCmd=curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:31312/style.css
 HealthInterval=60s
 HealthTimeout=10s
@@ -46,12 +43,10 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 # MoneroBlock panics on its first RPC poll while monerod is still opening its
-# LMDB ("connect: connection refused"), and the default RestartSec of ~1s turned
-# that into five starts in eight seconds -- which also tripped systemd's default
-# start limit (5 starts / 10s) and left the explorer failed until someone
-# restarted it. Thirty seconds outlives the start limit window and gives monerod
-# time to open the restricted RPC; deploy_explorers no longer waits on that port,
-# so the retry is the recovery.
+# LMDB, and systemd's default RestartSec turned that into a start rate past its
+# own default start limit, leaving the explorer failed. Thirty seconds outlives
+# the start-limit window and gives monerod time to open the restricted RPC;
+# deploy_explorers does not wait on that port, so the retry is the recovery.
 RestartSec=30s
 TimeoutStartSec=300
 

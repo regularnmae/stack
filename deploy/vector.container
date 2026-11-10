@@ -1,21 +1,16 @@
 # Quadlet unit for Vector, the stack's log shipper: journald -> VictoriaLogs.
 #
-# Why a shipper at all: podman's default log driver is journald, so *every*
-# container's stdout and every host script's output is already in one place.
-# What journald cannot do is search across services or keep more than a couple
-# of days -- this unit turns that one local journal into entries VictoriaLogs
-# can index, label and retain.
+# podman's default log driver is journald, so every container's stdout and
+# every host script's output is already in one place; what journald cannot do
+# is search across services or keep more than a couple of days. This unit turns
+# that one local journal into entries VictoriaLogs can index, label and retain.
 #
-# Vector's journald source checkpoints into data_dir (one cursor per batch), so
-# a restart resumes where it stopped instead of duplicating the journal. Its
-# `current_boot_only` MUST stay true on systemd 250-257: with `false` the source
-# refuses to start ("not supported for systemd versions 250 through 257"), which
-# is this host. The consequence is that entries written while Vector was stopped
-# *in an earlier boot* are not re-read; the journal itself is persistent from
-# bootstrap, so `podman logs`/`journalctl` still have them.
-#
-# install.sh renders this into ~/.config/containers/systemd/, where quadlet
-# turns it into vector.service.
+# Vector's journald source checkpoints into data_dir, so a restart resumes
+# where it stopped instead of duplicating. `current_boot_only` MUST stay true
+# on systemd 250-257: with `false` the source refuses to start ("not supported
+# for systemd versions 250 through 257"), which is this host. Entries written
+# while Vector was stopped in an earlier boot are then not re-read; the journal
+# itself is persistent from bootstrap.
 [Unit]
 Description=Vector (journald -> VictoriaLogs shipper)
 After=network-online.target npm-network-network.service victoria-logs.service
@@ -26,69 +21,55 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=vector
-# The Debian image, not -alpine and not -distroless: the journald source needs
-# the systemd journal library and runs `journalctl` as a child, and the health
-# check below needs bash. Renovate's Quadlet manager follows the tag.
+# Debian, not -alpine or -distroless: the journald source needs the systemd
+# journal library and runs `journalctl` as a child, and the check below needs
+# bash.
 Image=docker.io/timberio/vector:0.61.0-debian
 Network=npm-network.network
 
-# Reading the host journal from a rootless container takes TWO things, and
-# neither is optional (both were measured on this host):
-#
-#   GroupAdd=keep-groups
-#       The journal files are root:systemd-journal with an ACL for the login
-#       user's groups. The container's root maps to that user, but supplementary
-#       groups are dropped by default, so without this the read is EACCES and
-#       journalctl sees no entries at all.
-#   SecurityLabelDisable=true
-#       The journal directories carry the host's SELinux label, which a
-#       container domain may not read. Relabelling /run (or /var/log) is not an
-#       option, so this is the second unit (after node-exporter) with SELinux
-#       separation off. It is acceptable here because the mounts are :ro and the
-#       container publishes nothing to the LAN; the exception is documented in
-#       docs/logs.md.
+# Reading the host journal from a rootless container takes two things, and
+# neither is optional: GroupAdd=keep-groups (supplementary groups are dropped
+# by default, so the read is EACCES and journalctl sees nothing) and
+# SecurityLabelDisable=true (the journal directories carry the host's SELinux
+# label, which a container domain may not read). Relabelling /run is not an
+# option; the mounts are :ro and the container publishes nothing to the LAN,
+# and docs/logs.md records the exception.
 GroupAdd=keep-groups
 SecurityLabelDisable=true
-# BOTH journal directories. journald starts volatile and is switched to
-# /var/log/journal by `journalctl --flush` (systemd-journal-flush.service at
-# boot); the shipper has to see whichever one is live, and journalctl merges
-# the two when both are mounted. Mounting only /run is how the pipeline goes
-# quiet the moment persistence starts working.
+# BOTH journal directories: journald starts volatile and is flushed to
+# /var/log/journal at boot, and journalctl merges the two when both are
+# mounted. Mounting only /run is how the pipeline goes quiet the moment
+# persistence starts working.
 Volume=/run/log/journal:/run/log/journal:ro
 Volume=/var/log/journal:/var/log/journal:ro
-# journalctl resolves the journal directory from THIS file. Without it the
-# container uses the image's machine-id, finds no /var/log/journal/<id>, and
-# reports "No journal files were found" -- measured, and why the /run-only
-# mount happened to work (that directory is scanned whole).
+# journalctl resolves the journal directory from this file. Without it the
+# container uses the image's machine-id, finds no /var/log/journal/<id> and
+# reports "No journal files were found".
 Volume=/etc/machine-id:/etc/machine-id:ro
-# The shipper's config (rendered by install.sh from deploy/logs/vector.toml) and
-# its checkpoint directory. The config is a directory mount for the same reason
-# as VictoriaMetrics' scrape.yml: a single-file bind mount keeps the inode it
-# opened, so a re-rendered file would never reach the running process.
+# The shipper's config (rendered from deploy/logs/vector.toml) and its
+# checkpoint directory. The config is a directory mount because a single-file
+# bind keeps the inode it opened, so a re-rendered file would never reach the
+# running process.
 Volume=@CONFIG_DIR@/logs/vector:/etc/vector:ro
 Volume=@DATA_DIR@/logs/vector:/var/lib/vector:z
-# Suricata's eve.json, read-only. The PARENT directory is mounted, not
-# ids/suricata: the root tier owns ids/suricata, and a bind-mount source that
-# does not exist yet would be created by podman as the host user, handing the
-# rootful sensor a user-owned directory to write into. $DATA_DIR/ids always
-# exists (install.sh creates it for crowdsec), and the file source simply waits
-# until the sensor creates eve.json. :ro, and this container has SELinux off, so
-# the root-owned 0644 file is readable through the user-owned parent.
+# Suricata's eve.json, read-only. The PARENT is mounted, not ids/suricata: the
+# root tier owns that directory, and a bind source that does not exist yet
+# would be created by podman as the host user, handing the rootful sensor a
+# user-owned directory to write into. The file source waits until the sensor
+# creates eve.json; :ro, and SELinux is off here, so the root-owned file reads
+# through the parent.
 Volume=@DATA_DIR@/ids:/ids:ro
-# nginx-proxy-manager's access and error logs, read-only: the record of every
-# public request (and every upstream failure). It is the same directory crowdsec
-# already reads -- that is the point, not a coincidence: CrowdSec turns it into
-# decisions and keeps as long as logrotate does, this keeps it searchable for
-# LOGS_RETENTION, and neither is a copy of the other. NPM writes these as
-# container root, i.e. this same user, so no relabel and no ownership change;
-# the whole directory (not a file) because vector globs across proxy-host-N.
+# nginx-proxy-manager's access and error logs: the record of every public
+# request. The same directory crowdsec reads -- that is the point: CrowdSec
+# turns it into decisions and keeps as long as logrotate does, this keeps it
+# searchable for LOGS_RETENTION. NPM writes them as container root (this user),
+# so no relabel; the whole directory because vector globs across proxy-host-N.
 Volume=@DATA_DIR@/npm/data/logs:/npm-logs:ro
 
-# The image's entrypoint is /usr/bin/vector; Exec= supplies its arguments (the
-# image's own default points at /etc/vector/vector.yaml, which does not exist
-# here). The API is loopback-only inside the container and exists for the health
-# check -- it proves the process is alive and serving, while the real question
-# ("are entries arriving?") is answered by verify.sh and the monitor.
+# The image's entrypoint is /usr/bin/vector and its own default points at
+# /etc/vector/vector.yaml, which does not exist here. The API is loopback-only
+# and exists for the check: "are entries arriving?" is verify.sh's and the
+# monitor's.
 Exec=--config /etc/vector/vector.toml
 HealthCmd=bash -c "exec 3<>/dev/tcp/127.0.0.1/8686"
 HealthInterval=60s

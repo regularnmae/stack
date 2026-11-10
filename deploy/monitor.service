@@ -1,13 +1,13 @@
 # The stack health monitor + spend tripwire, run by monitor.timer.
 #
 # A plain systemd USER unit, not a Quadlet: the monitor is a host script that
-# inspects the containers (podman exec/ps) and reads the MCP endpoints, not a
-# container of its own. deploy/install.sh renders it into
-# ~/.config/systemd/user/ (it is not activated on its own -- the timer
-# activates it), so no [Install] section.
+# inspects the containers (podman exec/ps) and reads the MCP endpoints.
+# install.sh renders it into ~/.config/systemd/user/, and it has no [Install]
+# because the timer activates it.
 #
-# It changes nothing: it starts no unit and rewrites no config. A failure pushes
-# its alert set to Alertmanager and fails the dead-man's-switch heartbeat.
+# It changes nothing: it starts no unit and rewrites no config. A failure
+# pushes its alert set to Alertmanager and fails the dead-man's-switch
+# heartbeat.
 [Unit]
 Description=Stack health monitor and spend tripwire
 # The heartbeat and the alert push are outbound (the latter to alertmanager on
@@ -17,9 +17,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Seeded by deploy/install.sh (mode 600): the Alertmanager URL, the heartbeat
-# URL, the flap hold-down and the sync grace. The leading '-' makes it optional
-# -- with the file absent the monitor still runs, journal only.
+# Seeded by install.sh (mode 600): the Alertmanager URL, the heartbeat URL, the
+# flap hold-down and the sync grace. The leading '-' makes it optional -- with
+# the file absent the monitor still runs, journal only.
 EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env
 # --quiet: the journal gets the summary lines, not the whole sweep; running
 # scripts/monitor.sh by hand prints everything.

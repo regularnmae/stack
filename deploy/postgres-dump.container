@@ -1,14 +1,12 @@
 # Quadlet unit for the BoltMesh database dump: a one-shot pg_dumpall that
-# deploy/backup.container pulls in before the nightly restic job, alongside
-# db-dump.service (which does the same for NPM's SQLite database and
-# Uptime-Kuma's embedded MariaDB).
+# backup.container pulls in before the nightly restic job, alongside
+# db-dump.service.
 #
-# Why a dump and not the raw cluster: a copy of a live PGDATA taken file by
-# file is only crash-recoverable, so the backup set holds this SQL instead of
-# $DATA_DIR/postgres. Like the backup job it has no [Install]: backup.service
-# activates it (backup.container Wants=/After= this service, so a failed dump
-# never blocks the restic run). scripts/backup.sh starts the same unit for a
-# hand run, which has no Wants= ordering of its own.
+# The backup set holds this SQL instead of $DATA_DIR/postgres, because a copy
+# of a live PGDATA taken file by file is only crash-recoverable. Like the
+# backup job it has no [Install] -- backup.service activates it, and a failed
+# dump never blocks the restic run. scripts/backup.sh starts the same unit for
+# a hand run, which has no Wants= ordering of its own.
 [Unit]
 Description=BoltMesh database dump (pg_dumpall) for the nightly backup
 After=network-online.target npm-network-network.service postgres.service
@@ -30,17 +28,16 @@ Volume=@DATA_DIR@/postgres-dump:/dump:z
 
 # The image's ENTRYPOINT is docker-entrypoint.sh, so it is replaced with a
 # shell. There is no $VAR anywhere: the systemd generator expands $ in Exec,
-# not the container, so PGHOST/PGUSER/PGPASSWORD are read by libpq directly.
-# The write is a rename within one directory, so the backup never sees a
-# half-written file. umask 077 because the dump carries the cluster's role
-# password hashes: the restic repository is encrypted, the staging file is not.
+# not the container, so libpq reads PGHOST/PGUSER/PGPASSWORD directly. The
+# write is a rename within one directory, so the backup never sees a
+# half-written file, and umask 077 because the dump carries the cluster's role
+# password hashes -- the restic repository is encrypted, the staging file is
+# not.
 #
-# The staging file is removed on failure and at the start of every run, so a
-# dump that dies mid-write does not leave a stale all.sql.tmp beside the last
-# good all.sql for a restore to puzzle over: EXIT covers pg_dumpall exiting
-# non-zero, TERM/INT cover TimeoutStartSec below (a bare sh -c dies on SIGTERM
-# without running its EXIT trap), and the leading rm makes a SIGKILL
-# self-healing on the next run.
+# The staging file is removed at the start of every run and by the traps: EXIT
+# covers pg_dumpall exiting non-zero, TERM/INT cover TimeoutStartSec below (a
+# bare sh -c dies on SIGTERM without running its EXIT trap), and the leading rm
+# makes a SIGKILL self-healing on the next run.
 Entrypoint=/bin/sh
 Exec=-c "rm -f /dump/all.sql.tmp; trap 'rm -f /dump/all.sql.tmp' EXIT; trap 'rm -f /dump/all.sql.tmp; exit 143' TERM INT; umask 077; pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
 

@@ -1,12 +1,10 @@
-# Quadlet unit for the VictoriaLogs MCP server. deploy/install.sh renders this
-# into ~/.config/containers/systemd/, where quadlet turns it into
-# victoria-logs-mcp.service.
+# Quadlet unit for the VictoriaLogs MCP server.
 #
-# What it is: the authenticated front door to the log store. `victoria-logs`
-# has no authentication of its own and is loopback-only on purpose (every
-# container's stdout is in it, including any token a service once echoed), so
-# a client reaches the history through this server and its bearer token, not
-# through the store's HTTP API.
+# The authenticated front door to the log store: `victoria-logs` has no
+# authentication of its own and is loopback-only on purpose (every container's
+# stdout is in it, including any token a service echoed), so a client reaches
+# the history through this server and its bearer token, not through the store's
+# HTTP API.
 [Unit]
 Description=VictoriaLogs MCP Server (streamable HTTP)
 After=network-online.target npm-network-network.service victoria-logs.service
@@ -19,8 +17,7 @@ Network=npm-network.network
 
 # The bearer token clients must present, and the store this server reads. Both
 # live OUTSIDE this repo in $DATA_DIR/config/victoria-logs-mcp/ (mode 600),
-# written by deploy/install.sh, so no secret is ever committed -- only the
-# *.example files under deploy/ are.
+# written by install.sh; only the *.example files under deploy/ are committed.
 EnvironmentFile=@CONFIG_DIR@/victoria-logs-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/victoria-logs-mcp/upstream.env
 
@@ -29,16 +26,13 @@ EnvironmentFile=@CONFIG_DIR@/victoria-logs-mcp/upstream.env
 Environment=LOG_LEVEL=WARNING
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# server on host 8111 (MCP_HOSTS in stack.conf) -- it cannot resolve the
-# container name. The app itself still listens on 8000 inside its own
-# namespace. Bind 127.0.0.1, never a LAN address: the firewall opens nothing
-# for it and NPM is still the only way in for a client.
+# on host 8111 -- it cannot resolve the container name -- while the app still
+# listens on 8000 in its own namespace. The firewall opens nothing for it.
 PublishPort=127.0.0.1:8111:8000
 
-# Healthcheck: MCP initialize probe (authenticated). Makes a wedged server
-# visible/restartable instead of silently erroring. The app's own /health is
-# the liveness path; /ready probes the store and must never gate podman, or a
-# VictoriaLogs restart would restart-loop this container.
+# An authenticated MCP initialize probe, so a wedged server is visible and
+# restartable. /health is the liveness path; /ready probes the store and must
+# never gate podman, or a store restart would restart-loop this container.
 HealthCmd=python /app/healthcheck.py
 HealthInterval=30s
 HealthTimeout=10s

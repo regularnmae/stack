@@ -2,27 +2,28 @@
 #
 # A plain systemd USER unit, not a Quadlet: scripts/registrations.sh is a host
 # script that reads the app's users table through `podman exec postgres psql`
-# and pushes to Alertmanager on the loopback publish -- neither is something a
+# and pushes to Alertmanager's loopback publish -- neither is something a
 # container of its own could do as this user.
 #
-# It changes nothing: one SELECT, one POST to Alertmanager. A failure leaves the
-# watermark where it was, so the next run retries rather than losing the mail.
-# No [Install]: the timer activates it.
+# It changes nothing: one SELECT, one POST. A failure leaves the watermark
+# where it was, so the next run retries rather than losing the mail. No
+# [Install]: the timer activates it.
 [Unit]
 Description=BoltMesh signup watcher (one alert per registration)
-# postgres.service is the container the query execs into; the push is outbound to
-# Alertmanager's loopback publish. Ordering only, not Requires=: postgres being
-# down is the watcher's failure to record, not a reason to refuse to run.
+# postgres.service is the container the query execs into; the push is outbound
+# to Alertmanager's loopback publish. Ordering only, not Requires=: postgres
+# being down is the watcher's failure to record, not a reason to refuse to run.
 After=network-online.target alertmanager.service postgres.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-# The same file the monitor reads, and only its Alertmanager URL is used here, so
-# a host that set MONITOR_ALERTMANAGER_URL=off gets a watcher that logs to the
-# journal. The leading '-' keeps an unfilled file from stopping the run.
+# The file the monitor reads; only its Alertmanager URL is used here, so a host
+# that set MONITOR_ALERTMANAGER_URL=off gets a watcher that logs to the journal
+# instead. The leading '-' keeps an unfilled file from stopping the run.
 EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env
-# --quiet: the journal gets failures and one line per signup, not the whole pass.
+# --quiet: the journal gets failures and one line per signup, not the whole
+# pass.
 ExecStart=@REPO_DIR@/scripts/registrations.sh --quiet
 # A hung podman/psql/curl must not pile runs up behind the next tick.
 TimeoutStartSec=120

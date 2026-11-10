@@ -1,7 +1,5 @@
-# Quadlet unit for the Bitcoin Core full (archival) node. Owned by this repo so
-# the node config is version-controlled in one place; the secrets are not here --
-# bitcoind keeps its RPC credentials in bitcoin.conf under the data directory,
-# which is never committed.
+# Quadlet unit for the Bitcoin Core full (archival) node. The RPC credentials
+# live in bitcoin.conf under the data directory, never here.
 [Unit]
 Description=Bitcoin Core Node
 After=network-online.target npm-network-network.service
@@ -12,64 +10,36 @@ ContainerName=bitcoind
 Image=docker.io/lncm/bitcoind:v28.0
 Network=npm-network.network
 
-# P2P & RPC ports are deliberately NOT published to the host.
-#
-# Publishing them bound 0.0.0.0 on every host interface, which exposed the RPC
-# port to the whole LAN. lightningd reaches bitcoind over the podman network
-# (--bitcoin-rpcconnect=bitcoind), so no PublishPort is needed for RPC.
-# bitcoind makes its own outbound P2P connections to the Bitcoin network, so
-# inbound 8333 is not required either.
-#
-# Defence in depth: bitcoin.conf sets rpcallowip to the podman subnet only, so
-# even if a PublishPort is re-added the connection arrives from the host's LAN
-# address and is refused.
+# No PublishPort on purpose: lightningd reaches it over the podman network and
+# bitcoind dials out for P2P, while publishing would bind 0.0.0.0 on every
+# interface, RPC included. Re-adding one is still refused: bitcoin.conf's
+# rpcallowip is the podman subnet only.
 #PublishPort=8333:8333
 #PublishPort=8332:8332
 
-# LNCM image uses /data internally.
-# NOTE: this :z bind mount is owned by the image's non-root uid (525287 on the
-# host). Edit bitcoin.conf via "podman exec bitcoind ..." -- writing it as
-# $USER fails, and chown -R would lock bitcoind out of its own chainstate.
+# LNCM image uses /data internally. The :z bind mount is owned by the image uid
+# (525287 on the host): edit bitcoin.conf through "podman exec bitcoind", and
+# never chown -R, which locks bitcoind out of its own chainstate.
 Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 
-# Stop gracefully, not at podman's 10 s default: SIGTERM makes bitcoind flush
-# its block index and chainstate, and a SIGKILL mid-flush is what turns the next
-# start into a verify or a reindex. `[Service] TimeoutStopSec` below must stay
-# above this value by at least 30 s -- systemd owns the cgroup and its own
-# deadline kills the daemon first otherwise. Measured here: "Shutdown: done" in
-# 3-5 s (docs/units.md, "A durable unit is stopped, not killed").
+# Graceful stop, not podman's 10 s default: a SIGKILL mid-flush turns the next
+# start into a verify or a reindex. TimeoutStopSec below must stay at least 30
+# s above it -- systemd owns the cgroup and its own deadline kills the daemon
+# first otherwise (docs/units.md, "A durable unit is stopped, not killed").
 StopTimeout=120
 
-# The lncm image ships no HEALTHCHECK, so without this podman reports
-# "Up (no health status)" and verify.sh can only warn.
-#
-# The probe is a TCP connect to the RPC listener, NOT an RPC call. It used to be
-# `bitcoin-cli getblockchaininfo`, which was the wrong level: that is a data-path
-# check that enqueues work in bitcoind's RPC work queue (16 by default), so any
-# RPC load -- Fulcrum's initial index with three workers, the explorers,
-# nbxplorer, a deploy's own probes -- could answer the check with "error: Server
-# response: Work queue depth exceeded", and HealthOnFailure=kill turned three of
-# those in a row into a restart. Measured 2026-11-03: nine queue-depth rejections
-# in 30 s, the probe's own health log reading -28 / exit 125 / queue-depth-
-# exceeded, and a kill-restart every ~8 minutes (13 starts in 48 h: eleven in one
-# 83-minute burst on 11-02, one at 19:54, one at 20:01). Each restart reset
-# Fulcrum's RPC connections and re-ran the block-index verify, i.e. exactly the
-# load the node was already struggling with.
-#
-# `nc -z` proves the process is up and its HTTP server is accepting, and sends no
-# request, so it cannot be starved by legitimate RPC load and creates no work
-# item. "Alive but not answering RPC" is monitor.sh's job, not the unit's: it
-# already fails on "bitcoind RPC unreachable" and then reads height, peers and
-# mempool, and verify.sh --deep reads the node through the MCP (docs/units.md,
-# "Healthchecks follow a contract"). busybox nc is in the image; loopback is
-# inside the container, so rpcallowip still applies.
+# The lncm image ships no HEALTHCHECK, so without this podman reports "Up (no
+# health status)" and verify.sh can only warn. A TCP connect, not an RPC call:
+# an RPC probe enqueues work in bitcoind's queue and is starved by legitimate
+# load (Fulcrum's index, the explorers, nbxplorer), and HealthOnFailure=kill
+# turns that into a restart loop. "Alive but not answering RPC" is monitor.sh's
+# job; busybox nc is in the image and rpcallowip still applies to loopback
+# (docs/units.md, "Healthchecks follow a contract").
 HealthCmd=nc -z 127.0.0.1 8332
 HealthInterval=60s
 HealthTimeout=15s
-# The listener only binds after the block-index verify, which on the rotational
-# data disk has been measured at 3m50s worst (median 1m29s across 43 starts), so
-# the default 2m start budget would report "unhealthy" for a normal start. 5m is
-# twice that worst case.
+# The listener only binds after the block-index verify, which outlasts the 2m
+# default start budget on the rotational data disk.
 HealthStartPeriod=5m
 HealthRetries=3
 HealthOnFailure=kill

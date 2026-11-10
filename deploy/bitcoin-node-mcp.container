@@ -1,6 +1,4 @@
-# Quadlet unit for the MCP server itself. deploy/install.sh renders this
-# into ~/.config/containers/systemd/, where quadlet turns it into
-# bitcoin-node-mcp.service.
+# Quadlet unit for the Bitcoin node MCP server.
 [Unit]
 Description=Bitcoin Node MCP Server (streamable HTTP)
 After=network-online.target npm-network-network.service bitcoind.service
@@ -11,10 +9,9 @@ ContainerName=bitcoin-node-mcp
 Image=localhost/bitcoin-node-mcp:latest
 Network=npm-network.network
 
-# The bearer token clients must present, and the node's RPC credentials.
-# Both live OUTSIDE this repo in $DATA_DIR/config/bitcoin-node-mcp/ (mode 600),
-# written by deploy/install.sh, so no secret is ever committed -- only the
-# *.example files under deploy/ are.
+# The bearer token clients must present, and the node's RPC credentials. Both
+# live OUTSIDE this repo in $DATA_DIR/config/bitcoin-node-mcp/ (mode 600),
+# written by install.sh; only the *.example files under deploy/ are committed.
 EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/token.env
 EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/upstream.env
 
@@ -23,15 +20,13 @@ EnvironmentFile=@CONFIG_DIR@/bitcoin-node-mcp/upstream.env
 Environment=LOG_LEVEL=WARNING
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
-# server on host 8101 (the [npm.*] tables of deploy/services.toml) -- it can no longer resolve the
-# container name. The app itself still listens on 8000 inside its own namespace.
-# Bind 127.0.0.1, never a LAN address: the firewall opens nothing for it and NPM
-# is still the only way in for a client. The host-side checks read the container
-# by name on npm-network, through scripts/lib.sh's net_curl.
+# on host 8101 -- it cannot resolve the container name -- while the app still
+# listens on 8000 in its own namespace. The firewall opens nothing for it, and
+# host-side checks read the container by name on npm-network through net_curl.
 PublishPort=127.0.0.1:8101:8000
 
-# Healthcheck: MCP initialize probe (authenticated). Makes a wedged
-# server visible/restartable instead of silently erroring.
+# An authenticated MCP initialize probe, which makes a wedged server visible
+# and restartable instead of silently erroring.
 HealthCmd=python /app/healthcheck.py
 HealthInterval=30s
 HealthTimeout=10s
