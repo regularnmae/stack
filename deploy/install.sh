@@ -715,36 +715,6 @@ bitcoin_conf_value() {
     printf '%s' "$v"
 }
 
-# Move a file into the data dir if it is not there yet, and drop the old copy
-# once the two are byte-identical. Used to adopt the pre-data-dir layout.
-adopt_file() {
-    local src="$1" dest="$2"
-    [ -s "$src" ] || return 0
-    mkdir -p "$(dirname "$dest")"
-    [ -e "$dest" ] || cp -p "$src" "$dest" || return 0
-    if cmp -s "$src" "$dest"; then
-        rm -f "$src"
-        log "moved into the data dir: $src -> $dest"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# 0. adopt the old ~/.config layout
-# ---------------------------------------------------------------------------
-migrate_legacy_config() {
-    adopt_file "$CONFIG_HOME/crypto-nodes/secrets.env" "$CONFIG_DIR/stack/secrets.env"
-    adopt_file "$CONFIG_HOME/stack/secrets.env"        "$CONFIG_DIR/stack/secrets.env"
-    local d f
-    for d in searxng-mcp bitcoin-node-mcp monero-node-mcp monero-wallet-mcp lightning-mcp fulcrum-mcp victoria-logs-mcp victoriametrics-mcp; do
-        [ -d "$CONFIG_HOME/$d" ] || continue
-        for f in "$CONFIG_HOME/$d"/*.env; do
-            [ -e "$f" ] || continue
-            adopt_file "$f" "$CONFIG_DIR/$d/$(basename "$f")"
-        done
-    done
-}
-migrate_legacy_config
-
 # ---------------------------------------------------------------------------
 # 1. resolve the node secrets (reuse > installed unit > daemon config > new)
 # ---------------------------------------------------------------------------

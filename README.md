@@ -1483,6 +1483,12 @@ before each restic run; the dump, not the raw cluster, is what the
 No secret is committed. Everything real is generated or adopted on the host, under
 `$DATA_DIR/config/`, mode 600.
 
+Coming from the **pre-data-dir layout** (`~/.config/stack/`,
+`~/.config/crypto-nodes/` and `~/.config/<name>/*.env`), copy those files into
+`$DATA_DIR/config/` before the first deploy. The installer no longer moves them
+itself: without the copy, `secrets.env` and the MCP tokens are generated fresh,
+and clients holding the old tokens get 401 until their configuration is updated.
+
 - **`config/stack/secrets.env`** holds the node secrets (bitcoind RPC user and
   password, Tor service password), `BTCPAY_DB_PASSWORD` (the `btcpay` role in the
   Postgres cluster) and the two CrowdSec bouncer keys — which are append-only and
