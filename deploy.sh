@@ -507,9 +507,15 @@ start_daemons() {
 start_btcpay() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping BTCPay (--skip-daemons)"; return 0; fi
     if [ "$DRY_RUN" = 1 ]; then
-        printf '  [dry-run] systemctl --user start postgres nbxplorer monero-wallet-btcpay btcpay\n'
+        printf '  [dry-run] systemctl --user start btcpay-plugin postgres nbxplorer monero-wallet-btcpay btcpay\n'
         return 0
     fi
+
+    # The plugin is btcpay's input, and starting an already-active btcpay does
+    # not re-run its Wants=: stage it here so a bump reaches the plugin dir even
+    # on `--only btcpay`, then let btcpay_plugin_newer below decide about the
+    # restart.
+    start_unit btcpay-plugin || warn "could not stage the BTCPay Monero plugin"
 
     start_unit postgres || warn "postgres did not start"
     start_unit nbxplorer || warn "nbxplorer did not start"

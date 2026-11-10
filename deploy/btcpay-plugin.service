@@ -1,0 +1,25 @@
+# Stages the pinned BTCPay Monero plugin: the one piece of BTCPay that is a file
+# rather than an image, so no unit digest sees a version bump.
+#
+# btcpay.container Wants= and After= this unit, so a first start finds the plugin
+# already on disk. deploy.sh starts it explicitly before the BTCPay tier too,
+# because starting an already-active btcpay does not re-run its Wants=.
+# scripts/btcpay-plugin.sh owns the download, the hash check and the crash-safe
+# swap, and is a no-op while .artifact-sha256 still matches stack.conf.
+#
+# Wants=, not Requires=: a failed download must not take settlement down --
+# BTC-LN works without the plugin and the next start retries.
+#
+# No [Install]: btcpay.service pulls it in, and it can be run by hand with
+# `systemctl --user start btcpay-plugin.service`.
+[Unit]
+Description=Stage the pinned BTCPay Monero plugin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@REPO_DIR@/scripts/btcpay-plugin.sh
+# One 120 s download plus the extract and swap; a hung run must not hold the
+# start of the settlement tier open past this.
+TimeoutStartSec=180

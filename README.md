@@ -1603,7 +1603,8 @@ stack/
                           #   backup-verify-db, monitor, metrics, ids (plain
                           #   user units; Quadlet has no .timer type)
     *.service             # their one-shot hosts: backup-verify,
-                          #   backup-verify-db, monitor, metrics, ids
+                          #   backup-verify-db, monitor, metrics, ids,
+                          #   db-dump, btcpay-plugin
     npm-network.network
     crowdsec.container    # rootless: NPM access log -> decisions (local only)
     root/                 # the ONE rootful tier: suricata.container + its config,
@@ -1612,6 +1613,8 @@ stack/
                           #   rendered into $CONFIG_DIR/ids/crowdsec
     logs/vector.toml      # the shipper's config (journald -> victoria-logs),
                           #   rendered into $CONFIG_DIR/logs/vector
+    podman/99-stack.conf  # podman's event log: file, not journald; installed as
+                          #   containers.conf.d/99-stack.conf for user and root
     monitoring/scrape.yml # what victoriametrics scrapes, rendered into place
     searxng/{settings.yml,limiter.toml}
     env/<app>/<file>.env.in       # the shape of every env file install.sh seeds

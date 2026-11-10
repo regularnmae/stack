@@ -394,8 +394,9 @@ mapfile -t UNITS < <(deploy_entry_names "$DEPLOY_DIR"/*.container \
 [ "${#UNITS[@]}" -gt 0 ] || die "no units found in $DEPLOY_DIR"
 
 # Plain systemd user units (USER_UNIT_DIR, not the quadlet dir): the same
-# derivation over the two unit suffixes. db-dump.service is a host job -- it
-# `podman exec`s into the running container, which a container cannot do.
+# derivation over the two unit suffixes. The host jobs are here because a
+# container cannot do them -- db-dump.service `podman exec`s into a sibling, and
+# btcpay-plugin.service swaps a directory on the host.
 mapfile -t USER_UNITS < <(deploy_entry_names "$DEPLOY_DIR"/*.service \
     "$DEPLOY_DIR"/*.timer | LC_ALL=C sort)
 [ "${#USER_UNITS[@]}" -gt 0 ] || die "no user units found in $DEPLOY_DIR"
@@ -848,108 +849,11 @@ fi
 [ -d "$DATA_DIR/bitcoin" ] && chown_image_uid "$DATA_DIR/bitcoin"
 [ -s "$DATA_DIR/bitcoin/bitcoin.conf" ] && chown_image_uid "$DATA_DIR/bitcoin/bitcoin.conf"
 
-# Download and extract the pinned Monero plugin when the pinned artifact is not
-# the one on disk. A failure is a warning, not fatal: BTC-LN still works and the
-# next deploy retries. Renovate cannot track plugin-builder URLs, so the version
-# and hash in stack.conf are edited together -- the marker is what makes that edit
-# land, since the DLL's name does not change between versions.
-stage_btcpay_plugin() {
-    local dir="$DATA_DIR/btcpay/Plugins/$BTCPAY_PLUGIN_ID"
-    local marker="$dir/.artifact-sha256" tmp stage old has_old
-    local installed=""
-    [ -f "$marker" ] && installed=$(cat "$marker" 2>/dev/null)
-    if [ -f "$dir/$BTCPAY_PLUGIN_ID.dll" ] && [ "$installed" = "$BTCPAY_PLUGIN_SHA256" ]; then
-        return 0
-    fi
-    if ! command -v curl >/dev/null 2>&1; then
-        warn "curl is missing; cannot download the BTCPay Monero plugin"
-        return 0
-    fi
-    tmp=$(mktemp)
-    if ! curl -fsSL --max-time 120 "$BTCPAY_PLUGIN_URL" -o "$tmp"; then
-        warn "could not download the BTCPay Monero plugin; the installed one stays, XMR will stay disabled if there is none"
-        rm -f "$tmp"
-        return 0
-    fi
-    if [ "$(sha256sum "$tmp" | awk '{print $1}')" != "$BTCPAY_PLUGIN_SHA256" ]; then
-        warn "BTCPay Monero plugin hash mismatch; refusing to install it"
-        rm -f "$tmp"
-        return 0
-    fi
-    # Extract into a sibling directory and swap it in whole: extracting over the
-    # previous version would leave its extra files behind, and a failed download,
-    # extract or swap must not destroy a plugin that works.
-    stage=$(mktemp -d "$DATA_DIR/btcpay/Plugins/.stage.XXXXXX") || {
-        warn "could not create a staging directory for the BTCPay Monero plugin"
-        rm -f "$tmp"
-        return 0
-    }
-    if command -v unzip >/dev/null 2>&1; then
-        unzip -q -o "$tmp" -d "$stage" || { warn "could not extract the BTCPay Monero plugin"; rm -rf "$stage" "$tmp"; return 0; }
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$tmp" "$stage" \
-            || { warn "could not extract the BTCPay Monero plugin"; rm -rf "$stage" "$tmp"; return 0; }
-    else
-        warn "neither unzip nor python3 is available to extract the BTCPay Monero plugin"
-        rm -rf "$stage"
-        rm -f "$tmp"
-        return 0
-    fi
-    rm -f "$tmp"
-    if [ ! -s "$stage/$BTCPAY_PLUGIN_ID.dll" ]; then
-        warn "the BTCPay Monero plugin artifact has no $BTCPAY_PLUGIN_ID.dll; keeping the installed one"
-        rm -rf "$stage"
-        return 0
-    fi
-    # The container keeps its loaded assemblies mapped, so replacing the
-    # directory under a running BTCPay is safe; deploy.sh restarts it when the DLL
-    # is newer than the container and configure.sh runs the bootstrap.
-    # Move the installed tree aside rather than deleting it: a directory cannot be
-    # replaced atomically, so the old copy is what keeps BTCPay loadable if the
-    # second rename fails. The aside name is fixed and OUTSIDE Plugins/ (BTCPay
-    # scans that directory and must not find a second copy), removed only after
-    # the new tree is in place.
-    old="$DATA_DIR/btcpay/.plugin-previous"
-    if [ ! -e "$dir" ] && [ -e "$old" ]; then
-        # A previous run died between the two renames; the only working copy is
-        # still here.
-        if ! mv "$old" "$dir"; then
-            warn "could not restore the BTCPay Monero plugin from $old"
-            rm -rf "$stage"
-            return 0
-        fi
-    fi
-    rm -rf "$old"
-    has_old=0
-    if [ -e "$dir" ]; then
-        if ! mv "$dir" "$old"; then
-            warn "could not move the installed BTCPay Monero plugin aside; keeping it"
-            rm -rf "$stage"
-            return 0
-        fi
-        has_old=1
-    fi
-    chmod 755 "$stage"
-    if ! mv "$stage" "$dir"; then
-        warn "could not move the BTCPay Monero plugin into $dir"
-        if [ "$has_old" = 1 ]; then
-            mv "$old" "$dir" 2>/dev/null || warn "the previous plugin is left in $old"
-        fi
-        rm -rf "$stage"
-        return 0
-    fi
-    if [ "$has_old" = 1 ]; then
-        rm -rf "$old"
-    fi
-    printf '%s\n' "$BTCPAY_PLUGIN_SHA256" > "$marker"
-    log "installed the BTCPay Monero plugin into $dir"
-}
-
 # BTCPay's datadir (data-protection keys), its plugin dir, the view-only Monero
 # wallet and NBXplorer's cookie. All are written by container root == the host
-# user under rootless podman, so a plain mkdir is enough.
+# user under rootless podman, so a plain mkdir is enough. The plugin inside
+# Plugins/ is staged by deploy/btcpay-plugin.service, which docs/btcpay.md owns.
 mkdir -p "$DATA_DIR/btcpay/Plugins" "$DATA_DIR/btcpay/xmr-wallet" "$DATA_DIR/nbxplorer"
-stage_btcpay_plugin
 
 mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 

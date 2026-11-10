@@ -8,8 +8,9 @@
 # Postgres and are created by btcpay-bootstrap.container, not here.
 [Unit]
 Description=BTCPay Server (Lightning + Monero settlement)
-After=network-online.target npm-network-network.service postgres.service nbxplorer.service lightningd.service
+After=network-online.target npm-network-network.service postgres.service nbxplorer.service lightningd.service btcpay-plugin.service
 Requires=npm-network-network.service postgres.service nbxplorer.service
+Wants=btcpay-plugin.service
 
 [Container]
 ContainerName=btcpay
