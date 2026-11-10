@@ -79,4 +79,3 @@ this before touching `config/btcpay/`, `btcpay-wallet.sh`, the bootstrap, or the
   `additionalData.preimage`, the `apiKey` that `/api/v1/api-keys/current`
   echoes, and connection strings, and it rewrites BTCPay's internal
   `http://btcpay:49392` links to `BTCPAY_PUBLIC_URL`.
-

@@ -175,4 +175,3 @@ event-logger setting. The operator narrative is README's "Logs and history".
   parse is four hours out on this host. Both file sources set `host` themselves
   -- a file source labels it from the container's hostname, which is neither the
   host nor stable across a recreate, and `host` is a *stream* field.
-

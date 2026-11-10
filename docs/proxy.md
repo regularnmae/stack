@@ -171,4 +171,3 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   `deploy.sh --skip-daemons` they answer 502 forever. The key is how the sweep
   can tell that from a dead upstream: with `MONITOR_SKIP_NODES=1`
   `scripts/monitor.sh` reports those names as skipped instead of failing them.
-

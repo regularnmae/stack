@@ -162,4 +162,3 @@ restore" and "Disaster recovery".
   through `backup.env`; `scripts/backup.sh` reads `RESTIC_*` from **the
   environment first, then the file** — the only order that can recover a fresh
   host.
-

@@ -36,4 +36,3 @@
   warns when the two disagree), so `verify.sh` compares the resolved registry
   with the declared MCP prefixes and fails on the drift. `agent-mcp` is python3 (stdlib only),
   which `bootstrap.sh` now installs for it.
-

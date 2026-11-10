@@ -5,9 +5,9 @@ on:
     branches: [main]
   pull_request:
 
-# The lint job checks out, curls shellcheck and reads git -- nothing here
-# writes to the repository, so the token the action inherits is read-only
-# rather than the repository default.
+# The lint job checks out, curls shellcheck, runs the markdownlint action and
+# reads git -- nothing here writes to the repository, so the token the action
+# inherits is read-only rather than the repository default.
 permissions:
   contents: read
 
@@ -80,6 +80,13 @@ jobs:
       # comment lines first.
       - name: documentation references resolve
         run: ./scripts/docs-lint.sh
+      # docs-lint.sh proves cross-references resolve; this proves the files
+      # themselves stay well-formed. markdownlint-cli2 merges the action's own
+      # default glob (*.{md,markdown}) with the "globs" in
+      # .markdownlint-cli2.jsonc, so docs/ is covered by the config; removing
+      # them there would silently limit CI to the two root files.
+      - name: markdown lint
+        uses: DavidAnson/markdownlint-cli2-action@696eb3f2509270d7b882d2aa68347bc676e7af34 # v25.0.0
       # A container unit may mount only from $DATA_DIR (or a podman volume), never
       # from the checkout. Host scripts still run from the checkout (deploy/*.service
       # is the tooling), but a container a daemon starts fails at its *next* start

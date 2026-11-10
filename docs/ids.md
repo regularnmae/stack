@@ -278,4 +278,3 @@ README's "Intrusion detection".
   `/var/log/audit/audit.log` is not a failed read — `aureport` exits 1 when there
   is no log at all, which is what an inert subsystem looks like, so that case
   still advances and the window stays bounded.
-

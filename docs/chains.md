@@ -119,4 +119,3 @@ its status is captured instead of letting `set -e` abort at the RPC.
   state in the backup set; `config/btc-explorer/btc-explorer.env` is the BTC
   RPC/Fulcrum wiring. `xmr-explorer` probes its static `/style.css`, not `/`,
   which can time out during monerod's initial sync.
-

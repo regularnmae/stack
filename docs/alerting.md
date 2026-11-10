@@ -240,4 +240,3 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   source both look like "no requests"); that is a second query in the same
   script, not a second call site. Everything else still reads the daemons and the
   host directly.
-

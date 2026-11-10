@@ -35,6 +35,8 @@ owns the render, the digest and the secret resolution.
 # the CI gates, each runnable on its own
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract
 ./scripts/docs-lint.sh              # every README/docs section reference resolves
+# markdown lint; the tag matches the CLI the CI action bundles -- bump both together
+podman run --rm -v "$PWD":/work:z -w /work docker.io/davidanson/markdownlint-cli2:v0.24.0
 PYTHONPATH=scripts python3 -m stackctl units check  # README's "What runs" vs the units
 shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # CI pins v0.11.0
 ```

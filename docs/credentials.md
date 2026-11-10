@@ -96,4 +96,3 @@ token on a command line.
   `mcp_tool_call` pass them in a curl config on stdin (`-K -`), so `ps` cannot
   read a token out of a running verify/monitor/audit sweep. `npm-hosts.sh`
   does the same with the NPM admin password and the API token it mints.
-

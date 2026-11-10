@@ -367,39 +367,39 @@ Everything the stack must not lose sits under **one directory**, `$DATA_DIR`
 (`STACK_DATA_DIR`, default `$HOME/data`). `deploy.sh` asks for it once and
 remembers the answer in `~/.config/stack/data-dir.env`:
 
-  - `bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ searxng/` — daemon state
-    (`tor/onion/` holds the onion services' keys, `tor/torrc` the config; `fulcrum/`
-    is the Electrum index and its self-signed certificate, regenerable and excluded
-    from backups)
-  - `npm/{data,letsencrypt}` — nginx-proxy-manager
-  - `uptime-kuma/` — the status page's state (its embedded MariaDB, history and
-    login; configured in its UI). The live `mariadb/` datadir is excluded from
-    the backup — see below
-  - `ids/` — the two IDS engines' state: suricata's `eve.json` and rules
-    (root-owned) and crowdsec's database beside them (see
-    [Intrusion detection](#intrusion-detection))
-  - `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
-  - `postgres-dump/` — the pre-backup `pg_dumpall`
-  - `npm-dump/` — NPM's SQLite database as a consistent copy, written before
-    each backup (`scripts/db-dump.sh`)
-  - `uptime-kuma-dump/` — kuma's database as a `mariadb-dump`, written by the
-    same job
-  - `config/` — every bearer token and secret
-  - `bin/` — the two scripts `install.sh` stages for the containers that run them
-    (`monerod`'s block-notify helper, the BTCPay bootstrap); rewritten on every
-    deploy, so edit the copy in the repo, not this one
-  - `audit/` — the monitor's log, the spend tripwire baselines and the
-    rendered/applied unit digests
-  - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
-    (both regenerable, both excluded from backups)
-  - `logs/` — the log store (`vl/`) and `vector`'s checkpoint; journald history,
-    regenerable and excluded from backups
-  - `backup-cache/` — restic's cache (regenerable)
-  - `backup-verify/` — the restore drill's scratch target; a copy of the backup
-    set, wiped before and after every drill (regenerable, excluded from backups)
-  - `backup-verify-db/` — the database drill's scratch target; just the
-    snapshot's `postgres-dump/`, same lifecycle (regenerable, excluded from
-    backups)
+- `bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ searxng/` — daemon state
+  (`tor/onion/` holds the onion services' keys, `tor/torrc` the config; `fulcrum/`
+  is the Electrum index and its self-signed certificate, regenerable and excluded
+  from backups)
+- `npm/{data,letsencrypt}` — nginx-proxy-manager
+- `uptime-kuma/` — the status page's state (its embedded MariaDB, history and
+  login; configured in its UI). The live `mariadb/` datadir is excluded from
+  the backup — see below
+- `ids/` — the two IDS engines' state: suricata's `eve.json` and rules
+  (root-owned) and crowdsec's database beside them (see
+  [Intrusion detection](#intrusion-detection))
+- `postgres/` — the BoltMesh database (dumped before backup, not copied raw)
+- `postgres-dump/` — the pre-backup `pg_dumpall`
+- `npm-dump/` — NPM's SQLite database as a consistent copy, written before
+  each backup (`scripts/db-dump.sh`)
+- `uptime-kuma-dump/` — kuma's database as a `mariadb-dump`, written by the
+  same job
+- `config/` — every bearer token and secret
+- `bin/` — the two scripts `install.sh` stages for the containers that run them
+  (`monerod`'s block-notify helper, the BTCPay bootstrap); rewritten on every
+  deploy, so edit the copy in the repo, not this one
+- `audit/` — the monitor's log, the spend tripwire baselines and the
+  rendered/applied unit digests
+- `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
+  (both regenerable, both excluded from backups)
+- `logs/` — the log store (`vl/`) and `vector`'s checkpoint; journald history,
+  regenerable and excluded from backups
+- `backup-cache/` — restic's cache (regenerable)
+- `backup-verify/` — the restore drill's scratch target; a copy of the backup
+  set, wiped before and after every drill (regenerable, excluded from backups)
+- `backup-verify-db/` — the database drill's scratch target; just the
+  snapshot's `postgres-dump/`, same lifecycle (regenerable, excluded from
+  backups)
 
 The explorers keep no data directory: both are stateless and read their daemon
 over RPC. Their only persistent input is
@@ -1053,13 +1053,13 @@ unit lives in `/etc/containers/systemd/`, its config in `/etc/stack-ids/`, and
 
 ### What each can and cannot see
 
-* **Suricata** sees the LAN NIC and the host loopback (where each MCP server's
+- **Suricata** sees the LAN NIC and the host loopback (where each MCP server's
   plaintext HTTP and the daemon RPC ports live). It cannot see the rootless
   container bridge (a rootful sensor cannot enter the user's network namespace),
   inside TLS, or a client address on the re-originated loopback leg NPM opens — so
   everything on `lo` is whitelisted before a scenario sees it. Its external alerts
   feed CrowdSec, which bans the policy sids and three ET severity 1/2 signatures.
-* **CrowdSec** sees every request NPM served, the whole attack surface of the
+- **CrowdSec** sees every request NPM served, the whole attack surface of the
   public vhosts. It cannot attribute anything on the `.onion` vhosts: tor forwards
   to `host.containers.internal`, so NPM logs the host's own address for every
   onion visitor.
@@ -1078,7 +1078,7 @@ CrowdSec runs with host networking, so it polls the LAPI on the host's own loopb
 (`127.0.0.1:8080`, key-gated: an unauthenticated request gets 403) and writes one
 nftables table:
 
-```
+```text
 table inet stack_bans
   set banned_v4 { type ipv4_addr; flags timeout; }
   set banned_v6 { type ipv6_addr; flags timeout; }
@@ -1098,7 +1098,7 @@ systemctl stop stack-bouncer.timer          # the kill switch: detection keeps w
 
 Three properties:
 
-* **Never bans the operator.** `ipguard.py` refuses private space, the podman
+- **Never bans the operator.** `ipguard.py` refuses private space, the podman
   network, every address the host holds (checked at run time, so a DHCP change
   cannot self-ban), and **`STACK_WAN_IP`** from `stack.conf` — the router holds
   that one, and a LAN client using a public name arrives as it through NAT
@@ -1106,11 +1106,11 @@ Three properties:
   is at the bouncer, **not** in the whitelist: the decision still exists and still
   pages, only the drop is skipped, so `skipped=1` means "your own egress is
   tripping a rule", not a quiet host.
-* **Fails open in the safe direction.** An unreachable LAPI or a non-JSON answer
+- **Fails open in the safe direction.** An unreachable LAPI or a non-JSON answer
   leaves existing bans alone, and a failed `nft -f` rolls back. The address guard
   is the other direction on purpose: if it cannot classify, nothing is applied and
   the status file says why.
-* **Its key is never regenerated.** `CROWDSEC_BOUNCER_KEY` is registered into the
+- **Its key is never regenerated.** `CROWDSEC_BOUNCER_KEY` is registered into the
   LAPI by the crowdsec container at start; a new value leaves the old bouncer
   registered and enforcement silently dead.
 
@@ -1196,12 +1196,12 @@ databases, `sudoers`, `sshd_config`, `auditd.conf`, and the stack's own
 
 Two facts decide how you read that status:
 
-* **Directory watches do not work on this kernel**, so entry creation — a new unit
+- **Directory watches do not work on this kernel**, so entry creation — a new unit
   file, a sudoers drop-in, a cron job — is covered by a **hash diff** of
   `/etc/systemd/system`, `/etc/containers/systemd`, `/etc/sudoers.d`, `/etc/cron.d`,
   `/etc/ssh/sshd_config.d` and `/etc/audit/rules.d`. Anything new, changed or
   removed is counted and named.
-* **The ruleset is checked as state, not as an event.** `install.sh --root` removes
+- **The ruleset is checked as state, not as an event.** `install.sh --root` removes
   and re-adds every `stack_` watch on each run, so `op=remove_rule` events cannot
   tell a deploy from tampering; the report compares `60-stack.rules` with
   `auditctl -l`. Events carry a **key** — `stack_hard` for host config the repo
@@ -1582,7 +1582,7 @@ rather than a remembered id, and the write-ahead order for the restic key — is
 
 ## Layout
 
-```
+```text
 stack/
   bootstrap.sh            # bare host -> podman, linger, sysctl, firewall ports, dirs
   deploy.sh               # the one-click orchestrator (asks for the data dir)
