@@ -12,9 +12,12 @@ README's "Intrusion detection".
 - **Enforcement is ours** (`deploy/root/bouncer.sh`), because no upstream bouncer
   image works, and it refuses private space, every address the host holds, and
   `STACK_WAN_IP` -- that last one is the operator's own shared egress. Its status
-  file and `auditd.status` are written by one shared root-tier writer,
-  `/etc/stack-ids/status.sh` (`deploy/root/status.sh`), which is also
-  `scripts/lib.sh`'s contract: `tests/test-status.sh` runs both over one table.
+  file and `auditd.status` are written by `deploy/root/status.sh`, the one file
+  both tiers source: root takes the installed copy `/etc/stack-ids/status.sh`
+  (it must not read the user-writable checkout), `scripts/lib.sh` takes the
+  checkout. That file also carries the Go-duration parser the bouncer floors and
+  `wait_healthy` rounds up, so there is no second copy to keep in step;
+  `tests/test-status.sh` pins the contract and fails if lib.sh grows one back.
 - **The bouncer's address guard is CIDR-exact, and replayed.**
   `deploy/root/ipguard.py` classifies every decision with the stdlib
   `ipaddress` module and installs beside the bouncer as

@@ -195,13 +195,13 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   shorter wait reports "not healthy" about a service that never had a chance to
   answer. That is `./configure.sh`'s wait, not the deploy's. Durations are **Go
   duration strings and may be fractional** (`HealthTimeout=7.5s` is legal),
-  which is why `lib.sh`'s `dur_ms` parses each
+  which is why `dur_ms` (in `deploy/root/status.sh`, sourced by `lib.sh` and
+  installed for the root tier) parses each
   component by its unit: the whole-second regex it replaced matched the digits
   *after* the dot, reading `2.5h` as `5h`, `1m30.5s` as 65 s and `500ms` as 500
   minutes — and `healthcheck-lint.sh` judges HC006 in ms for the same reason, so
-  a 6 s probe still fails against a 5.5 s timeout. `deploy/root/bouncer.sh` keeps
-  its own copy (floored), because a root script must not source a helper out of
-  the user-writable checkout; change both together. A **one-shot unit
+  a 6 s probe still fails against a 5.5 s timeout. The bouncer takes the same
+  parse floored (`dur_to_sec`) and clamps it to 1s..24h. A **one-shot unit
   (`Type=oneshot`) is the other way a wait lies**:
   the job *exits* instead of reporting `(healthy)` and never appears in
   `podman ps`, so `wait_healthy` reads its terminal state instead
@@ -386,7 +386,11 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   boundary. A change to `deploy/root/` therefore needs `sudo ./bootstrap.sh`
   again; `verify.sh` walks a declared table (`ROOT_FILES`) of every file
   `install.sh --root` renders and warns per file when one has drifted or is
-  missing. Content only -- bootstrap owns the modes -- and two kinds are
+  missing. One file in that directory is also read by the user tier:
+  `deploy/root/status.sh` is sourced from the checkout by `scripts/lib.sh` and
+  from `/etc/stack-ids/` by the root jobs, so the status writer and the
+  Go-duration parser have one implementation across the boundary. Content only
+  -- bootstrap owns the modes -- and two kinds are
   excluded on purpose: the 0600 env files (written from heredocs, no repo
   counterpart) and `60-stack.rules` (0640 in a 0750 directory,
   unreadable to an unprivileged sweep; the audit section reads the report's

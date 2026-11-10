@@ -224,9 +224,11 @@ install_root_tier() {
     install -m 600 "$aenv" "$ROOT_CONFIG_DIR/audit.env"
     rm -f "$aenv"
     root_render "$DEPLOY_DIR/root/audit-report.sh" "$ROOT_CONFIG_DIR/audit-report.sh" 755 "$data"
-    # The status-file writer audit-report.sh and bouncer.sh share. Installed
-    # unconditionally, because the bouncer block below runs only once a key
-    # exists, and the bouncer must never be left without it.
+    # The status-file writer and duration parser audit-report.sh and bouncer.sh
+    # share. Also sourced by the user tier, from the checkout, so this render is
+    # the only copy root gets and there is no second implementation to drift.
+    # Installed unconditionally, because the bouncer block below runs only once a
+    # key exists, and the bouncer must never be left without it.
     root_render "$DEPLOY_DIR/root/status.sh" "$ROOT_CONFIG_DIR/status.sh" 644 "$data"
     root_render "$DEPLOY_DIR/root/stack-audit.service" /etc/systemd/system/stack-audit.service 644 "$data"
     root_render "$DEPLOY_DIR/root/stack-audit.timer" /etc/systemd/system/stack-audit.timer 644 "$data"

@@ -52,9 +52,10 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Sourced before the parse loop so --help can use usage_header, the one reader of
 # a leading block; a hard-coded line range would silently truncate it. lib.sh
-# only defines, so --help still opens no config. It also carries dur_ms (and
-# dur_s, the rounded-up view) shared with wait_healthy: the same parser reads a
-# unit's durations here and in the post-start waits (configure.sh, rotate.sh).
+# only defines, so --help still opens no config. dur_ms comes from
+# deploy/root/status.sh (the root tier reads the same file) and dur_s from
+# lib.sh: one parser reads a unit's durations here and in the post-start waits
+# (configure.sh, rotate.sh).
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 

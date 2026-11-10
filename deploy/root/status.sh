@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# The status-file writer shared by the root tier's two reporters.
+# The one status-file writer and Go-duration parser both privilege tiers use.
 #
-# Sourced, not executed:
+# Installed to /etc/stack-ids/status.sh by `deploy/install.sh --root`. Sourced,
+# never executed:
 #   . /etc/stack-ids/status.sh
 #
-# This is deploy/root/'s own copy of scripts/lib.sh's status_write. It has to be
-# a copy: bouncer.sh and audit-report.sh run as root from /etc/stack-ids and must
-# not read the user-writable checkout, and lib.sh pulls in stack.conf, podman and
-# the whole host-side toolchain besides. Everything here is coreutils plus bash,
-# and tests/test-status.sh runs this file and lib.sh over one table so the two
-# cannot drift apart.
+# One implementation, two paths to it. bouncer.sh and audit-report.sh run as
+# root from /etc/stack-ids and must not read the user-writable checkout, so they
+# source the installed copy; scripts/lib.sh sources this file out of the
+# checkout, so a change here reaches the user tier without a second copy to keep
+# in step. That is why nothing in this file may depend on lib.sh: it is bash and
+# coreutils only, and must load with no stack.conf, no podman, no config.
 #
-# The contract, which scripts/monitor.sh and verify.sh depend on:
+# The status contract, which scripts/monitor.sh and verify.sh depend on:
 #   * KEY=VALUE, read with env_value (sed), never sourced -- a status file is
 #     data, not code;
 #   * written atomically, so a sweep never reads half a line;
@@ -35,12 +36,24 @@ env_value() {
 # a root run and a user run read the same way.
 _status_note() { printf 'WARNING: %s\n' "$*" >&2; }
 
-# stdin -> PATH atomically: a hidden temp beside it, the mode, then a rename, so
-# a reader sees the old file or the new one and never half of either.
-write_atomic() { # path mode
-    local path="$1" mode="$2" dir tmp
+# Write stdin to PATH in one step: a hidden temp beside it, the mode, then a
+# rename in the same directory. The rename is the point -- a reader sees the old
+# file or the new one, never half of either, wherever a timer writes and a sweep
+# reads.
+#
+# DIR-MODE is for the case where the reader owns neither directory nor file:
+# node-exporter runs as uid 65534 (a *subuid* under rootless podman), and if
+# either mode slips the collector serves nothing, the quietest way to lose every
+# metric. The root tier passes no third argument.
+#
+#   printf 'stack_x 1\n' | write_atomic "$path" 644 755
+#
+# On failure the destination is untouched and the temp file removed.
+write_atomic() { # path mode [dir-mode]
+    local path="$1" mode="$2" dmode="${3:-}" dir tmp
     dir=$(dirname "$path")
     mkdir -p "$dir" || return 1
+    [ -z "$dmode" ] || chmod "$dmode" "$dir" 2>/dev/null || true
     tmp=$(mktemp "$dir/.$(basename "$path").XXXXXX") || return 1
     if ! cat > "$tmp"; then
         rm -f "$tmp"
@@ -78,4 +91,28 @@ status_write() { # path header result detail [KEY=VALUE ...]
         _status_note "could not write $path"
     fi
     return 0
+}
+
+# "1m30s" / "500ms" / "1h2m3.5s" -> MILLIseconds. Podman and CrowdSec's LAPI
+# both print Go duration strings with an optional fraction on any component, so
+# each is parsed by its unit and summed. Three details are load-bearing: `ms`
+# before `m` in the alternation, or "500ms" reads as 500 minutes; `10#`, or
+# "08m" is octal; and the fraction padded to three digits, because bash has no
+# arithmetic on it. Unparsable input (or an unset field) is 0.
+#
+# The bouncer floors this answer and clamps it; wait_healthy rounds it up
+# (dur_s in lib.sh). The parse is the shared part, the rounding is not.
+dur_ms() {
+    local d="$1" total=0 num frac unit
+    while [ -n "$d" ] && [[ $d =~ ^[^0-9]*([0-9]+)(\.([0-9]+))?(ms|h|m|s)(.*)$ ]]; do
+        num=${BASH_REMATCH[1]} frac=${BASH_REMATCH[3]} unit=${BASH_REMATCH[4]} d=${BASH_REMATCH[5]}
+        frac="${frac}000"; frac="${frac:0:3}"
+        case "$unit" in
+            h)  total=$(( total + 10#$num * 3600000 + 10#$frac * 3600 )) ;;
+            m)  total=$(( total + 10#$num * 60000 + 10#$frac * 60 )) ;;
+            s)  total=$(( total + 10#$num * 1000 + 10#$frac )) ;;
+            ms) total=$(( total + 10#$num )) ;;
+        esac
+    done
+    printf '%s' "$total"
 }

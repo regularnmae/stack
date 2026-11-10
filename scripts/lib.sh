@@ -8,6 +8,14 @@ log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# env_value, write_atomic, status_write and dur_ms live in deploy/root/status.sh,
+# which root sources as its installed copy and this sources from the checkout:
+# one implementation, so the status contract the monitor reads cannot drift from
+# what the root tier writes. Sourced after warn/die because that file must not
+# depend on them.
+# shellcheck source=../deploy/root/status.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../deploy/root/status.sh"
+
 # Escape a value for sed's replacement side (&, \, |): an unescaped `|` in a
 # data dir breaks the expression, and `&` re-inserts the match. install.sh renders
 # through this and verify.sh re-renders to compare, so one copy keeps them honest.
@@ -23,14 +31,6 @@ render_root_template() { # src data-dir
         -e "s|@REPO_DIR@|$(esc "${REPO_DIR:-}")|g" \
         -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" \
         "$1"
-}
-
-# Echo KEY's value from a KEY=VALUE file (first match). Never sources the file,
-# and strips a trailing CR so a CRLF file still parses.
-env_value() {
-    local file="$1" key="$2"
-    [ -s "$file" ] || return 0
-    sed -n "s/^$key=//p" "$file" | head -n1 | tr -d '\r'
 }
 
 # A fresh secret. Hex only: these reach a rendered systemd Exec= (Quadlet splits
@@ -84,27 +84,6 @@ net_curl() {
 net_curl_host() {
     netcheck_ready "$NETCHECK_HOST_CONTAINER" || return 127
     podman --events-backend=none exec -i "$NETCHECK_HOST_CONTAINER" curl "$@"
-}
-
-# "1m30s" / "500ms" / "1h2m3.5s" -> MILLIseconds. Podman and CrowdSec's LAPI both
-# print Go duration strings with an optional fraction on any component, so each
-# is parsed by its unit and summed. Three details are load-bearing: `ms` before
-# `m` in the alternation, or "500ms" reads as 500 minutes; `10#`, or "08m" is
-# octal; and the fraction padded to three digits, because bash has no arithmetic
-# on it. Unparsable input (or an unset field) is 0.
-dur_ms() {
-    local d="$1" total=0 num frac unit
-    while [ -n "$d" ] && [[ $d =~ ^[^0-9]*([0-9]+)(\.([0-9]+))?(ms|h|m|s)(.*)$ ]]; do
-        num=${BASH_REMATCH[1]} frac=${BASH_REMATCH[3]} unit=${BASH_REMATCH[4]} d=${BASH_REMATCH[5]}
-        frac="${frac}000"; frac="${frac:0:3}"
-        case "$unit" in
-            h)  total=$(( total + 10#$num * 3600000 + 10#$frac * 3600 )) ;;
-            m)  total=$(( total + 10#$num * 60000 + 10#$frac * 60 )) ;;
-            s)  total=$(( total + 10#$num * 1000 + 10#$frac )) ;;
-            ms) total=$(( total + 10#$num )) ;;
-        esac
-    done
-    printf '%s' "$total"
 }
 
 # Whole seconds, rounded UP: the caller is wait_healthy's floor, where waiting
@@ -635,39 +614,9 @@ kuma_image() {
     container_image_or uptime-kuma "${UPTIME_KUMA_IMAGE:-docker.io/louislam/uptime-kuma:2}"
 }
 
-# Write stdin to PATH in one step: a hidden temp beside it, the mode, then a
-# rename in the same directory. The rename is the point -- a reader sees the old
-# file or the new one, never half of either, wherever a timer writes and a sweep
-# reads.
-#
-# DIR-MODE is for the case where the reader owns neither directory nor file:
-# node-exporter runs as uid 65534 (a *subuid* under rootless podman), and if
-# either mode slips the collector serves nothing, the quietest way to lose every
-# metric.
-#
-#   printf 'stack_x 1\n' | write_atomic "$path" 644 755
-#
-# On failure the destination is untouched and the temp file removed.
-write_atomic() { # path mode [dir-mode]
-    local path="$1" mode="$2" dmode="${3:-}" dir tmp
-    dir=$(dirname "$path")
-    mkdir -p "$dir" || return 1
-    [ -z "$dmode" ] || chmod "$dmode" "$dir" 2>/dev/null || true
-    tmp=$(mktemp "$dir/.$(basename "$path").XXXXXX") || return 1
-    if ! cat > "$tmp"; then
-        rm -f "$tmp"
-        return 1
-    fi
-    if ! chmod "$mode" "$tmp" 2>/dev/null; then
-        rm -f "$tmp"
-        return 1
-    fi
-    mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
-}
-
 # Write a Prometheus textfile for node-exporter's textfile collector: stdin -> a
-# .prom file, atomically, with the permissions the exporter needs (see
-# write_atomic above for why 0755/0644):
+# .prom file, atomically, with the permissions the exporter needs (write_atomic
+# in deploy/root/status.sh says why 0755/0644):
 #   printf 'stack_x 1\n' | prom_write "$DATA_DIR/monitoring/textfile/stack.prom"
 prom_write() {
     write_atomic "$1" 644 755
@@ -685,42 +634,6 @@ write_env_file() { # path
 # being written. An alias rather than renaming thirty call sites.
 write_secret() { # path
     write_env_file "$1"
-}
-
-# Write a status file: the one record a oneshot unit leaves for monitor.sh and
-# verify.sh. KEY=VALUE so env_value reads it, never sourced, written atomically.
-# ok_epoch is the last SUCCESS carried forward by a failure or a skip, so age
-# checks key on it and a job that skips forever cannot look healthy because its
-# timer fired. deploy/root/status.sh is the root tier's own copy (it cannot
-# source the checkout); tests/test-status.sh keeps the two from drifting.
-#
-# The caller supplies the file, the line naming the scheduling unit, its own
-# KEY=VALUE fields, and a detail (newlines flattened to one line).
-status_write() { # path header result detail [KEY=VALUE ...]
-    local path="$1" header="$2" result="$3" detail="$4"
-    shift 4
-    local now prev_ok="" ok_epoch line
-    now=$(date +%s)
-    [ -f "$path" ] && prev_ok=$(env_value "$path" ok_epoch)
-    case "$prev_ok" in ''|*[!0-9]*) prev_ok="" ;; esac
-    if [ "$result" = ok ]; then ok_epoch="$now"; else ok_epoch="$prev_ok"; fi
-    # A status file is best-effort: the job already did its work, and dying here
-    # would turn a full disk into a failed unit instead of a visible stale
-    # ok_epoch. The caller's own exit code is the job's verdict.
-    if ! {
-        printf '%s\n' "$header"
-        printf 'time=%s\n' "$(date -Is)"
-        printf 'epoch=%s\n' "$now"
-        printf 'result=%s\n' "$result"
-        printf 'ok_epoch=%s\n' "$ok_epoch"
-        for line in "$@"; do
-            printf '%s\n' "$line"
-        done
-        printf 'detail=%s\n' "$(printf '%s' "$detail" | tr '\n' ' ')"
-    } | write_atomic "$path" 644; then
-        warn "could not write $path"
-    fi
-    return 0
 }
 
 # Read one of those status files, in one place: monitor.sh and verify.sh judge the

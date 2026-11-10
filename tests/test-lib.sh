@@ -30,10 +30,10 @@ assert_eq other     "$(container_health_state 'Exited (1) 5 minutes ago')" 'exit
 assert_eq '[["method^getinfo","method^listpeers"]]' \
     "$(rune_json getinfo listpeers)" 'rune restriction JSON'
 
-# The Go-duration parser has a second implementation in deploy/root/bouncer.sh
-# (dur_to_sec); both are tested against the SAME fixture file, so a fix on one
-# side that forgets the other fails here rather than silently splitting
-# wait_healthy and enforcement.
+# dur_ms is deploy/root/status.sh's parser, shared with the root tier (the
+# bouncer floors it, wait_healthy rounds it up). These fixtures are the table
+# that pins it: every row is a misread that happened -- 500ms as 500 minutes,
+# "08m" as octal, the digits after the dot taken as the component.
 while IFS=$'\t' read -r input want; do
     case "$input" in ''|\#*) continue ;; esac
     [ "$input" = '<empty>' ] && input=''

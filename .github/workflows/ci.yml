@@ -211,17 +211,16 @@ jobs:
         run: PYTHONPATH=scripts python3 -c 'import stackctl.manifest, stackctl.npm, stackctl.units'
       # The Python core behind the npm-hosts reconciler (scripts/stackctl/),
       # offline: declaration parsing, payload construction, a full reconcile
-      # against a fake NPM admin API. The two shell Go-duration parsers
-      # (scripts/lib.sh and deploy/root/bouncer.sh) are cross-checked against
-      # one shared fixture file (tests/fixtures/durations.txt) by the
-      # shell-helper steps below.
+      # against a fake NPM admin API. The shell's Go-duration parser
+      # (deploy/root/status.sh, shared by both tiers) is pinned against
+      # tests/fixtures/durations.txt by the shell-helper steps below.
       - name: stackctl python tests
         run: python3 tests/test_stackctl.py
       - name: shared shell helper tests
         run: tests/test-lib.sh
-      # deploy/root/bouncer.sh cannot source scripts/lib.sh (it runs as root and
-      # must not read the checkout), so it carries its own Go-duration parser;
-      # this replays the shared duration fixtures and the timeout clamp.
+      # deploy/root/bouncer.sh shares the parser (status.sh, installed beside it)
+      # but not the rounding: this pins the nft timeout clamp and the --dry-run
+      # guard that must not replace the live verdict.
       - name: bouncer duration parser tests
         run: tests/test-bouncer.sh
       # The guard that decides whether a ban is enforced (ipguard.py, installed
@@ -229,9 +228,9 @@ jobs:
       # space immediately outside it must ban.
       - name: bouncer address guard tests
         run: python3 tests/test-ipguard.py
-      # The status file scripts/monitor.sh reads is written by two files --
-      # scripts/lib.sh for the user tier and deploy/root/status.sh for root,
-      # which cannot source the checkout. This runs one table through both and
-      # diffs, so the two cannot drift.
+      # The status file scripts/monitor.sh reads has one writer,
+      # deploy/root/status.sh: root sources it as /etc/stack-ids/status.sh,
+      # scripts/lib.sh sources it from the checkout. This pins the contract and
+      # that lib.sh has not grown a copy back.
       - name: status writer tests
         run: tests/test-status.sh

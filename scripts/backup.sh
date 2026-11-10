@@ -293,9 +293,9 @@ replay_skips=""
 VERIFY_WROTE=0
 
 # The record scripts/monitor.sh alerts on (a failed oneshot unit is otherwise
-# just a line in `systemctl --user status`). scripts/lib.sh's status_write owns
-# the format -- KEY=VALUE, atomic, ok_epoch carried forward on failure/skip --
-# and these two wrappers are what keep each drill's verdict in its own file.
+# just a line in `systemctl --user status`). status_write owns the format --
+# KEY=VALUE, atomic, ok_epoch carried forward on failure/skip -- and these two
+# wrappers are what keep each drill's verdict in its own file.
 write_verify_status() { # result detail [snapshot files bytes subset]
     local result="$1" detail="$2" snap="${3:-}" files="${4:-}" bytes="${5:-}" subset="${6:-}"
     status_write "$VERIFY_STATUS" \

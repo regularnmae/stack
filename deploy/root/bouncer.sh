@@ -42,10 +42,11 @@ SET_V6=banned_v6
 # shellcheck source=/dev/null
 . "$ENV_FILE"
 
-# The status-file writer, installed beside this script by install.sh --root. A
-# missing one is fatal rather than optional: without it this run cannot leave a
-# verdict, and the monitor's age check is what notices. Failing here (nothing is
-# applied) is the safe direction, exactly as an ipguard failure is.
+# The status-file writer and duration parser, installed beside this script by
+# install.sh --root. A missing one is fatal rather than optional: without it this
+# run cannot leave a verdict, and the monitor's age check is what notices.
+# Failing here (nothing is applied) is the safe direction, exactly as an ipguard
+# failure is.
 if [ ! -r /etc/stack-ids/status.sh ]; then
     printf 'ERROR: /etc/stack-ids/status.sh is missing; re-run sudo ./bootstrap.sh\n' >&2
     exit 1
@@ -110,30 +111,17 @@ own_ips() {
 }
 
 # ---------------------------------------------------------------------------
-# Go duration ("3h59m59.7s") -> whole seconds nft understands. Sub-SECOND precision
-# is dropped: the LAPI re-sends the decision every minute, so a ban arriving a
-# fraction short is refreshed long before it lapses.
-#
-# Parsed by unit. Reading the digits after the dot as the component turned "2.5h"
-# into a 5-hour ban and "500ms" into 30000 s (no ms case) -- the worst direction,
-# a sub-second decision becoming an eight-hour ban -- and 10# keeps "08m" from
-# being read as octal. It is the same parser as lib.sh's dur_ms, floored instead of
-# rounded up, and cannot be sourced from there: this runs as root and must not read
-# a helper out of the user-writable checkout.
+# Go duration ("3h59m59.7s") -> whole seconds nft understands, FLOORED: the LAPI
+# re-sends the decision every minute, so a ban arriving a fraction short is
+# refreshed long before it lapses. The parse itself is dur_ms in status.sh,
+# installed beside this script and shared with the user tier; only the clamp is
+# here, and it is the direction that matters -- a sub-second decision must not
+# become 0s (nft rejects it) or an eight-hour ban, and an absurd one must not
+# become a permanent ban.
 # ---------------------------------------------------------------------------
 dur_to_sec() {
-    local d="$1" ms=0 num frac unit s
-    while [ -n "$d" ] && [[ $d =~ ^[^0-9]*([0-9]+)(\.([0-9]+))?(ms|h|m|s)(.*)$ ]]; do
-        num=${BASH_REMATCH[1]} frac=${BASH_REMATCH[3]} unit=${BASH_REMATCH[4]} d=${BASH_REMATCH[5]}
-        frac="${frac}000"; frac="${frac:0:3}"
-        case "$unit" in
-            h)  ms=$(( ms + 10#$num * 3600000 + 10#$frac * 3600 )) ;;
-            m)  ms=$(( ms + 10#$num * 60000 + 10#$frac * 60 )) ;;
-            s)  ms=$(( ms + 10#$num * 1000 + 10#$frac )) ;;
-            ms) ms=$(( ms + 10#$num )) ;;
-        esac
-    done
-    s=$(( ms / 1000 ))
+    local s
+    s=$(( $(dur_ms "$1") / 1000 ))
     [ "$s" -gt 0 ] || s=3600
     [ "$s" -le 86400 ] || s=86400
     printf '%s' "$s"

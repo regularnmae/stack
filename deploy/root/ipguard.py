@@ -140,9 +140,9 @@ def main() -> int:
         value = value.strip()
         if not value:
             continue
-        # The bouncer's dur_to_sec owns the duration parse; a value that would
-        # break the record framing is neutralised here and parses to its 1h
-        # default there anyway.
+        # The bouncer's dur_to_sec clamps whatever this parses to; a value that
+        # would break the record framing is neutralised here and parses to the
+        # same 1h default in dur_ms anyway.
         duration = (duration.strip() or "1h").replace("\t", " ").replace("\n", " ")
 
         address, reason = _classify(value, wan, own)

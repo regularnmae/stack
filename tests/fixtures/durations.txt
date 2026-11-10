@@ -1,8 +1,7 @@
-# Shared fixtures for the Go-duration parser: tests/test-lib.sh (bash dur_ms)
-# and tests/test_stackctl.py (stackctl.duration.dur_ms) both read this file,
-# which is the whole point -- the two implementations exist on either side of a
-# language boundary and must never disagree (scripts/metrics.sh's cpu_seconds
-# and lib.sh's wait_healthy key off the same numbers).
+# Fixtures for the Go-duration parser, dur_ms in deploy/root/status.sh. The user
+# tier (scripts/lib.sh) and the bouncer read that one file, so this table is not
+# a cross-check between copies; it is the record of what the parse must do,
+# including the rows that were once read wrongly.
 #
 # Format: <input><TAB><expected-milliseconds>; "#" lines are comments and the
 # literal token <empty> stands for the empty string.

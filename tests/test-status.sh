@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Offline regression tests for the status-file contract, run against BOTH
-# implementations: scripts/lib.sh's status_write (the user tier) and
-# deploy/root/status.sh (the root tier, which cannot source the checkout).
+# Offline regression tests for the status-file contract. There is one
+# implementation, deploy/root/status.sh: the root tier sources it as
+# /etc/stack-ids/status.sh and scripts/lib.sh sources it from the checkout.
 #
-# They are two files because the privilege boundary is real, not because the
-# shape may differ: this runs the same table through each and diffs the result,
-# so a change to one side that forgets the other fails here -- the same
-# arrangement tests/test-lib.sh and tests/test-bouncer.sh use for the two
-# Go-duration parsers.
+# The contract is what scripts/monitor.sh and verify.sh read, so it is pinned
+# here -- the fields, the ok_epoch carry-forward, the atomic write and its mode,
+# and that the file loads with nothing but bash and coreutils. The last check
+# pins that the user tier is still calling the shared function: a copy pasted
+# back into lib.sh would pass every behavioural assert above and fails there.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SHARED="$ROOT_DIR/deploy/root/status.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -23,57 +24,64 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 source "$ROOT_DIR/tests/lib.sh"
 
 HDR='# written by tests/test-status.sh'
-# time= and epoch= are the clock, and the two runs necessarily disagree on both.
-strip_clock() { grep -v -e '^time=' -e '^epoch=' "$1"; }
 
-# --- the user tier ---------------------------------------------------------
-lib_ok="$TMP_DIR/lib-ok.status"
-status_write "$lib_ok" "$HDR" ok 'all good' 'alerts=3' 'decisions=0'
-lib_fail="$TMP_DIR/lib-fail.status"
-printf 'ok_epoch=111\n' > "$lib_fail"
-status_write "$lib_fail" "$HDR" fail $'two\nlines' 'alerts=4'
+# --- the writer, reached the way the user tier reaches it ------------------
+ok_f="$TMP_DIR/ok.status"
+status_write "$ok_f" "$HDR" ok 'all good' 'alerts=3' 'decisions=0'
+fail_f="$TMP_DIR/fail.status"
+printf 'ok_epoch=111\n' > "$fail_f"
+status_write "$fail_f" "$HDR" fail $'two\nlines' 'alerts=4'
 
-# --- the root tier (sourcing it replaces the functions above) ---------------
-# shellcheck source=../deploy/root/status.sh
-source "$ROOT_DIR/deploy/root/status.sh"
-
-root_ok="$TMP_DIR/root-ok.status"
-status_write "$root_ok" "$HDR" ok 'all good' 'alerts=3' 'decisions=0'
-root_fail="$TMP_DIR/root-fail.status"
-printf 'ok_epoch=111\n' > "$root_fail"
-status_write "$root_fail" "$HDR" fail $'two\nlines' 'alerts=4'
-
-# --- the two files are one contract ----------------------------------------
-strip_clock "$lib_ok" > "$TMP_DIR/lib-ok.stripped"
-strip_clock "$root_ok" > "$TMP_DIR/root-ok.stripped"
-cmp -s "$TMP_DIR/lib-ok.stripped" "$TMP_DIR/root-ok.stripped" \
-    || fail "lib.sh and deploy/root/status.sh disagree on a successful run:
-$(diff -u "$TMP_DIR/lib-ok.stripped" "$TMP_DIR/root-ok.stripped" || true)"
-strip_clock "$lib_fail" > "$TMP_DIR/lib-fail.stripped"
-strip_clock "$root_fail" > "$TMP_DIR/root-fail.stripped"
-cmp -s "$TMP_DIR/lib-fail.stripped" "$TMP_DIR/root-fail.stripped" \
-    || fail "lib.sh and deploy/root/status.sh disagree on a failure:
-$(diff -u "$TMP_DIR/lib-fail.stripped" "$TMP_DIR/root-fail.stripped" || true)"
-
-# --- and it is the contract the monitor reads ------------------------------
-assert_eq ok "$(env_value "$root_ok" result)" 'a success is recorded as ok'
-assert_eq 'all good' "$(env_value "$root_ok" detail)" 'the detail is recorded'
-assert_eq 3 "$(env_value "$root_ok" alerts)" 'the caller fields are recorded'
-assert_eq 0 "$(env_value "$root_ok" decisions)" 'a zero caller field is kept'
-assert_eq fail "$(env_value "$root_fail" result)" 'a failure is recorded as fail'
-assert_eq 111 "$(env_value "$root_fail" ok_epoch)" \
+assert_eq "$HDR" "$(head -n1 "$ok_f")" 'the header names the scheduling unit'
+assert_eq ok "$(env_value "$ok_f" result)" 'a success is recorded as ok'
+assert_eq 'all good' "$(env_value "$ok_f" detail)" 'the detail is recorded'
+assert_eq 3 "$(env_value "$ok_f" alerts)" 'the caller fields are recorded'
+assert_eq 0 "$(env_value "$ok_f" decisions)" 'a zero caller field is kept'
+assert_eq fail "$(env_value "$fail_f" result)" 'a failure is recorded as fail'
+assert_eq 111 "$(env_value "$fail_f" ok_epoch)" \
     'a failure carries the previous ok_epoch'
-assert_eq 'two lines' "$(env_value "$root_fail" detail)" \
+assert_eq 'two lines' "$(env_value "$fail_f" detail)" \
     'the detail is flattened to one line'
 # A success advances it; the same file, so it must be the run's own epoch.
-assert_eq "$(env_value "$root_ok" epoch)" "$(env_value "$root_ok" ok_epoch)" \
+assert_eq "$(env_value "$ok_f" epoch)" "$(env_value "$ok_f" ok_epoch)" \
     'a success advances ok_epoch'
 
-assert_eq 644 "$(stat -c %a "$root_ok")" 'the status file is mode 644'
-assert_eq 0 "$(find "$TMP_DIR" -name '.root-ok.status.*' | wc -l)" \
+assert_eq 644 "$(stat -c %a "$ok_f")" 'the status file is mode 644'
+assert_eq 0 "$(find "$TMP_DIR" -name '.ok.status.*' | wc -l)" \
     'no temp file is left behind'
 
-# The two reporters must actually use it -- a copy nobody sources is not shared.
+# --- the root tier's load path --------------------------------------------
+# bouncer.sh and audit-report.sh source the INSTALLED copy, in a shell that has
+# never seen scripts/lib.sh, stack.conf or podman. A helper that grew a
+# dependency on the user tier would break here, not in the bouncer's timer.
+root_f="$TMP_DIR/root.status"
+cat > "$TMP_DIR/root-load.sh" <<'EOF'
+. "$1"
+status_write "$2" "$3" ok 'from root' 'banned=2'
+EOF
+env -i PATH="$PATH" bash --noprofile --norc "$TMP_DIR/root-load.sh" \
+    "$SHARED" "$root_f" "$HDR"
+assert_eq ok "$(env_value "$root_f" result)" \
+    'the shared file loads and writes with no lib.sh present'
+assert_eq 2 "$(env_value "$root_f" banned)" 'the root path passes its own fields'
+
+# --- one implementation, not two ------------------------------------------
+# declare -f is the function as this shell has it; a fresh shell that has only
+# the shared file shows what root would run. They must be the same text, which
+# is the check that a copy-pasted second definition cannot pass.
+cat > "$TMP_DIR/print-fn.sh" <<'EOF'
+. "$1"
+declare -f "$2"
+EOF
+for fn in env_value write_atomic status_write dur_ms; do
+    fresh=$(env -i PATH="$PATH" bash --noprofile --norc "$TMP_DIR/print-fn.sh" \
+        "$SHARED" "$fn")
+    [ "$(declare -f "$fn")" = "$fresh" ] \
+        || fail "lib.sh's $fn is not deploy/root/status.sh's"
+done
+
+# The two root reporters must actually source the installed copy: a shared file
+# nobody loads is not shared.
 for script in bouncer.sh audit-report.sh; do
     grep -qx '\. /etc/stack-ids/status.sh' "$ROOT_DIR/deploy/root/$script" \
         || fail "deploy/root/$script does not source /etc/stack-ids/status.sh"
