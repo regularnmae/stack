@@ -5,8 +5,7 @@
 # daemon exports.
 [Unit]
 Description=node_exporter (host metrics and the stack's textfile metrics)
-After=network-online.target npm-network-network.service
-Requires=npm-network-network.service
+After=network-online.target
 
 [Container]
 ContainerName=node-exporter
