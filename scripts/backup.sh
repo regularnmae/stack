@@ -341,13 +341,18 @@ verify_cleanup() {
     if [ -n "${REPLAY_CONTAINER:-}" ]; then
         podman rm -f "$REPLAY_CONTAINER" >/dev/null 2>&1 || true
     fi
-    # The guard against a drill that dies before writing a verdict: `set -e` can
-    # exit from anywhere, and the timer's TimeoutStartSec lands here too. A
-    # status file left at the previous `result=ok` would make a broken weekly
-    # run read healthy, so an exit with no verdict of our own records a failure.
+    # The guard against a drill that dies before writing a verdict. `set -e` can
+    # exit from anywhere; the timer's TimeoutStartSec is a SIGTERM and a hand run
+    # a SIGINT, and bash runs no EXIT trap for either, so both signals are
+    # trapped to reach this function too. A status file left at the previous
+    # `result=ok` would make a broken weekly run read healthy, so an exit with no
+    # verdict of our own records a failure.
     if [ "${VERIFY_WROTE:-0}" != 1 ]; then
         write_verify_status fail \
             "the drill exited without recording a verdict; see journalctl --user -u backup-verify.service"
+        # A signal trap exits through the EXIT trap as well; the second call has
+        # nothing left to record.
+        VERIFY_WROTE=1
     fi
     case "${VERIFY_TARGET:-}" in
         ""|/) return 0 ;;
@@ -363,7 +368,9 @@ verify_cleanup() {
 # drill that dies before writing a verdict. `set -e` can exit from anywhere, and
 # a status file left at the previous `result=ok` would make a broken monthly run
 # read healthy -- so an exit with no verdict of our own records a failure. The
-# timer's TimeoutStartSec lands here too, which is what a hung drill deserves.
+# timer's TimeoutStartSec is a SIGTERM and a hand run a SIGINT, neither of which
+# runs an EXIT trap, so both are trapped to this function too (which is what a
+# hung drill deserves). A SIGKILL cannot be caught; the age check is the backstop.
 verify_db_cleanup() {
     if [ -n "${REPLAY_CONTAINER:-}" ]; then
         podman rm -f "$REPLAY_CONTAINER" >/dev/null 2>&1 || true
@@ -371,6 +378,9 @@ verify_db_cleanup() {
     if [ "${VERIFY_DB_WROTE:-0}" != 1 ]; then
         write_verify_db_status fail \
             "the drill exited without recording a verdict; see journalctl --user -u backup-verify-db.service"
+        # A signal trap exits through the EXIT trap as well; the second call has
+        # nothing left to record.
+        VERIFY_DB_WROTE=1
     fi
     case "${VERIFY_DB_TARGET:-}" in
         ""|/) return 0 ;;
@@ -719,6 +729,11 @@ run_verify_db() {
         die "timed out waiting for $VERIFY_LOCK"
     fi
     trap verify_db_cleanup EXIT
+    # TimeoutStartSec (SIGTERM) and a hand Ctrl-C (SIGINT) run no EXIT trap:
+    # without these, a drill killed mid-replay leaves the previous `result=ok`
+    # behind and reads healthy.
+    trap 'verify_db_cleanup; exit 143' TERM
+    trap 'verify_db_cleanup; exit 130' INT
 
     # Resolve `latest` so the report names the snapshot that was proven, and keep
     # its time: the dump must come from that run, not from months earlier.
@@ -819,6 +834,11 @@ case "$cmd" in
             die "timed out waiting for $VERIFY_LOCK"
         fi
         trap verify_cleanup EXIT
+        # TimeoutStartSec (SIGTERM) and a hand Ctrl-C (SIGINT) run no EXIT trap:
+        # without these, a drill killed mid-restore leaves the previous
+        # `result=ok` behind and reads healthy.
+        trap 'verify_cleanup; exit 143' TERM
+        trap 'verify_cleanup; exit 130' INT
 
         # Resolve `latest` so the report names the snapshot that was proven, and
         # keep its time: the dumps inside it must come from that run, not from
