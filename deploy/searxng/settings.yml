@@ -1,7 +1,7 @@
 # SearXNG settings seeded into %h/data/searxng by deploy/install.sh on a
 # fresh host (an existing file is never overwritten). It MUST keep
 # `search.formats` containing `json`, or search_web gets a 403 and every
-# search fails -- see the README's "SearXNG setup".
+# search fails.
 #
 # `secret_key` is deliberately blank here: install.sh substitutes a fresh
 # random key when it seeds this file, so no secret is committed.

@@ -41,6 +41,7 @@ credentials.
 ./scripts/logs.sh --since 1h        # cross-service log search (LogsQL; UI on :9428)
 ./scripts/registrations.sh --dry-run # what the BoltMesh signup watcher would mail
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract (the CI gate)
+./scripts/docs-lint.sh              # every README/docs section reference still resolves
 ./scripts/btcpay-wallet.sh          # import the view-only BTCPay Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / verify / inspect
 ./scripts/ids.sh -v                 # the IDS roll-up, by hand (ids.timer runs it every 5 min)

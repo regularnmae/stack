@@ -8,7 +8,7 @@
 #   stack/suricata-policy
 #     A public source touching a port this host never publishes, or hitting the
 #     default vhost, is hostile by definition. The default vhost exists only to
-#     answer scanners (README, "The proxy tier"), and the 9001xxx rules fire
+#     answer scanners (README, "Proxy hosts"), and the 9001xxx rules fire
 #     only when something that must never be published becomes reachable. One
 #     alert is enough; there is no benign version of these.
 #

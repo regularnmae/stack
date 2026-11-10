@@ -71,6 +71,15 @@ jobs:
           done < <(git grep -hoE 'docs/[a-z0-9-]+\.md' -- ':!docs/' | sort -u)
           [ "$fail" -eq 0 ] || exit 1
           printf 'docs index: %s docs, all reachable from AGENTS.md\n' "${#docs[@]}"
+      # The step above proves every docs/ *file* is reachable; this proves every
+      # named *section* is. Each doc opens by naming the README sections it
+      # defers to, which is a link in prose -- and four of those pointed at
+      # headings that had been renamed or never existed. scripts/docs-lint.sh
+      # resolves each quoted name against the headings that exist, on both sides
+      # of the README/docs split, and joins a reference wrapped across two
+      # comment lines first.
+      - name: documentation references resolve
+        run: ./scripts/docs-lint.sh
       # A container unit may mount only from $DATA_DIR (or a podman volume), never
       # from the checkout. Host scripts still run from the checkout (deploy/*.service
       # is the tooling), but a container a daemon starts fails at its *next* start

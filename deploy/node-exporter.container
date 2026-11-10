@@ -61,7 +61,7 @@ SecurityLabelDisable=true
 # write their .prom files. Must be world-readable: the exporter runs as
 # uid 65534, i.e. a subuid that owns nothing here. Both writers chmod 0755 the
 # directory and 0644 the files -- a silent "no metrics" is otherwise the first
-# failure mode (README: "Monitoring and metrics").
+# failure mode (README: "Metrics and history").
 Volume=@DATA_DIR@/monitoring/textfile:/textfile:z
 
 Exec=--web.listen-address=:9100 --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host --collector.textfile.directory=/textfile

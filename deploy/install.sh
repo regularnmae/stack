@@ -897,8 +897,8 @@ txindex=1
 # cache is the one knob that materially speeds up the initial block download,
 # because it cuts chainstate writes to disk -- it does not change the download
 # itself. 3072 fits a 16 GB host next to monerod and Fulcrum; drop it back to
-# 450 once the chain is synced and the cache buys nothing (README: "Speeding up
-# the initial sync").
+# 450 once the chain is synced and the cache buys nothing -- it only speeds the
+# initial download, not steady-state validation.
 dbcache=3072
 
 # RPC. rpcallowip is the podman subnet only, so a re-added PublishPort would

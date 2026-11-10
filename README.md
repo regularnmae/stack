@@ -1655,7 +1655,7 @@ Notes:
 - The websockets it serves for its dashboard are why `[npm.status]` carries
   the `ws` flag.
 
-## Proxy hosts (nginx-proxy-manager)
+## Proxy hosts
 
 nginx-proxy-manager is the stack's only LAN-facing HTTP unit, so every public
 hostname is a proxy host in NPM. (Fulcrum's raw Electrum ports `50001`/`50002`
