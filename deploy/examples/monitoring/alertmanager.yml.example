@@ -110,7 +110,7 @@ receivers:
     # Uncomment and fill in once the SMTP settings above are set. Until then
     # Alertmanager accepts alerts and delivers nothing, on purpose: a fresh host
     # must not fail every sweep because a mailer is not configured yet.
-    # verify.sh reports that state as "alerting is inert" instead.
+    # monitor.sh reports that state as "alerting is inert" instead.
     #
     # email_configs:
     #   - to: you@example.com

@@ -702,6 +702,47 @@ restic_snapshot_summary() { # -> "count<TAB>newest-epoch"
     printf '%s\t%s' "$count" "$epoch"
 }
 
+# The receiver a config's default route sends to, and whether that receiver has
+# a live email_configs. "Alerting is inert" must key on the paging path, not on
+# any email_configs in the file: filling in only the signups sub-route pages
+# nobody, and a file-wide grep would go quiet anyway.
+# shellcheck disable=SC2034  # set for the caller to read after this returns
+alertmanager_paging() { # config -> AM_RECEIVER, AM_PAGING=1|0
+    AM_RECEIVER=""
+    AM_PAGING=0
+    [ -r "$1" ] || return 0
+    AM_RECEIVER=$(awk '
+        /^route:[[:space:]]*(#.*)?$/ { inroute = 1; next }
+        inroute && /^[^[:space:]#]/ { inroute = 0 }
+        inroute && /^[[:space:]]+receiver:[[:space:]]*/ {
+            v = $0
+            sub(/^[[:space:]]+receiver:[[:space:]]*/, "", v)
+            sub(/[[:space:]]+#.*$/, "", v)
+            gsub(/["\047]/, "", v)
+            print v
+            exit
+        }
+    ' "$1")
+    [ -n "$AM_RECEIVER" ] || return 0
+    if awk -v want="$AM_RECEIVER" '
+        /^receivers:[[:space:]]*(#.*)?$/ { inlist = 1; next }
+        inlist && /^[^[:space:]#]/ { inlist = 0 }
+        inlist && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+            v = $0
+            sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", v)
+            sub(/[[:space:]]+#.*$/, "", v)
+            gsub(/["\047]/, "", v)
+            inrecv = (v == want)
+            next
+        }
+        inrecv && /^[[:space:]]*email_configs:/ { found = 1; exit }
+        END { exit !found }
+    ' "$1"; then
+        AM_PAGING=1
+    fi
+    return 0
+}
+
 # What the last mcp_initialize saw: the session id, the revision the server
 # actually agreed to, the handshake body (kept because capturing the function's
 # stdout would run it in a subshell and lose these globals), and the marker -w

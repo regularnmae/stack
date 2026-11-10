@@ -316,6 +316,54 @@ if unit_in_set "" " tor "; then
     exit 1
 fi
 
+# "alerting is inert" keys on the receiver the default route sends to, not on
+# any email_configs in the file. A signups-only setup delivers no pages, so it
+# must still report itself -- that is the regression the file-wide grep had.
+alertmanager_paging "$ROOT_DIR/deploy/examples/monitoring/alertmanager.yml.example"
+assert_eq stack-email "$AM_RECEIVER" 'the example names its paging receiver'
+assert_eq 0 "$AM_PAGING" 'the seeded example delivers nothing, so it is inert'
+
+cat > "$TMP_DIR/am-paging.yml" <<'YAML'
+route:
+  receiver: stack-email
+receivers:
+  - name: stack-email
+    email_configs:
+      - to: ops@example.com
+  - name: stack-signups
+YAML
+alertmanager_paging "$TMP_DIR/am-paging.yml"
+assert_eq 1 "$AM_PAGING" 'an uncommented email_configs on the default receiver pages'
+
+cat > "$TMP_DIR/am-signups.yml" <<'YAML'
+route:
+  receiver: stack-email
+  routes:
+    - receiver: stack-signups
+      matchers:
+        - severity = "info"
+receivers:
+  - name: stack-email
+    # email_configs:
+    #   - to: ops@example.com
+  - name: stack-signups
+    email_configs:
+      - to: events@example.com
+YAML
+alertmanager_paging "$TMP_DIR/am-signups.yml"
+assert_eq stack-email "$AM_RECEIVER" 'a sub-route does not replace the default receiver'
+assert_eq 0 "$AM_PAGING" 'signups-only email_configs must not silence the inert warning'
+
+cat > "$TMP_DIR/am-noroute.yml" <<'YAML'
+receivers:
+  - name: stack-email
+    email_configs:
+      - to: ops@example.com
+YAML
+alertmanager_paging "$TMP_DIR/am-noroute.yml"
+assert_eq "" "$AM_RECEIVER" 'no [route] receiver means there is no paging path to judge'
+assert_eq 0 "$AM_PAGING" 'a config with no default route stays inert'
+
 # A script's leading comment block IS its --help: usage_header prints it
 # verbatim, so a header that is not one contiguous block from line 2 gives a
 # truncated usage message, and healthcheck-lint used to hard-code a line range

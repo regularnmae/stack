@@ -1356,11 +1356,14 @@ else
             && ! am_chk=$(podman exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>&1); then
             soft "alertmanager config is invalid (${am_chk##*$'\n'}); it runs the last good one until that is fixed"
         fi
-        # The seeded config ships with the receiver's email block commented out:
-        # until it is filled in the path accepts alerts and delivers nothing. A
-        # fresh host is not broken, it is just not paging yet.
-        if ! grep -qE '^[[:space:]]*email_configs:' "$AM_CFG"; then
-            soft "alerting is inert: no email_configs in $AM_CFG (fill in SMTP, then scripts/monitor.sh --test)"
+        # The seeded config ships with the paging receiver's email block
+        # commented out: until it is filled in the path accepts alerts and
+        # delivers nothing. Keyed on the default route's receiver, not on any
+        # email_configs in the file -- filling in only the signups sub-route
+        # pages nobody and must keep saying so.
+        alertmanager_paging "$AM_CFG"
+        if [ "$AM_PAGING" != 1 ]; then
+            soft "alerting is inert: the default route${AM_RECEIVER:+ (receiver $AM_RECEIVER)} has no email_configs in $AM_CFG (fill in SMTP, then scripts/monitor.sh --test)"
         fi
     fi
 fi

@@ -119,11 +119,12 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   line, `alerts.state` untouched) rather than burn the sweep into a
   half-written flap-damper state.
   Two smaller things: a **config with no receiver integrations is valid** (that
-  is what makes a fresh host safe before SMTP is filled in), and the image runs
-  as uid **65534**, which cannot read a 0600 SMTP-bearing config — the unit sets
-  `User=0`, which under rootless podman is the login user (same as
-  `victoriametrics`), not an escalation. Proving the path end to end is
-  `scripts/monitor.sh --test`.
+  is what makes a fresh host safe before SMTP is filled in; the "inert" warning
+  follows the default route's receiver, so filling in only a signups sub-route
+  still reports it), and the image runs as uid **65534**, which cannot read a
+  0600 SMTP-bearing config — the unit sets `User=0`, which under rootless podman
+  is the login user (same as `victoriametrics`), not an escalation. Proving the
+  path end to end is `scripts/monitor.sh --test`.
 
 - **Editing `alertmanager.yml` needs an explicit reload.** Alertmanager v0.34
   ships no config-file watcher (the process holds no inotify fd at all: verified
