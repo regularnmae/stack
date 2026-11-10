@@ -77,18 +77,22 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   signal**: it advances `units.rendered`, `verify.sh` fails naming the units
   (and the monitor pages through it), and the next deploy restarts them. Do not
   go back to digesting the files either side of the installer: that compares the
-  render with itself. `units.applied` advances only after every changed active
-  unit was applied (`APPLIED_UNITS`); a tier that warns does not abort the
-  deploy, but a changed unit no phase restarted keeps the baseline where it is,
-  so the next run repeats it rather than hiding it. The first deploy on a host
-  without a baseline adopts the render on disk once, with a warning (drift older
-  than that run is unknowable).
+  render with itself. `units.applied` advances per unit: a tier that warns does
+  not abort the deploy, but a changed unit no phase restarted keeps its own line
+  where it is (`unit_digest_hold`), so `verify.sh` keeps naming it and the next
+  run repeats it rather than hiding it — without holding back the units this run
+  did apply, which would restart all of them a second time. The first deploy on a
+  host without a baseline adopts the render on disk once, with a warning (drift
+  older than that run is unknowable).
   `nginx-proxy-manager` is only flagged by the restart pass: its restart is
   deferred to `sync_npm_network`, after the proxy hosts are rewritten
-  (`deploy.sh` says why the order is load-bearing), and `units_commit` refuses
-  to record the baseline while that flag is still set — a `--only` branch that
-  never reached the rewrite must not claim NPM applied. Every `--only` branch
-  goes through `sync_units` and commits at the end; `agent-skills` runs no
+  (`deploy.sh` says why the order is load-bearing), and `units_commit` keeps its
+  baseline line behind while that flag is still set — a `--only` branch that
+  never reached the rewrite must not claim NPM applied. `--only
+  nginx-proxy-manager` is the exception: its branch restarts the unit directly
+  (no branch rewrites the hosts) and settles the flag itself, so only a change
+  that also moves the network mode still needs `--only npm-hosts`. Every `--only`
+  branch goes through `sync_units` and commits at the end; `agent-skills` runs no
   installer and therefore commits nothing. Two ordering facts inside
   `sync_units`: **`ensure_netcheck` is its last step, not part of the `--only`
   prologue**, because `install.sh` rebuilds the `netcheck` image in

@@ -279,6 +279,28 @@ before=$(unit_digest)
 printf 'changed\n' > "$TMP_DIR/quadlet/b.container"
 assert_eq b "$(unit_digest_changed "$before" "$(unit_digest)")" 'unit digest identifies changed unit'
 
+# The baseline advance when one unit is not applied: the rest of the render is
+# recorded, and the unapplied unit keeps its applied line -- so verify.sh still
+# names it and the next deploy repeats only that one.
+assert_eq '111 a.container
+222 b.container' \
+    "$(unit_digest_hold '111 a.container
+999 b.container' '111 a.container
+222 b.container' ' b ')" \
+    'unit_digest_hold keeps the applied line for a held unit'
+assert_eq '111 a.container
+999 b.container' \
+    "$(unit_digest_hold '111 a.container
+999 b.container' '111 a.container
+222 b.container' ' ')" \
+    'unit_digest_hold records everything when nothing is held'
+# A held unit with no applied line cannot be carried forward: failing lets
+# units_commit withhold the file rather than drop a unit the new render has.
+if unit_digest_hold '111 a.container' '222 b.container' ' a ' >/dev/null; then
+    printf 'FAIL: unit_digest_hold accepted a held unit with no applied line\n' >&2
+    exit 1
+fi
+
 # The space-delimited unit sets deploy.sh passes around: an exact stem, never a
 # substring (tor must not match tor-control), and the empty set matches nothing.
 if ! unit_in_set tor " bitcoind tor "; then

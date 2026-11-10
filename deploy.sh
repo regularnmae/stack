@@ -197,8 +197,10 @@ sync_units() {
     # restart_changed_units only flags nginx-proxy-manager: its restart has to
     # follow the proxy-host rewrite (sync_npm_network says why). A --only branch
     # does not rewrite the hosts, so leave it to `--only npm-hosts` or a full
-    # deploy, in the right order.
-    if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ]; then
+    # deploy, in the right order -- except `--only nginx-proxy-manager` itself,
+    # whose branch restarts it after this returns.
+    if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ] \
+        && [ "${ONLY:-}" != nginx-proxy-manager ]; then
         warn "nginx-proxy-manager's unit changed; its restart is deferred -- run ./deploy.sh (or ./deploy.sh --only npm-hosts) to apply it"
     fi
     # Last, not in the --only prologue: install.sh runs inside install_units and
@@ -213,9 +215,12 @@ sync_units() {
 # Record the render this run applied: at the end of a full deploy and of every
 # --only branch that ran install.sh, never on a dry run, and never after a
 # failure. A baseline that advances past a restart that did not happen is the
-# silent-stale-config bug this manifest exists to prevent.
+# silent-stale-config bug this manifest exists to prevent -- so a changed unit
+# no phase restarted keeps its own line where it is (unit_digest_hold) instead of
+# holding back the whole file: withholding all of it makes the next run restart
+# every unit this one applied.
 units_commit() {
-    local now unit pending=""
+    local now unit pending="" record
     [ "$DRY_RUN" = 0 ] || return 0
     [ "$UNITS_SYNCED" = 1 ] || return 0
     # install.sh is also runnable by hand, so a render can land after the digest
@@ -229,21 +234,25 @@ units_commit() {
         restart_changed_units "$UNITS_APPLIED_DIGEST" "$now"
         UNITS_APPLIED_DIGEST="$now"
     fi
-    # A branch that did not reach sync_npm_network must not record NPM's new
-    # unit as applied: the next full deploy is what restarts it.
+    # A branch that did not reach sync_npm_network leaves NPM's new unit
+    # unapplied on purpose (the next full deploy restarts it, after the rewrite).
     if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ]; then
-        warn "not recording the applied-unit baseline: nginx-proxy-manager's unit is still unapplied"
-        return 0
+        pending="$pending nginx-proxy-manager "
     fi
     # A changed unit that was active had to be restarted to apply its
-    # definition. If no phase did, the baseline stays put: recording it hides
-    # the drift.
+    # definition. If no phase did, its baseline line stays put.
     for unit in $CHANGED_ACTIVE_UNITS; do
         unit_applied "$unit" || pending="$pending$unit "
     done
     if [ -n "$pending" ]; then
-        warn "not recording the applied-unit baseline: still unapplied:$pending"
-        return 0
+        if record=$(unit_digest_hold "$UNITS_APPLIED_DIGEST" \
+            "$(unit_applied_read)" "$pending"); then
+            UNITS_APPLIED_DIGEST="$record"
+            warn "not applied yet; their baseline lines stay put:$pending"
+        else
+            warn "not recording the applied-unit baseline: still unapplied:$pending"
+            return 0
+        fi
     fi
     unit_digest_write "$DATA_DIR/audit/units.applied" "$UNITS_APPLIED_DIGEST"
     log "recorded the applied-unit baseline ($DATA_DIR/audit/units.applied)"
@@ -913,6 +922,13 @@ if [ -n "$ONLY" ]; then
         else
             restart_unit "$ONLY"
             mark_applied "$ONLY"
+        fi
+        # A direct restart settles NPM's unit question for units_commit, which
+        # otherwise keeps its baseline line behind. This branch did not rewrite
+        # the proxy hosts first, so a unit change that also changes the network
+        # mode still needs `--only npm-hosts` (sync_npm_network says why).
+        if [ "$ONLY" = nginx-proxy-manager ]; then
+            NPM_UNIT_CHANGED=0
         fi
     fi
     units_commit

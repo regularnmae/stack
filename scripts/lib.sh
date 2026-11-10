@@ -541,6 +541,30 @@ unit_digest_write() { # file [digest-set]
     fi
 }
 
+# The set to record when some units are not applied yet: the new render with a
+# held unit's line replaced by its applied one, so the baseline still advances
+# for everything that was applied (one unapplied unit must not make the next
+# deploy restart all of them again) while verify.sh keeps naming the held one --
+# its live digest still differs. Fails (exit 3) when a held unit has no applied
+# line, because keeping a never-applied unit out of the baseline would hide it:
+# unit_digest_changed ignores names on one side only.
+unit_digest_hold() { # new-set applied-set held-stems -> the set to record
+    awk -v held="$3" '
+        BEGIN { n = split(held, h, " "); for (i = 1; i <= n; i++) hold[h[i]] = 1 }
+        NR == FNR { applied[$2] = $0; next }
+        {
+            stem = $2; sub(/\.[^.]*$/, "", stem)
+            if (stem in hold) {
+                if (!($2 in applied)) missing = 1
+                else print applied[$2]
+                next
+            }
+            print
+        }
+        END { exit (missing ? 3 : 0) }
+    ' <(printf '%s\n' "$2") <(printf '%s\n' "$1")
+}
+
 # The last applied digest set, empty when this host has no baseline yet (a fresh
 # host, or the first deploy after this file was introduced).
 unit_applied_read() {
