@@ -20,4 +20,4 @@
 #   * behaviour is ported, not reimagined: the comments that explain a trap
 #     (NPM's rate-limit zones, the parked-config rescue, the onion certificate
 #     rule) travel with the code they protect.
-__all__ = ["envfile", "http", "manifest", "npm", "ui"]
+__all__ = ["envfile", "http", "manifest", "npm", "ui", "units"]

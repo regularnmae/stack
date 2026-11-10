@@ -35,13 +35,14 @@ done
 
 # The files that carry references. README.md is the target, not a source; the two
 # explorers are vendored app code whose README is their own; this file quotes
-# example references, so scanning it would read its own documentation as prose.
+# example references, so scanning it would read its own documentation as prose;
+# tests/ quote README table syntax as fixtures, which is not a reference to it.
 mapfile -t SOURCES < <(
     cd "$REPO_DIR" && git ls-files -- \
         '*.sh' '*.md' '*.py' '*.yml' '*.yaml' '*.toml' '*.conf' \
         '*.container' '*.container.in' '*.service' '*.timer' \
         ':!README.md' ':!btc-explorer/*' ':!xmr-explorer/*' \
-        ':!scripts/docs-lint.sh'
+        ':!scripts/docs-lint.sh' ':!tests/*'
 )
 
 # Headings of a markdown file, one per line, without the leading #s.
@@ -53,14 +54,20 @@ headings() {
 # of quotes, so a reference wrapped by a comment's column limit is still one
 # reference. The comment prefix is stripped and runs of spaces collapsed, so the
 # joined text reads like the sentence it was. Prints "<first-line>\t<text>".
-logical_lines() { # file
-    awk '
+#
+# With comments_only, a file is read for its comment lines alone: in code a
+# cross-reference is prose and prose is a comment, while a line that merely
+# quotes table syntax (a usage string, a test fixture) is not a reference.
+logical_lines() { # file [comments_only]
+    awk -v comments="${2:-0}" '
+        comments && $0 !~ /^[[:space:]]*#/ { next }
         { line = $0; sub(/^[[:space:]]*#+[[:space:]]?/, "", line)
           gsub(/[[:space:]]+/, " ", line)
           sub(/^ /, "", line); sub(/ $/, "", line)
           if (buf == "") start = NR
           buf = (buf == "" ? line : buf " " line)
-          q += gsub(/"/, "&", line)
+          tmp = line; gsub(/\\"/, "", tmp)   # an escaped quote is text, not a delimiter
+          q += gsub(/"/, "&", tmp)
           if (q % 2 == 0) { print start "\t" buf; buf = ""; q = 0 }
         }
         END { if (buf != "") print start "\t" buf }
@@ -124,7 +131,8 @@ for src in "${SOURCES[@]}"; do
             fi
             check "$src" "$ln" "$text" "$REPO_DIR/$target"
         done
-    done < <(logical_lines "$REPO_DIR/$src")
+    done < <(logical_lines "$REPO_DIR/$src" \
+             "$([ "${src##*.}" = md ] && echo 0 || echo 1)")
 done
 
 check_anchors "$REPO_DIR/README.md"

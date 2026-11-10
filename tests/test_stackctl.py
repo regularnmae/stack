@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from stackctl import envfile, manifest, npm  # noqa: E402
+from stackctl import envfile, manifest, npm, units  # noqa: E402
 from stackctl.ui import Fatal  # noqa: E402
 
 
@@ -707,6 +707,135 @@ flags = ["mcp"]
         self.assertIn("MCP_PORTS=(8100)", out)
         # The public-surface list monitor.sh probes: one clearweb vhost.
         self.assertIn("NPM_DOMAINS=(mcp.example.net)", out)
+
+
+class TestUnits(unittest.TestCase):
+    """README's "What runs" against the unit files. The three facts checked are
+    the ones a Renovate bump can invalidate without touching the README, plus the
+    reverse direction (a row left behind by a deleted unit)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="stackctl-units-")
+        self.deploy = os.path.join(self.tmp, "deploy")
+        os.makedirs(os.path.join(self.deploy, "root"))
+        self.readme = os.path.join(self.tmp, "README.md")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def unit(self, name, image="docker.io/x/y:1", ports=(), oneshot=False, root=False):
+        body = ["[Container]", f"ContainerName={name}", f"Image={image}"]
+        body += [f"PublishPort={p}" for p in ports]
+        if oneshot:
+            body.append("Type=oneshot")
+        path = os.path.join(self.deploy, "root" if root else "", f"{name}.container")
+        with open(path, "w") as f:
+            f.write("\n".join(body) + "\n")
+
+    def rows(self, rows):
+        text = ["# stack", "", "## What runs", "",
+                "| Unit | Image | Published | Data |",
+                "| --- | --- | --- | --- |"]
+        for names, image, published in rows:
+            text.append(f"| {', '.join(f'`{n}`' for n in names)} | {image} "
+                        f"| {published} | — |")
+        text += ["", "The prose below the table is not a row.", "", "## Next", ""]
+        with open(self.readme, "w") as f:
+            f.write("\n".join(text) + "\n")
+
+    def run_check(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = units.check(self.deploy, self.readme)
+        return rc, out.getvalue()
+
+    def test_real_tree_agrees(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = units.check(os.path.join(ROOT, "deploy"),
+                             os.path.join(ROOT, "README.md"))
+        self.assertEqual(rc, 0, out.getvalue())
+
+    def test_a_matching_row_passes(self):
+        self.unit("bitcoind", ports=["8333:8333"])
+        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "`8333`")])
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0, out)
+
+    def test_bumped_image_is_caught(self):
+        # The drift this exists for: Renovate moves Image=, the table keeps the tag.
+        self.unit("bitcoind", image="docker.io/lncm/bitcoind:v29.0")
+        self.rows([(["bitcoind"], "`docker.io/lncm/bitcoind:v28.0`", "—")])
+        rc, out = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("does not carry its Image=", out)
+        self.assertIn("v29.0", out)
+
+    def test_missing_row_is_caught(self):
+        self.unit("bitcoind")
+        self.rows([(["monerod"], "`docker.io/x/y:1`", "—")])
+        # ... and monerod has no unit, so that row is stale in the other direction.
+        self.unit("monerod")
+        rc, out = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("no ", out)
+        self.assertIn("row names the unit `bitcoind`", out)
+
+    def test_oneshot_needs_no_row(self):
+        self.unit("stack-backup", oneshot=True)
+        self.unit("bitcoind")
+        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "`8333`")])
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0, out)
+
+    def test_new_publish_port_is_caught(self):
+        self.unit("fulcrum", ports=["50001:50001", "50003:50003"])
+        self.rows([(["fulcrum"], "`docker.io/x/y:1`", "`50001`")])
+        rc, out = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("port 50003", out)
+
+    def test_a_row_may_name_two_units(self):
+        self.unit("netcheck")
+        self.unit("netcheck-host")
+        self.rows([(["netcheck", "netcheck-host"], "`docker.io/x/y:1`", "—")])
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0, out)
+
+    def test_a_host_unit_row_is_allowed(self):
+        # stack-bouncer is a root oneshot script: a row, no ContainerName.
+        self.unit("bitcoind")
+        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "—"),
+                   (["stack-bouncer"], "— (a host script)", "—")])
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0, out)
+
+    def test_a_stale_row_is_caught(self):
+        self.unit("bitcoind")
+        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "—"),
+                   (["gone-unit"], "`docker.io/x/z:1`", "—")])
+        rc, out = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("not a container unit", out)
+
+    def test_no_table_is_an_error(self):
+        with open(self.readme, "w") as f:
+            f.write("# stack\n\n## Next\n")
+        self.unit("bitcoind")
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(Fatal):
+                self.run_check()
+
+    def test_main_arg_handling(self):
+        self.unit("bitcoind")
+        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "`8333`")])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(units.main(["check", self.readme,
+                                         "--units", self.deploy]), 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(units.main(["nope"]), 2)
 
 
 if __name__ == "__main__":

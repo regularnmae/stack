@@ -306,7 +306,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   default), are matched by `renovate.json`'s regex manager. Both files are
   matched so a restic bump moves them together. The wallet tag appears in
   the `btcpayserver/monero` unit, and one PR moves both; it also appears in
-  the README's "What runs" table, which is hand-maintained. `postgres` (hand
+  the README's "What runs" table, which `stackctl units check` holds to the
+  units' own `Image=` lines. `postgres` (hand
   pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
   (`pinDigests` off): kuma's `2` and searxng's date tags move on their own, a
   digest pin would turn a reviewable version bump into a PR per upstream

@@ -196,11 +196,19 @@ jobs:
       # table in AGENTS.md, the hand-maintained contract with the app repos.
       - name: service manifest agrees with AGENTS.md
         run: PYTHONPATH=scripts python3 -m stackctl manifest check deploy/services.toml --agents AGENTS.md
+      # README's "What runs" table is the one place an Image= tag is written
+      # twice, and the second copy is the one nothing was reading: Renovate bumps
+      # the unit, the deploy ships it, and the table keeps the old tag until
+      # someone rereads it. The prose in that table stays hand-written; these are
+      # the three facts that can be compared (a row per non-oneshot unit, its
+      # Image=, its PublishPort=).
+      - name: README "What runs" agrees with the units
+        run: PYTHONPATH=scripts python3 -m stackctl units check
       # load_manifest runs this package on the bare interpreter (install.sh,
       # verify.sh, monitor.sh, CI itself), so every command in it must stay
       # stdlib-only -- importing them proves it without a venv.
       - name: stackctl imports without extras
-        run: PYTHONPATH=scripts python3 -c 'import stackctl.manifest, stackctl.npm'
+        run: PYTHONPATH=scripts python3 -c 'import stackctl.manifest, stackctl.npm, stackctl.units'
       # The Python core behind the npm-hosts reconciler (scripts/stackctl/),
       # offline: declaration parsing, payload construction, a full reconcile
       # against a fake NPM admin API. The two shell Go-duration parsers
