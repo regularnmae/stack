@@ -1025,7 +1025,9 @@ makes that impossible to change or spend silently:
    trip repeats until you accept it with `./scripts/spend-audit.sh --rebaseline`.
 2. **Activity.** It reads outgoing payments (`lightning listpays`) and transfers
    (monero-wallet `get_transfers`, outgoing only) through the **read** tokens and
-   diffs them against `$DATA_DIR/audit/outgoing-baseline.txt`.
+   diffs them against `$DATA_DIR/audit/outgoing-baseline.txt`. A new entry trips
+   on every run until `--rebaseline` records the current set, and a source that
+   cannot be read leaves the old baseline alone rather than recording half of it.
 
 Trips are appended to `$DATA_DIR/audit/spend.log` and folded into the monitor's
 alert and heartbeat. It is **not** a gate: it cannot stop a spend, only make one
