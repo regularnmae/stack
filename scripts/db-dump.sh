@@ -7,13 +7,13 @@
 #   scripts/db-dump.sh npm      # one target, for debugging
 #   scripts/db-dump.sh kuma
 #
-# Why this exists: BACKUP_PATHS used to include the live files
+# Why this exists: BACKUP_PATHS must never include the live files
 # (npm/data/database.sqlite and uptime-kuma/mariadb/). A file-by-file copy of a
 # database a daemon is writing is only crash-recoverable -- the same reason the
-# raw postgres/ cluster is not in the set -- and restic additionally reads each
-# file at its own instant, so even a datadir that would recover from a crash
-# image can come back with a redo log and data pages from different moments.
-# stack.conf's BACKUP_EXCLUDES takes those files out of the snapshot; this script
+# raw postgres/ cluster is not in the set -- and restic reads each file at its own
+# instant, so even a datadir that would recover from a crash image can come back
+# with a redo log and data pages from different moments. stack.conf's
+# BACKUP_EXCLUDES takes those files out of the snapshot; this script
 # writes what replaces them:
 #
 #   $DATA_DIR/npm-dump/database.sqlite      SQLite online-backup-API copy
@@ -38,10 +38,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 
-# Arguments are parsed before anything with a side effect. resolve_data_dir
+# Arguments are parsed before anything with a side effect: resolve_data_dir
 # persists ~/.config/stack/data-dir.env, so a bare `--help` (or a typo'd target)
-# must not get that far; it used to create the dump directories and chmod them
-# before even looking at $1.
+# must not get that far, and the dump directories must not be created for it.
 DUMPS=(npm kuma)
 case "${1:-}" in
     -h|--help) usage_header "$0"; exit 0 ;;

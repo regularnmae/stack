@@ -26,8 +26,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BITCOIN_WALLET="mainnet"
 
 # No options: the script does its one job. --help and an unknown argument are the
-# only branches (a stray argument must not be silently ignored, which is what
-# `--bitcoin` used to be).
+# only branches (a stray argument must not be silently ignored).
 if [ $# -gt 0 ]; then
     case "$1" in
         -h|--help) usage_header "$0"; exit 0 ;;
@@ -47,8 +46,8 @@ ask() { local p="$1" a; read -r -p "$p" a; printf '%s' "$a"; }
 # ---------------------------------------------------------------------------
 # Bitcoin
 # ---------------------------------------------------------------------------
-# bitcoind_cli (scripts/lib.sh) is the stack's one bitcoind client; it pins the
-# datadir the same way this script used to.
+# bitcoind_cli (scripts/lib.sh) is the stack's one bitcoind client, and it pins
+# the datadir so a caller does not have to.
 
 btc_wallet_loaded() {
     bitcoind_cli listwallets 2>/dev/null \

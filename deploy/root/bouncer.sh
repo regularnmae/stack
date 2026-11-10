@@ -140,11 +140,11 @@ dur_to_sec() {
 }
 
 write_status() { # result detail banned [skipped]
-    # The guard lives here, not at the single success path at the end of the
-    # file: every failure path (LAPI, JSON shape, classifier, nft) calls this
-    # too, and each of them used to overwrite the live verdict -- so a manual
-    # `--dry-run` against a down LAPI set result=fail and made the monitor page,
-    # despite the header saying "write nothing".
+    # The guard lives here, not at the single success path at the end: every
+    # failure path (LAPI, JSON shape, classifier, nft) calls this too, and writing
+    # the verdict from there would make a manual `--dry-run` against a down LAPI
+    # set result=fail and page the monitor, despite the header saying "write
+    # nothing".
     if [ "$DRY_RUN" = 1 ]; then
         say "dry-run: would have written $STATUS result=$1${2:+ ($2)}"
         return 0

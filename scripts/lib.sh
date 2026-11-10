@@ -723,9 +723,9 @@ status_write() { # path header result detail [KEY=VALUE ...]
     return 0
 }
 
-# Read one of those status files, in one place: monitor.sh and verify.sh judge
-# the oneshot jobs' verdicts the same way and used to spell out the read at seven
-# sites. The judgement (thresholds, wording, units) stays with the caller.
+# Read one of those status files, in one place: monitor.sh and verify.sh judge the
+# oneshot jobs' verdicts the same way, and only the judgement (thresholds, wording,
+# units) differs per caller.
 #
 # Sets STATUS_RESULT, STATUS_AGE_S and STATUS_DETAIL rather than printing a line:
 # a delimiter-separated line cannot carry the empty fields this read exists for
@@ -1047,11 +1047,11 @@ ensure_data_dirs() {
 # --- the service manifest -----------------------------------------------------
 # deploy/services.toml is the ONE declaration of the public surface: the *_HOST
 # names, the MCP prefixes/containers/ports, the onion services and the proxy
-# hosts. This is how a bash caller gets them back under the same variable names
-# stack.conf used to carry, by eval'ing `python3 -m stackctl manifest shell` --
-# NAME='value' lines and array assignments, nothing else. Each table leaves as one
-# array per column (MCP_PREFIXES / MCP_CONTAINERS / MCP_PORTS, and ONION_*), so no
-# caller splits a record apart.
+# hosts. This is how a bash caller reads them, by eval'ing
+# `python3 -m stackctl manifest shell` -- NAME='value' lines and array
+# assignments, nothing else. Each table leaves as one array per column
+# (MCP_PREFIXES / MCP_CONTAINERS / MCP_PORTS, and ONION_*), so no caller splits a
+# record apart.
 #
 # It must never run inside stack.conf: bootstrap.sh sources that file standalone
 # (curl | bash, no checkout), so stack.conf stays plain data and the manifest load

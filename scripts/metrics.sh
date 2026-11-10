@@ -129,9 +129,9 @@ if ln=$(lightning_cli getinfo 2>/dev/null) && [ -n "$ln" ]; then
     # Connected peers, not getinfo's num_peers: that one is documented as "the
     # total count of peers, connected or with channels", so it stays >= 1 for a
     # node whose only peer is offline and the series would read as healthy.
-    # A failed listpeers/listpeerchannels is a HOLE, not an empty list: the
-    # fallback `{"peers":[]}` used to turn an unreachable node into a healthy
-    # zero and write no collector_error.
+    # A failed listpeers/listpeerchannels is a HOLE, not an empty list: a
+    # `{"peers":[]}` fallback would turn an unreachable node into a healthy zero
+    # and write no collector_error.
     npeers=""
     if lpeers=$(lightning_cli listpeers 2>/dev/null) && [ -n "$lpeers" ]; then
         npeers=$(jq -r '[.peers[] | select(.connected)] | length' <<<"$lpeers" 2>/dev/null) || npeers=""
