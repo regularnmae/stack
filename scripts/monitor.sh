@@ -6,33 +6,27 @@
 #   scripts/monitor.sh --no-verify  # skip the verify.sh base sweep
 #   scripts/monitor.sh --test       # send one real alert through Alertmanager
 #
-# Driven by deploy/monitor.timer (a plain systemd user unit) every five minutes.
-# Read-only: it starts nothing, restarts nothing and rewrites no config. It
-# reuses verify.sh for the container/MCP base checks and adds the ones nothing
-# else does -- chain freshness, CLN peers and channels, the Monero wallet's lag,
-# the public vhosts through nginx-proxy-manager, and the spend tripwire in
-# scripts/spend-audit.sh.
+# Driven by monitor.timer every five minutes. Read-only: it starts nothing,
+# restarts nothing and rewrites no config. It reuses verify.sh for the
+# container/MCP base checks and adds the ones nothing else does -- chain
+# freshness, CLN peers and channels, the Monero wallet's lag, the public vhosts
+# through nginx-proxy-manager, and the spend tripwire.
 #
-# This script decides WHAT is wrong; it does not decide when to say it. Each
-# check section becomes one alert, pushed to Alertmanager
-# ($MONITOR_ALERTMANAGER_URL, loopback :9093), which owns grouping, repeat
-# intervals, inhibition, silences and delivery. The one state machine that stays
-# here is the flap damper: an alert must be bad for MONITOR_ALERT_FOR seconds
-# (two sweeps) before it is pushed at all, because Alertmanager only sees what
-# is pushed at it and cannot tell a flapping check from one that never settled.
-# A recovery is pushed explicitly (endsAt in the past) as soon as a sweep sees
-# it, so it is not delayed by Alertmanager's resolve_timeout.
+# It decides WHAT is wrong, not when to say it: each section becomes one alert
+# pushed to Alertmanager, which owns grouping, repeat intervals, inhibition,
+# silences and delivery. The one state machine kept here is the flap damper -- an
+# alert must be bad for MONITOR_ALERT_FOR seconds (two sweeps) before it is
+# pushed, because Alertmanager only sees what is pushed at it and cannot tell a
+# flapping check from one that never settled. A recovery is pushed explicitly
+# (endsAt in the past) as soon as a sweep sees it.
 #
-# Nothing here pauses a failing service; a failure fails the dead-man's-switch
-# heartbeat ($MONITOR_PING_URL). A host that is down cannot report itself, and
-# neither can a host whose mail is not leaving -- which is why the heartbeat
-# also fails when the alert push fails or Alertmanager reports failed
-# deliveries. That heartbeat is a plain outbound ping for exactly this reason.
+# A failure fails the dead-man's-switch heartbeat: a host that is down cannot
+# report itself, and neither can one whose mail is not leaving, so the heartbeat
+# also fails when the push fails or Alertmanager reports failed deliveries.
 #
 # Config comes from $DATA_DIR/config/monitoring/monitor.env (the unit's
-# EnvironmentFile); it is read here too so the script also runs by hand. Empty
-# values mean "journal only": no heartbeat. The SMTP credentials live in
-# $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, never here.
+# EnvironmentFile), read here too so a hand run behaves the same. Empty means
+# journal only. The SMTP credentials live in alertmanager.yml, never here.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -76,11 +70,9 @@ MONITOR_ENV="$CONFIG_DIR/monitoring/monitor.env"
 AUDIT_LOG="$AUDIT_DIR/audit.log"
 
 # The unit passes these through EnvironmentFile; reading the file here too makes
-# a hand run behave the same. env_value never sources the file. The order is the
-# same at every key -- process environment, then the file, then the caller's
-# default -- so it lives in one helper instead of being re-expanded at each of
-# the twenty-six keys: the one that forgot the file read would alert differently
-# by hand than from the timer.
+# a hand run behave the same. Order at every key: process environment, then the
+# file, then the caller's default -- one helper, so the key that forgot the file
+# read cannot alert differently by hand than from the timer.
 monitor_var() { # NAME [default]
     local v="${!1:-}"
     [ -n "$v" ] || v=$(env_value "$MONITOR_ENV" "$1")
@@ -89,19 +81,17 @@ monitor_var() { # NAME [default]
 }
 MONITOR_PING_URL=$(monitor_var MONITOR_PING_URL)
 MONITOR_ALERTMANAGER_URL=$(monitor_var MONITOR_ALERTMANAGER_URL)
-# Default on: the container is part of the stack now, so a host that upgrades
-# gets alerting without an env edit. `off` is the explicit opt-out (an empty
-# value cannot mean it: env_value returns nothing for both "absent" and
-# "empty", which is why the sentinel is a word, not a blank).
+# Default on, so a host that upgrades gets alerting without an env edit. `off` is
+# the explicit opt-out: env_value returns nothing for both "absent" and "empty",
+# which is why the sentinel is a word.
 MONITOR_ALERTMANAGER_URL="${MONITOR_ALERTMANAGER_URL:-http://127.0.0.1:9093}"
 MONITOR_ALERT_FOR=$(monitor_var MONITOR_ALERT_FOR)
 MONITOR_GRACE_SYNC=$(monitor_var MONITOR_GRACE_SYNC)
 MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-1}"
 MONITOR_VERIFY_ARGS=$(monitor_var MONITOR_VERIFY_ARGS)
 MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:---deep}"
-# What every alert carries as its instance label: inhibition rules and a future
-# federated setup both key on it, and it is what makes "critical here mutes the
-# warnings here" expressible at all.
+# What every alert carries as its instance label: inhibition rules key on it,
+# which is what makes "critical here mutes the warnings here" expressible.
 ALERT_INSTANCE="$(hostname -s 2>/dev/null || echo stack)"
 # Where the pushed alert set and Alertmanager's delivery counter are remembered
 # between sweeps. Both are host state, not config, so they live in audit/.
@@ -109,10 +99,8 @@ ALERT_STATE="$AUDIT_DIR/alerts.state"
 ALERT_LOCK="$AUDIT_DIR/alerts.lock"
 ALERT_FAILED_FILE="$AUDIT_DIR/alertmanager.failed"
 
-# The host-check thresholds follow the same order as the four above -- the unit's
-# EnvironmentFile when systemd runs it, then this file, then the default inside
-# num_or below -- so `scripts/monitor.sh` by hand alerts on exactly what the
-# timer would.
+# The host-check thresholds follow the same order as the four above, so a hand
+# run alerts on exactly what the timer would.
 MONITOR_DISK_FREE_PCT=$(monitor_var MONITOR_DISK_FREE_PCT)
 MONITOR_INODES_FREE_PCT=$(monitor_var MONITOR_INODES_FREE_PCT)
 MONITOR_IO_UTIL_PCT=$(monitor_var MONITOR_IO_UTIL_PCT)
@@ -125,9 +113,8 @@ MONITOR_RESTART_MAX=$(monitor_var MONITOR_RESTART_MAX)
 MONITOR_METRICS_MAX_AGE_S=$(monitor_var MONITOR_METRICS_MAX_AGE_S)
 MONITOR_LOGS_MAX_AGE_S=$(monitor_var MONITOR_LOGS_MAX_AGE_S)
 MONITOR_FULCRUM_LAG_BLOCKS=$(monitor_var MONITOR_FULCRUM_LAG_BLOCKS)
-# The chain section (below) reads these before the host checks define theirs, so
-# they resolve here too, next to THRESH_FULCRUM_LAG which unblocks that order:
-# bitcoind's peer floor and mempool cap, and monerod's lag behind its target.
+# The chain section reads these before the host checks define theirs, so they
+# resolve here, next to THRESH_FULCRUM_LAG which unblocks that order.
 MONITOR_BTC_MIN_PEERS=$(monitor_var MONITOR_BTC_MIN_PEERS)
 MONITOR_MEMPOOL_MB=$(monitor_var MONITOR_MEMPOOL_MB)
 MONITOR_XMR_LAG_BLOCKS=$(monitor_var MONITOR_XMR_LAG_BLOCKS)
@@ -137,27 +124,23 @@ MONITOR_BOUNCER_MAX_AGE_MIN=$(monitor_var MONITOR_BOUNCER_MAX_AGE_MIN)
 MONITOR_AUDIT_MAX_AGE_MIN=$(monitor_var MONITOR_AUDIT_MAX_AGE_MIN)
 MONITOR_REGISTRATIONS_MAX_AGE_MIN=$(monitor_var MONITOR_REGISTRATIONS_MAX_AGE_MIN)
 
-# Defaults live here, not only in monitor.env, so an older env file (one written
-# before these checks existed) still monitors. The helper and the one threshold
-# the chain section reads live up here rather than with the host checks below.
+# Defaults live here, not only in monitor.env, so an env file written before a
+# check existed still monitors.
 num_or() { # value default
     case "${1:-}" in
         ''|*[!0-9]*) printf '%s' "$2" ;;
         *)           printf '%s' "$1" ;;
     esac
 }
-# How far Fulcrum's index may sit behind bitcoind before it is a failure. A
-# healthy one polls every 5s (--polltime) and is 0-1 block behind, so this is a
-# "stopped following" threshold, not a "slightly late" one: 12 blocks is about
-# two hours at 10 minutes a block.
+# How far Fulcrum's index may sit behind bitcoind. A healthy one polls every 5s
+# and is 0-1 block behind, so this is a "stopped following" threshold: 12 blocks
+# is about two hours at 10 minutes a block.
 THRESH_FULCRUM_LAG=$(num_or "${MONITOR_FULCRUM_LAG_BLOCKS:-}" 12)
-# The peer floor is deliberately 1: any peer count below it (i.e. zero) fails,
-# and during IBD zero peers means the download is stalled, not protected --
-# there is no grace here, unlike the height checks.
+# Deliberately 1: during IBD zero peers means the download is stalled, not
+# protected, so there is no grace here unlike the height checks.
 THRESH_BTC_PEERS=$(num_or "${MONITOR_BTC_MIN_PEERS:-}" 1)
-# A warn, not a failure: bitcoind's default maxmempool is 300 MB and Core
-# grows the mempool well into a fee storm before it rejects; this is the
-# "look at the fees" signal long before anything else notices.
+# A warn, not a failure: Core's default maxmempool is 300 MB and it grows well
+# into a fee storm before rejecting, so this is the "look at the fees" signal.
 THRESH_MEMPOOL_MB=$(num_or "${MONITOR_MEMPOOL_MB:-}" 250)
 # While synchronized, monerod is normally 0-1 blocks from target_height; more
 # means a wedged-but-alive RPC surface serving a stale chain. While not
@@ -214,24 +197,21 @@ fail() { PROBLEMS+=("$*"); PROBLEM_SECTIONS+=("$SECTION"); say "  FAIL  $*"; }
 # ---------------------------------------------------------------------------
 # 0. the alert path: what Alertmanager is told, and what is held back
 # ---------------------------------------------------------------------------
-# One alert per section, never per line. The section is the alert's identity
-# (its label) and the lines are its annotation, so a changing number ("disk 9%
-# free" vs "disk 8% free") is the same alert instead of a new one every sweep.
+# One alert per section, never per line: the section is the alert's identity (its
+# label) and the lines are its annotation, so "disk 9% free" and "disk 8% free"
+# are the same alert instead of a new one every sweep.
 #
-# What stays here instead of moving into Alertmanager is the flap damper.
-# Alertmanager has group_wait/repeat_interval/inhibition/silences, but it only
-# sees what is pushed at it: it cannot tell a check that fails every other sweep
-# from one that has been down for an hour unless the producer holds the state.
-# The state file is that memory -- name, service, severity, first seen, last
-# pushed -- and it is also what makes explicit resolution possible.
+# The flap damper stays here rather than moving into Alertmanager, which only
+# sees what is pushed at it and cannot tell a check that fails every other sweep
+# from one that has been down an hour unless the producer holds the state. The
+# state file is that memory -- name, service, severity, first seen, last pushed --
+# and it is also what makes explicit resolution possible.
 #
-# The state file is a read-modify-write, and the timer only serializes its own
-# runs: a hand run overlapping a sweep could lose the other's first-seen and
-# pushed columns. So emit_alerts takes a lock over exactly that window (the
-# push, seconds) and emit_alerts_locked does the work; a lock that cannot be
-# had in two minutes fails the push instead of clobbering the memory, which the
-# caller turns into a failed heartbeat. flock is util-linux; without it, behave
-# as before rather than refuse to monitor.
+# It is a read-modify-write, and the timer only serializes its own runs: a hand
+# run overlapping a sweep could lose the other's first-seen and pushed columns.
+# emit_alerts takes a lock over exactly that window; a lock that cannot be had in
+# two minutes fails the push instead of clobbering the memory. flock is
+# util-linux: without it, behave as before rather than refuse to monitor.
 emit_alerts() { # take the state lock, then emit_alerts_locked
     [ "$MONITOR_ALERTMANAGER_URL" = off ] && return 0
     if command -v flock >/dev/null 2>&1; then
@@ -281,8 +261,8 @@ emit_alerts_locked() { # push the current set; resolve the sections that cleared
         psince="${p_since[$name]:-$now}"
         psent="${p_sent[$name]:-0}"
         # Hold-down: bad for THRESH_ALERT_FOR before it is ever pushed. Held
-        # alerts are remembered but not posted, so the first-seen time survives
-        # a sweep in which the check recovers and fails again.
+        # alerts are remembered but not posted, so first-seen survives a sweep in
+        # which the check recovers and fails again.
         if [ "$s" != alerting ] && [ "$((now - psince))" -lt "$THRESH_ALERT_FOR" ]; then
             new_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
             retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
@@ -300,10 +280,9 @@ emit_alerts_locked() { # push the current set; resolve the sections that cleared
         retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
     done
 
-    # What cleared. Resolving needs the ALERT's own labels, not the ones it
-    # would have now, so they come back out of the state file. An alert that
-    # never left (held, then cleared) is not "resolved" -- Alertmanager never
-    # heard of it, and mailing a recovery for an alert nobody saw is noise.
+    # What cleared. Resolving needs the ALERT's own labels, not the ones it would
+    # have now, so they come back out of the state file. An alert that never left
+    # (held, then cleared) is not "resolved": Alertmanager never heard of it.
     for name in ${p_since[@]+"${!p_since[@]}"}; do
         [ -n "${current[$name]:-}" ] && continue
         [ "${p_sent[$name]:-0}" -gt 0 ] || continue
@@ -328,10 +307,9 @@ emit_alerts_locked() { # push the current set; resolve the sections that cleared
         return 0
     fi
     # The retry state is written on purpose: the next sweep resumes with the
-    # original first-seen time, so a failed push neither loses a pending
-    # resolution nor restarts the hold-down, and nothing is marked delivered
-    # that Alertmanager never received. The caller fails the heartbeat, which is
-    # the only path that survives a broken alert channel.
+    # original first-seen, so a failed push neither loses a pending resolution nor
+    # restarts the hold-down, and nothing is marked delivered that was not. The
+    # caller fails the heartbeat, the only path that survives a broken channel.
     printf '%s' "$retry_state" > "$ALERT_STATE"
     say "  warn  could not push alerts to Alertmanager at $url (state kept for the next sweep)"
     return 1
@@ -402,11 +380,10 @@ else
     else
         ok "bitcoind at height $blocks"
     fi
-    # Peers: the freshness check above has a blind spot -- a connected node
-    # whose only peers vanished keeps its height while its sync stalls. The
-    # floor defaults to 1, so any 0-peer read fails (the message below names the
-    # floor); this deliberately looks past IBD, where a stalled download is the
-    # same fault as a stalled tip.
+    # Peers: the freshness check has a blind spot -- a node whose only peers
+    # vanished keeps its height while its sync stalls. The floor defaults to 1, so
+    # any 0-peer read fails, and this deliberately looks past IBD, where a stalled
+    # download is the same fault as a stalled tip.
     json_peers=$(bitcoind_cli getpeerinfo 2>/dev/null) || json_peers=""
     n_peers=$(printf '%s' "$json_peers" | jq -r 'if type == "array" then length else empty end' 2>/dev/null) || n_peers=""
     if [ -z "$n_peers" ]; then
@@ -430,10 +407,9 @@ else
 fi
 
 # Fulcrum, the Electrum server: the one daemon whose own port says the least. Its
-# healthcheck is the process table (`grep -qx Fulcrum /proc/1/comm`), it keeps
-# accepting connections and answering server.version while the index is wedged,
-# and the wallet/explorer surface then silently serves stale heights. So ask it
-# the index-backed question -- the tip it reports -- and compare with bitcoind.
+# healthcheck is the process table, it keeps answering server.version while the
+# index is wedged, and the wallet/explorer surface then serves stale heights. So
+# ask the index-backed question -- the tip it reports -- and compare with bitcoind.
 ftip=$(electrum_tip 50001)
 if [ -z "$ftip" ]; then
     if [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
@@ -461,21 +437,15 @@ else
     if printf '%s' "$lninfo" | jq -e 'has("warning_bitcoind_sync")' >/dev/null 2>&1; then
         fail "lightningd reports warning_bitcoind_sync (its view of bitcoind is stale)"
     fi
-    # Peers and channels both come from the node's own view, not from getinfo:
-    # getinfo's num_peers is "the total count of peers, connected or with
-    # channels" (CLN's wording), so it stays >= 1 for a node whose only peer is
-    # offline -- measured live: the peer container was stopped and this still
-    # printed "1 peer(s)". listpeers carries `connected` per peer.
+    # Peers and channels come from the node's own view, not getinfo: getinfo's
+    # num_peers counts peers "connected or with channels", so it stays >= 1 for a
+    # node whose only peer is offline. listpeers carries `connected` per peer.
     #
-    # Channels: listchannels is the gossip table (one entry per direction, for
-    # every channel the node knows) and its `active` is the channel_update's
-    # enabled bit -- an operator setting that stays true while the peer is
-    # offline. It has no connectivity field, so a `grep '"connected": false'`
-    # there matched nothing and the check passed every sweep.
-    # listpeerchannels is the node's own view, with peer_connected and a state;
+    # listchannels is the gossip table: one entry per direction, and its `active`
+    # is the channel_update's enabled bit, an operator setting that stays true
+    # while the peer is offline -- a check against it passes every sweep.
+    # listpeerchannels is the node's own view (peer_connected plus a state), and
     # only operational channels count (an ONCHAIN one is meant to be alone).
-    # jq is a hard requirement of this script (checked at the top), so there is
-    # no no-jq fallback here: a missing jq aborts the sweep before this point.
     lpeers=$(lightning_cli listpeers 2>/dev/null) || lpeers=""
     npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
     if [ -z "$npeers" ]; then
@@ -499,19 +469,15 @@ else
 fi
 
 # Monero heights are read through the node MCP and the wallet MCP (the daemons
-# carry no curl/wget of their own, so this goes through the MCP servers, which
-# mcp_call reaches on npm-network or, for a host-network unit, through
-# netcheck-host). Missing/unparseable
+# carry no curl/wget), so this goes through mcp_call. Missing or unparseable
 # output is a warning only -- verify.sh already fails if the endpoint is down.
 #
-# The node's own probe is the process, not its RPC (deploy/monerod.container:
-# the handler blocks while a --block-sync-size batch holds the chain lock), so
-# "alive but not answering" is owned HERE, and only here: an RPC that returns
-# nothing is either that documented stall or a wedged daemon, and the two are
-# told apart by the grace flag, not by a probe in the unit. Under grace it is a
-# warning; with MONITOR_GRACE_SYNC=0 the node is expected to be current, so it
-# fails (the flap damper still holds it for MONITOR_ALERT_FOR first). The
-# history is scripts/metrics.sh's stack_xmr_rpc_up.
+# The node's own probe is the process, not its RPC (the handler blocks while a
+# --block-sync-size batch holds the chain lock), so "alive but not answering" is
+# owned HERE and only here: an RPC that returns nothing is either that documented
+# stall or a wedged daemon, and the grace flag tells them apart. Under grace it is
+# a warning; with MONITOR_GRACE_SYNC=0 the node is expected to be current, so it
+# fails. The history is metrics.sh's stack_xmr_rpc_up.
 node_h=""
 sync=""
 xmrnode_token=$(env_value "$CONFIG_DIR/monero-node-mcp/token.env" MONERO_MCP_TOKEN)
@@ -529,10 +495,9 @@ if [ -n "$xmrnode_token" ]; then
         fail "monerod is not synchronized (height ${node_h:-?})"
     else
         ok "monerod height ${node_h:-?} (synchronized=${sync:-?})"
-        # Lag behind the network tip (get_info's target_height minus height).
-        # A synchronized node sitting above the threshold is a fault: the RPC
-        # surface (explorer, wallet-RPC) then answers, but serves a stale
-        # chain. While not synchronized, the grace covers it as usual.
+        # Lag behind the network tip. A synchronized node above the threshold is
+        # a fault: the RPC surface answers, but serves a stale chain. While not
+        # synchronized, the grace covers it as usual.
         target_h=$(mcp_result "$node_body" | jq -r '.target_height // empty' 2>/dev/null)
         if [ -n "$node_h" ] && [ -n "$target_h" ] && [ "$target_h" -ge "$node_h" ]; then
             xlag=$(( target_h - node_h ))
@@ -554,10 +519,9 @@ elif [ -n "$xmrwallet_token" ]; then
     w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
     w_h=$(mcp_result "$w_body" | jq -r '.height // empty' 2>/dev/null)
     if [ -z "$w_h" ]; then
-        # No answer at all is not "fine": the wallet RPC is down, wedged or (the
-        # usual cause) rebuilding its cache, and nothing else notices -- the
-        # container can sit "Up (unhealthy)" for hours while every sweep reports
-        # the height as "?".
+        # No answer is not "fine": the wallet RPC is down, wedged or (usually)
+        # rebuilding its cache, and the container can sit "Up (unhealthy)" for
+        # hours while every sweep reports the height as "?".
         fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-btcpay)"
     elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
         soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
@@ -578,9 +542,9 @@ fi
 # ---------------------------------------------------------------------------
 head3 "host"
 
-# Defaults live here, not only in monitor.env, so an older env file (one written
-# before these checks existed) still monitors. num_or is defined with the config
-# above, because the chain section reads a threshold through it first.
+# Defaults live here too, so an env file written before a check existed still
+# monitors. num_or is defined with the config above, because the chain section
+# reads a threshold through it first.
 THRESH_DISK=$(num_or "${MONITOR_DISK_FREE_PCT:-}" 10)
 THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
 THRESH_IO=$(num_or "${MONITOR_IO_UTIL_PCT:-}" 90)
@@ -591,18 +555,15 @@ THRESH_DUMP_H=$(num_or "${MONITOR_DUMP_MAX_AGE_H:-}" 36)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
 THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
 THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
-# The log pipeline: how old the newest entry in the store may be. The shipper
-# runs continuously, so this is a "stopped shipping" alarm, not a threshold --
-# 15 minutes gives a restart of vector or the store room to come back.
+# The log pipeline: how old the newest entry in the store may be. A "stopped
+# shipping" alarm, not a threshold -- 15 minutes gives a restart room to come back.
 THRESH_LOGS_S=$(num_or "${MONITOR_LOGS_MAX_AGE_S:-}" 900)
 # The NIC's errs+drop columns, delta'd between sweeps like the restart counters:
-# a carrier dropping packets is invisible to every chain check (all of them
-# see is a slow sync) and to node-exporter's *counters* until someone looks.
+# a carrier dropping packets looks like a slow sync to every chain check.
 MONITOR_NET_DROP=$(monitor_var MONITOR_NET_DROP)
 THRESH_NET_DROP=$(num_or "${MONITOR_NET_DROP:-}" 100)
-# The hottest hwmon reading at sweep time; a warn, since this box is headless
-# and a one-off spike (a compile, a busy sweep) is noise, while a climbing
-# trend shows in the graphs node-exporter already exports from the same sysfs.
+# The hottest hwmon reading at sweep time; a warn, since a one-off spike is noise
+# and a climbing trend shows in the graphs node-exporter already exports.
 MONITOR_TEMP_MAX=$(monitor_var MONITOR_TEMP_MAX)
 THRESH_TEMP_C=$(num_or "${MONITOR_TEMP_MAX:-}" 85)
 
@@ -630,12 +591,10 @@ for target in "$DATA_DIR" /; do
     fi
 done
 
-# Saturation, not space: a disk that is 100% busy at a few MB/s is why every
-# chain crawls, and it is invisible in df. io_ticks (wall-clock milliseconds
-# during which the device had I/O in flight) is field 10 of
-# /sys/block/<dev>/stat -- note *10*, not the 13 of /proc/diskstats: the sysfs
-# file omits major/minor/name, so it is three columns shorter. Sampling it twice
-# gives percent-busy directly.
+# Saturation, not space: a disk 100% busy at a few MB/s is why every chain crawls,
+# and it is invisible in df. io_ticks is field 10 of /sys/block/<dev>/stat -- note
+# *10*, not the 13 of /proc/diskstats: the sysfs file omits major/minor/name, so
+# it is three columns shorter. Sampling twice gives percent-busy directly.
 block_device() { # path -> the whole-disk name behind it (sda for sda1)
     local src name=""
     src=$(findmnt -no SOURCE --target "$1" 2>/dev/null) || return 1
@@ -662,15 +621,15 @@ else
     soft "could not identify the block device holding $DATA_DIR"
 fi
 
-# A credential rotation is reconciled, not journaled (scripts/rotate.sh): the
-# dangerous residue is not a bookkeeping file but a live credential nothing
-# references. Two of them are checkable from here.
+# A rotation is reconciled, not journaled (rotate.sh): the dangerous residue is
+# not a bookkeeping file but a live credential nothing references. Two are
+# checkable from here.
 #
-# 1. The runes. Exactly the pair lightning-mcp/node.env carries may be live on
-#    the node; anything else this stack minted is a key that survived a run and
-#    is still valid -- two of the five found on this host could also spend. The
-#    comparison (method sets against stack.conf, not remembered ids) lives in
-#    scripts/lib.sh so scripts/rotate.sh's pruner and this check agree.
+# 1. The runes. Exactly the pair lightning-mcp/node.env carries may be live on the
+#    node; anything else this stack minted is a key that survived a run and is
+#    still valid, and one of those could also spend. The comparison (method sets
+#    against stack.conf, not remembered ids) is in lib.sh so rotate.sh's pruner
+#    and this check agree.
 if podman container exists lightningd 2>/dev/null; then
     keep_runes=(
         "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_RUNE)"
@@ -694,11 +653,10 @@ else
     soft "lightningd is not running; skipped the rune check"
 fi
 
-# 2. The bitcoin RPC password: bitcoind's own file and the copy every client
-#    reads must agree. A half-applied bitcoin-rpc rotation leaves them
-#    different, and nothing else notices until bitcoind is restarted into a
-#    config its clients no longer match. Unlike the rune set this is a plain
-#    string comparison -- no credentials change hands.
+# 2. The bitcoin RPC password: bitcoind's own file and the copy every client reads
+#    must agree. A half-applied bitcoin-rpc rotation leaves them different and
+#    nothing notices until bitcoind restarts into a config its clients no longer
+#    match. A plain string comparison -- no credentials change hands.
 btc_conf_pw=$(bitcoind_conf_password)
 btc_env_pw=$(env_value "$CONFIG_DIR/stack/secrets.env" BITCOIN_RPC_PASSWORD)
 if [ -z "$btc_conf_pw" ] || [ -z "$btc_env_pw" ]; then
@@ -709,17 +667,17 @@ else
     fail "bitcoind's bitcoin.conf and config/stack/secrets.env disagree on the RPC password (a bitcoin-rpc rotation half-applied?); re-run: scripts/rotate.sh bitcoin-rpc"
 fi
 
-# A journal from the version that had one is inert now, but it is also the only
-# trace of a rotation that was interrupted before the reconciling design: worth
-# a soft line so an operator can delete it or re-run the target it names.
+# A journal from the version that had one is inert now, but it is the only trace
+# of a rotation interrupted before the reconciling design: a soft line so an
+# operator can delete it or re-run the target it names.
 if compgen -G "$CONFIG_DIR/rotation/*.pending" >/dev/null; then
     soft "stale rotation journal(s) from an older version: $(cd "$CONFIG_DIR/rotation" && printf '%s ' *.pending) -- delete them (nothing reads them)"
 fi
 
 # backup age: a timer that fires is not a repository that has a snapshot, and a
-# fire-and-forget backup is the failure you find out about on restore day.
-# restic_snapshot_summary (scripts/lib.sh) is the same read scripts/rotate.sh
-# makes before it will rotate the repository password.
+# fire-and-forget backup is the failure found on restore day.
+# restic_snapshot_summary is the same read rotate.sh makes before it will rotate
+# the repository password.
 if bsummary=$(restic_snapshot_summary); then
     IFS=$'\t' read -r backup_count backup_epoch <<< "$bsummary"
     if [ -n "$backup_epoch" ]; then
@@ -737,13 +695,11 @@ else
     soft "could not list the restic repository (scripts/backup.sh list)"
 fi
 
-# The pre-backup database dumps: the live database files are in stack.conf's
-# BACKUP_EXCLUDES, so restic copies these dumps instead. A dump job that stops
-# working therefore does not break the backup -- restic keeps copying the last
-# good copy -- which is exactly why this check exists: without it the loss only
-# appears on restore day. Each dump is renamed into place only after it was
-# validated (scripts/db-dump.sh, postgres-dump.container), so its mtime is the
-# time it was taken.
+# The pre-backup dumps: the live database files are in BACKUP_EXCLUDES, so restic
+# copies these dumps instead. A dump job that stops working does not break the
+# backup -- restic keeps copying the last good copy -- which is why this check
+# exists: otherwise the loss appears on restore day. Each dump is renamed into
+# place only after validation, so its mtime is when it was taken.
 dump_missing=""
 dump_stale=""
 dump_oldest=0
@@ -772,10 +728,10 @@ case "${backup_count:-}" in
         fi ;;
 esac
 
-# The restore drill (scripts/backup.sh verify, run weekly by backup-verify.timer):
-# a repository that opens and lists is not a repository that restores. The age is
-# measured from the last SUCCESS, not the last run -- a drill that skips (no disk
-# space, an oversized set) must not look healthy just because the timer fired.
+# The restore drill (backup.sh verify, weekly): a repository that opens and lists
+# is not one that restores. Age is measured from the last SUCCESS, not the last
+# run -- a drill that skips (no disk space, an oversized set) must not look
+# healthy because the timer fired.
 VERIFY_STATUS_FILE="$AUDIT_DIR/backup-verify.status"
 if [ ! -f "$VERIFY_STATUS_FILE" ]; then
     soft "no backup restore drill yet (expected until backup-verify.timer runs)"
@@ -802,13 +758,12 @@ else
     fi
 fi
 
-# The database drill (scripts/backup.sh verify-db, run monthly by
-# backup-verify-db.timer): the weekly drill proves restic mechanics and that the
-# dump files are present, never that all.sql REPLAYS -- and the dump is the only
-# copy of the app tier's data. Its verdict is a file of its own, judged on its
-# own last success: sharing the weekly one would let either drill's result mask
-# the other's age. A skip (no pull, no repository lock, not enough disk) carries
-# ok_epoch forward, so a run of skips fails on age instead of looking green.
+# The database drill (backup.sh verify-db, monthly): the weekly drill proves
+# restic mechanics and that the dump files are present, never that all.sql
+# REPLAYS -- and the dump is the only copy of the app tier's data. Its verdict is
+# its own file, judged on its own last success: sharing the weekly one would let
+# either drill mask the other's age. A skip carries ok_epoch forward, so a run of
+# skips fails on age instead of looking green.
 VERIFY_DB_STATUS_FILE="$AUDIT_DIR/backup-verify-db.status"
 if [ ! -f "$VERIFY_DB_STATUS_FILE" ]; then
     soft "no backup database drill yet (expected until backup-verify-db.timer runs)"
@@ -835,14 +790,13 @@ else
     fi
 fi
 
-# The schedules. Each job's *effect* is already checked above -- snapshot age,
-# drill age, dump freshness, the signup watermark -- so a timer that stopped is
-# proven by the job's output once its threshold passes. What the effect cannot
-# show is a unit that was never installed (there is no output to age), and what
-# it shows only after a threshold is a schedule that has already been dead for
-# hours. A warning, not a failure, so one fact never pages twice: the effect
-# check owns the alarm, this names the cause. (The metrics timer is not here: its
-# own block below checks it, because that is where its staleness is judged.)
+# The schedules. Each job's *effect* is checked above (snapshot age, drill age,
+# dump freshness, the signup watermark), so a stopped timer is proven by the job's
+# output once its threshold passes. What the effect cannot show is a unit that was
+# never installed (no output to age), and it shows a dead schedule only after
+# hours. So this names the cause as a warning, not a failure: the effect check
+# owns the alarm, and one fact never pages twice. (The metrics timer is checked in
+# its own block below, where its staleness is judged.)
 schedule_faults=""
 if command -v systemctl >/dev/null 2>&1; then
     for u in backup.timer backup-verify.timer backup-verify-db.timer \
@@ -855,7 +809,7 @@ if command -v systemctl >/dev/null 2>&1; then
     done
     # db-dump is a oneshot service (backup.container Wants=/After= it), so its
     # "active" state is dead by design once it has run; only its installation is
-    # a question here, and the dump freshness above is the effect check.
+    # a question here, and dump freshness above is the effect check.
     systemctl --user cat db-dump.service >/dev/null 2>&1 \
         || schedule_faults="$schedule_faults db-dump.service(not installed)"
 fi
@@ -891,7 +845,7 @@ fi
 
 # Restart deltas between sweeps: systemd restarts a crashed unit and podman
 # briefly reports it healthy again, so a crash loop can hide inside a green
-# health check. Counted per sweep against the last one.
+# health check.
 RESTART_STATE="$AUDIT_DIR/restarts"
 declare -A prev_restarts=()
 if [ -f "$RESTART_STATE" ]; then
@@ -903,10 +857,9 @@ restart_state=""
 restarted=0
 if command -v systemctl >/dev/null 2>&1; then
     for c in $(podman ps --format '{{.Names}}' 2>/dev/null); do
-        # Container name != unit stem for anything that sets ContainerName
-        # (backup.container is stack-backup under backup.service), and
+        # Container name != unit stem for anything that sets ContainerName, and
         # systemctl answers 0 for a unit that does not exist -- so assuming the
-        # two are equal silently stopped watching that job's restarts.
+        # two are equal silently stops watching that job's restarts.
         u=$(unit_for_container "$c")
         nr=$(systemctl --user show "$u.service" -p NRestarts --value 2>/dev/null || true)
         [ -n "$nr" ] || continue
@@ -922,9 +875,8 @@ if command -v systemctl >/dev/null 2>&1; then
     [ "$restarted" = 0 ] && ok "no unit restarted more than $THRESH_RESTART time(s) since the last sweep"
 fi
 
-# The collector that produces every graph. If it stops, the history stops and
-# nothing else notices -- so the thing that is meant to give visibility is
-# itself checked, from the outside.
+# The collector that produces every graph: if it stops, the history stops and
+# nothing else notices, so it is checked from the outside.
 STACK_PROM="$DATA_DIR/monitoring/textfile/stack.prom"
 if systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
     if [ -f "$STACK_PROM" ]; then
@@ -937,10 +889,9 @@ if systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
     else
         fail "metrics collector has never written $STACK_PROM"
     fi
-    # A fresh file is not a graph: node-exporter runs as uid 65534 (a subuid), so
-    # a textfile left 0600 is a collector that works and a history that stops.
-    # Proven from the outside, by the series the exporter actually serves -- the
-    # same trap README's "textfile is a permissions trap" names.
+    # A fresh file is not a graph: node-exporter runs as uid 65534 (a subuid), so a
+    # textfile left 0600 is a collector that works and a history that stops.
+    # Proven from the outside, by the series the exporter actually serves.
     if ne_metrics=$(net_curl -s -m 10 http://host.containers.internal:9100/metrics 2>/dev/null) \
         && grep -q '^stack_metrics_timestamp' <<< "$ne_metrics"; then
         ok "node-exporter serves the stack's textfile series"
@@ -951,12 +902,11 @@ else
     soft "metrics.timer is not active; the metrics pipeline is not checked"
 fi
 
-# The log pipeline. This is the ONE query the sweep makes against a store, and
-# it is here because the question *is* the pipeline's own liveness: journald ->
-# vector -> victoria-logs is three processes, and the failure that matters is
-# the silent one (every unit "active", nothing arriving). A dead store or an
-# empty window adds a problem; it cannot hide any other check, because every
-# other check reads the daemons and the host directly.
+# The log pipeline: the ONE query the sweep makes against a store, and it is here
+# because the question *is* the pipeline's liveness -- journald -> vector ->
+# victoria-logs is three processes and the failure that matters is the silent one
+# (every unit "active", nothing arriving). A dead store cannot hide any other
+# check, because every other check reads the daemons and the host directly.
 logs_ok=0
 if systemctl --user is-active --quiet vector.service 2>/dev/null; then
     if logs_detail=$("$REPO_DIR/scripts/logs.sh" --health --window "$THRESH_LOGS_S" --quiet 2>&1); then
@@ -969,11 +919,10 @@ else
     soft "vector.service is not active; log shipping is not checked"
 fi
 
-# journald's storage: a reboot must not erase the record the store exists to
-# keep. The config alone is not proof -- a /var/log/journal that tmpfiles has not
-# prepared leaves journald writing to /run while Storage=persistent is in force,
-# which is the state this host was in once (bootstrap.sh judges it by a *.journal
-# file, not by the drop-in).
+# journald's storage: a reboot must not erase the record the store exists to keep.
+# The config alone is not proof -- a /var/log/journal tmpfiles has not prepared
+# leaves journald writing to /run while Storage=persistent is in force, which is
+# why bootstrap.sh judges it by a *.journal file, not by the drop-in.
 if [ -n "$(find /var/log/journal -name '*.journal' -print -quit 2>/dev/null)" ]; then
     ok "journald is persistent ($(du -sh /var/log/journal 2>/dev/null | cut -f1))"
 elif grep -qs '^Storage=persistent' /etc/systemd/journald.conf.d/99-stack.conf; then
@@ -984,11 +933,10 @@ fi
 
 # podman's own events are two lines per exec and one per healthcheck, so pointed
 # at journald they are most of the store's volume. install.sh (user) and
-# bootstrap (root) point them at a bounded file; a replaced containers.conf
-# turns the flood back on, which is silent until someone reads the store's
-# growth. The user side is asked of podman (that is the effective value); the
-# root side is read from the merged file, because asking root's podman needs
-# sudo.
+# bootstrap (root) point them at a bounded file; a replaced containers.conf turns
+# the flood back on, which is silent until someone reads the store's growth. The
+# user side is asked of podman (the effective value); the root side is read from
+# the merged file, because asking root's podman needs sudo.
 podman_events=$(podman info --format '{{.Host.EventLogger}}' 2>/dev/null || true)
 case "$podman_events" in
     journald) soft "podman events go to journald (deploy/install.sh moves them to a bounded file)" ;;
@@ -1001,10 +949,9 @@ else
     soft "root podman events still go to journald (sudo ./bootstrap.sh writes /etc/containers/containers.conf)"
 fi
 
-# The carrier, read the way the restart counters above are: delta'd between
-# sweeps, against a state file. The chain checks have a blind spot here -- a
-# NIC shedding packets still shows as "syncing, just slowly", which is what
-# every IBD looks like anyway.
+# The carrier, read the way the restart counters are: delta'd between sweeps
+# against a state file. The chain checks have a blind spot here -- a NIC shedding
+# packets still shows as "syncing, just slowly", which is what every IBD looks like.
 NET_STATE="$AUDIT_DIR/net"
 nic=""
 if command -v ip >/dev/null 2>&1; then
@@ -1040,8 +987,8 @@ else
     fi
 fi
 
-# The hottest sensor, read off the same sysfs node-exporter graphs -- but the
-# alert reads it here so the graphs being down does not cost the check.
+# The hottest sensor, read off sysfs here rather than from the graphs, so the
+# graphs being down does not cost the check.
 if command -v find >/dev/null 2>&1; then
     temp_max=-999
     temp_chip=""
@@ -1068,12 +1015,10 @@ fi
 
 # The syslog socket. sshd, PAM, sudo and cron all log through /dev/log; if that
 # inode goes stale every one of them gets ECONNREFUSED and the message is simply
-# dropped. This host spent six days in exactly that state (journald restarted
-# 2026-10-31 and never re-bound the path): /var/log/secure stayed at 0 bytes while
-# SSH logins went unrecorded, and nothing else noticed, because the journal kept
-# filling from container stdout. Probe the whole path rather than the file --
-# write a sentinel with logger (the same syslog(3) call sshd makes) and require it
-# back out of the journal.
+# dropped -- /var/log/secure stays empty while SSH logins go unrecorded, and the
+# journal keeps filling from container stdout, so nothing notices. Probe the whole
+# path rather than the file: write a sentinel with logger (the same syslog(3) call
+# sshd makes) and require it back out of the journal.
 if command -v logger >/dev/null 2>&1 && command -v journalctl >/dev/null 2>&1; then
     auth_probe="stack-monitor-authlog-$$-$(date +%s)"
     if auth_err=$(logger -p authpriv.info -- "$auth_probe" 2>&1); then
@@ -1089,11 +1034,10 @@ if command -v logger >/dev/null 2>&1 && command -v journalctl >/dev/null 2>&1; t
 fi
 
 # ---------------------------------------------------------------------------
-# The BoltMesh signup watcher (scripts/registrations.sh,
-# deploy/registrations.timer). Judged off its status file's ok_epoch, not the
-# timer: a unit can read "active" while every run fails. A warning rather than a
-# failure because nothing about the site is broken -- but this is the only thing
-# that mails a registration, so it must fail loudly enough to be noticed.
+# The BoltMesh signup watcher (registrations.sh, registrations.timer). Judged off
+# its status file's ok_epoch, not the timer: a unit can read "active" while every
+# run fails. A warning, because nothing about the site is broken -- but this is
+# the only thing that mails a registration, so it must be noticed.
 # ---------------------------------------------------------------------------
 REG_STATUS_FILE="$AUDIT_DIR/registrations.status"
 if [ ! -f "$REG_STATUS_FILE" ]; then
@@ -1116,25 +1060,21 @@ fi
 # ---------------------------------------------------------------------------
 # 4. the public surface -- every clearweb vhost through nginx-proxy-manager.
 #
-# The status page's monitors used to be the only continuous check of this; they
-# are UI-owned now (deploy/services.toml says why), so the sweep owns it. The
-# probe connects to 127.0.0.1, not to the public address: NPM terminates TLS and
+# The status page's monitors are UI-owned now, so the sweep owns this check. The
+# probe connects to 127.0.0.1, not the public address: NPM terminates TLS and
 # every vhost is a proxy host, so this proves the certificate, the server block
 # and the loopback publish -- not DNS or the router, which --connect-to
 # deliberately bypasses (without NAT reflection a hairpin would fail and the
 # vhost would look down for the wrong reason).
 #
-# The list is the manifest's own [npm.*] declarations (NPM_DOMAINS), so a new
-# public name is checked the moment it is declared. load_manifest is the same
-# call verify.sh makes; a manifest that cannot be read stops the sweep here,
-# which the dead-man's-switch heartbeat reports.
+# The list is the manifest's [npm.*] declarations (NPM_DOMAINS), so a new public
+# name is checked the moment it is declared; a manifest that cannot be read stops
+# the sweep here, which the heartbeat reports.
 #
-# What counts as down: no answer at all (000 -- NPM, the certificate or the
-# socket) or a 5xx (the upstream died). A 4xx is accepted on purpose: the
-# app roots legitimately 404, and the token-gated endpoints 401. Whether a
-# declared host is missing from NPM is not distinguishable from that default
-# vhost's 404 here; the status page (UI) and verify.sh's per-surface probes
-# are what name a missing proxy host.
+# Down is no answer at all (000 -- NPM, certificate or socket) or a 5xx (the
+# upstream died). A 4xx is accepted on purpose: app roots 404 and token-gated
+# endpoints 401. A declared host missing from NPM is indistinguishable from that
+# default vhost's 404 here; verify.sh's per-surface probes name it.
 # ---------------------------------------------------------------------------
 head3 "public surface"
 load_manifest "$REPO_DIR"
@@ -1192,11 +1132,10 @@ fi
 head3 "intrusion detection"
 # The engines are not touched from here: Suricata is a rootful system unit whose
 # logs live in a root-owned directory, and crowdsec is queried through
-# `podman exec`. scripts/ids.sh (deploy/ids.timer, at *:2/5 so it lands between
-# sweeps) does both and leaves a verdict in $DATA_DIR/audit/ids.status. A wedged
-# engine therefore shows up as a stale or failed status, which is the same
-# contract as the backup drill's verdict -- and the reason a dead sensor cannot
-# look healthy just because its unit is "active".
+# `podman exec`. ids.sh (deploy/ids.timer, at *:2/5 so it lands between sweeps)
+# does both and leaves a verdict in audit/ids.status, so a wedged engine shows up
+# as a stale or failed status -- the same contract as the backup drill's, and the
+# reason a dead sensor cannot look healthy because its unit is "active".
 IDS_STATUS_FILE="$AUDIT_DIR/ids.status"
 ids_alerts=0
 ids_decisions=0
@@ -1224,17 +1163,17 @@ else
         fi
     fi
     # Alerts are a report, not a page: Suricata's output needs a human to read it,
-    # and a page per alert would make the sweep's signal unreadable. The counter
-    # goes to VictoriaMetrics so a change in *rate* is visible without one.
+    # and a page per alert makes the sweep's signal unreadable. The counter goes to
+    # VictoriaMetrics so a change in *rate* is visible without one.
     if [ "$ids_alerts" -gt "$THRESH_IDS_ALERTS" ]; then
         soft "$ids_alerts Suricata alert(s) since the last report (threshold $THRESH_IDS_ALERTS) -- read $DATA_DIR/ids/suricata/eve.json"
     fi
 fi
 
-# The audit report: host-level changes that no script in this repo makes
-# (account databases, sudoers, sshd, audit's own config), plus the hash diff over
-# the persistence directories -- which is the part that catches a *new* unit file,
-# because this kernel emits no audit events for directory watches.
+# The audit report: host-level changes no script in this repo makes (account
+# databases, sudoers, sshd, audit's own config), plus the hash diff over the
+# persistence directories -- which catches a *new* unit file, because this kernel
+# emits no audit events for directory watches.
 AUDIT_STATUS_FILE="$AUDIT_DIR/auditd.status"
 audit_fim=0
 if [ -f /etc/systemd/system/stack-audit.timer ]; then
@@ -1261,9 +1200,8 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
                     *)
                         ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported" ;;
                 esac
-                # `aureport` failing means the window is re-read rather than
-                # skipped (audit-report.sh pins its cursor), so this is a report,
-                # not a page: nothing was lost, but the counters are stale.
+                # `aureport` failing means the window is re-read, not skipped, so
+                # this is a report: nothing was lost, but the counters are stale.
                 if [ "$(env_value "$AUDIT_STATUS_FILE" read)" = failed ]; then
                     soft "the audit report could not read the audit log; it is re-examining the same window"
                 fi
@@ -1271,10 +1209,9 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
         fi
     fi
 fi
-# The applier. A separate check from the engines on purpose: detection can be
-# perfectly healthy while nothing enforces (a stopped timer, a wrong key, an nft
-# that refuses the table), and that is the state where the host believes it is
-# protected and is not.
+# The applier. Separate from the engines on purpose: detection can be perfectly
+# healthy while nothing enforces (a stopped timer, a wrong key, an nft that refuses
+# the table) -- the state where the host believes it is protected and is not.
 BOUNCER_STATUS_FILE="$AUDIT_DIR/bouncer.status"
 bouncer_bans=0
 if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
@@ -1283,10 +1220,9 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
     else
         status_verdict "$BOUNCER_STATUS_FILE"
         bouncer_bans=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" banned)" 0)
-        # Decisions enforcement declined because they name an address the
-        # operator holds or their own public egress: a decision that exists and
-        # is deliberately not applied. Worth a line, because "0 banned" next to
-        # a live decision reads like a broken applier.
+        # Decisions enforcement declined because they name an address the operator
+        # holds or their own egress: worth a line, because "0 banned" next to a
+        # live decision reads like a broken applier.
         bouncer_skipped=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" skipped)" 0)
         if [ "$STATUS_RESULT" = fail ]; then
             fail "the bouncer is not applying decisions: ${STATUS_DETAIL:-see $AUDIT_DIR/bouncer.status}"
@@ -1309,13 +1245,13 @@ fi
 # ---------------------------------------------------------------------------
 # 7. the alert path itself
 # ---------------------------------------------------------------------------
-# Checked before the record so a broken path shows up in the same sweep's exit
-# code and audit log. Two failures are distinguishable here and nowhere else:
+# Checked before the record so a broken path shows in the same sweep's exit code
+# and audit log. Two failures are distinguishable here and nowhere else:
 # Alertmanager not answering, and Alertmanager answering but failing to deliver.
-# The second one can never be reported through the channel it broke, which is
-# why it is remembered as a counter and turned into a page on the *next* sweep
-# -- and why the heartbeat is pushed after this block: "all checks pass but
-# nobody can be told" must fail it.
+# The second can never be reported through the channel it broke, so it is
+# remembered as a counter and turned into a page on the *next* sweep -- and the
+# heartbeat is pushed after this block, because "all checks pass but nobody can be
+# told" must fail it.
 head3 "alerting"
 am_ok=1
 if [ "$MONITOR_ALERTMANAGER_URL" = off ]; then
@@ -1341,22 +1277,20 @@ else
     fi
     [ "$am_ok" = 1 ] && ok "Alertmanager answers, and nothing failed to deliver since the last sweep"
     # The config on disk is operator-owned and hand-edited. Alertmanager keeps
-    # running the last good config when it refuses a new one, so an invalid edit
-    # is silent until the next restart -- a warning rather than a page: the
-    # running path still works, and it needs a human edit either way.
+    # running the last good config when it refuses a new one, so an invalid edit is
+    # silent until the next restart -- a warning: the running path still works.
     AM_CFG="$CONFIG_DIR/monitoring/alertmanager/alertmanager.yml"
     if [ ! -f "$AM_CFG" ]; then
         soft "no alertmanager config at $AM_CFG (run deploy/install.sh)"
     else
-        # amtool lives in the image, so only ask when the health probe above
-        # answered -- otherwise a stopped container reads as a broken config,
-        # which is already reported.
+        # amtool lives in the image, so only ask when the health probe answered --
+        # otherwise a stopped container reads as a broken config, already reported.
         if [ "$am_code" = 200 ] \
             && ! am_chk=$(podman exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>&1); then
             soft "alertmanager config is invalid (${am_chk##*$'\n'}); it runs the last good one until that is fixed"
         fi
         # The seeded config ships with the receiver's email block commented out:
-        # until it is filled in, the path accepts alerts and delivers nothing. A
+        # until it is filled in the path accepts alerts and delivers nothing. A
         # fresh host is not broken, it is just not paging yet.
         if ! grep -qE '^[[:space:]]*email_configs:' "$AM_CFG"; then
             soft "alerting is inert: no email_configs in $AM_CFG (fill in SMTP, then scripts/monitor.sh --test)"
@@ -1397,8 +1331,8 @@ heartbeat() { # ok|fail [body]
 }
 
 # The push, then the heartbeat's verdict. Order is load-bearing: a host whose
-# checks all pass but whose alerts cannot leave must still fail the heartbeat,
-# because the email about that failure would take the same broken path.
+# checks pass but whose alerts cannot leave must fail the heartbeat, because the
+# email about that failure would take the same broken path.
 alert_push_ok=1
 emit_alerts || alert_push_ok=0
 
@@ -1410,10 +1344,9 @@ else
     heartbeat ok
 fi
 
-# The other half of node-exporter's textfile: the numbers this sweep has to
-# compute anyway (backup age, the verifier's failures, spend trips), so they get
-# history without scripts/metrics.sh paying for them again. prom_write owns the
-# 0755/0644 permissions the exporter's uid needs.
+# The other half of node-exporter's textfile: the numbers this sweep computes
+# anyway (backup age, verifier failures, spend trips), so they get history without
+# metrics.sh paying for them again. prom_write owns the exporter's uid permissions.
 {
     printf '# written by scripts/monitor.sh (deploy/monitor.timer)\n'
     printf 'stack_sweep_timestamp %s\n' "$(date +%s)"
