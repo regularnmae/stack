@@ -96,95 +96,25 @@ unset _kuma_host
 # eight hours. Nothing needs a restart -- podman reads it per invocation, unlike
 # a rendered unit.
 #
-# The merge is table-aware: a second [engine] is a TOML duplicate-table error and
-# podman then refuses to run anything for that user, so the candidate is
-# validated with podman itself before it replaces the real file.
-#
-# Defined above the root tier because that pass runs before the rest of this file
-# is read, so a helper defined below it is "command not found" there.
-podman_events_write() { # conf-file
-    local conf="$1" src tmp val header=0
-    command -v podman >/dev/null 2>&1 || return 0
-    if [ -f "$conf" ]; then
-        src="$conf"
-    else
-        # A missing file is not the same as an empty one: only this case gets the
-        # header comment, so an operator's own file is never annotated.
-        src=/dev/null
-        header=1
-    fi
-    mkdir -p "$(dirname "$conf")"
+# A drop-in, not an edit of containers.conf: podman merges
+# containers.conf.d/*.conf after the main file, so an operator's own file is
+# never rewritten and the setting is one declarative file. A later-sorting
+# drop-in overrides it -- which is how an operator can put events back.
+PODMAN_EVENTS_CONF="$DEPLOY_DIR/podman/99-stack.conf"
 
-    tmp=$(mktemp) || return 1
-    awk -v header="$header" '
-        function flush(   i, last, line) {
-            # Trailing blank lines inside the table are held back, so an added
-            # key lands at the end of the table rather than after a gap.
-            last = 0
-            for (i = 1; i <= n; i++) if (body[i] ~ /[^[:space:]]/) last = i
-            print hdr
-            for (i = 1; i <= last; i++) {
-                line = body[i]
-                if (line ~ /^[[:space:]]*events_logger[[:space:]]*=/) {
-                    print "events_logger = \"file\""; saw1 = 1; continue
-                }
-                if (line ~ /^[[:space:]]*events_logfile_max_size[[:space:]]*=/) {
-                    print "events_logfile_max_size = \"10m\""; saw2 = 1; continue
-                }
-                print line
-            }
-            if (!saw1) print "events_logger = \"file\""
-            if (!saw2) print "events_logfile_max_size = \"10m\""
-            n = 0; saw1 = 0; saw2 = 0
-        }
-        BEGIN {
-            if (header) {
-                print "# Podman configuration written by deploy/install.sh."
-                print "# events_logger: journald is where podman events used to pile"
-                print "# up, two lines per exec and one per healthcheck, and it is the log"
-                print "# store behind it that paid for them."
-            }
-        }
-        /^[[:space:]]*\[/ {
-            if (in_engine) { flush(); in_engine = 0 }
-            if ($0 ~ /^[[:space:]]*\[[[:space:]]*engine[[:space:]]*\][[:space:]]*$/) {
-                in_engine = 1; seen = 1; hdr = $0
-            } else print
-            next
-        }
-        in_engine { body[++n] = $0; next }
-        { print }
-        END {
-            if (in_engine) flush()
-            else if (!seen) {
-                print ""
-                print "[engine]"
-                print "events_logger = \"file\""
-                print "events_logfile_max_size = \"10m\""
-            }
-        }
-    ' "$src" > "$tmp" || { rm -f "$tmp"; warn "could not render $conf"; return 0; }
-
-    if cmp -s "$tmp" "$conf" 2>/dev/null; then
-        rm -f "$tmp"
-        return 0
-    fi
-    if ! val=$(CONTAINERS_CONF="$tmp" podman info --format '{{.Host.EventLogger}}' 2>/dev/null) \
-        || [ "$val" != file ]; then
-        rm -f "$tmp"
-        warn "podman would not accept the event-logger setting (${val:-no answer}); leaving $conf alone -- fix or remove it by hand"
-        return 0
-    fi
-    install -m 644 "$tmp" "$conf"
-    rm -f "$tmp"
-    log "podman events -> bounded file, not journald ($conf)"
+podman_events_dropin() { # conf-dir
+    install -d -m 755 "$1"
+    install -m 644 "$PODMAN_EVENTS_CONF" "$1/99-stack.conf"
 }
 
-# The login user's podman -- every script and timer here, plus the shell an
-# operator pokes a container from. Root's is written by install_root_tier. A
-# no-op when the file is already right.
-podman_events_conf() {
-    podman_events_write "$PODMAN_CONF_DIR/containers.conf"
+# The effective value rather than the file, because a later-sorting drop-in of
+# the operator's own is exactly the case worth reporting.
+podman_events_check() {
+    local val
+    command -v podman >/dev/null 2>&1 || return 0
+    val=$(podman info --format '{{.Host.EventLogger}}' 2>/dev/null || true)
+    [ -z "$val" ] || [ "$val" = file ] \
+        || warn "podman's event logger is $val, not file -- a later containers.conf.d drop-in overrides $PODMAN_EVENTS_CONF"
 }
 
 ROOT_UNIT_DIR=/etc/containers/systemd
@@ -210,9 +140,9 @@ install_root_tier() {
 
     # Root's podman config, so the sensor's own healthchecks stop writing a
     # `health_status` event every 30s. They are podman children of the *system*
-    # manager, so the user-side file cannot reach them; this is the same setting
-    # in root's chain, and /etc is where a system manager's podman reads it.
-    podman_events_write /etc/containers/containers.conf
+    # manager, so the user-side drop-in cannot reach them; /etc is where a system
+    # manager's podman reads its chain.
+    podman_events_dropin /etc/containers/containers.conf.d
 
     # The configuration the container reads. Root-owned: a rootful container
     # consuming a file the stack user can edit is a privilege boundary.
@@ -1618,9 +1548,10 @@ render_unit_backedup() { # src target
 }
 
 mkdir -p "$QUADLET_DIR"
-# Before the units: podman's event log is a host config, rendered once here
-# rather than flagged at every exec call site (see podman_events_conf).
-podman_events_conf
+# Before the units: podman's event log is a host config, installed once here
+# rather than flagged at every exec call site (deploy/podman/99-stack.conf).
+podman_events_dropin "$PODMAN_CONF_DIR/containers.conf.d"
+podman_events_check
 for u in "${UNITS[@]}"; do
     # An .in is a template; the rendered target drops the suffix.
     render_unit_backedup "$DEPLOY_DIR/$u" "$QUADLET_DIR/${u%.in}"

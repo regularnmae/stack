@@ -45,13 +45,21 @@ event-logger setting. The operator narrative is README's "Logs and history".
   default (`/usr/share/containers/containers.conf`; there is no environment
   variable for it): an exec is **two** lines (`exec`, `exec_died`, each
   carrying the image's label dump) and podman's generated healthcheck units log
-  a `health_status` line on *every* check. Measured before `deploy/install.sh`
-  set it: 4,156 of 9,315 journal lines an hour (1.8 of 2.4 MB) -- 2,357
+  a `health_status` line on *every* check. Measured before the stack set it:
+  4,156 of 9,315 journal lines an hour (1.8 of 2.4 MB) -- 2,357
   `health_status`, 1,352 exec -- all shipped into the store, i.e. the noise
-  `scripts/logs.sh` was supposed to answer past. `podman_events_conf` writes
-  `[engine] events_logger = "file"` plus `events_logfile_max_size = "10m"` into
-  `~/.config/containers/containers.conf`, and `scripts/monitor.sh` warns if
-  `podman info --format {{.Host.EventLogger}}` reports `journald` again. Four
+  `scripts/logs.sh` was supposed to answer past.
+  `deploy/podman/99-stack.conf` is that setting: `[engine] events_logger =
+  "file"` plus `events_logfile_max_size = "10m"`, installed by `deploy/install.sh`
+  into `~/.config/containers/containers.conf.d/` and, by its root tier, into
+  `/etc/containers/containers.conf.d/`. It is a **drop-in** rather than an edit of
+  `containers.conf` because podman merges `containers.conf.d/*.conf` after the
+  main file: an operator's own file is never rewritten, a second `[engine]` table
+  in one file can no longer break every podman command for that user, and a
+  later-sorting drop-in overrides ours deliberately rather than by accident.
+  `scripts/monitor.sh` asks podman for the effective value on the user side (so a
+  later-sorting drop-in shows up) and reads the files under `/etc` for the root
+  side, since asking root's podman would need sudo. Four
   reasons it lives there rather than at the 64 `podman exec` call sites: a per-call
   `--events-backend=none` cannot reach the healthcheck units at all; no
   discipline survives the 65th call site (that is how the first one-place
@@ -59,22 +67,16 @@ event-logger setting. The operator narrative is README's "Logs and history".
   (`$XDG_RUNTIME_DIR/libpod/tmp/events`, tmpfs, ~8 h at this rate, gone at
   reboot) where `none` would throw the diagnostic away; and **nothing needs a
   restart** -- podman reads the file per invocation, unlike a rendered unit,
-  where a re-render alone changes nothing. Two traps: the merge must be
-  **table-aware**, because a second `[engine]` table is a TOML duplicate-table
-  error and podman then refuses to run *anything* for that user, so the candidate
-  is validated with `CONTAINERS_CONF=<candidate> podman info` before it replaces
-  the real file (a file that fails is left alone); and the price is that the
+  where a re-render alone changes nothing. The price is that the
   complete per-check health series leaves the journal, so a flap older than that
   ring is answered by `monitor.sh`'s restart delta and the unit's state, not by
-  history. There are **two** copies of the setting, because root's podman is a
-  different config chain: the login user's file (written by the user-side
-  install) and `/etc/containers/containers.conf` (written by
+  history. There are **two** copies of the same file, because root's podman is a
+  different config chain: the login user's (installed by the user-side install)
+  and `/etc/containers/containers.conf.d/99-stack.conf` (installed by
   `install.sh --root`, i.e. `sudo ./bootstrap.sh`), which is what the
   `deploy/root/` sensor's own healthchecks read -- they are podman children of
-  the *system* manager, so the user file cannot reach them, and they were the
-  whole remainder of the flood (~120 lines an hour). `scripts/monitor.sh` checks
-  both: the user side through `podman info`, the root side by reading the merged
-  file, since asking root's podman would need sudo.
+  the *system* manager, so the user drop-in cannot reach them, and they were the
+  whole remainder of the flood (~120 lines an hour).
   **`podman logs -f` stops working, by podman's own rule** (`using --follow with
   the journald --log-driver but without the journald --events-backend (file) is
   not supported`): follow reads the events stream to learn the container died,

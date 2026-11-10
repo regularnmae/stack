@@ -431,9 +431,10 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   container ("cannot set multiple networks without bridge network mode") and
   NPM's admin API is a `127.0.0.1` bind that only a host-netns client can reach.
   `--events-backend=none` keeps the exec session
-  (`exec`/`exec_died`) out of the journal too, as belt to
-  `deploy/install.sh`'s braces: the mechanism itself is `events_logger` in the
-  user's `~/.config/containers/containers.conf` (the bullet above), because a flag at
+  (`exec`/`exec_died`) out of the journal too, as belt to the drop-in's braces:
+  the mechanism itself is `events_logger` in `deploy/podman/99-stack.conf`, which
+  installs as `~/.config/containers/containers.conf.d/99-stack.conf` (the bullet
+  above), because a flag at
   the call site cannot reach podman's own healthcheck units. `netcheck_ready`
   fails with the one-line fix when either is stopped; `deploy.sh` starts them
   first in `start_infra`, after `refresh_image_unit` because install.sh rebuilds

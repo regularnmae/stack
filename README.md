@@ -87,7 +87,9 @@ cannot do that on a rootless build: podman's `rootlessport` forwards from inside
 the rootless namespace, so NPM logged its own container IP (`10.89.0.5`) for
 every client. Podman ≥ 6.0 can forward with `pasta` instead
 (`rootless_port_forwarder="pasta"` under `[network]` in
-`~/.config/containers/containers.conf`), which does preserve the source address,
+`~/.config/containers/containers.conf`, or in a drop-in under
+`~/.config/containers/containers.conf.d/` — where the stack's own `99-stack.conf`
+lives), which does preserve the source address,
 but Rocky 10's podman 5.8 has no such key.
 
 Because NPM is no longer a peer on `npm-network` (`10.89.0.0/24`, pinned in

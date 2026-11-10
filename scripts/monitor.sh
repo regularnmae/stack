@@ -933,20 +933,22 @@ fi
 
 # podman's own events are two lines per exec and one per healthcheck, so pointed
 # at journald they are most of the store's volume. install.sh (user) and
-# bootstrap (root) point them at a bounded file; a replaced containers.conf turns
-# the flood back on, which is silent until someone reads the store's growth. The
-# user side is asked of podman (the effective value); the root side is read from
-# the merged file, because asking root's podman needs sudo.
+# bootstrap (root) install deploy/podman/99-stack.conf into podman's config
+# chain; a replaced or overridden drop-in turns the flood back on, which is
+# silent until someone reads the store's growth. The user side is asked of podman
+# (the effective value) -- which also catches a later-sorting drop-in -- while the
+# root side is read from the files, because asking root's podman needs sudo.
 podman_events=$(podman info --format '{{.Host.EventLogger}}' 2>/dev/null || true)
 case "$podman_events" in
     journald) soft "podman events go to journald (deploy/install.sh moves them to a bounded file)" ;;
     "")       soft "could not read podman's event logger (podman info failed)" ;;
     *)        ok "podman events -> $podman_events, not the journal" ;;
 esac
-if grep -Eq '^[[:space:]]*events_logger[[:space:]]*=[[:space:]]*"file"' /etc/containers/containers.conf 2>/dev/null; then
-    ok "root podman events -> file (/etc/containers/containers.conf)"
+if grep -Eqs '^[[:space:]]*events_logger[[:space:]]*=[[:space:]]*"file"' \
+    /etc/containers/containers.conf /etc/containers/containers.conf.d/*.conf; then
+    ok "root podman events -> file (/etc/containers/containers.conf.d/99-stack.conf)"
 else
-    soft "root podman events still go to journald (sudo ./bootstrap.sh writes /etc/containers/containers.conf)"
+    soft "root podman events still go to journald (sudo ./bootstrap.sh installs /etc/containers/containers.conf.d/99-stack.conf)"
 fi
 
 # The carrier, read the way the restart counters are: delta'd between sweeps
