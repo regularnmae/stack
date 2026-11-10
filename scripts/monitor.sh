@@ -637,15 +637,21 @@ done
 # and it is invisible in df. io_ticks is field 10 of /sys/block/<dev>/stat -- note
 # *10*, not the 13 of /proc/diskstats: the sysfs file omits major/minor/name, so
 # it is three columns shorter. Sampling twice gives percent-busy directly.
-block_device() { # path -> the whole-disk name behind it (sda for sda1)
-    local src name=""
+# The device whose own /sys/block/<name>/stat is the I/O: sda for sda1, but
+# dm-2 for /dev/mapper/vg-lv and md0 for an array. A partition has no
+# /sys/block entry, while an LVM/dm/md/crypt device does even though its
+# mapper name is not what the kernel calls it, so walk the inverse chain and
+# take the first name sysfs knows.
+block_device() { # path -> the device that owns its I/O
+    local src dev
     src=$(findmnt -no SOURCE --target "$1" 2>/dev/null) || return 1
-    name=$(basename "$src")
-    case "$name" in
-        *p[0-9]*) name="${name%p[0-9]*}" ;;   # nvme0n1p1, mmcblk0p1
-        *[0-9])   name="${name%[0-9]*}" ;;    # sda1, vda2
-    esac
-    [ -n "$name" ] && printf '%s' "$name"
+    src=${src%%\[*}                     # btrfs subvolume: /dev/sda1[/@data]
+    while read -r dev; do
+        [ -r "/sys/block/$dev/stat" ] || continue
+        printf '%s' "$dev"
+        return 0
+    done < <(lsblk -sno KNAME -- "$src" 2>/dev/null)
+    return 1
 }
 dev=$(block_device "$DATA_DIR" || true)
 if [ -n "${dev:-}" ] && [ -r "/sys/block/$dev/stat" ]; then
