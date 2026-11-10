@@ -10,8 +10,8 @@
 # the units through deploy/install.sh, restarts the dependents and verifies):
 #
 #   bitcoin-rpc    bitcoind's RPC password (and --user, its RPC user). Touches
-#                  bitcoin.conf, stack/secrets.env, the rendered lightningd and
-#                  fulcrum units, bitcoin-node-mcp/upstream.env and
+#                  bitcoin.conf, stack/secrets.env, the rendered lightningd,
+#                  fulcrum and nbxplorer units, bitcoin-node-mcp/upstream.env and
 #                  btc-explorer/btc-explorer.env.
 #   tor-control    Tor's control password, which lightningd uses for its
 #                  statictor onion service. Touches torrc's hash and the
@@ -75,8 +75,8 @@ STARTED=0
 # The applied-unit baseline (scripts/lib.sh's units_baseline) read before the
 # target edits anything, the units this rotation restarted or proved already
 # current, and whether it re-rendered at all. Only bitcoin-rpc and tor-control
-# re-render (the secrets they rotate are baked into a unit's Exec=), and only
-# those advance the baseline -- see complete().
+# re-render (the secrets they rotate are baked into a unit's Exec= or
+# Environment=), and only those advance the baseline -- see complete().
 UNITS_BEFORE=""
 APPLIED_UNITS=" "
 RERENDERED=0
@@ -95,6 +95,8 @@ RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
 BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
 LN_WAIT="${LN_WAIT:-300}"
 APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"
+# NBXplorer's health start period is 2m and configure.sh waits the same 300s.
+NBXPLORER_WAIT="${NBXPLORER_WAIT:-300}"
 
 # ---------------------------------------------------------------------------
 # arguments
@@ -121,7 +123,8 @@ if [ "${LIST:-0}" = 1 ]; then
 targets (each one writes its source of truth, re-renders, restarts, verifies):
 
   bitcoin-rpc    bitcoind RPC password/user -> bitcoin.conf, secrets.env,
-                 lightningd + fulcrum units, bitcoin-node-mcp, btc-explorer
+                 lightningd + fulcrum + nbxplorer units, bitcoin-node-mcp,
+                 btc-explorer
   tor-control    Tor control password -> torrc hash, secrets.env, lightningd
                  (the onion address is unchanged)
   runes          CLN runes -> lightning-mcp/node.env;
@@ -345,8 +348,8 @@ restart_if_deployed() { # container...
 # EnvironmentFile= key. It is only ever an optimisation -- anything that cannot
 # be proven from the running process (a secret a daemon reads out of a config
 # file, or one it consumed at initdb) is restarted.
-restart_if_stale() { # container argv|env value
-    local c="$1" via="$2" val="$3"
+restart_if_stale() { # container argv|env value [timeout]
+    local c="$1" via="$2" val="$3" t="${4:-$APP_HEALTH_WAIT}"
     if ! podman container exists "$c" 2>/dev/null; then
         say "$c is not deployed; skipping"
         return 0
@@ -365,7 +368,7 @@ restart_if_stale() { # container argv|env value
                   fi ;;
         esac
     fi
-    restart_unit_and_wait "$c"
+    restart_unit_and_wait "$c" "$t"
 }
 
 # --- audit trail ------------------------------------------------------------
@@ -453,7 +456,10 @@ mcp_ok() { # container token tool args
 # leave a half-applied credential behind.
 preflight_target() { # target
     case "$1" in
-        bitcoin-rpc) require_healthy bitcoind ;;
+        # The unit list is a code invariant, not host state, and a run that
+        # missed one would end in a refusal to advance units.applied; refuse
+        # before the password is generated so the failure names the fix.
+        bitcoin-rpc) check_bitcoin_rpc_units; require_healthy bitcoind ;;
         tor-control) require_healthy tor lightningd ;;
         runes)       require_healthy lightningd ;;
         token:*)     require_healthy "${1#token:}" ;;
@@ -498,8 +504,45 @@ verify_bitcoin_rpc() {
     fi
 }
 
+# Every unit the credential reaches through a re-render: install.sh bakes it into
+# each one, so a rotation that misses a unit leaves a changed definition the run
+# never applied -- complete() then refuses to advance the baseline and verify.sh
+# reports drift until someone runs ./deploy.sh. The list is the source for both
+# the check below and the restarts in apply_bitcoin_rpc(), so the two cannot
+# disagree.
+BITCOIN_RPC_UNITS="nbxplorer lightningd fulcrum bitcoin-node-mcp btc-explorer"
+
+# The other side of the same contract: a NEW unit that embeds the placeholder and
+# is absent from the list above. Refused before anything is written, because the
+# repair is a code change (a line in BITCOIN_RPC_UNITS and a recipe below), not
+# something a re-run could converge on by itself.
+check_bitcoin_rpc_units() {
+    local f u missing=""
+    for f in "$REPO_DIR"/deploy/*.container "$REPO_DIR"/deploy/*.container.in; do
+        grep -qE '@BITCOIN_RPC_(USER|PASSWORD)@' "$f" 2>/dev/null || continue
+        u=$(basename "$f"); u=${u%.in}; u=${u%.container}
+        case " $BITCOIN_RPC_UNITS " in *" $u "*) ;; *) missing="$missing $u" ;; esac
+    done
+    [ -z "$missing" ] || die "deploy/ embeds the RPC credential in$missing, which BITCOIN_RPC_UNITS does not list; add both the unit and its restart recipe, or the re-render stays unapplied and verify.sh reports drift"
+}
+
+# How the new credential reaches each running process: argv for an Exec=
+# argument, env for an Environment= key, proven on PID 1 so a unit already
+# carrying it is not bounced twice. NBXplorer goes first because it depends only
+# on bitcoind and BTCPay is red until it answers again.
+restart_rpc_dependent() { # unit password
+    case "$1" in
+        nbxplorer)        restart_if_stale nbxplorer env "NBXPLORER_BTCRPCPASSWORD=$2" "$NBXPLORER_WAIT" ;;
+        lightningd)       restart_if_stale lightningd argv "--bitcoin-rpcpassword=$2" ;;
+        fulcrum)          restart_if_stale fulcrum argv "$2" ;;
+        bitcoin-node-mcp) restart_if_stale bitcoin-node-mcp env "BITCOIN_RPC_PASSWORD=$2" ;;
+        btc-explorer)     restart_if_stale btc-explorer env "BTCEXP_BITCOIND_PASS=$2" ;;
+        *) die "no restart recipe for $1; BITCOIN_RPC_UNITS and this case must agree" ;;
+    esac
+}
+
 apply_bitcoin_rpc() {
-    local pass user rpcuser_old=""
+    local pass user rpcuser_old="" u
     pass=$(gen)
     if [ "$ROTATE_USER" = 1 ]; then
         user="u$(rand_hex | cut -c1-12)"
@@ -529,10 +572,9 @@ apply_bitcoin_rpc() {
     # restarts: no probe can prove what the running process will read next.
     restart_unit_and_wait bitcoind "$BITCOIND_WAIT"
 
-    restart_if_stale lightningd argv "--bitcoin-rpcpassword=$pass"
-    restart_if_stale fulcrum argv "$pass"
-    restart_if_stale bitcoin-node-mcp env "BITCOIN_RPC_PASSWORD=$pass"
-    restart_if_stale btc-explorer env "BTCEXP_BITCOIND_PASS=$pass"
+    for u in $BITCOIN_RPC_UNITS; do
+        restart_rpc_dependent "$u" "$pass"
+    done
 
     verify_bitcoin_rpc
     complete

@@ -39,6 +39,12 @@
 #          knobs are not symmetric -- StopTimeout is integer seconds, and
 #          `StopTimeout` in [Service] is an unknown systemd key, not a typo that
 #          works.
+#   HC011  every container unit that is not Type=oneshot sets Restart=always.
+#          HealthOnFailure=kill only stops the container, so with no restart
+#          policy a dead unit is reported active-but-unhealthy (or gone) until a
+#          human starts it -- crowdsec ran that way with detection off. systemd
+#          owns the restart, which is also what monitor.sh's NRestarts delta
+#          counts.
 #
 # A rule can be waived for ONE unit with an inline comment carrying the code and
 # the reason, so the exemption lives beside the thing it is about:
@@ -139,6 +145,19 @@ for f in "${unit_files[@]}"; do
     hcmd=$(kv "$f" HealthCmd)
     oneshot=$(kv "$f" Type)
     onfail=$(kv "$f" HealthOnFailure)
+
+    # --- the restart policy is systemd's ------------------------------------
+    # Above the branches below, which `continue`: a healthless unit (victoria-logs,
+    # the netchecks) is long-lived all the same, and podman's `restart` is not an
+    # answer here (HC008).
+    if [ "$oneshot" != "oneshot" ]; then
+        restart=$(kv "$f" Restart)
+        if [ "$restart" != "always" ]; then
+            w=$(waiver_for "$f" HC011)
+            if [ -n "$w" ]; then waived "$name" HC011 "Restart=${restart:-unset}" "$w"
+            else bad "$name" HC011 "Restart=${restart:-unset} (always: systemd owns the restart)"; fi
+        fi
+    fi
 
     # --- a durable unit is stopped, not killed ----------------------------
     # Checked before the health/oneshot branches: a durable unit is never

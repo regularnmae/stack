@@ -104,6 +104,10 @@ HealthOnFailure=kill
 HealthStartPeriod=180s
 
 [Service]
+# HealthOnFailure=kill stops the container, not the unit: without this a three
+# failed LAPI probes are terminal and detection stays dead until a human starts
+# it. systemd owns the restart, so monitor.sh's NRestarts delta sees it.
+Restart=always
 # Same reason as the health start period.
 TimeoutStartSec=300
 

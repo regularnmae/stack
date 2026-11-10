@@ -112,11 +112,15 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
 - **`scripts/rotate.sh` is the third writer of `units.applied`.** A rotation
   re-renders through `install.sh` (only `bitcoin-rpc` and `tor-control` bake a
-  secret into a unit's `Exec=`), restarts its dependents and then advances the
-  baseline — otherwise the next deploy would bounce the units it just restarted.
-  Because `install.sh` re-renders *every* unit, `complete()` commits only when
-  the changed definitions are ones the rotation restarted or proved already
-  current; anything else stays unapplied for the next deploy, with a warning.
+  secret into a unit's `Exec=` or `Environment=`), restarts its dependents and
+  then advances the baseline — otherwise the next deploy would bounce the units
+  it just restarted. Because `install.sh` re-renders *every* unit, `complete()`
+  commits only when the changed definitions are ones the rotation restarted or
+  proved already current; anything else stays unapplied for the next deploy,
+  with a warning. That is why the units baking the RPC credential live in one
+  list, `BITCOIN_RPC_UNITS`: it drives the restarts, and `apply_bitcoin_rpc`
+  refuses to run when a unit in `deploy/` embeds the placeholder without being
+  in it (`nbxplorer` was re-rendered and never restarted until it joined).
 
 - **`<unit>.bak` is the *previous* render, and only when the render changes
   something.** It used to be written only if it did not already exist, so it
@@ -166,8 +170,10 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   **`HealthOnFailure=kill`, never `restart`** — podman's own restart leaves the
   unit active, so `NRestarts` does not move and `monitor.sh`'s restart delta
   cannot see a container flapping every 30 s; systemd's `Restart=always` is the
-  process that should act. The two exceptions are `monero-wallet-btcpay` (red for a
-  whole refresh) and `boltmesh-backend`, whose health is **deep** (postgres +
+  process that should act, and HC011 requires it on every non-oneshot unit
+  (`crowdsec` shipped without it, so a kill was terminal). The two exceptions
+  are `monero-wallet-btcpay` (red for a whole refresh) and `boltmesh-backend`,
+  whose health is **deep** (postgres +
   valkey): a database blip must not restart-loop the app tier, and `verify.sh`
   pages on the same endpoint. **`HealthCmd` proves the process/serving path, not
   the data path** — a check that is legitimately red while recovering (IBD,
@@ -175,7 +181,11 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   never in a unit; that is why `fulcrum`'s and `monerod`'s probes are the
   process table, `tor`'s is a port and `bitcoind`'s is a bare TCP connect to its
   RPC listener (`nc -z`, no request), and replacing any of them with a data
-  probe is a regression, not a fix. `bitcoind` is the second worked example, and
+  probe is a regression, not a fix. A liveness *file* is the one data-shaped
+  probe that belongs in a unit (`boltmesh-worker` serves no port, so its own
+  cron refreshes one), and it must assert a **match**: bare `find -mmin -3`
+  exits 0 when nothing matched, so a stopped cron would look healthy — hence
+  `-print -quit | grep -q .`. `bitcoind` is the second worked example, and
   the sharper one: its probe *was* `bitcoin-cli getblockchaininfo`, so it
   entered the RPC work queue that Fulcrum's first index, the explorers and
   nbxplorer were already filling — the check itself answered "error: Server

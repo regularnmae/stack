@@ -1540,7 +1540,7 @@ dependency order:
 
 | Target | Rotates | Restarts |
 | --- | --- | --- |
-| `bitcoin-rpc` | `bitcoind`'s RPC password (and `--user`) | bitcoind, then fulcrum, lightningd, bitcoin-node-mcp, btc-explorer |
+| `bitcoin-rpc` | `bitcoind`'s RPC password (and `--user`) | bitcoind, then nbxplorer, fulcrum, lightningd, bitcoin-node-mcp, btc-explorer |
 | `tor-control` | Tor's control password (lightningd's statictor) | tor, then lightningd |
 | `runes` | the CLN runes: lightning-mcp's read/spend pair | lightning-mcp |
 | `token:<server>` | one MCP server's bearer token (`--spend` for a money server's spend token) | that server |

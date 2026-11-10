@@ -22,10 +22,11 @@ EnvironmentFile=@CONFIG_DIR@/btcpay/backend.env
 Exec=arq app.worker.WorkerSettings
 
 # The worker serves no port, so liveness is the file its own cron refreshes
-# every 60 s (freshness threshold 180 s, in app/worker.py). `find` is the whole
-# probe: exit 0 when the file was modified in the last 3 minutes. No $VARS here
-# -- the systemd generator would expand them, not the container.
-HealthCmd=find /tmp/arq-worker-liveness -mmin -3
+# every 60 s (freshness threshold 180 s, in app/worker.py). `find` alone exits 0
+# when nothing matches, so the probe asserts a match: -print -quit stops at the
+# first fresh path and grep turns that into the exit code. No $VARS here -- the
+# systemd generator would expand them, not the container.
+HealthCmd=find /tmp/arq-worker-liveness -mmin -3 -print -quit | grep -q .
 HealthInterval=60s
 HealthTimeout=10s
 HealthStartPeriod=180s
