@@ -93,8 +93,9 @@ outputs:
       # deploy/root/logrotate-stack-ids (rename, create, SIGHUP to reopen).
       # (No `rotate-interval` key: a static filename is never rotated, and 0 is
       # the compiled default.)
-      # Local timestamps: an alert at 03:12 should read as 03:12 in the
-      # operator's own timezone, next to the monitor's audit log.
+      # Timestamps are UTC (+0000): the container has no host timezone, so
+      # Suricata's "local" is UTC, not the operator's. Not RFC3339 either;
+      # vector parses the offset (docs/logs.md, "The other sources").
       community-id: yes
       types:
         - alert:

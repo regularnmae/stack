@@ -719,9 +719,10 @@ deploy_explorers() {
 # ---------------------------------------------------------------------------
 # Not a unit: nginx-proxy-manager already serves. Every backend it fronts
 # publishes on the host's loopback, where NPM (on the host network) forwards, so
-# this only writes the hosts declared in NPM_HOSTS through NPM's admin API
-# (docs/proxy.md). It self-skips when $DATA_DIR/config/npm/api.env has no
-# credentials, so a fresh host deploys before the admin login exists.
+# this only writes the hosts declared in deploy/services.toml's [npm.*] tables
+# through NPM's admin API (docs/proxy.md). It self-skips when
+# $DATA_DIR/config/npm/api.env has no credentials, so a fresh host deploys
+# before the admin login exists.
 configure_npm_hosts() {
     if [ "$DRY_RUN" = 1 ]; then
         printf '  [dry-run] %s\n' "$REPO_DIR/scripts/npm-hosts.sh"

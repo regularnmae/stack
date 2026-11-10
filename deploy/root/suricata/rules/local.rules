@@ -27,10 +27,11 @@ alert tcp $EXTERNAL_NET any -> $HOME_NET 50002 (msg:"STACK Fulcrum Electrum TLS 
 
 # An HTTP request whose Host is neither a declared vhost nor an .onion address
 # is hitting the default host -- that vhost exists only to answer scanners, so
-# every request to it is worth knowing about. The list mirrors NPM_HOSTS in
-# stack.conf by hand: a new host there means a new alternation here, and a stale
-# list only costs a false "undeclared Host" alert (the rule is an alert, never a
-# drop, so drift cannot take a vhost down).
+# every request to it is worth knowing about. The list mirrors the [host.*]
+# domains in deploy/services.toml by hand: a new host there means a new
+# alternation here, and a stale list only costs a false "undeclared Host"
+# alert (the rule is an alert, never a drop, so drift cannot take a vhost
+# down).
 #
 # Direction and port are pinned to NPM's clearweb HTTP listener on purpose.
 # Without them the rule also fires on every plaintext HTTP request on lo (the

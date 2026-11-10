@@ -17,9 +17,9 @@
 # cannot silence an alert.
 #
 # Not behind nginx-proxy-manager: the UI and the API have no authentication of
-# their own, so this is loopback only, like vmui, and absent from NPM_HOSTS and
-# FIREWALL_PORTS. Reach it over an SSH tunnel:   ssh -L 9093:127.0.0.1:9093
-# thishost    # then http://127.0.0.1:9093
+# their own, so this is loopback only, like vmui, and absent from
+# deploy/services.toml and FIREWALL_PORTS. Reach it over an SSH tunnel:
+#   ssh -L 9093:127.0.0.1:9093 thishost    # then http://127.0.0.1:9093
 [Unit]
 Description=Alertmanager (alert grouping, dedupe and delivery for the stack)
 After=network-online.target npm-network-network.service

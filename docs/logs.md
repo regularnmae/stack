@@ -29,14 +29,15 @@ event-logger setting. The operator narrative is README's "Logs and history".
   7 days) because the default was volatile, a 32 MB ring in `/run` that a
   reboot erased; `vector` reads the journal and pushes to `victoria-logs`
   (`LOGS_RETENTION`/`LOGS_MAX_BYTES` in `stack.conf`), which is loopback-only,
-  not in `NPM_HOSTS`, not in `FIREWALL_PORTS`, and **not** in `BACKUP_PATHS`.
+  not in `deploy/services.toml`'s `[npm.*]` tables, not in `FIREWALL_PORTS`,
+  and **not** in `BACKUP_PATHS`.
   `scripts/logs.sh` is the CLI over the same store. Read it over an SSH tunnel
   (`ssh -L 9428:…`, then `/select/vmui`), like `vmui`; there is no Grafana, by
   the same reasoning as the metrics store. `victoria-logs-mcp` is the
   authenticated front door for a client (`/logs` on the MCP host): the store
-  itself stays loopback-only and out of `NPM_HOSTS`, because its own API has no
-  authentication — publishing that would add a second, unauthenticated door to
-  the same history the MCP token already gates.
+  itself stays loopback-only and out of the `[npm.*]` tables, because its own
+  API has no authentication — publishing that would add a second,
+  unauthenticated door to the same history the MCP token already gates.
 
 ## podman's own event log is a config value
 

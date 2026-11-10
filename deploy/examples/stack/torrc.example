@@ -17,12 +17,12 @@ SocksPolicy reject *
 # Log to stdout so "podman logs tor" works.
 Log notice stdout
 
-# The onion services, one per ONION_SERVICES entry in stack.conf (this block is
-# a *declaration*: deploy/install.sh rewrites it on every run from that array, so
-# change it there, not here). The keys tor creates under each HiddenServiceDir
-# are what make the address stable; they are mounted from $DATA_DIR/tor/onion and
-# are part of the backup set.
-# >>> onion services (rendered by deploy/install.sh from ONION_SERVICES)
+# The onion services, one per [onion.*] entry in deploy/services.toml (this
+# block is a *declaration*: deploy/install.sh rewrites it on every run from
+# those tables, so change it there, not here). The keys tor creates under each
+# HiddenServiceDir are what make the address stable; they are mounted from
+# $DATA_DIR/tor/onion and are part of the backup set.
+# >>> onion services (rendered by deploy/install.sh from deploy/services.toml)
 HiddenServiceDir /var/lib/tor/onion/boltmesh
 HiddenServicePort 80 10.89.0.241:80
 HiddenServiceDir /var/lib/tor/onion/api

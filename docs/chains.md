@@ -8,7 +8,7 @@ daemon unit, `fulcrum`, or an explorer.
 
 - **Both daemons are full archival nodes**, and the data disk is sized for it.
 - **`fulcrum` is the one non-NPM LAN surface**: raw Electrum on 50001/50002, no
-  `NPM_HOSTS` entry, ports kept in `FIREWALL_PORTS`. Ask it for
+  `[npm.*]` entry, ports kept in `FIREWALL_PORTS`. Ask it for
   `blockchain.headers.subscribe`, never `server.version`.
 - **CLN peers and channels come from `listpeerchannels`/`listpeers`**, never
   `listchannels` or `getinfo`'s `num_peers`.
@@ -83,7 +83,7 @@ its status is captured instead of letting `set -e` abort at the RPC.
 - **`fulcrum` is the Electrum server, and the one non-NPM LAN surface:**
   `deploy/fulcrum.container.in` runs the official image on `npm-network` and
   publishes raw Electrum `50001`/`50002` straight on the LAN, because NPM only
-  proxies HTTP — don't add it to `NPM_HOSTS`, and keep the ports in
+  proxies HTTP — don't add an `[npm.*]` entry for it, and keep the ports in
   `FIREWALL_PORTS`. It indexes from bitcoind's RPC and follows it through IBD,
   accepting wallets only once its own index catches up. `--db_mem` is left at
   Fulcrum 2.1.4's own autodetect — 2048 MiB or 25% of physical RAM, whichever is

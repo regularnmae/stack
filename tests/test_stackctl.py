@@ -421,8 +421,8 @@ class TestNpmReconcile(unittest.TestCase):
         self.facts(["keep.example.net|127.0.0.1:8107|block"], prune="1")
         rc, out, _ = self.reconcile()
         self.assertEqual(rc, 0)
-        self.assertIn("deleted proxy host 99 (not in NPM_HOSTS)", out)
-        self.assertIn("deleted certificate 7 (unused, not in NPM_HOSTS)", out)
+        self.assertIn("deleted proxy host 99 (not declared in deploy/services.toml)", out)
+        self.assertIn("deleted certificate 7 (unused, not declared in deploy/services.toml)", out)
         kept = [r for r in self.server.requests if r[0] == "DELETE"]
         self.assertEqual([r[1] for r in kept],
                          ["/api/nginx/proxy-hosts/99", "/api/nginx/certificates/7"])

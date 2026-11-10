@@ -12,8 +12,8 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 
 - **NPM runs on the host network**, so a client's real address reaches it and it
   cannot resolve a container name: every fronted unit publishes on loopback.
-- **Every proxy host is declared in `stack.conf`**, never hand-clicked; `--prune`
-  is the only destructive mode.
+- **Every proxy host is declared**, never hand-clicked; `--prune` is the only
+  destructive mode.
 - **The onion rate limit is global** -- every `.onion` visitor arrives as the
   host's own address, so it is keyed on `$server_name`.
 - **Never seed the `.onion` address anywhere**; it is key material in

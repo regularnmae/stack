@@ -361,7 +361,8 @@ def reconcile() -> int:
 
 def _prune(api: NpmApi, declared_domains: List[str], dry_run: bool) -> None:
     if dry_run:
-        log("[dry-run] would delete every host and certificate not in NPM_HOSTS")
+        log("[dry-run] would delete every host and certificate not declared in "
+            "deploy/services.toml")
         return
 
     def covers_declared(domain_names) -> bool:
@@ -372,7 +373,8 @@ def _prune(api: NpmApi, declared_domains: List[str], dry_run: bool) -> None:
         if isinstance(h, dict) and not covers_declared(h.get("domain_names")):
             _, raw = api.raw_call("DELETE", f"/api/nginx/proxy-hosts/{h['id']}")
             if raw is not None:
-                log(f"deleted proxy host {h['id']} (not in NPM_HOSTS)")
+                log(f"deleted proxy host {h['id']} "
+                    f"(not declared in deploy/services.toml)")
 
     # Certificates no longer attached to any surviving host and covering no
     # declared domain -- the leftovers of a host that was pruned.
@@ -385,7 +387,8 @@ def _prune(api: NpmApi, declared_domains: List[str], dry_run: bool) -> None:
         if not covers_declared(c.get("domain_names")) and c.get("id") not in used:
             _, raw = api.raw_call("DELETE", f"/api/nginx/certificates/{c['id']}")
             if raw is not None:
-                log(f"deleted certificate {c['id']} (unused, not in NPM_HOSTS)")
+                log(f"deleted certificate {c['id']} "
+                    f"(unused, not declared in deploy/services.toml)")
 
 
 def main(argv: List[str]) -> int:

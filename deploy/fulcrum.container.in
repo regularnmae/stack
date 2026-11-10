@@ -16,7 +16,8 @@ Image=docker.io/cculianu/fulcrum:v2.1.4
 Network=npm-network.network
 
 # Raw Electrum TCP and SSL, straight on the LAN: the one service not behind
-# NPM, opened by bootstrap.sh from FIREWALL_PORTS. Do not add it to NPM_HOSTS.
+# NPM, opened by bootstrap.sh from FIREWALL_PORTS. Do not give it an [npm.*]
+# entry.
 PublishPort=50001:50001
 PublishPort=50002:50002
 
