@@ -126,23 +126,19 @@ say "crowdsec: $CROWDSEC_STATE, $DECISIONS decision(s)${NEWEST:+ (newest: $NEWES
 # Suricata alerts since the last run
 # ---------------------------------------------------------------------------
 # A byte cursor, not a scan of the whole file: eve.json is the highest-volume
-# artefact in the stack (every HTTP/TLS/DNS record), and re-reading it every
-# five minutes to count a handful of alerts is how a monitor becomes the load it
-# is supposed to notice. The cursor carries the inode as well as the offset:
-# logrotate (deploy/root/logrotate-stack-ids) renames the file and creates a new
-# one, and a same-size-or-larger new file would otherwise be read from the old
-# offset, skipping its beginning. A truncate still trips the size check. The
-# offset always lands on a line boundary, so a line still being written is read
-# whole next sweep rather than started mid-line.
+# artefact in the stack, and re-reading it every five minutes to count a handful of
+# alerts is how a monitor becomes the load it is supposed to notice. The cursor
+# carries the inode as well as the offset: logrotate renames the file and creates a
+# new one, and a same-size-or-larger new file would otherwise be read from the old
+# offset. A truncate trips the size check. The offset always lands on a line
+# boundary, so a line still being written is read whole next sweep.
 ALERTS=0
 LAST_ALERT=""
-# eve=ok|missing|unreadable|na goes into the status file: "0 alerts" is only
-# good news if the file was actually read. The guard used to be
-# `[ -s "$EVE" ]` with no else, so a permission/SELinux problem, a missing jq,
-# or an eve.json removed under a running sensor left ALERTS at 0, the verdict
-# looked only at the engine states, and the roll-up said ok -- alert counting
-# could be dead for as long as nobody looked. A missing feed is normal only when
-# the sensor is not running.
+# eve=ok|missing|unreadable|na goes into the status file: "0 alerts" is only good
+# news if the file was actually read. A bare `[ -s "$EVE" ]` with no else lets a
+# permission problem, a missing jq or an eve.json removed under a running sensor
+# leave ALERTS at 0, and the roll-up say ok. A missing feed is normal only when the
+# sensor is not running.
 EVE_STATE=na
 if [ "$SURICATA_STATE" = active ]; then
     EVE_STATE=ok
@@ -168,18 +164,16 @@ if [ "$SURICATA_STATE" = active ]; then
         if [ "$size" -lt "$off" ]; then off=0; fi
         if [ "$size" -gt "$off" ]; then
             # Read exactly the window [off, size) -- never "to EOF". The file is
-            # being appended to while this runs: tail-to-EOF counted alerts past
-            # size and then rewound the cursor to size, so the next sweep counted
-            # them again. dd's byte-count flags bound the read, and unlike
-            # `tail | head` they do not fail on a SIGPIPE at the boundary.
+            # appended to while this runs: tail-to-EOF counts alerts past size and
+            # then rewinds the cursor, so the next sweep counts them again. dd's
+            # byte-count flags bound the read and, unlike `tail | head`, do not fail
+            # on a SIGPIPE at the boundary.
             #
-            # -R + fromjson? so a torn final line (an unfinished write) is
-            # skipped instead of failing the whole stream. Only the signature is
-            # printed, not signature_id: the id was in the stream as a second
-            # tab-separated field once, and `read -a` splits on tabs as well as
-            # spaces, so LAST_ALERT came back as "2010936" while the message
-            # claimed it was the signature. Two fields, count and signature, and
-            # `read` with two names keeps the rest of the line (spaces and all).
+            # -R + fromjson? so a torn final line is skipped instead of failing the
+            # stream. Only the signature is printed, not signature_id: `read -a`
+            # splits on tabs as well as spaces, so a two-field line read into an
+            # array puts the id where the signature belongs. Two names on `read`
+            # keep the rest of the line, spaces and all.
             window=$((size - off))
             CHUNK=""
             if ! CHUNK=$(mktemp "$AUDIT_DIR/.ids-chunk.XXXXXX" 2>/dev/null); then
@@ -194,12 +188,10 @@ if [ "$SURICATA_STATE" = active ]; then
                     ALERTS="${ALERTS:-0}"
                     LAST_ALERT="${LAST_ALERT:-}"
                     case "$ALERTS" in ''|*[!0-9]*) ALERTS=0 ;; esac
-                    # Advance only over COMPLETE lines: if size lands inside a
-                    # line, that line is re-read whole next sweep instead of
-                    # being started mid-line and dropped by fromjson?. The inode
-                    # is re-checked because logrotate may have replaced the file
-                    # between the stat above and this read; a changed inode means
-                    # the next sweep must start at 0, not at this offset.
+                    # Advance only over COMPLETE lines: if size lands inside a line,
+                    # that line is re-read whole next sweep instead of being dropped
+                    # by fromjson?. The inode is re-checked because logrotate may
+                    # have replaced the file between the stat and this read.
                     consumed=$(complete_line_bytes "$CHUNK") || consumed=0
                     if [ "$consumed" -gt 0 ] \
                         && [ "$(stat -c %i "$EVE" 2>/dev/null || echo "")" = "$ino" ]; then

@@ -243,14 +243,13 @@ if [ "$HEALTH" = 1 ]; then
         printf 'no log entries in the last %ss (vector stopped, or the store is not being written)\n' "$WINDOW" >&2
         exit 1
     fi
-    # The NPM file source is the half journald cannot see, and it fails on its
-    # own: an image update that moves the log path or changes log_format leaves
-    # vector reading nothing, forever, with every unit green -- and CrowdSec reads
-    # the same directory, so detection goes blind at the same moment. "No
-    # requests" is not a fault on a quiet site, so the access log's own mtime
-    # decides: a file written inside the window with no entries in the store
-    # means the source is not being read, while both being old means nobody
-    # visited.
+    # The NPM file source is the half journald cannot see, and it fails on its own:
+    # an image update that moves the log path or changes log_format leaves vector
+    # reading nothing, forever, with every unit green -- and CrowdSec reads the same
+    # directory, so detection goes blind at the same moment. "No requests" is not a
+    # fault on a quiet site, so the access log's own mtime decides: written inside
+    # the window with no entries in the store means the source is not being read,
+    # while both being old means nobody visited.
     resolve_data_dir
     vl_query /select/logsql/query --get \
         --data-urlencode "query=_time:${WINDOW}s log_type:\"npm_access\" | stats count() as n"

@@ -5,30 +5,21 @@
 #   scripts/metrics.sh            # collect, write, print what was written
 #   scripts/metrics.sh --quiet    # no stdout (what deploy/metrics.service runs)
 #
-# Driven by deploy/metrics.timer every minute. This is the *observation* half of
-# the monitoring pair, and the split is deliberate:
+# Driven by metrics.timer every minute. This is the *observation* half of the
+# monitoring pair: monitor.sh DECIDES and NOTIFIES, reading the daemons directly
+# and never the store, so the pipeline can be down without the alerts going with
+# it; this script only observes, for history, and never alerts.
 #
-#   * scripts/monitor.sh DECIDES and NOTIFIES -- it reads the daemons directly
-#     and never queries the store, so the metrics pipeline can be down without
-#     the alerts going with it, and an alert needs no query engine to be
-#     healthy;
-#   * this script only OBSERVES, for history: how fast a chain synced, when the
-#     Monero RPC wedged, how the wallet's lag moved, what each container costs.
-#     It never alerts.
-#
-# A metric that cannot be collected is omitted and its collector is recorded as
-# stack_collector_error{collector="..."} 1, so a hole in a graph is never
-# mistaken for a zero. stack_metrics_timestamp is always written, and
-# scripts/monitor.sh alerts on it going stale -- a silently dead timer is the
-# one failure this pipeline cannot report about itself.
+# A metric that cannot be collected is omitted and its collector recorded as
+# stack_collector_error{collector="..."} 1, so a hole in a graph is never mistaken
+# for a zero. stack_metrics_timestamp is always written, and monitor.sh alerts on
+# it going stale: a silently dead timer is the one failure this pipeline cannot
+# report about itself.
 #
 # Output goes to $DATA_DIR/monitoring/textfile/stack.prom atomically. The
-# directory is 0755 and the file 0644 on purpose: node-exporter runs as uid
-# 65534, a subuid that owns nothing here, and a permissions slip is the
-# quietest possible way to lose every metric (README: "Monitoring and metrics").
-#
-# scripts/monitor.sh writes the *other* textfile, monitor.prom, with the
-# numbers it has to compute anyway (backup age, spend trips, verify failures).
+# directory is 0755 and the file 0644 because node-exporter runs as uid 65534 (a
+# subuid that owns nothing here), and a permissions slip is the quietest way to
+# lose every metric. monitor.sh writes the other textfile, monitor.prom.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -81,12 +72,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# bitcoind -- the mempool and the peers, the two reads that a *synced* node
-# makes interesting: how close the mempool sits to its cap (bitcoin.conf's
-# maxmempool; a fee storm fills it long before anything else in the stack
-# degrades) and whether the node is actually peered (a node answering RPC on
-# zero peers is exactly the silent-stalling failure class CLN's check below
-# is about; during IBD zero peers means stalled, so the grace is not applied).
+# bitcoind -- the mempool and the peers: how close the mempool sits to its cap (a
+# fee storm fills it long before anything else degrades) and whether the node is
+# actually peered. Zero peers while synced is the silent-stalling failure class;
+# during IBD it means stalled, so the grace is not applied.
 # ---------------------------------------------------------------------------
 if mp=$(bitcoind_cli getmempoolinfo 2>/dev/null) && [ -n "$mp" ]; then
     emit stack_btc_mempool_bytes "$(jq -r '.bytes' <<<"$mp")"
@@ -101,16 +90,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# fulcrum -- the process (the container's own healthcheck), the Electrum surface,
-# and how far its index has actually got. The tip is asked of the server over
-# 50001 rather than scraped from `podman logs`: Fulcrum prints "Processed height:
-# N, X%" only at 1% steps, so once it has caught up `--tail 200` legitimately
-# holds no line and the scrape reported a stale height indefinitely.
-#
-# stack_fulcrum_up and stack_fulcrum_electrum_up disagree in the case that
-# matters: a healthy process with a wedged index answers server.version all day.
-# No collector_error here -- a first-run index answers nothing on 50001 for days,
-# and that is a state to graph (up=0, lag growing), not a broken collector.
+# fulcrum -- the process, the Electrum surface, and how far its index has got. The
+# tip is asked over 50001 rather than scraped from `podman logs`: Fulcrum prints
+# "Processed height: N, X%" only at 1% steps, so once caught up a `--tail 200`
+# legitimately holds no line. stack_fulcrum_up and stack_fulcrum_electrum_up
+# disagree in the case that matters: a healthy process with a wedged index answers
+# server.version all day. No collector_error here -- a first-run index answers
+# nothing for days, which is a state to graph (up=0, lag growing).
 # ---------------------------------------------------------------------------
 if podman inspect -f '{{.State.Health.Status}}' fulcrum 2>/dev/null | grep -qx healthy; then
     emit stack_fulcrum_up 1
@@ -133,9 +119,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# lightningd -- RPC up, peers, offline channels, and the warning it raises when
-# its view of bitcoind is stale (the state CLN sits in while a rewound backend
-# catches up; README "Full nodes and disk").
+# lightningd -- RPC up, peers, offline channels, and the warning it raises when its
+# view of bitcoind is stale (the state CLN sits in while a rewound backend catches
+# up; docs/chains.md).
 # ---------------------------------------------------------------------------
 ln=""
 if ln=$(lightning_cli getinfo 2>/dev/null) && [ -n "$ln" ]; then
@@ -177,18 +163,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# monerod -- height and whether its restricted RPC answers at all. The RPC *
-# *blocks for minutes while the daemon syncs**, so this is the series that
-# explains a dead Monero MCP surface, the xmr-explorer home page timing out and
-# the BTCPay wallet's health flipping: none of those fail on their own.
+# monerod -- height and whether its restricted RPC answers at all. The RPC *blocks
+# for minutes while the daemon syncs*, so this series explains a dead Monero MCP
+# surface, the explorer home page timing out and the BTCPay wallet's health
+# flipping: none of those fail on their own.
 #
-# Read with curl *inside* the container (the image ships one) rather than
-# through a netcheck run, so a wedged RPC costs one short exec, not a container
-# start, every minute.
-#
-# This series is also why the unit's own probe is the process
-# (deploy/monerod.container) and not this RPC: it is the history half, and
-# scripts/monitor.sh is the one that says whether the RPC answers at all.
+# Read with curl *inside* the container rather than through a netcheck run, so a
+# wedged RPC costs one short exec, not a container start, every minute. The unit's
+# own probe is the process for that reason: this is the history half, and
+# monitor.sh says whether the RPC answers at all.
 # ---------------------------------------------------------------------------
 xnode=""
 if xnode=$(monerod_rpc get_height 2>/dev/null) \
@@ -213,9 +196,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# the BTCPay Monero wallet -- height and lag behind the node. This goes through
-# the MCP server (mcp_call, a netcheck run on npm-network), which reads the
-# plugin's view-only wallet; before it is imported there is nothing to report.
+# the BTCPay Monero wallet -- height and lag behind the node, through the MCP
+# server (mcp_call, a netcheck run on npm-network), which reads the plugin's
+# view-only wallet. Before it is imported there is nothing to report.
 # ---------------------------------------------------------------------------
 wtoken=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
 if [ -n "$wtoken" ] && [ -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
@@ -236,20 +219,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# systemd -- the restart counter of every unit that is managing a running
-# container, read straight off the user manager. monitor.sh pages on the
-# *delta* between its sweeps; this is the monotonic counter for the graph, so
-# "when did it start crash-looping and did it stop" is a query, not a scroll
-# through the journal. Units that are not running (deleted, failed and never
-# restarted) are simply absent, as podman ps does not know them.
+# systemd -- the restart counter of every unit managing a running container, read
+# off the user manager. monitor.sh pages on the *delta* between sweeps; this is the
+# monotonic counter for the graph, so "when did it start crash-looping and did it
+# stop" is a query, not a scroll through the journal. Units that are not running
+# are absent, as podman ps does not know them.
 # ---------------------------------------------------------------------------
 if command -v systemctl >/dev/null 2>&1; then
     while read -r cname; do
         [ -n "$cname" ] || continue
-        # The container name is not always the unit stem: deploy/backup.container
-        # sets ContainerName=stack-backup under backup.service, and
-        # `systemctl show stack-backup.service` answers 0 like a real unit, so
-        # the old label named a unit that does not exist.
+        # The container name is not always the unit stem (backup.container sets
+        # ContainerName=stack-backup under backup.service), and `systemctl show
+        # stack-backup.service` answers 0 like a real unit.
         unit=$(unit_for_container "$cname")
         nr=$(systemctl --user show "$unit.service" -p NRestarts --value 2>/dev/null) || continue
         [ -n "$nr" ] || continue
@@ -260,42 +241,30 @@ fi
 
 # ---------------------------------------------------------------------------
 # containers -- what each running unit actually costs. One `podman stats
-# --no-stream` call reads the cgroup counters for the whole stack (measured at
-# ~85ms for 35 containers), which is the only place they exist: no daemon
-# exports its own resource use, and node-exporter's cpu collector is host-wide.
-#
-# The shape is deliberate:
+# --no-stream` call reads the cgroup counters for the whole stack, which is the
+# only place they exist: no daemon exports its resource use, and node-exporter's
+# cpu collector is host-wide. The shape is deliberate:
 #   * cpu_time is cumulative -> a *_total counter, so the query is rate().
-#     cpu_percent is NOT written: on --no-stream it is a one-shot reading over
-#     an unknown interval (measured: bitcoind 25.5% against a 1.8% lifetime
-#     average), i.e. not comparable across scrapes.
-#   * mem_usage is podman's working set (memory.current - inactive_file), not
-#     RSS, hence the name; its units are decimal (4.176GB == 4176224256 B,
-#     verified against the cgroup), but go-units' binary suffixes are accepted
-#     too so a podman change cannot silently zero the series -- lib.sh's
-#     human_bytes reads both spellings. Sizes inherit podman's 4-significant-
-#     digit rendering: right for a graph, and the exact values are always in
-#     the container's cgroup (cpu.stat usage_usec, memory.current) if a one-off
-#     measurement needs them.
-#   * block_io reads 0B/0B on every container here -- the io controller does
-#     not account under rootless cgroups -- so it is not exported at all.
+#     cpu_percent is NOT written: on --no-stream it is a one-shot reading over an
+#     unknown interval, not comparable across scrapes.
+#   * mem_usage is podman's working set (memory.current - inactive_file), not RSS,
+#     hence the name. Sizes inherit podman's 4-significant-digit rendering: right
+#     for a graph, and the exact values are in the cgroup.
+#   * block_io reads 0B/0B on every container here -- the io controller does not
+#     account under rootless cgroups -- so it is not exported at all.
 #   * the label is the container NAME, never the id: a recreated container keeps
-#     its series, and rate() sees the counter reset instead of a new series.
+#     its series and rate() sees the counter reset instead of a new series.
 #
-# A hole stays a hole: a container field whose cpu/mem cannot be parsed is
-# omitted for that run rather than written as zero, and one collector_error
-# names the parse without a per-container label (that would explode the
-# cardinality on a bad podman release). The two fields are independent, so a
-# cpu_time of "N/A" still leaves the memory series in place.
+# A hole stays a hole: an unparsable field is omitted, with one collector_error
+# naming the parse and no per-container label (that would explode cardinality on
+# a bad podman release). The two fields are independent.
 # ---------------------------------------------------------------------------
 
-# podman prints cpu_time as a Go duration ("47m45.158824s"), and lib.sh's
-# dur_ms already parses those -- it is what wait_healthy and healthcheck-lint
-# read, so this must not grow a second parser that could disagree on a fraction.
-# Its floor is a millisecond: a container younger than one tick reads 0.000,
-# which rate() tolerates. An unparsable field ("N/A") is rejected by dur_valid
-# before it gets here: dur_ms answers 0 for it too, and that is not the same
-# thing.
+# podman prints cpu_time as a Go duration ("47m45.158824s"), and lib.sh's dur_ms
+# already parses those -- one parser, so a fraction cannot disagree with
+# wait_healthy. Its floor is a millisecond, which rate() tolerates. An unparsable
+# field ("N/A") is rejected by dur_valid before it gets here: dur_ms answers 0 for
+# it too, and that is not the same thing.
 cpu_seconds() { awk -v ms="$(dur_ms "$1")" 'BEGIN { printf "%.3f", ms / 1000 }'; }
 
 if cstats=$(podman stats --no-stream --format json 2>/dev/null) \
@@ -310,7 +279,7 @@ if cstats=$(podman stats --no-stream --format json 2>/dev/null) \
         esac
         csecs=""
         # dur_valid, not just non-empty: dur_ms answers 0 for junk, so podman's
-        # cpu_time: "N/A" used to be written as a real 0.000 instead of a hole.
+        # cpu_time: "N/A" would be written as a real 0.000 instead of a hole.
         if [ -n "$cputime" ] && dur_valid "$cputime"; then
             csecs=$(cpu_seconds "$cputime")
         fi

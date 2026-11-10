@@ -1,37 +1,31 @@
 #!/usr/bin/env bash
 # Verify the running stack.
 #
-#   ./verify.sh                 # shallow: container health + the MCP endpoints
-#                               # are gated (401 without a token) and answer an
-#                               # authenticated initialize handshake; every
-#                               # onion service declared in services.toml answers
-#                               # tor too
+#   ./verify.sh                 # shallow: container health, the MCP endpoints
+#                               # (token-gated: 401, then an authenticated
+#                               # initialize) and every onion service declared
+#                               # in services.toml, via tor
 #   ./verify.sh --deep          # additionally call one read tool per endpoint,
 #                               # proving the path through to the daemon, and
-#                               # compare Fulcrum's Electrum index height with
-#                               # bitcoind's
+#                               # compare Fulcrum's index height with bitcoind's
 #   ./verify.sh --no-nodes      # the chain daemons were skipped (deploy.sh
 #                               # --skip-daemons); don't call them missing
 #
-# The scheduled jobs' own health is scripts/monitor.sh's, not this script's: the
-# backup/drill/metrics timers, the pre-backup dumps, the collector's textfile,
-# Alertmanager's config and the log pipeline are checked by the sweep that pages
-# (its "host" and "alerting" sections), so this script does not carry a second,
-# quieter answer to the same question. What is left here is the diagnostic: the
-# container and MCP surface, the chains, the proxy/onion paths, and the config
-# drift that only a human run should act on.
+# The scheduled jobs' own health is scripts/monitor.sh's, not this script's: a
+# second copy here would be a quieter answer to the same question. This is the
+# diagnostic -- the container and MCP surface, the chains, the proxy/onion paths,
+# and the config drift only a human run should act on. docs/units.md,
+# docs/proxy.md and docs/ids.md own the reasoning.
 #
-# Run it on the host: it reads the containers with podman and reaches each MCP
-# server on npm-network as <container>:8000, through the long-lived `netcheck`
-# container (the app images vary and several carry no curl; scripts/lib.sh says
-# why it is not a throwaway `podman run` per probe). The one exception is
-# nginx-proxy-manager, which is on the host network -- it is read on 127.0.0.1,
-# the same place it listens.
+# Run it on the host: it reads containers with podman and reaches each MCP server
+# on npm-network as <container>:8000 through the long-lived `netcheck` container
+# (scripts/lib.sh says why not a throwaway `podman run` per probe), except
+# nginx-proxy-manager, which owns the host network and is read on 127.0.0.1.
 #
 # Read-only against the stack: it starts nothing, writes nothing in $DATA_DIR and
-# changes no unit. It does resolve the data dir like every other host script, so
-# on a host whose pointer is missing it persists ~/.config/stack/data-dir.env.
-# Exits non-zero if anything is wrong.
+# changes no unit. It does resolve the data dir like every host script, so a host
+# whose pointer is missing gets ~/.config/stack/data-dir.env written. Exits
+# non-zero if anything is wrong.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,11 +36,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The public surface (the *_HOST names, the MCP prefixes, the onion services) is
 # declared in deploy/services.toml; stack.conf keeps the non-registry knobs.
 load_manifest "$REPO_DIR"
-# The tokens live under the data dir now, so resolving it is how we find them.
+# The tokens live under the data dir, so resolving it is how we find them.
 resolve_data_dir
 
-# MCP_HOST (the [host.mcp] name) and the rest of the public surface come from
-# the service manifest via load_manifest, above.
 
 DEEP=0
 NO_NODES=0
@@ -69,10 +61,9 @@ head2() { printf '\n%s\n' "$*"; }
 # ---------------------------------------------------------------------------
 head2 "Containers"
 # The inventory is the declaration, not a list here: install.sh renders every
-# deploy/*.container[.in], so that directory is what this host runs. A unit that
-# declares Type=oneshot has run to completion by the time a sweep starts, so it
-# is not a container to find up; everything else is checked. `--no-nodes` drops
-# stack.conf's CHAIN_UNITS (the deploy was told to skip them) and keeps the rest.
+# deploy/*.container[.in], so that directory is what this host runs. Type=oneshot
+# units have finished by the time a sweep starts, so they are not containers to
+# find up. `--no-nodes` drops stack.conf's CHAIN_UNITS.
 containers=()
 for _f in "$REPO_DIR"/deploy/*.container "$REPO_DIR"/deploy/*.container.in; do
     [ -f "$_f" ] || continue
@@ -91,23 +82,21 @@ unset _f _c
 if [ "$NO_NODES" = 1 ]; then
     warn "daemon tier skipped by request; not checking ${CHAIN_UNITS[*]:-}"
 fi
-# The units that cannot define a health command are declared once, in
-# stack.conf's HEALTHLESS_UNITS (each with its reason): victoria-logs' image is
-# distroless, and the two netcheck clients just sleep until something execs
-# into them. scripts/healthcheck-lint.sh keeps that declaration and the units
-# in agreement; here it only decides what an "Up but unprobed" container means.
+# Units that cannot define a health command are declared once in stack.conf's
+# HEALTHLESS_UNITS (victoria-logs is distroless; the netcheck clients just sleep
+# until something execs into them). scripts/healthcheck-lint.sh keeps that
+# declaration and the units in agreement; here it only decides what an "Up but
+# unprobed" container means.
 healthless=" "
 for _u in "${HEALTHLESS_UNITS[@]:-}"; do
     healthless+="${_u%%|*} "
 done
 # One classifier for every container check in this file, because a failing probe
-# still reads "Up ... (unhealthy)": the old prefix match passed (or, worse,
-# warned about) a container whose healthcheck was red, and a warning never
-# increments fails -- so the monitor, which carries only FAIL lines and the exit
-# code, could not see it. `starting` stays a warning on purpose: podman promotes
-# a probe that never succeeds to (unhealthy) after HealthStartPeriod x retries,
-# so the state is bounded and transient, while a FAIL there would page on the
-# tail of every ordinary restart (a 5-minute sweep, StartPeriod up to 5m).
+# still reads "Up ... (unhealthy)" and a warning never increments fails -- so the
+# monitor, which carries only FAIL lines and the exit code, could not see it.
+# `starting` stays a warning on purpose: podman promotes a probe that never
+# succeeds to (unhealthy) after HealthStartPeriod x retries, so the state is
+# bounded and transient, while a FAIL there would page on every ordinary restart.
 check_container() { # container
     local c="$1" line
     line=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
@@ -133,11 +122,10 @@ for c in "${containers[@]}"; do
     check_container "$c"
 done
 
-# The exposure model in one line: NPM on the host network is what makes a
-# client's real address reach its logs, fail2ban surface and X-Forwarded-For. A
-# rootless published port cannot (rootlessport forwards from inside the rootless
-# namespace, so NPM would see its own address), and that is also why every
-# service it fronts publishes its port on the host's loopback instead.
+# NPM on the host network is what makes a client's real address reach its logs
+# and X-Forwarded-For: a rootless published port cannot (rootlessport forwards
+# from inside the namespace, so NPM would see its own address), which is also why
+# every service it fronts publishes on the host's loopback. See docs/proxy.md.
 npm_net=$(podman inspect nginx-proxy-manager --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)
 if [ -z "$npm_net" ]; then
     warn "nginx-proxy-manager is not running; skipping the host-network check"
@@ -149,12 +137,11 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Local images"
-# These four are built here, not pulled, so a healthy container says nothing
-# about whether its image still matches its Containerfile -- a merged base-image
-# bump (Renovate's dockerfile manager) changes only that file. deploy.sh and
-# install.sh rebuild on the label mismatch (scripts/lib.sh's image_is_current);
-# this is how a bump that was merged but never deployed becomes visible. A stale
-# image is a warning, not a failure: the service is running the last good bits.
+# These are built here, not pulled, so a healthy container says nothing about
+# whether its image still matches its Containerfile -- a merged base-image bump
+# changes only that file. deploy.sh and install.sh rebuild on the label mismatch
+# (scripts/lib.sh's image_is_current); a stale image is a warning, because the
+# service is running the last good bits.
 local_images=(
     "btc-explorer|$BTC_EXPLORER_IMAGE|btc-explorer"
     "xmr-explorer|$XMR_EXPLORER_IMAGE|xmr-explorer"
@@ -176,13 +163,11 @@ done
 # ---------------------------------------------------------------------------
 head2 "Unit definitions"
 # A running container keeps the definition it started with, so a rendered unit
-# that was never applied is invisible to every health check -- the one failure
-# mode that silently leaves the host on old config. install.sh records what it
+# never applied is invisible to every health check. install.sh records what it
 # rendered ($DATA_DIR/audit/units.rendered); deploy.sh and scripts/rotate.sh
-# record what they applied (units.applied). Comparing the live digests with the
-# applied set makes a hand render, a hand edit and an interrupted deploy fail
-# here instead of waiting to be noticed. This is a FAIL, not a warning: the
-# monitor carries verify's FAIL lines, and a warning would be silent.
+# record what they applied (units.applied). Comparing the live digests against
+# that applied set catches a hand render, a hand edit and an interrupted deploy.
+# It is a FAIL, not a warning: the monitor carries only verify's FAIL lines.
 unit_lines() { # digest-set stem -> that unit's manifest lines
     printf '%s\n' "$1" | awk -v u="$2" '$2 ~ ("^" u "\\.") { print }' | sort
 }
@@ -213,13 +198,11 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Host tools"
-# The monitor's alert path is the host's own curl + jq (Alertmanager is a
-# loopback bind and the heartbeat an outbound POST), and openssl reads
-# certificate expiry and runs Fulcrum's TLS probe. They are requirements, not
-# conveniences: a missing one turns a check off silently, which is how a stack
-# can look healthy while nothing can page. bootstrap.sh installs all three --
-# including on a host that already had podman, where the package bundle above
-# never runs -- so this names the gap on a host provisioned before that.
+# The monitor's alert path is the host's own curl + jq (Alertmanager is a loopback
+# bind, the heartbeat an outbound POST), and openssl reads certificate expiry and
+# runs Fulcrum's TLS probe. They are requirements, not conveniences: a missing one
+# turns a check off silently, which is how a stack looks healthy while nothing can
+# page. bootstrap.sh installs all three.
 for t in curl openssl jq; do
     if command -v "$t" >/dev/null 2>&1; then
         pass "$t is installed"
@@ -241,13 +224,10 @@ head2 "BTCPay settlement"
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking BTCPay/NBXplorer"
 else
-    # btcpay, nbxplorer and monero-wallet-btcpay are in the container inventory
-    # above (both branches), so check_container already names their state with the
-    # one classifier. This section owns the functional question instead -- what
-    # the endpoint answers -- rather than keeping a second, laxer copy of the
-    # status rules.
-    # The same endpoint the backend's /health uses: a 200 means BTCPay and its
-    # database are serving, not merely that the container is up.
+    # btcpay, nbxplorer and monero-wallet-btcpay are already in the container
+    # inventory above, so check_container owns their state; this section owns the
+    # functional question. The same endpoint the backend's /health uses: a 200
+    # means BTCPay and its database serve, not merely that the container is up.
     btcpay_health=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 http://btcpay:49392/api/v1/health 2>/dev/null || echo 000)
     if [ "$btcpay_health" = "200" ]; then
         pass "BTCPay /api/v1/health 200"
@@ -258,24 +238,18 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "MCP endpoints"
-# The servers, their token variables, the one deep tool each answers and whether
-# it needs a chain are declared with each server in deploy/services.toml
-# ([mcp.*]) and emitted by the manifest as index-aligned arrays
-# (MCP_CONTAINERS / PROBE_TOKEN_VARS / PROBE_TOOLS / PROBE_ARGS /
-# PROBE_NEEDS_NODES / PROBE_SPEND_VARS), so a server added there is probed here
-# without a second table to keep in step. The token file is the container's own
-# token.env by convention. The name is the container name: scripts/lib.sh decides
-# where it is reached -- by name on npm-network for every server but crowdsec-mcp,
-# which runs on the host network and is read through netcheck-host at
-# 127.0.0.1:8113 (mcp_base / mcp_curl). The arrays are index-aligned, so
-# MCP_PORTS[$i] is that container's loopback publish -- the port
-# nginx-proxy-manager fronts. The spend column is scripts/rotate.sh's; verify.sh
-# does not use it.
+# The servers, their token variable, the one deep tool each answers and whether it
+# needs a chain are declared in deploy/services.toml ([mcp.*]) and emitted by the
+# manifest as index-aligned arrays, so a server added there is probed here with no
+# second table to keep in step. The token file is the container's own token.env;
+# scripts/lib.sh decides where it is reached (mcp_base / mcp_curl) -- by name on
+# npm-network, except crowdsec-mcp (host network, 127.0.0.1:8113). MCP_PORTS[$i] is
+# the loopback publish NPM fronts; the spend column is rotate.sh's, unused here.
 if [ "${PROBE_TOKEN_VARS+x}" != x ] || [ "${#MCP_CONTAINERS[@]}" -eq 0 ]; then
     die "the manifest emitted no probe table (run ./deploy.sh)"
 fi
-# One check that the emission is not ragged: a column shorter than the others
-# would pair a container with another server's token, silently.
+# A column shorter than the others would pair a container with another server's
+# token, silently.
 manifest_columns_agree() {
     local n
     for n in "${#PROBE_TOKEN_VARS[@]}" "${#PROBE_TOOLS[@]}" "${#PROBE_ARGS[@]}" \
@@ -288,8 +262,8 @@ manifest_columns_agree() {
 manifest_columns_agree \
     || die "the manifest emission is ragged (its columns differ in length)"
 
-# The token each container's endpoint needs, keyed by container name, so the
-# through-nginx-proxy-manager section below can reuse it.
+# Each endpoint's token file and variable, keyed by container, for the proxy
+# section below.
 declare -A EP_ENV=() EP_VAR=()
 
 for i in "${!MCP_CONTAINERS[@]}"; do
@@ -302,9 +276,8 @@ for i in "${!MCP_CONTAINERS[@]}"; do
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"
 
-    # Read through mcp_curl (scripts/lib.sh), which picks netcheck or
-    # netcheck-host for this container and knows its base URL. nginx-proxy-manager,
-    # on the host network, reaches the same server through its loopback port.
+    # mcp_curl picks netcheck or netcheck-host and the base URL for this
+    # container (scripts/lib.sh).
     health=$(mcp_curl "$name" -s -o /dev/null -w '%{http_code}' -m 10 "$(mcp_base "$name")/health" 2>/dev/null || echo 000)
     if [ "$health" = "200" ]; then pass "$name /health 200"; else bad "$name /health -> $health"; fi
 
@@ -321,9 +294,9 @@ for i in "${!MCP_CONTAINERS[@]}"; do
     if mcp_initialize "$name" "$token" 15 >/dev/null; then
         pass "$name authenticated MCP handshake"
         # The revision the server agreed to. A mismatch is not a failure -- a
-        # server legitimately negotiates down -- but it means this client's
-        # pinned MCP_PROTOCOL_VERSION is no longer what the server speaks, and
-        # nothing else in the stack would notice.
+        # server legitimately negotiates down -- but this client's pinned
+        # MCP_PROTOCOL_VERSION is then not what the server speaks, and nothing
+        # else in the stack would notice.
         pv=$(mcp_protocol "$MCP_INIT_RESPONSE")
         case "$pv" in
             '')
@@ -363,20 +336,19 @@ done
 # ---------------------------------------------------------------------------
 head2 "MCP through nginx-proxy-manager"
 # The path a real client takes: https://$MCP_HOST/<prefix> -> 127.0.0.1:<port>/mcp
-# (NPM is on the host network, so the upstream is the loopback publish of that
-# unit). Read through NPM's own :80 with the Host header, so this works before
+# (NPM owns the host network, so the upstream is that unit's loopback publish).
+# Read through NPM's own :80 with the real Host header, so this works before
 # public DNS and TLS exist. A configured host answers 401 without a token and a
-# serverInfo handshake with one; an unconfigured one (NPM's default host) does
-# neither, which is a warning rather than a failure until it is set up.
+# serverInfo handshake with one; an unconfigured one does neither -- a warning,
+# not a failure, until it is set up.
 if [ "${MCP_PREFIXES+x}" != x ] || [ "${#MCP_PREFIXES[@]}" -eq 0 ]; then
     warn "no MCP prefixes are declared in deploy/services.toml; skipping the proxy checks"
 else
     for i in "${!MCP_PREFIXES[@]}"; do
         prefix="${MCP_PREFIXES[$i]}"; name="${MCP_CONTAINERS[$i]}"
-        # Probe the public URL but connect to NPM itself (--connect-to), so this
-        # works before public DNS exists and the certificate still validates:
-        # SNI and Host are the real host, only the connection target changes.
-        # NPM binds :80/:443 on the host itself, hence 127.0.0.1 here.
+        # Probe the public URL but connect to NPM itself (--connect-to): SNI and
+        # Host stay the real host, so the certificate still validates before
+        # public DNS exists. NPM binds :80/:443 on the host, hence 127.0.0.1.
         url="http://$MCP_HOST$prefix"
         connect="$MCP_HOST:80:127.0.0.1:80"
         code=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
@@ -417,18 +389,17 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Agent tooling"
-# The eleven skills plus `agent-mcp` from the agent-skills repo: the same servers,
-# through the same tokens, for harnesses that do not speak MCP (Codex, a plain
-# shell, CI). The registry reads $DATA_DIR/config/<server>/token.env on every
-# call -- never a copy -- so a rotated token needs no second edit. A host that
-# only serves has none of it, so that is a warning, not a failure. The live call
-# is kept for --deep so the shallow sweep stays offline.
+# The skills plus `agent-mcp` from the agent-skills repo: the same servers, through
+# the same tokens, for harnesses that do not speak MCP (Codex, a plain shell, CI).
+# The registry reads $DATA_DIR/config/<server>/token.env on every call -- never a
+# copy -- so a rotated token needs no second edit. A host that only serves has
+# none of it: a warning, not a failure. The live call is --deep only, so the
+# shallow sweep stays offline.
 AGENT_BIN="${AGENT_MCP_BIN:-$HOME/.local/bin/agent-mcp}"
 AGENT_DIR="$BUILD_DIR/${AGENT_SKILLS_REPO:-agent-skills}"
-# The revision agent-mcp sends is hand-maintained in scripts/lib.sh too
-# (MCP_PROTOCOL_VERSION): two clients of the same servers must name the same
-# one, so a bump that lands on one side only is drift. Read the constant,
-# never import the module.
+# agent-mcp's revision is hand-maintained in scripts/lib.sh too
+# (MCP_PROTOCOL_VERSION): two clients of the same servers must name the same one,
+# so a bump on one side only is drift. Read the constant, never import the module.
 if [ -r "$AGENT_DIR/lib/mcp_http.py" ]; then
     agent_proto=$(sed -n 's/^PROTOCOL_VERSION *= *"\(.*\)"/\1/p' "$AGENT_DIR/lib/mcp_http.py" | head -n1)
     if [ -z "$agent_proto" ]; then
@@ -443,10 +414,9 @@ if [ ! -x "$AGENT_BIN" ]; then
     warn "agent-mcp is not installed (./deploy.sh --only agent-skills)"
 else
     pass "agent-mcp is installed"
-    # Enumerate the clone, never a copy of its list: a hand-written list here
-    # silently checked 8 of the 11 skills (btcpay, crowdsec and crypto-stack
-    # were added to agent-skills and not to this line), so "every skill is
-    # linked" could pass while three links were missing.
+    # Enumerate the clone, never a copy of its list: a hand-written list goes
+    # stale silently, and "every skill is linked" then passes while links are
+    # missing.
     skills=()
     if [ -d "$AGENT_DIR/skills" ]; then
         for skill_dir in "$AGENT_DIR"/skills/*/; do
@@ -470,13 +440,12 @@ else
         fi
     fi
 
-    # servers.json is the skills' copy of the public surface: one URL per
-    # MCP prefix. A prefix that moved in the manifest and not here means a
-    # skill calls a URL nginx-proxy-manager no longer serves, so compare the
-    # resolved registry with the declaration -- using the CLI's own resolver,
-    # never a second copy of the expansion rules. The host is compared
-    # separately and only warns: a harness deliberately pointed at another stack
-    # (AGENT_MCP_BASE_URL) is the operator's call, a missing prefix is not.
+    # servers.json is the skills' copy of the public surface: one URL per MCP
+    # prefix. A prefix that moved in the manifest and not here makes a skill call
+    # a URL nginx-proxy-manager no longer serves, so compare the resolved registry
+    # with the declaration through the CLI's own resolver -- never a second copy of
+    # the expansion rules. The host only warns: AGENT_MCP_BASE_URL pointing at
+    # another stack is the operator's call, a missing prefix is not.
     if [ -r "$AGENT_DIR/lib/config.py" ] && command -v python3 >/dev/null 2>&1 \
        && [ "${MCP_PREFIXES+x}" = x ] && [ "${#MCP_PREFIXES[@]}" -gt 0 ]; then
         agent_urls=()
@@ -523,15 +492,14 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Onion services (tor)"
-# The same public surface without DNS or a certificate. tor publishes one hidden
-# service per [onion.*] entry and forwards it; the address is read from tor's own
-# data dir, because it is key material and not declared. The probe goes through
-# tor's SOCKS port from the netcheck container on npm-network (torrc's SocksPolicy
-# allows nothing else) and asks tor to resolve the .onion name itself
-# (--socks5-hostname), exactly as a client does. A fresh service takes a minute to
-# become reachable, so "no answer" is a warning. The mcp entry expects 401: that
-# proves the whole onion -> NPM -> container path and the bearer-token gate, since
-# NPM cannot match an onion by name (see [npm.onion_wildcard]).
+# The same public surface without DNS or a certificate: tor publishes one hidden
+# service per [onion.*] entry. The address is read from tor's own data dir because
+# it is key material and not declared. The probe goes through tor's SOCKS port
+# from netcheck on npm-network (torrc's SocksPolicy allows nothing else) and lets
+# tor resolve the .onion itself (--socks5-hostname), as a client does. "No answer"
+# is a warning: a fresh service takes a minute to become reachable. The mcp entry
+# expects 401, which proves the onion -> NPM -> container path and the token gate,
+# since NPM cannot match an onion by name (see [npm.onion_wildcard]).
 TOR_SOCKS="${TOR_SOCKS:-10.89.0.240:9050}"
 if [ "${ONION_NAMES+x}" != x ] || [ "${#ONION_NAMES[@]}" -eq 0 ]; then
     warn "no onion services are declared in deploy/services.toml; skipping the onion checks"
@@ -563,9 +531,8 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "BoltMesh"
-# The API's /health is deep: 200 only when it can reach postgres and valkey.
-# Read as a peer on npm-network; nginx-proxy-manager, on the host network,
-# reaches the same server through the unit's loopback publish.
+# The API's /health is deep: 200 only when it reaches postgres and valkey. Read
+# as a peer on npm-network; NPM reaches the same server on its loopback publish.
 be_body=$(net_curl -s -m 10 "http://boltmesh-backend:8000/health" 2>/dev/null || true)
 if printf '%s' "$be_body" | jq -e '.status == "healthy"' >/dev/null 2>&1; then
     pass "boltmesh-backend /health healthy"
@@ -577,11 +544,10 @@ if [ "$fe_code" = "200" ]; then pass "boltmesh-frontend / 200"; else bad "boltme
 
 # ---------------------------------------------------------------------------
 head2 "Block explorers"
-# Both explorers are read as peers on npm-network; NPM reaches the same servers
-# through their loopback publishes (127.0.0.1:8108/8109 in NPM_HOSTS). Asking
-# each for something RPC-backed proves more than a bare 200 on a static page:
-# BTC's /api/blocks/tip reads bitcoind, and MoneroBlock's / calls get_info and
-# get_block_headers_range against monerod.
+# Both explorers are read as peers on npm-network; NPM reaches them on their
+# loopback publishes. An RPC-backed request proves more than a bare 200 on a
+# static page: BTC's /api/blocks/tip reads bitcoind, and MoneroBlock's / calls
+# get_info and get_block_headers_range against monerod.
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking the explorers"
 else
@@ -610,9 +576,9 @@ else
         bad "xmr-explorer /style.css -> $xmr_code (listener down?)"
     fi
 
-    # The home page exercises monerod's restricted RPC. During initial sync that
-    # RPC is slow enough to time out, so this is a warning, not a failure --
-    # monerod's own freshness is checked separately by the monitor.
+    # The home page exercises monerod's restricted RPC, which is slow enough to
+    # time out during initial sync, so this is a warning -- monerod's own
+    # freshness is the monitor's check.
     xmr_home=$(net_curl -s -o /dev/null -w '%{http_code}' -m 30 "http://xmr-explorer:31312/" 2>/dev/null || true)
     [ -n "$xmr_home" ] || xmr_home=000
     if [ "$xmr_home" = "200" ]; then
@@ -624,25 +590,24 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Fulcrum (Electrum)"
-# Fulcrum is the one service that is not HTTP: the Electrum protocol is
-# newline-delimited JSON-RPC over raw TCP (50001) and TLS (50002), so neither
-# net_curl nor nginx-proxy-manager can read it. Its healthcheck is the process
-# table (`grep -qx Fulcrum /proc/1/comm`), which a wedged index passes forever --
-# before this probe existed, an index that had stopped following bitcoind read
-# healthy from every direction. The probes dial the published ports on the host's
-# loopback, i.e. exactly what a wallet on the LAN reaches (see scripts/lib.sh).
+# Fulcrum is the one service that is not HTTP: Electrum is newline-delimited
+# JSON-RPC over raw TCP (50001) and TLS (50002), so neither net_curl nor
+# nginx-proxy-manager can read it. Its healthcheck is the process table
+# (`grep -qx Fulcrum /proc/1/comm`), which a wedged index passes forever. The
+# probes dial the host's loopback publishes -- what a wallet on the LAN reaches
+# (see scripts/lib.sh, docs/chains.md).
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking Fulcrum"
 else
-    # One getblockchaininfo for the whole section: it is what decides whether a
-    # silent 50001 is broken or just a first-run index that has not caught up.
+    # One getblockchaininfo for the whole section: it decides whether a silent
+    # 50001 is broken or just a first-run index that has not caught up.
     btc_chain=$(bitcoind_cli getblockchaininfo 2>/dev/null || true)
     btc_ibd=$(printf '%s' "$btc_chain" | jq -r 'if has("initialblockdownload") then .initialblockdownload else empty end' 2>/dev/null || true)
     btc_blocks=$(printf '%s' "$btc_chain" | jq -r '.blocks // empty' 2>/dev/null || true)
 
     # server.version is the banner: it names the server and the protocol revision,
-    # which is the cheapest proof that something is speaking Electrum rather than
-    # merely listening (a listening socket with a stuck app passes a TCP connect).
+    # the cheapest proof that something speaks Electrum rather than merely
+    # listening (a stuck app behind a listening socket passes a TCP connect).
     ver_req='{"id":0,"method":"server.version","params":["stack-verify","1.4"]}'
     for spec in "50001|plain|$ver_req" "50002|tls|$ver_req"; do
         IFS='|' read -r port kind req <<<"$spec"
@@ -663,11 +628,10 @@ else
     done
 
     if [ "$DEEP" = 1 ]; then
-        # The index-backed question. server.version comes from memory and stays
-        # green on a wedged index, so the height is what separates "serving" from
-        # "serving stale". Fulcrum polls bitcoind every 5s (--polltime), so a
-        # healthy one sits 0-1 block behind; a big gap in the other direction is
-        # either a first index or a stall -- monitor.sh decides which, and pages.
+        # The index-backed question: server.version comes from memory and stays
+        # green on a wedged index, so the height separates "serving" from "serving
+        # stale". A big gap is either a first index or a stall -- scripts/monitor.sh
+        # decides which, and pages (docs/chains.md).
         tip=$(electrum_tip 50001)
         if [ -z "$tip" ]; then
             if [ "$btc_ibd" = true ]; then
@@ -690,16 +654,12 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Status page"
-# Uptime-Kuma serves its dashboard SPA at /; on npm-network it is a peer like
-# the rest. The public path through nginx-proxy-manager is checked like the MCP
-# hosts above, but it answers 200 (a login page) rather than 401 -- until the
-# admin account exists and a status page is published, any 200 from the SPA
-# still proves the proxy host is wired.
+# Uptime-Kuma serves its dashboard SPA at /, a peer on npm-network. Through NPM it
+# answers 200 (a login page) rather than 401, and any 200 from the SPA still proves
+# the proxy host is wired before an admin account or a status page exists.
 #
-# A fresh v2 answers / with a 302 to /dashboard, so the probes follow
-# redirects: the SPA (login included) and every published status page return
-# 200 there. The scheme dance (80 -> 443, --connect-to pinned to NPM) is done
-# by hand first, as in the MCP section; -L answers only kuma's own redirects.
+# It answers / with a 302 to /dashboard, so the probes follow redirects; -L follows
+# only kuma's own, the 80 -> 443 dance is done by hand as in the MCP section.
 kuma_code=$(net_curl -s -L -o /dev/null -w '%{http_code}' -m 15 "http://uptime-kuma:3001/" 2>/dev/null || echo 000)
 if [ "$kuma_code" = "200" ]; then pass "uptime-kuma / 200 (after redirects)"; else bad "uptime-kuma / (following redirects) -> $kuma_code"; fi
 
@@ -723,11 +683,10 @@ if [ "${UPTIME_KUMA_HOST+x}" = x ] && [ -n "$UPTIME_KUMA_HOST" ]; then
     esac
 fi
 
-# A published status page answers its public data endpoint without auth -- so
-# the check runs from the host by container name and needs no token. A 404
-# means the page does not exist (yet), not that the monitor is broken: the page
-# and its monitors are authored in kuma's UI (docs/proxy.md), so this only
-# names the missing publish.
+# A published status page answers its data endpoint without auth, so this runs by
+# container name and needs no token. A 404 means the page does not exist yet, not
+# that the monitor is broken: pages and their monitors are authored in kuma's UI
+# (docs/proxy.md), so this only names the missing publish.
 if [ "${KUMA_STATUS_SLUG+x}" = x ] && [ -n "$KUMA_STATUS_SLUG" ]; then
     slug_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 \
         "http://uptime-kuma:3001/api/status-page/$KUMA_STATUS_SLUG" 2>/dev/null || echo 000)
@@ -738,12 +697,10 @@ if [ "${KUMA_STATUS_SLUG+x}" = x ] && [ -n "$KUMA_STATUS_SLUG" ]; then
     esac
 fi
 
-# The monitors must resolve their vhosts to the host gateway, not the public
-# name: that resolution is what stopped seven checks a minute from leaving the
-# host and coming back as the WAN address (89,766 handshakes in eight days).
-# A warning, not a failure -- Uptime-Kuma is UI-configured for its own account,
-# and a hand-added monitor may still hairpin. Read the entry from /etc/hosts
-# because it is exactly what podman wrote from --add-host.
+# The monitors must resolve their vhosts to the host gateway, not the public name:
+# otherwise every check leaves the host and returns as the WAN address. A warning,
+# not a failure -- Uptime-Kuma is UI-configured, and a hand-added monitor may still
+# hairpin. Read /etc/hosts because it is exactly what podman wrote from --add-host.
 if podman container exists uptime-kuma 2>/dev/null; then
     kuma_host_ip=$(podman exec uptime-kuma awk -v h="$BOLTMESH_FRONTEND_HOST" \
         '$2 == h { print $1; exit }' /etc/hosts 2>/dev/null || true)
@@ -759,19 +716,16 @@ fi
 
 # ---------------------------------------------------------------------------
 head2 "Intrusion detection"
-# Two tiers, and they fail differently:
-#   crowdsec is an ordinary rootless user unit, so this sweep can talk to it.
-#   suricata is the repo's one ROOTFUL unit (AF_PACKET needs CAP_NET_RAW in the
-#   init namespace), installed by `sudo ./bootstrap.sh` into the system manager.
-#   A host that has not re-run bootstrap simply has no sensor -- report that as a
-#   warning, not a failure, so an older host does not fail every sweep.
+# Two tiers, and they fail differently: crowdsec is an ordinary rootless user unit,
+# so this sweep can talk to it; suricata is the repo's one ROOTFUL unit (AF_PACKET
+# needs CAP_NET_RAW in the init namespace), installed by `sudo ./bootstrap.sh`. A
+# host that never re-ran bootstrap has no sensor: a warning, not a failure.
 if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container" ]; then
-    # The parser is the whole detection chain's front door. Two replayed lines
-    # through cscli explain prove it still matches NPM's format -- a log-format
-    # change would otherwise disable detection silently. The second is the shape
-    # that used to be dropped: NPM logs $upstream_status before $status, and it
-    # is "-" whenever no upstream was contacted (the 301 onto https, a 499 on a
-    # client abort), which was 13% of this host's real traffic.
+    # The parser is the detection chain's front door: two replayed lines through
+    # cscli explain prove it still matches NPM's log format, which a format change
+    # would otherwise break silently. The second is the shape that traps naive
+    # parsers -- NPM logs $upstream_status before $status, and it is "-" whenever
+    # no upstream was contacted (the 301 onto https, a 499 on a client abort).
     npm_parse_ok=0
     for sample in \
         '[30/Oct/2026:13:31:19 +0000] - 404 404 - GET https api.example.invalid "/probe" [Client 203.0.113.9] [Length 22] [Gzip -] [Sent-to 127.0.0.1] "verify/1.0" "-"' \
@@ -788,13 +742,11 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
     else
         warn "crowdsec parsed ${npm_parse_ok}/2 sample access log lines (parser or log_format changed)"
     fi
-    # The packet tier's half of the same chain: Suricata's EVE alert must reach
-    # a scenario, and a loopback-sourced one must be whitelisted before it can.
-    # The first sample is a public undeclared-Host alert -- the rule that
-    # actually bans the scanners in this host's log -- and the second is the
-    # same alert from 127.0.0.1, the NPM re-originated leg that has no client
-    # identity. A parser rename, an acquisition label change or a missing
-    # scenario fails here instead of silently disabling enforcement.
+    # The packet tier's half: Suricata's EVE alert must reach a scenario, and a
+    # loopback-sourced one must be whitelisted first -- that leg is NPM
+    # re-originating and has no client identity. A parser rename, an acquisition
+    # label change or a missing scenario fails here instead of silently disabling
+    # enforcement.
     eve_sample='{"timestamp":"2026-11-07T12:00:00.000000+0000","event_type":"alert","in_iface":"enp8s0","src_ip":"198.51.100.7","dest_ip":"192.0.2.10","dest_port":80,"proto":"TCP","alert":{"signature_id":9000004,"rev":2,"signature":"STACK HTTP request to an undeclared Host","severity":1}}'
     eve_ok=0
     if explain=$(cscli explain --type suricata-evelogs --log "$eve_sample" 2>/dev/null); then
@@ -814,24 +766,20 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
         fi
     fi
     # The acquisition's file is root-owned; a container that cannot read it
-    # produces no decisions and no error anyone reads. The label is the real
-    # failure mode (a default_t file is unreadable), so prove the read.
+    # produces no decisions and no error anyone reads, so prove the read. The label
+    # is the usual failure (a default_t file is unreadable).
     if podman exec crowdsec sh -c 'test -r /ids/suricata/alerts.json' 2>/dev/null; then
         pass "crowdsec can read Suricata's alert feed"
     else
         warn "crowdsec cannot read /ids/suricata/alerts.json (sensor not installed, or the file lost its container label)"
     fi
-    # The whitelist is the other half of detection, and it fails QUIETLY: its
-    # expressions are plain string matches and the parser runs in s02-enrich,
-    # before any scenario, so a prefix one octet too short reports the traffic as
-    # `whitelisted` and it can never become a decision. This file once carried
-    # `startsWith '172.2'` for the LAN's middle span and so swallowed 172.2.0.0/16
-    # and 172.200.0.0/14 with it (~4.4M public addresses reported as whitelisted).
-    # Probe both directions: over-matching hides detections, while under-matching
-    # -- a file that stopped loading, or a range that lost its entry -- bans the
-    # onion path and the status page. The Uptime-Kuma probe is the only one the
-    # stock crowdsecurity/whitelists cannot answer for us, so it is what proves
-    # this file is actually loaded.
+    # The whitelist fails QUIETLY: its expressions are plain string matches and the
+    # parser runs in s02-enrich, before any scenario, so a prefix one octet too short
+    # reports traffic as `whitelisted` and it can never become a decision. Probe both
+    # directions: over-matching hides detections, while under-matching -- a file that
+    # stopped loading, or a range that lost its entry -- bans the onion path and the
+    # status page. The Uptime-Kuma probe is the one the stock
+    # crowdsecurity/whitelists cannot answer for us, so it proves this file loads.
     for wl_probe in \
         '172.220.10.5|verify/1.0|no' \
         '172.18.0.5|verify/1.0|yes' \
@@ -862,23 +810,14 @@ else
     warn "crowdsec unit is not installed (run deploy/install.sh)"
 fi
 
-# The other half of not banning the operator: stack-bouncer refuses to ENFORCE a
-# ban on the host's own public address (STACK_WAN_IP, stack.conf), because
-# traffic that leaves this host and comes back through the router's NAT loopback
-# arrives with that one address as its source, and a decision against it takes
-# the whole public surface down. A stale declaration is silently that
-# self-lockout waiting to happen again, and an empty one is no protection at
-# all, so compare it with the address NPM actually logs for the host's own
-# monitoring: the Uptime-Kuma user agent is what identifies it (the agent
-# clients share the address, but poll too rarely to rely on).
-#
-# The monitors no longer hairpin -- deploy/uptime-kuma.container resolves every
-# vhost but MCP_HOST to the container's host gateway -- so the status page's
-# MCP_HOST monitor is the only public Uptime-Kuma source left (it is authored in
-# the UI now, so a fresh host must recreate it; docs/proxy.md lists it), and it
-# is the canary this check reads. Private sources are filtered out first:
-# otherwise the internal monitors (192.168.1.112) would be the top entry and the
-# WAN address would look unverified forever.
+# stack-bouncer refuses to ENFORCE a ban on the host's own public address
+# (STACK_WAN_IP, stack.conf): traffic returning through the router's NAT loopback
+# arrives with it as its source, so a decision against it takes the whole public
+# surface down -- an empty value protects nothing, a stale one is the same
+# self-lockout. Compare it with the address NPM logs for the host's own monitoring,
+# identified by the Uptime-Kuma user agent (the agent clients share it but poll too
+# rarely). The status page's MCP_HOST monitor is the canary (docs/proxy.md); private
+# sources are filtered first, or the internal monitors would be the top entry.
 npm_logs="$DATA_DIR/npm/data/logs"
 wan_seen=$(grep -h 'Uptime-Kuma/' "$npm_logs"/*_access.log 2>/dev/null \
     | sed -n 's/.*\[Client \([^]]*\)\].*/\1/p' \
@@ -895,24 +834,19 @@ else
 fi
 
 # Render a deploy/root/ file the way install.sh does, so a drift check compares
-# what bootstrap would write, not the literal template. The substitution list
-# itself lives in scripts/lib.sh (render_root_template), which install.sh's
-# root_render also calls -- one list, so a new placeholder cannot make a
-# correctly installed file look permanently drifted.
+# what bootstrap would write, not the literal template. The substitution list is
+# scripts/lib.sh's render_root_template, which install.sh's root_render also calls
+# -- one list, so a new placeholder cannot make a correct file look drifted.
 root_want() { # src
     render_root_template "$1" "$DATA_DIR"
 }
 
 # Everything install.sh --root renders from deploy/root/, as source:target[:opt].
-# Content only -- bootstrap owns the modes. Two kinds of file are absent on
-# purpose: the 0600 env files it writes from heredocs (audit.env, bouncer.env),
-# and /etc/audit/rules.d/60-stack.rules, which it writes 0640 into a 0750
-# directory -- an unprivileged sweep cannot read it at all, and `auditctl -l`
-# needs CAP_AUDIT_CONTROL, so the audit section reads the report's verdict
-# instead.
-# `opt` marks a target that is legitimately absent until there is a bouncer key
-# in secrets.env (the second bootstrap pass installs it): skip those silently
-# when missing, since the bouncer block above already reports its own state.
+# Content only, bootstrap owns the modes. Deliberately absent: the 0600 env files it
+# writes from heredocs (audit.env, bouncer.env), and /etc/audit/rules.d/60-stack.rules,
+# which an unprivileged sweep cannot read (the audit section reads the verdict).
+# `opt` marks a target legitimately absent until a bouncer key exists in
+# secrets.env: skip it silently, the bouncer block reports itself.
 ROOT_FILES=(
     "deploy/root/suricata.container:/etc/containers/systemd/suricata.container"
     "deploy/root/suricata/suricata.yaml:/etc/stack-ids/suricata/suricata.yaml"
@@ -937,10 +871,9 @@ if [ -f /etc/containers/systemd/suricata.container ]; then
     else
         bad "suricata is not active (sudo systemctl status suricata)"
     fi
-    # Rotation is the host logrotate's job (a static filename is never rotated
-    # by Suricata's rotate-interval). The file size is the signal that it
-    # stopped: a daily rotation keeps eve.json well under 100 MB, so 500 MB
-    # means ~a week of unrotated growth and the disk is the loser.
+    # Rotation is the host logrotate's job: a static filename is never rotated by
+    # Suricata's rotate-interval, and the file size is the only signal that it
+    # stopped (the threshold is generous; docs/ids.md owns the rotation).
     eve_file="$DATA_DIR/ids/suricata/eve.json"
     if [ -s "$eve_file" ]; then
         eve_mb=$(( $(stat -c %s "$eve_file" 2>/dev/null || echo 0) / 1048576 ))
@@ -955,13 +888,11 @@ if [ -f /etc/containers/systemd/suricata.container ]; then
     else
         warn "logrotate.timer is not active; eve.json and alerts.json will not rotate"
     fi
-    # A rendered file that no longer matches the repo means someone edited
-    # deploy/root/ without re-running bootstrap -- the root tier is then not the
-    # one in git, which is exactly the drift the digest check exists for. It is
-    # checked over every rendered file because the config matters as much as the
-    # unit: suricata reads /etc/stack-ids/suricata/suricata.yaml, so a unit-only
-    # check reported a clean sweep while the engine ran a config nobody had
-    # committed.
+    # A rendered file that no longer matches the repo means deploy/root/ was edited
+    # without re-running bootstrap, so the host is not on what git holds. Every
+    # rendered file is compared, not just the unit: suricata reads
+    # /etc/stack-ids/suricata/suricata.yaml, so a unit-only check would report a
+    # clean sweep while the engine ran an uncommitted config.
     root_checked=0 root_faults=0
     for row in "${ROOT_FILES[@]}"; do
         src=${row%%:*}
@@ -1047,11 +978,9 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
     else
         warn "the audit report has not run yet (systemctl start stack-audit)"
     fi
-    # The ruleset itself cannot be checked from here: `auditctl -l` needs
-    # CAP_AUDIT_CONTROL, so an unprivileged verify would always see zero rules and
-    # warn about nothing. The status file above is the signal (a report that runs
-    # at all means auditd answered), and `sudo auditctl -l | grep stack_` is the
-    # manual check.
+    # The ruleset cannot be checked from here: `auditctl -l` needs CAP_AUDIT_CONTROL,
+    # so an unprivileged verify would always see zero rules. The status file above is
+    # the signal; `sudo auditctl -l | grep stack_` is the manual check.
 else
     warn "the audit tier is not installed (sudo ./bootstrap.sh)"
 fi

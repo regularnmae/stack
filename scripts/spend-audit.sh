@@ -66,8 +66,8 @@ note() { printf 'audit: %s\n' "$*" >&2; }
 # ---------------------------------------------------------------------------
 # policy drift
 # ---------------------------------------------------------------------------
-# The baseline is a TSV of <absolute path> TAB <sha256>. It is append-only:
-# a newly-seen file is added, but a changed one keeps its old hash so the trip
+# The baseline is a TSV of <absolute path> TAB <sha256>. Append-only: a
+# newly-seen file is added, but a changed one keeps its old hash so the trip
 # repeats until --rebaseline (a deliberate act) accepts the new state.
 if [ "$REBASELINE" = 1 ]; then
     : > "$BASELINE"

@@ -48,13 +48,12 @@
 #           superseded key removed, so no crash can strand the repository on a
 #           password nobody holds.
 #
-# A journal was the earlier design, and it could only describe the state one run
-# expected: the rune table on this host carried five live leftovers no journal
-# had ever seen. Converging from whatever is actually there is the same job with
-# less to get wrong. The one thing a re-run cannot reproduce is the proof that
-# the *previous* value is dead (a bearer token, a role password); those two
-# negative checks are implied by the positive one -- the server and the role
-# each hold exactly one credential -- and are deliberately gone.
+# A journal was the earlier design and could describe only the state one run
+# expected; converging from whatever is actually there is the same job with less to
+# get wrong. The one thing a re-run cannot reproduce is the proof that the
+# *previous* value is dead (a bearer token, a role password): those negative checks
+# are implied by the positive one -- the server and the role each hold exactly one
+# credential.
 #
 # Nothing here is scheduled. These tokens have consumers outside the stack
 # (opencode's MCP config, a wallet, nginx-proxy-manager), and rotating one on a
@@ -578,17 +577,17 @@ apply_tor_control() {
 # target: runes
 # ---------------------------------------------------------------------------
 # A rune is a bearer token: mint it, prove it, swap it in, prove the consumer
-# works, and only then blacklist everything that is not the pair -- a failed
-# swap that had already destroyed the live rune would leave lightning-mcp unable
-# to read the node.
+# works, and only then blacklist everything that is not the pair -- a failed swap
+# that had already destroyed the live rune would leave lightning-mcp unable to read
+# the node.
 mint_rune() { # restriction-json -> "rune unique_id"
     if [ "$DRY_RUN" = 1 ]; then
         printf 'dryrun 0'
         return 0
     fi
-    # The mint -> checkrune -> retry loop is scripts/lib.sh's cln_mint_rune,
-    # shared with deploy/install.sh so the installer and the rotator cannot
-    # disagree about what makes a rune usable.
+    # The mint -> checkrune -> retry loop is lib.sh's cln_mint_rune, shared with
+    # install.sh so the installer and the rotator cannot disagree about what makes
+    # a rune usable.
     cln_mint_rune "$1"
 }
 
@@ -606,11 +605,11 @@ verify_runes() {
 }
 
 # Revocation is a SET reconciliation, not a remembered id: every live rune whose
-# method set is exactly one of stack.conf's must be the pair node.env carries,
-# and anything else is a leftover (this run's predecessor, or an older crash).
-# scripts/lib.sh owns the comparison -- scripts/monitor.sh checks the same
-# invariant -- and it is deliberately restricted to exact method-set matches so
-# a rune minted for something else is never touched.
+# method set is exactly one of stack.conf's must be the pair node.env carries, and
+# anything else is a leftover (this run's predecessor, or an older crash). lib.sh
+# owns the comparison -- monitor.sh checks the same invariant -- and it is
+# restricted to exact method-set matches so a rune minted for something else is
+# never touched.
 prune_orphan_runes() {
     local node_env="$CONFIG_DIR/lightning-mcp/node.env" keep_read keep_spend orphans id
 
@@ -694,12 +693,11 @@ apply_runes() {
 # target: token:<server>
 # ---------------------------------------------------------------------------
 # The MCP bearer tokens are the stack's most-copied secret: every client config
-# holds one. Rotating therefore has two halves -- the server's token.env and,
-# for the client, a pointer at that file (the value is never printed, and
-# ~/.config/opencode/mcp.env already reads it from there at shell start).
-# The rotation targets and their token specs are the manifest's [mcp.*] table,
-# emitted as index-aligned arrays: MCP_CONTAINERS / PROBE_TOKEN_VARS /
-# PROBE_TOOLS / PROBE_ARGS / PROBE_SPEND_VARS. The token file is
+# holds one. Rotating has two halves -- the server's token.env and, for the client,
+# a pointer at that file (the value is never printed; ~/.config/opencode/mcp.env
+# reads it from there at shell start). The targets and their token specs are the
+# manifest's [mcp.*] table, emitted as index-aligned arrays: MCP_CONTAINERS /
+# PROBE_TOKEN_VARS / PROBE_TOOLS / PROBE_ARGS / PROBE_SPEND_VARS. The token file is
 # $CONFIG_DIR/<container>/token.env by convention, exactly as verify.sh reads it.
 TOKEN_SERVERS=(${MCP_CONTAINERS[@]+"${MCP_CONTAINERS[@]}"})
 
@@ -922,17 +920,15 @@ apply_boltmesh_keys() {
 # The one secret whose loss loses the backups. The order is what makes a re-run
 # safe, and it is a write-ahead, not a journal:
 #
-#   1. RESTIC_PASSWORD_NEXT goes into backup.env BEFORE the repository learns
-#      the password, so the value is durable on disk first;
-#   2. the key is added only if that password does not already open the repo
-#      (a re-run after 'key add' must not add a second one);
+#   1. RESTIC_PASSWORD_NEXT goes into backup.env BEFORE the repository learns the
+#      password, so the value is durable on disk first;
+#   2. the key is added only if that password does not already open the repo (a
+#      re-run after 'key add' must not add a second one);
 #   3. the new key must read the repository;
 #   4. it is promoted to RESTIC_PASSWORD and the transient key removed;
 #   5. every superseded key is removed, so the repo ends with exactly one.
 #
-# A crash between any two steps is finished by running the target again: either
-# the old password still works and the new one is on disk waiting, or the new
-# one already works and is promoted.
+# A crash between any two steps is finished by running the target again.
 restic_run() { # restic args...
     local repo cache
     repo=$(env_value "$BACKUP_ENV" RESTIC_REPOSITORY)
@@ -1058,12 +1054,12 @@ complete() {
         log "dry run complete for $TARGET; nothing was written and nothing was restarted"
         return 0
     fi
-    # A rotation that re-rendered through install.sh has to advance the
-    # applied-unit baseline, or the next ./deploy.sh would restart the units this
-    # run just restarted (and verify.sh would report drift until it did). But
-    # install.sh re-renders *every* unit, so commit only when the definitions
-    # that changed are ones this rotation restarted or proved already current.
-    # Anything else was never applied and must stay visible to the next deploy.
+    # A rotation that re-rendered through install.sh has to advance the applied-unit
+    # baseline, or the next ./deploy.sh would restart the units this run just
+    # restarted (and verify.sh would report drift until it did). install.sh
+    # re-renders *every* unit, so commit only when the definitions that changed are
+    # ones this rotation restarted or proved current; anything else was never
+    # applied and must stay visible to the next deploy.
     if [ "$RERENDERED" = 1 ]; then
         now=$(unit_digest)
         changed=$(unit_digest_changed "$UNITS_BEFORE" "$now")

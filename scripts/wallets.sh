@@ -144,10 +144,10 @@ setup_bitcoin() {
             log "restoring wallet '$BITCOIN_WALLET'"
             # The named argument is backup_file (help restorewallet), and
             # load_on_startup=true is what puts the name in settings.json --
-            # without it a successful restore is gone at the next bitcoind
-            # restart. The rescan can outrun bitcoin-cli's 900 s default, so wait
-            # indefinitely. Capture the status instead of letting set -e abort:
-            # the temp copy has to go either way.
+            # without it a successful restore is gone at the next restart. The
+            # rescan can outrun bitcoin-cli's 900 s default, so wait indefinitely.
+            # Capture the status instead of letting set -e abort: the temp copy has
+            # to go either way.
             local rc=0
             bitcoind_cli -rpcclienttimeout=0 -named restorewallet \
                 wallet_name="$BITCOIN_WALLET" \

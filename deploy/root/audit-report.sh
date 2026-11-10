@@ -83,20 +83,17 @@ case "$data" in ''|*[!0-9]*) data=0 ;; esac
 
 # The summary above is read with --no-config, because loading the rule set makes
 # the kernel emit a keyed CONFIG_CHANGE per rule added: counting those would fail
-# the sweep on every bootstrap (measured here: three per reload, from
-# `auditctl -R`).
+# the sweep on every bootstrap.
 #
-# A removal is the opposite kind of event -- that is how someone blinds the host
-# -- but the kernel spells it op=remove_rule (audit_log_rule_change("remove_rule",
-# ...) from AUDIT_DEL_RULE), never op=del_rule, so the old grep here matched
-# nothing. Fixing the pattern alone is not enough either: `install.sh --root`
-# removes every loaded stack_ watch (`auditctl -W`) and reloads them on every
-# run, so a deploy legitimately writes nine op=remove_rule events with
-# key="stack_*". Counting those would page on our own deploy. So:
-#   * removals of rules that are NOT ours are counted here -- an ALLEXEC rule or
-#     a daemon's own rule disappearing is somebody else turning the light off;
-#   * our own nine are checked as STATE below (what `auditctl -l` reports). That
-#     is also the only check that notices a removal which is never reloaded.
+# A removal is the opposite kind of event -- that is how someone blinds the host --
+# but the kernel spells it op=remove_rule, never op=del_rule. Matching the pattern
+# alone is not enough: `install.sh --root` removes every loaded stack_ watch and
+# reloads them on every run, so a deploy legitimately writes op=remove_rule events
+# with key="stack_*". Counting those would page on our own deploy. So:
+#   * removals of rules that are NOT ours are counted here -- an ALLEXEC rule or a
+#     daemon's own rule disappearing is somebody else turning the light off;
+#   * our own are checked as STATE below (what `auditctl -l` reports), the only
+#     check that notices a removal which is never reloaded.
 # The one hole left is a remove+re-add inside a single window, which neither the
 # event filter nor the state can tell from a deploy.
 removed=$(ausearch --start "$since_date" "$since_time" -m CONFIG_CHANGE 2>/dev/null \
@@ -146,13 +143,13 @@ fi
 # ---------------------------------------------------------------------------
 # This kernel emits no events for a watch on a directory (see audit.rules), so a
 # unit file, a sudoers.d drop-in or a cron job appearing would go unseen. Hashing
-# the trees instead catches exactly that, and unlike an audit rule it names the
-# file. Directories only; the files inside are small and few.
+# the trees catches exactly that, and unlike an audit rule it names the file.
+# Directories only; the files inside are small and few.
 #
 # Changes are reported, not paged, even in /etc/sudoers.d: `sudo ./bootstrap.sh`
-# legitimately rewrites stack-bouncer.* and suricata.container every time it runs,
-# and a monitor that pages on its own deploy stops being read. The count and the
-# filenames go into the sweep; an unexplained one is what an operator looks at.
+# legitimately rewrites stack-bouncer.* and suricata.container every run, and a
+# monitor that pages on its own deploy stops being read. The count and filenames go
+# into the sweep; an unexplained one is what an operator looks at.
 FIM_DIRS="/etc/systemd/system /etc/containers/systemd /etc/sudoers.d /etc/cron.d /etc/ssh/sshd_config.d /etc/stack-ids /etc/audit/rules.d"
 FIM_BASELINE="$DATA_DIR/audit/auditd.fim"
 fim_changes=0

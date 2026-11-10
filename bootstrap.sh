@@ -81,23 +81,19 @@ command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y gi
 # because the host has no curl.)
 command -v jq >/dev/null 2>&1 || { log "installing jq"; sudo dnf install -y jq; }
 # curl is the monitor's alert path, and it must be the host's own: monitor.sh
-# pushes alerts to Alertmanager on 127.0.0.1:9093 and pings the dead-man's-switch
-# heartbeat. A container cannot be what reports a broken container runtime, so
-# this is a requirement rather than a convenience -- and without it every alert
-# is lost with nothing able to say so (monitor.sh refuses to run at all).
-# Checked individually, not only in the podman bundle above: a host that
-# already had podman would otherwise never get it.
+# pushes to Alertmanager on 127.0.0.1:9093 and pings the dead-man's-switch. A
+# container cannot report a broken container runtime, so this is a requirement:
+# without it every alert is lost with nothing able to say so. Checked separately
+# from the podman bundle, or a host that already had podman would never get it.
 command -v curl >/dev/null 2>&1 || { log "installing curl (monitor alert path)"; sudo dnf install -y curl; }
-# openssl reads certificate expiry for the monitor, runs the Electrum TLS probe
-# in scripts/lib.sh (verify.sh --deep), and generates the stack's secrets
-# (rand_hex in scripts/lib.sh). Same reason for the separate check.
+# openssl reads certificate expiry for the monitor, runs the Electrum TLS probe in
+# verify.sh --deep, and generates the stack's secrets (rand_hex).
 command -v openssl >/dev/null 2>&1 || { log "installing openssl"; sudo dnf install -y openssl; }
-# python3 runs agent-mcp, the CLI behind the agent skills (the agent-skills
-# repo, installed by deploy.sh), the stackctl Python core (scripts/stackctl/:
-# the npm-hosts reconciler and the load_manifest reader install.sh/verify.sh/
-# monitor.sh/CI share). Stdlib only -- there is no venv -- but a minimal
-# install has no interpreter at all, and then every skill call fails with
-# "bad interpreter".
+# python3 runs agent-mcp (the CLI behind the agent skills), the stackctl core
+# (scripts/stackctl/: the npm-hosts reconciler and the load_manifest reader that
+# install.sh, verify.sh, monitor.sh and CI share). Stdlib only, no venv -- but a
+# minimal install has no interpreter, and then every skill call fails with "bad
+# interpreter".
 command -v python3 >/dev/null 2>&1 || { log "installing python3 (agent-mcp)"; sudo dnf install -y python3; }
 
 # audit-rules provides auditctl/augenrules, which load the stack's audit rules
@@ -153,23 +149,19 @@ fi
 # 6. journald persistence (the source every log line is collected from)
 # ---------------------------------------------------------------------------
 # journald defaults to Storage=auto, which means VOLATILE when /var/log/journal
-# does not exist -- and on this host it did not, so the whole journal was a
-# 32 MB ring in /run that a reboot erased. Every container's stdout and every
-# host script writes there, so that was the stack's only record of what
-# happened, gone.
-#
-# Persistent, and bounded: ~10 MB of text an hour compresses to roughly 1.5 GB
-# a day on this host, so 2 GB is about a day and a half on the root filesystem
-# (36 GB free). The log store keeps 14 days; this only has to cover `podman
-# logs` across a reboot and the window before `vector` has shipped an entry.
+# does not exist -- and then every container's stdout and every host script is a
+# 32 MB ring in /run that a reboot erases. That is the stack's only record of what
+# happened, so it is persistent and bounded: the log store keeps 14 days, and this
+# only has to cover `podman logs` across a reboot and the window before vector has
+# shipped an entry.
 JOURNALD_DROPIN=/etc/systemd/journald.conf.d/99-stack.conf
-# Persistent means "journald is actually writing under /var/log/journal", not
-# "the config file says so". Two things make the difference, both measured:
-#   * journald starts on the runtime journal and only switches on a flush
-#     (`journalctl --flush`, or SIGUSR1; systemd-journal-flush.service does it
-#     at boot, which is why restarting the service alone changes nothing);
-#   * /var/log/journal must carry the tmpfiles ACL (group wheel r-x) that the
-#     rootless vector container reads through -- a plain `install -d` has none.
+# Persistent means "journald is actually writing under /var/log/journal", not "the
+# config file says so". Two things make the difference:
+#   * journald starts on the runtime journal and switches on a flush
+#     (`journalctl --flush`, or SIGUSR1; systemd-journal-flush.service does it at
+#     boot, which is why restarting the service alone changes nothing);
+#   * /var/log/journal must carry the tmpfiles ACL (group wheel r-x) the rootless
+#     vector container reads through -- a plain `install -d` has none.
 journald_persistent() {
     [ -n "$(find /var/log/journal -name '*.journal' -print -quit 2>/dev/null)" ]
 }
@@ -276,15 +268,15 @@ fi
 # 10. the root tier: the intrusion-detection sensor
 # ---------------------------------------------------------------------------
 # One unit in this repo runs as root: Suricata, because AF_PACKET capture needs
-# CAP_NET_RAW in the init user namespace (deploy/root/suricata.container owns the
-# long version). Everything else stays rootless, and this is the only place that
-# writes outside the user's home.
+# CAP_NET_RAW in the init user namespace (suricata.container owns the long
+# version). Everything else stays rootless, and this is the only place that writes
+# outside the user's home.
 #
-# It is a *second* pass on purpose: the sensor's config references the data dir,
-# which does not exist until deploy.sh has run. So the first bootstrap skips this
-# step with a notice, and the follow-up run (bootstrap is idempotent) installs it.
-# Rendering lives in deploy/install.sh --root so that the installer stays the one
-# authority on what gets installed -- this script only supplies the data dir.
+# A *second* pass on purpose: the sensor's config references the data dir, which
+# does not exist until deploy.sh has run, so the first bootstrap skips this with a
+# notice and the idempotent follow-up installs it. Rendering lives in
+# install.sh --root, so the installer stays the one authority; this supplies the
+# data dir.
 IDS_DATA_DIR="${STACK_DATA_DIR:-}"
 if [ -z "$IDS_DATA_DIR" ]; then
     DATA_POINTER="${STACK_DATA_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/stack/data-dir.env}"

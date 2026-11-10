@@ -95,36 +95,31 @@ lapi_get() { # host port path key -> body on stdout, non-zero on a non-200
 # never ban these, whatever the LAPI says
 # ---------------------------------------------------------------------------
 # The classes -- private space, every address this host holds, and the declared
-# WAN address -- and the reasons each one is a self-inflicted outage live in
-# deploy/root/ipguard.py, which classifies every decision for this script. The
-# two inputs it cannot discover for itself are collected here: the host's own
-# addresses, and STACK_WAN_IP from bouncer.env.
+# WAN address -- and why each is a self-inflicted outage live in ipguard.py, which
+# classifies every decision for this script. The two inputs it cannot discover are
+# collected here: the host's own addresses, and STACK_WAN_IP from bouncer.env.
 #
 # STACK_WAN_IP is NOT in OWN_IPS: the router holds it, not the host. Every check
-# that leaves this host resolves the public names and comes back through the
-# router's NAT loopback, so Uptime-Kuma, agent-mcp and the MCP clients all appear
-# here as the operator's own egress -- one shared source IP, which is the whole
-# problem: five 401s in ten seconds from one stale token would ban all of them
-# together. Detection is untouched (the decision still exists, still pages, still
-# shows in cscli); only enforcement skips it.
+# leaving this host comes back through the router's NAT loopback, so Uptime-Kuma,
+# agent-mcp and the MCP clients all appear as the operator's own egress -- one
+# shared source IP, so five 401s from one stale token would ban all of them
+# together. Detection is untouched (the decision still pages and shows in cscli);
+# only enforcement skips it.
 own_ips() {
     ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' '
 }
 
 # ---------------------------------------------------------------------------
-# Go duration ("3h59m59.7s") -> whole seconds nft understands. Sub-SECOND
-# precision is dropped: the LAPI re-sends the decision every minute, so a ban
-# that comes back a fraction of a second short is refreshed long before it lapses.
+# Go duration ("3h59m59.7s") -> whole seconds nft understands. Sub-SECOND precision
+# is dropped: the LAPI re-sends the decision every minute, so a ban arriving a
+# fraction short is refreshed long before it lapses.
 #
-# Parsed by unit, not by "digits before the unit" anywhere in the string: a
-# fractional component was read as the digits AFTER its dot, which turned
-# "2.5h" into a 5-hour ban (18000 s), "1m30.5s" into 65 s, and "500ms" into
-# 30000 s because there is no ms case -- the worst direction, since a sub-second
-# decision became an eight-hour ban. 10# keeps "08m" from being read as octal
-# (which errored and left the previous subtotal in place). This is the same
-# parser as scripts/lib.sh's dur_ms, floored instead of rounded up; it cannot be
-# sourced from there because this script runs as root and must not read a
-# config or helper out of the user-writable checkout.
+# Parsed by unit. Reading the digits after the dot as the component turned "2.5h"
+# into a 5-hour ban and "500ms" into 30000 s (no ms case) -- the worst direction,
+# a sub-second decision becoming an eight-hour ban -- and 10# keeps "08m" from
+# being read as octal. It is the same parser as lib.sh's dur_ms, floored instead of
+# rounded up, and cannot be sourced from there: this runs as root and must not read
+# a helper out of the user-writable checkout.
 # ---------------------------------------------------------------------------
 dur_to_sec() {
     local d="$1" ms=0 num frac unit s

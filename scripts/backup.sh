@@ -156,12 +156,10 @@ export RESTIC_REPOSITORY RESTIC_PASSWORD RESTIC_CACHE_DIR
 # The repo is mounted at /repo for the local default; a remote
 # RESTIC_REPOSITORY makes that mount unused, which is harmless.
 #
-# --log-driver=none: restic's output is the *caller's* (a hand run prints it, the
-# monitor captures `list --json`, verify captures the snapshot table) and the
-# driver only controls whether podman also journals a copy. Without it every
-# monitor and verify sweep wrote the whole snapshot table into the journal --
-# 161 lines every five minutes -- which the log store then indexed: the same
-# one-shot-container noise the apprise probe already avoids.
+# --log-driver=none: restic's output is the *caller's* -- a hand run prints it, the
+# monitor captures `list --json`, verify captures the snapshot table -- and the
+# driver only controls whether podman also journals a copy. Without it every sweep
+# wrote the whole table into the journal for the log store to index.
 common=(
     --rm
     --log-driver=none
@@ -169,15 +167,14 @@ common=(
     -v "$DATA_DIR/backup-cache:/cache:z"
     --env RESTIC_REPOSITORY --env RESTIC_PASSWORD --env RESTIC_CACHE_DIR
 )
-# The backup set, derived from BACKUP_PATHS in stack.conf -- the same
-# declaration deploy/install.sh renders into deploy/backup.container's Volume=
-# lines and Exec=. Nothing below repeats the list: a directory added there is
-# mounted, backed up, created before a restore and named in the prompt
-# automatically.
+# The backup set, derived from BACKUP_PATHS in stack.conf -- the same declaration
+# install.sh renders into backup.container's Volume= lines and Exec=. Nothing below
+# repeats the list: a directory added there is mounted, backed up, created before a
+# restore and named in the prompt automatically.
 #
 # The mount paths mirror $DATA_DIR (/data/<name>), which is what lets `restore
 # --target /` land the contents back in the data dir. `:z` (shared) because
-# lightningd, nginx-proxy-manager and tor mount some of these directories too.
+# lightningd, nginx-proxy-manager and tor mount some of these too.
 data_ro=()
 data_rw=()
 backup_paths=()
@@ -425,24 +422,18 @@ tree_size() { # path -> bytes
 }
 
 # restic restore exits 1 when it cannot apply a SELinux label recorded in the
-# snapshot. In the backup container /data is not a bind mount, so the tree
-# carries that container's label, and the host-run scripts that write into
-# $DATA_DIR/audit give their files a different one (unconfined_u vs system_u);
-# rootless podman cannot set security.selinux at all. The file itself restores
-# fine -- only the label is left alone -- but restic still exits non-zero, which
-# would abort an in-place restore before the wallet's chown. Both restore calls
-# therefore pass --exclude-xattr security.selinux, which removes the error at its
-# source: the same files keep the label they already have, which is what happens
-# when the setxattr fails anyway.
+# snapshot: the tree carries the backup container's label, host-run scripts write
+# $DATA_DIR/audit under a different one, and rootless podman cannot set
+# security.selinux at all. The file restores fine, only the label is left alone,
+# but the non-zero exit would abort an in-place restore before the wallet's chown.
+# Both restore calls therefore pass --exclude-xattr security.selinux, which
+# removes the error at its source.
 #
 # What follows is the safety net for that class, not the primary fix. It counts
 # the label errors instead of assuming a number, because which files mismatch
-# depends on what a host script rewrote since the snapshot: this was written
-# against one error on /data, and the 2026-11-01 drill produced two (/data and
-# /data/audit/ids.status, which ids.sh had rewritten). It also does not pin the
-# path -- a restore narrowed to a subfolder reports e.g. /restore/ids.status, and
-# a path anchor is exactly the brittleness that broke the first version. The
-# cause is what must be SELinux-only, not the path.
+# depends on what a host script rewrote since the snapshot, and it does not pin the
+# path -- a restore narrowed to a subfolder reports a different one. The cause must
+# be SELinux-only, not the path.
 restore_acceptable() { # log rc
     local log="$1" rc="$2" seen benign sum fatals
     [ "$rc" -eq 0 ] && return 0
@@ -461,11 +452,11 @@ restore_acceptable() { # log rc
 }
 
 # A restic command that failed because another run holds the repository lock is a
-# scheduling collision, not a broken backup: the caller records a skip (leaving
-# the last success in place) and stops. `check` and `forget --prune` take
-# exclusive locks, and every timer here is Persistent, so a post-downtime
-# catch-up can overlap. A predicate rather than a writer, because the weekly and
-# the monthly drills record their skips in different files.
+# scheduling collision, not a broken backup: the caller records a skip (leaving the
+# last success in place) and stops. `check` and `forget --prune` take exclusive
+# locks and every timer here is Persistent, so a post-downtime catch-up can
+# overlap. A predicate rather than a writer: the two drills record skips in
+# different files.
 verify_skip_if_locked() { # log -> 0 if the failure was the repository lock
     grep -qiE 'already locked|unable to create lock' "$1" 2>/dev/null
 }
@@ -473,7 +464,7 @@ verify_skip_if_locked() { # log -> 0 if the failure was the repository lock
 # One slice of the repository's pack data per run, cycling 1..parts, so a
 # repository too large for a full `check --read-data` every week is still read
 # completely over a few runs. The counter is regenerable state, like the status
-# file, and lives beside it.
+# file beside it.
 next_subset() { # parts -> n (and advance the counter)
     local parts="$1" n=1
     [ -f "$VERIFY_SUBSET_FILE" ] && n=$(head -n1 "$VERIFY_SUBSET_FILE" 2>/dev/null || true)
@@ -497,17 +488,15 @@ replay_image() {
 }
 
 # Replay the restored pg_dumpall into a throwaway postgres: the one thing a
-# file-level restore cannot prove. Shared by `verify --with-db` (manual, full
-# drill) and `verify-db` (monthly, dump only). The database name is not
-# hardcoded -- whatever the dump creates is discovered afterwards and must hold
-# at least one table.
+# file-level restore cannot prove. Shared by `verify --with-db` (manual) and
+# `verify-db` (monthly). The database name is not hardcoded -- whatever the dump
+# creates is discovered afterwards and must hold at least one table.
 #
-# Returns 0 on success, 1 on a failed replay (detail in $replay_detail), and 2
-# when the image could not be obtained (detail in $replay_skip_detail): a
-# registry that will not answer says nothing about the dump, so the caller
-# records a skip and lets the status file's age decide when it has gone on too
-# long. The pull is explicit rather than implicit in `podman run` precisely so
-# those two can be told apart.
+# Returns 0 on success, 1 on a failed replay ($replay_detail), 2 when the image
+# could not be obtained ($replay_skip_detail): a registry that will not answer says
+# nothing about the dump, so the caller records a skip and the status file's age
+# decides when it has gone on too long. The pull is explicit, not implicit in
+# `podman run`, precisely so the two can be told apart.
 verify_replay_dump() { # restored data root
     local root="$1" dump="$1/postgres-dump/all.sql"
     local image name deadline db tables total=0 out
@@ -540,16 +529,15 @@ verify_replay_dump() { # restored data root
         sleep 2
     done
     # Deliberately not ON_ERROR_STOP: the dump carries the role, and psql always
-    # reports the already-exists / drop-while-connected errors on a fresh
-    # cluster. The table count below is the assertion that matters -- and because
-    # psql would replay a truncated dump's prefix just as happily, the caller
-    # checks the completion trailer first (assert_pg_dump_shaped).
+    # reports the already-exists / drop-while-connected errors on a fresh cluster.
+    # The table count below is the assertion -- and because psql would replay a
+    # truncated dump's prefix just as happily, the trailer is checked first.
     podman exec -i "$name" psql -q -U postgres -d postgres < "$dump" >/dev/null 2>&1 || true
     # Every non-template database, INCLUDING `postgres`: the app database is
     # normally its own, but a dump whose only data lives in `postgres` would
-    # otherwise replay into a cluster this loop cannot see and be reported as
-    # empty. The stock `postgres` database has no user tables, so counting it
-    # cannot manufacture a pass.
+    # otherwise replay into a cluster this loop cannot see and be reported empty.
+    # The stock `postgres` database has no user tables, so counting it cannot
+    # manufacture a pass.
     while IFS= read -r db; do
         [ -n "$db" ] || continue
         tables=$(podman exec "$name" psql -At -U postgres -d "$db" -c \
@@ -567,12 +555,10 @@ verify_replay_dump() { # restored data root
 }
 
 # Replay the restored kuma dump into a throwaway MariaDB started from the
-# uptime-kuma image: the same server version that wrote it, so no second image to
-# pull, and the only proof that matters -- the SQL imports and the kuma schema is
-# there. Reached only from `verify --with-db` (the monthly drill probes the
-# postgres dump, which is the one the app tier dies without); same return codes as
-# verify_replay_dump, so a missing image is rc 2 and the caller records a skip.
-# It is never pulled: the weekly run must not acquire a registry dependency.
+# uptime-kuma image: the same server version that wrote it, so no second image, and
+# the only proof that matters -- the SQL imports and the kuma schema is there.
+# Reached only from `verify --with-db`; same return codes as verify_replay_dump, and
+# it is never pulled: the weekly run must not acquire a registry dependency.
 verify_replay_kuma_dump() { # restored data root
     local root="$1" dump="$1/uptime-kuma-dump/kuma.sql" image out tables
     image=$(kuma_image)
@@ -660,15 +646,14 @@ assert_pg_dump_shaped() { # postgres-dump/all.sql -> 0 shaped or absent, 1 bad
 
 # The dumps are the only part of the set whose CONTENT can be wrong while every
 # file is present -- and presence is all the marker loop proves. Each format gets
-# the cheapest check that can actually tell:
-#   * kuma      header + completion trailer; a dump killed mid-write is still a
-#               valid SQL prefix, so the trailer is the proof it finished
+# the cheapest check that can tell:
+#   * kuma      header + completion trailer: a dump killed mid-write is still a
+#               valid SQL prefix, so the trailer proves it finished
 #   * npm       PRAGMA quick_check on the restored copy (SQLite has no trailer),
 #               read through the NPM image; soft-skipped if that image is gone
-#   * freshness every dump's mtime sits inside the snapshot's own run. restic
-#               preserves mtimes, so a dump job that has been failing for months
-#               while restic kept copying the last good file cannot pass -- the
-#               exact hole "the marker exists" leaves open.
+#   * freshness every dump's mtime sits inside the snapshot's own run: restic
+#               preserves mtimes, so a dump job failing for months while restic
+#               copied the last good file cannot pass.
 # The replay (`verify-db` monthly, `verify --with-db` by hand) is the expensive
 # proof that the SQL imports at all.
 verify_dump_contents() { # restored data root
@@ -713,22 +698,18 @@ if (verdict !== "ok") { console.error("quick_check: " + JSON.stringify(rows)); p
     return 0
 }
 
-# The monthly database drill (`verify-db`, run by backup-verify-db.timer). The
-# claim it makes is the one the weekly run cannot: that the snapshot's
-# postgres-dump/all.sql REPLAYS into a cluster. Everything except the restore is
-# shared with the weekly run -- the lock, the status discipline, the freshness
-# check, the replay itself -- and what differs is deliberate:
-#
-#   * only /data/postgres-dump is restored (a few MiB, not the whole set), so it
-#     has no BACKUP_VERIFY_MAX_MB gate. Inheriting that gate would stop the proof
-#     at exactly the set size where a restore matters most;
-#   * its own scratch root and its own status file, because one drill's failure
-#     or skip must not mask the other's age;
-#   * the weekly run gains nothing from it: no image, no pull, no network, so its
-#     determinism stays untouched. Here a pull IS allowed, and a pull that fails
-#     is a skip rather than a failure -- a registry outage is not evidence about
-#     the dump, and the status file's age check is what turns a run of skips into
-#     an alert.
+# The monthly database drill (`verify-db`). The claim it makes is the one the
+# weekly run cannot: that the snapshot's postgres-dump/all.sql REPLAYS into a
+# cluster. Everything except the restore is shared with the weekly run; what
+# differs is deliberate:
+#   * only /data/postgres-dump is restored (a few MiB), so it has no
+#     BACKUP_VERIFY_MAX_MB gate -- inheriting that would stop the proof at exactly
+#     the set size where a restore matters most;
+#   * its own scratch root and its own status file, so one drill's failure or skip
+#     cannot mask the other's age;
+#   * a pull is allowed here and a failed pull is a skip, not a failure: a registry
+#     outage is not evidence about the dump. The status file's age check is what
+#     turns a run of skips into an alert.
 run_verify_db() {
     local snap_id snap_time root avail need rlog rrc rres
     mkdir -p "$DATA_DIR/audit"
