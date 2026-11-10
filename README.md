@@ -1258,7 +1258,8 @@ nginx-proxy-manager is the stack's only LAN-facing HTTP unit, so every public
 hostname is a proxy host in NPM. (Fulcrum's `50001`/`50002` are the deliberate
 non-HTTP exception; see [What runs](#what-runs).) They are declared in the
 `[npm.*]` tables of `deploy/services.toml` — a `host` reference (or a literal
-`domain` for the `*.onion` wildcard), a `forward` and `flags` — and reconciled by
+`domain` for the `*.onion` wildcard), a `forward_host`/`forward_port` and `flags`
+— and reconciled by
 `scripts/npm-hosts.sh` through the NPM admin API on `127.0.0.1:81`: a host already
 serving the domain is updated in place, otherwise it is created, and a Let's
 Encrypt certificate is requested for any host that has none. The hostnames
@@ -1269,18 +1270,22 @@ tier; `./deploy.sh --only npm-hosts` re-applies it after a change.
 ```toml
 [npm.frontend]
 host = "frontend"                 # a [host.*] key: boltmesh.net
-forward = "127.0.0.1:8106"        # the boltmesh-frontend unit's loopback publish
+forward_host = "127.0.0.1"        # always loopback; NPM is on the host network
+forward_port = 8106               # the boltmesh-frontend unit's PublishPort=
 flags = ["ws", "block"]
 
 [npm.mcp_edge]
 host = "mcp"
-forward = "127.0.0.1:8100"
+forward_host = "127.0.0.1"
+forward_port = 8100
 flags = ["mcp", "force-ssl", "http2"]
 ```
 
-`forward` is `[scheme://]host:port` (scheme defaults to `http`) and is always
-`127.0.0.1`: NPM runs on the host network and cannot resolve a container name, so
-it reaches the unit's loopback publish. The flags are `force-ssl` (redirect `:80`
+`forward_host` is always `127.0.0.1` and `forward_port` is the unit's
+`PublishPort=`: NPM runs on the host network and cannot resolve a container name,
+so it reaches the unit's loopback publish. `scheme` defaults to `http` (`https`
+for an upstream that speaks TLS), and an `mcp` host's port must be one an
+`[mcp.*]` entry publishes. The flags are `force-ssl` (redirect `:80`
 to `:443`), `http2`, `ws` (websocket upgrade), `block` (common exploits) and `mcp`.
 `--dry-run` prints the API payloads without changing anything; `--prune`
 additionally **deletes** hosts and certificates the manifest does not declare — the

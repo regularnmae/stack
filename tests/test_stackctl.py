@@ -703,6 +703,35 @@ forward_port = 8100
         out = manifest.load(ok).shell()
         self.assertIn("KUMA_ADD_HOST_HOSTS=(a.example)", out)
 
+    def test_readme_manifest_examples_load(self):
+        # README restates two of the manifest's tables by hand ([npm.*] and
+        # [onion.*]). That is the same second copy the "What runs" check exists
+        # for, and it drifted once already: the documented `forward = "host:port"`
+        # key was never read by the loader (it reads forward_host/forward_port),
+        # so following the README failed the manifest check. Merge each example
+        # with the host/mcp stubs it references and parse it with the real loader.
+        import re
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+
+        def toml_block(heading):
+            section = readme.split(heading, 1)
+            self.assertEqual(len(section), 2, f"no {heading} section in README.md")
+            block = re.search(r"```toml\n(.*?)```", section[1], re.S)
+            self.assertIsNotNone(block, f"no toml block under {heading}")
+            return block.group(1)
+
+        examples = toml_block("## Proxy hosts") + toml_block("## Tor onion services")
+        # Every table the examples point at: a `host`/`mirrors` reference needs
+        # its [host.*]; the npm `mcp` flag needs a port an [mcp.*] publishes.
+        referenced = sorted(set(re.findall(
+            r'^\s*(?:host|mirrors) = "([^"]+)"', examples, re.M)))
+        stubs = [f'[host.{name}]\ndomain = "{name}.example"\n' for name in referenced]
+        stubs.append('[mcp.stub]\nprefix = "/stub"\ncontainer = "stub-mcp"\nport = 8100\n')
+        path = self.write("readme-examples.toml",
+                          "\n".join(stubs) + "\n" + examples)
+        manifest.load(path)  # Fatal = the documented shape is not the one read
+
     def test_probe_fields_are_required_and_valid(self):
         from stackctl import manifest
         base = """
