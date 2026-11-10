@@ -446,3 +446,32 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   pair only sleeps, so neither can define a health command; their functional
   checks are the LogsQL query and the probes themselves.
 
+## The knobs in stack.conf
+
+`stack.conf` is plain shell sourced by `bootstrap.sh` and `deploy.sh`; each knob
+carries one line there and its reasoning is here.
+
+- **`FIREWALL_PORTS`** is the complete LAN-reachable surface: `80/443/81` for
+  nginx-proxy-manager, which is on the host network and binds them itself (that is
+  what makes a client's real address reach its logs), and `50001/50002` for
+  Fulcrum, because the Electrum protocol is raw TCP and NPM cannot front it. Every
+  other service publishes on the host's loopback only, which is where NPM's
+  forwards point; a loopback bind is not LAN-reachable, so those ports stay closed.
+- **`APP_REPOS` order is load-bearing**, not alphabetical: each server reads
+  something the step above it brings up. A server whose upstream is missing on
+  first boot is retried by `./configure.sh` rather than ordering the whole deploy
+  around it.
+- **`HEALTHLESS_UNITS` and `STATEFUL_UNITS` are policy lists**, not inventories
+  (the inventory is `deploy/` itself). The first is the complete set of units that
+  cannot define a health command, with the reason; the second is the units whose
+  on-disk database must be closed cleanly, and the test is whether a SIGKILL
+  mid-write costs a rebuild or a resync -- not whether the unit writes at all.
+- **`CHAIN_UNITS` is the one list `deploy.sh --skip-daemons` and
+  `verify.sh --no-nodes` share**, so a skipped unit is not reported missing.
+- **`BTCPAY_PLUGIN_URL`/`_SHA256` are edited together.** Renovate cannot track a
+  plugin-builder URL, and the marker file install.sh writes is what makes the edit
+  land, since the DLL's name does not change between versions.
+- **Retention** (`METRICS_RETENTION`, `LOGS_RETENTION`, `LOGS_MAX_BYTES`,
+  `IDS_RETENTION_DAYS`) is sized for a postmortem, not an archive. The metrics and
+  log stores are regenerable and outside the backup set; `LOGS_MAX_BYTES` is a
+  second, independent bound so a crash-loop cannot fill the data disk.
