@@ -180,10 +180,10 @@ linger, sets
 `net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
 80/443/81 rootless), opens the stack's ports (`FIREWALL_PORTS`) in firewalld,
 makes journald persistent and bounded (so the container logs survive a reboot
-and the log store has something to collect), creates the build dir and the
-quadlet directory, and clones this repo to `~/build/stack`. `deploy.sh` then
-resolves and creates the data directories, clones the app repos, builds every
-image, starts everything in order and verifies.
+and the log store has something to collect), creates the build dir, and clones
+this repo to `~/build/stack`. `deploy.sh` then resolves and creates the data
+directories and the quadlet directory, clones the app repos, builds every image,
+starts everything in order and verifies.
 
 With git already present, the equivalent is:
 

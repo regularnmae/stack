@@ -8,7 +8,7 @@
 #   * firewalld enabled and the stack's ports opened (FIREWALL_PORTS)
 #   * journald made persistent and bounded, so the container logs survive a
 #     reboot (they are the source the log store collects from)
-#   * the build dir and the quadlet directory (deploy.sh creates the data dirs)
+#   * the build dir (deploy.sh creates the data dirs and the quadlet directory)
 #
 # Run as your normal login user -- it uses sudo for the privileged parts. The
 # containers themselves always run rootless. Idempotent.
@@ -29,7 +29,6 @@ GITHUB_ORG="${GITHUB_ORG:-regularnmae}"
 BUILD_DIR="${BUILD_DIR:-$HOME/build}"
 
 USER_NAME="$(id -un)"
-DATA_HOME="$HOME"
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -213,10 +212,8 @@ sudo systemctl enable --now firewalld >/dev/null 2>&1 || warn "could not enable 
 # ---------------------------------------------------------------------------
 # 8. directories
 # ---------------------------------------------------------------------------
-log "creating $BUILD_DIR and the quadlet directory"
-mkdir -p "$BUILD_DIR" "$DATA_HOME/.config/containers/systemd"
-
-systemctl --user daemon-reload 2>/dev/null || true
+log "creating $BUILD_DIR"
+mkdir -p "$BUILD_DIR"
 
 # If this is not a checkout (curl | bash), fetch one now that git exists, so
 # the next step is always deploy.sh.
