@@ -53,18 +53,14 @@ LOGS_RETENTION="${LOGS_RETENTION:-14d}"
 LOGS_MAX_BYTES="${LOGS_MAX_BYTES:-10GiB}"
 export STACK_BACKUP_DIR
 
-# Uptime-Kuma's static host entries (deploy/uptime-kuma.container): every
-# monitored vhost except MCP_HOST resolves to the container's host gateway, so
-# the checks do not hairpin through the router and come back wearing the WAN
-# address. MCP_HOST stays literal on purpose -- its monitor is the one canary
-# verify.sh reads to notice a WAN change. Built from the declarations, so a
-# renamed vhost cannot leave a stale entry behind.
+# Uptime-Kuma's static host entries (deploy/uptime-kuma.container). Every
+# monitored vhost that did not opt out with `kuma_add_host = false` resolves to
+# the container's host gateway, so its checks reach nginx-proxy-manager directly
+# instead of hairpinning through the router and coming back wearing the WAN
+# address. MCP_HOST and the status page's host stay literal: MCP_HOST's monitor
+# is the canary verify.sh reads to notice a WAN change. Built from the manifest,
+# so a renamed vhost cannot leave a stale entry behind.
 kuma_add_hosts=""
-# KUMA_ADD_HOST_HOSTS comes from the service manifest (load_manifest above):
-# every [host.*] that did not opt out with kuma_add_host = false. The
-# uptime-kuma unit resolves those vhosts on its host gateway, so its own
-# monitors reach nginx-proxy-manager directly instead of hairpinning through
-# the router (the WAN canary and the status page's own host are the opt-outs).
 for _kuma_host in "${KUMA_ADD_HOST_HOSTS[@]}"; do
     kuma_add_hosts="${kuma_add_hosts:+$kuma_add_hosts }--add-host=$_kuma_host:host-gateway"
 done
@@ -74,61 +70,38 @@ unset _kuma_host
 # the root tier
 # ---------------------------------------------------------------------------
 # `--root` installs deploy/root/, the ONE privileged unit in this repo: the
-# Suricata sensor, which needs CAP_NET_RAW in the init user namespace and
-# therefore cannot be a rootless Quadlet (see deploy/root/suricata.container).
-# bootstrap.sh is its only caller, under sudo; the user-side install below never
-# runs in this mode, so nothing here creates a root-owned file inside the data
-# dir.
+# Suricata sensor, which needs CAP_NET_RAW in the init user namespace and so
+# cannot be a rootless Quadlet (deploy/root/suricata.container). bootstrap.sh is
+# its only caller, under sudo; the user-side install never runs in this mode.
 #
-# The split is deliberate: $DATA_DIR stays user-owned (the sensor only writes
-# its logs into $DATA_DIR/ids, which the host user can read and this script
-# creates), while everything a rootful container *reads* lives root-owned under
-# /etc/stack-ids. A user-writable config consumed by a root container would be a
-# privilege boundary.
-# Values substituted into a unit go through esc() (scripts/lib.sh) on both the
-# render side and verify.sh's comparison side; the comment there says what an
-# unescaped `|` or `&` does to a data dir.
+# The split is deliberate: $DATA_DIR stays user-owned (the sensor writes its logs
+# into $DATA_DIR/ids, which the host user reads), while everything a rootful
+# container *reads* lives root-owned under /etc/stack-ids. A user-writable config
+# consumed by a root container would be a privilege boundary.
+# Values substituted into a unit go through esc() on both the render side and
+# verify.sh's comparison side; esc() says what an unescaped `|` or `&` does.
 
 # ---------------------------------------------------------------------------
 # podman's own event log
 # ---------------------------------------------------------------------------
-# Every podman invocation writes an event and the default backend is the
-# journal: an exec session is two lines (`exec`, `exec_died`, each with
-# the image's full label dump) and podman's generated healthcheck units log a
-# `health_status` line on *every* check, healthy or not. Measured on this host
-# before this setting existed: 4,156 of 9,315 journal lines an hour (1.8 MB of
-# 2.4 MB) were podman events -- 2,357 health_status, 1,352 exec -- and all of it
-# reached the log store, burying the cross-service timeline `scripts/logs.sh`
-# exists to answer questions from. metrics.sh alone makes eight execs a minute,
-# i.e. sixteen journal lines, every minute.
+# Every podman invocation writes an event and the default backend is the journal:
+# an exec is two lines (each with the image's label dump) and every healthcheck
+# run is a `health_status` line, all of it reaching the log store and burying the
+# cross-service timeline logs.sh exists to answer from. The measurement, and the
+# reasons this lives in podman's own config rather than at the 64 exec call
+# sites, are in docs/logs.md ("podman's own event log is a config value").
 #
-# This belongs in podman's own config, not in a flag at the 64 `podman exec`
-# call sites: `--events-backend=none` (scripts/lib.sh's net_curl) cannot reach
-# the healthcheck units at all, says nothing about the next script anyone
-# writes, and the one-flag-at-one-place version of it is exactly how the flood
-# came back. `events_logger` has no environment-variable equivalent, so the
-# config file is the one lever that covers them all -- and there are two of
-# them, because the sensor (deploy/root/, started by the *system* manager) is
-# not the login user's podman: the rootless file below, and root's own in
-# install_root_tier. Both are rendered here.
+# "file", not "none": events are a diagnostic (what started when, did the check
+# fire) and the ring keeps `podman events` readable; at this volume 10m is about
+# eight hours. Nothing needs a restart -- podman reads it per invocation, unlike
+# a rendered unit.
 #
-# "file", not "none": the events are a diagnostic (what started when, did the
-# check fire), and the file backend keeps `podman events` reading them from a
-# size-capped ring in the runtime dir (tmpfs, gone at reboot). At ~1.2 MB an
-# hour of events here, 10m is about eight hours; "none" would throw the
-# diagnostic away to save the same bytes. Nothing needs a restart: podman reads
-# this per invocation, so the next metrics tick and the next healthcheck pick it
-# up -- unlike a rendered unit, where a re-render alone changes nothing.
+# The merge is table-aware: a second [engine] is a TOML duplicate-table error and
+# podman then refuses to run anything for that user, so the candidate is
+# validated with podman itself before it replaces the real file.
 #
-# The merge has to be table-aware. Appending a second `[engine]` to a file that
-# already has one is a TOML duplicate-table error, and podman then refuses to
-# run *anything* for that user, so the candidate is validated with podman itself
-# (`CONTAINERS_CONF` pointed at it, `podman info` must report "file") before it
-# replaces the real file. A file that does not pass is left alone.
-#
-# Defined above the root-tier block for the same reason as esc(): the root pass
-# runs before the rest of this file has been read, so a helper defined below it
-# is "command not found" when install_root_tier calls it.
+# Defined above the root tier because that pass runs before the rest of this file
+# is read, so a helper defined below it is "command not found" there.
 podman_events_write() { # conf-file
     local conf="$1" src tmp val header=0
     command -v podman >/dev/null 2>&1 || return 0
@@ -207,11 +180,9 @@ podman_events_write() { # conf-file
     log "podman events -> bounded file, not journald ($conf)"
 }
 
-# The login user's own podman -- every script and timer this repo runs, plus the
-# shell an operator pokes a container from. Root's is written by the root tier
-# (install_root_tier) because the sensor's healthchecks are podman children of
-# the *system* manager. Called from the main flow below, and a no-op when the
-# file is already right.
+# The login user's podman -- every script and timer here, plus the shell an
+# operator pokes a container from. Root's is written by install_root_tier. A
+# no-op when the file is already right.
 podman_events_conf() {
     podman_events_write "$PODMAN_CONF_DIR/containers.conf"
 }
@@ -238,11 +209,9 @@ install_root_tier() {
     log "installing the root tier (Suricata) for data dir $data"
 
     # Root's podman config, so the sensor's own healthchecks stop writing a
-    # `health_status` event to the journal every 30 seconds. They are podman's
-    # children under the *system* manager, so the login user's config (written on
-    # the user side, podman_events_write) cannot reach them; this is the same
-    # setting in root's chain, and it is the whole remainder of the flood once
-    # the user side is in place. /etc is where a system manager's podman reads it.
+    # `health_status` event every 30s. They are podman children of the *system*
+    # manager, so the user-side file cannot reach them; this is the same setting
+    # in root's chain, and /etc is where a system manager's podman reads it.
     podman_events_write /etc/containers/containers.conf
 
     # The configuration the container reads. Root-owned: a rootful container
@@ -255,13 +224,11 @@ install_root_tier() {
     root_render "$DEPLOY_DIR/root/suricata/rules/local.rules" \
         "$ROOT_CONFIG_DIR/suricata/rules/local.rules" 644 "$data"
 
-    # $DATA_DIR/ids is the one directory with two owners: the sensor's state
-    # (ids/suricata, root-owned, because a rootful container writes it) and the
-    # crowdsec state next to it (ids/crowdsec, user-owned, because that container
-    # is rootless). The parent goes to the invoking user so the *user-side*
-    # install can keep creating ids/crowdsec/ on later deploys -- root writes
-    # ids/suricata/ regardless of the mode bits. 0755/0644 so the unprivileged
-    # scripts/ids.sh can read eve.json.
+    # $DATA_DIR/ids has two owners: the sensor's state (ids/suricata, root-owned,
+    # because a rootful container writes it) and crowdsec's next to it
+    # (ids/crowdsec, user-owned, because that container is rootless). The parent
+    # goes to the invoking user so the user-side install can keep creating
+    # ids/crowdsec on later deploys. 0755/0644 so scripts/ids.sh can read eve.json.
     install -d -m 755 "$data/ids"
     if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
         chown "$SUDO_UID:$SUDO_GID" "$data/ids" || warn "could not hand $data/ids back to uid $SUDO_UID"
@@ -269,54 +236,39 @@ install_root_tier() {
     install -d -m 755 "$data/ids/suricata" "$data/ids/suricata/lib"
 
     # The alert-only feed CrowdSec tails (the second eve-log output in
-    # deploy/root/suricata/suricata.yaml). Created here rather than left to the
-    # sensor because crowdsec may start first, and a fixed path that does not
-    # exist yet is not retried by its file acquisition. `:` creates without
-    # truncating a live file. The label is load-bearing: a file created under
-    # this root-owned directory inherits default_t, which a container cannot
-    # read (measured), so it is set explicitly -- the same chcon install.sh
-    # already does for NPM's http.conf. There is no tmpfiles rule (see below):
-    # the file persists on disk, and start.sh recreates it if a restart finds
-    # it missing.
+    # suricata.yaml). Created here because crowdsec may start first, and a fixed
+    # path that does not exist yet is not retried by its file acquisition. `:`
+    # creates without truncating a live file. The label is load-bearing: a file
+    # created under this root-owned dir inherits default_t, which a container
+    # cannot read, so it is set explicitly. start.sh recreates it if missing.
     [ -e "$data/ids/suricata/alerts.json" ] || : > "$data/ids/suricata/alerts.json"
     chmod 644 "$data/ids/suricata/alerts.json" 2>/dev/null || true
     chcon -t container_file_t "$data/ids/suricata/alerts.json" 2>/dev/null \
         || warn "could not label $data/ids/suricata/alerts.json for containers"
 
-    # There is deliberately no /etc/tmpfiles.d/stack-ids.conf any more, and any
-    # copy an earlier bootstrap wrote is removed below. That rule could never
-    # work: every path under $DATA_DIR crosses the user-owned data dir before
-    # reaching the root-owned ids/suricata, and systemd-tmpfiles refuses to
-    # canonicalize that ("unsafe path transition"), so `--create` exited 73 on
-    # every bootstrap and pruned nothing. Rotation is the host logrotate's job
-    # instead (deploy/root/logrotate-stack-ids, rendered below): Suricata only
-    # rotates a `filename` containing a strftime template, and ours are static,
-    # so logrotate renames the live files, creates new ones and SIGHUPs the
-    # sensor to reopen them. This script creates the directory and the feed.
+    # No /etc/tmpfiles.d rule: every path here crosses the user-owned data dir
+    # before reaching root-owned ids/suricata, and systemd-tmpfiles refuses that
+    # ("unsafe path transition"). Rotation is the host logrotate's job instead
+    # (deploy/root/logrotate-stack-ids, rendered below): Suricata rotates only a
+    # `filename` with a strftime template, and ours are static.
     rm -f /etc/tmpfiles.d/stack-ids.conf
 
-    # The unit itself. Render, then let systemd regenerate suricata.service from
-    # it -- the same render-then-daemon-reload cycle as the user side, just in
-    # the system manager. Mode 0644, unlike the 0600 user units: a system unit in
-    # /etc carries no secret (the secret-bearing templates are the *user* units
-    # with @PLACEHOLDERS@), and this one has to be readable by the unprivileged
-    # ./verify.sh, which diffs it against the repo to catch drift.
+    # The unit itself. Render, then let systemd regenerate suricata.service --
+    # the same render-then-daemon-reload cycle as the user side, in the system
+    # manager. Mode 0644, unlike the 0600 user units: a system unit carries no
+    # secret, and the unprivileged verify.sh must read it to catch drift.
     root_render "$DEPLOY_DIR/root/suricata.container" "$ROOT_UNIT_DIR/suricata.container" 644 "$data"
 
     # A silent substitution failure is worse than a loud one: an empty @DATA_DIR@
     # renders a unit that mounts /ids/suricata, which podman rejects only after
-    # systemd has already tried to start it (this happened once -- the helper that
-    # escapes sed replacements was defined below its first use, and a failed
-    # $(...) in an argument does not trip set -e). Nothing reaches the system
-    # manager under test.
+    # systemd has tried to start it. Nothing reaches the system manager untested.
     grep -qF "$data/ids/suricata" "$ROOT_UNIT_DIR/suricata.container" \
         || die "rendered $ROOT_UNIT_DIR/suricata.container does not reference $data/ids/suricata -- the substitution failed"
 
     # Rotation and retention for the EVE files (see the header of
-    # deploy/root/logrotate-stack-ids): Suricata cannot rotate a static
-    # filename, so the host's daily logrotate renames the files, creates new
-    # ones and SIGHUPs the sensor to reopen them. Rendered here because the
-    # paths carry @DATA_DIR@ and the keep count is IDS_RETENTION_DAYS.
+    # deploy/root/logrotate-stack-ids): Suricata cannot rotate a static filename,
+    # so the host's logrotate renames, creates and SIGHUPs. Rendered here because
+    # the paths carry @DATA_DIR@ and the keep count is IDS_RETENTION_DAYS.
     root_render "$DEPLOY_DIR/root/logrotate-stack-ids" /etc/logrotate.d/stack-ids 644 "$data"
     grep -qF "$data/ids/suricata" /etc/logrotate.d/stack-ids \
         || die "rendered /etc/logrotate.d/stack-ids does not reference $data/ids/suricata -- the substitution failed"
@@ -332,10 +284,9 @@ install_root_tier() {
     # ------------------------------------------------------------------
     # auditd: watch the host-level surfaces nothing in this repo writes
     # ------------------------------------------------------------------
-    # The daemon was already running with an empty rules.d. The rules are
-    # rendered (they carry @DATA_DIR@ for the data-dir watches) and loaded with
-    # augenrules; the report unit turns the root-only log into a status file the
-    # unprivileged monitor can read.
+    # The daemon runs with an empty rules.d. The rules are rendered (they carry
+    # @DATA_DIR@ for the data-dir watches) and loaded with augenrules; the report
+    # unit turns the root-only log into a status file the monitor can read.
     install -d -m 750 /etc/audit/rules.d
     root_render "$DEPLOY_DIR/root/audit.rules" /etc/audit/rules.d/60-stack.rules 640 "$data"
     aenv=$(mktemp)
@@ -344,27 +295,24 @@ install_root_tier() {
     rm -f "$aenv"
     root_render "$DEPLOY_DIR/root/audit-report.sh" "$ROOT_CONFIG_DIR/audit-report.sh" 755 "$data"
     # The status-file writer audit-report.sh and bouncer.sh share. Installed
-    # here, unconditionally, because the bouncer block below only runs once a
-    # key exists -- and the bouncer must never be left without it.
+    # unconditionally, because the bouncer block below runs only once a key
+    # exists, and the bouncer must never be left without it.
     root_render "$DEPLOY_DIR/root/status.sh" "$ROOT_CONFIG_DIR/status.sh" 644 "$data"
     root_render "$DEPLOY_DIR/root/stack-audit.service" /etc/systemd/system/stack-audit.service 644 "$data"
     root_render "$DEPLOY_DIR/root/stack-audit.timer" /etc/systemd/system/stack-audit.timer 644 "$data"
     # augenrules ADDS rules; it never removes the ones a previous render left
-    # behind (that is how a watch I deleted kept firing). Remove only OUR rules,
-    # one at a time -- NOT `auditctl -D`: on this host (kernel 6.12 / audit 4.0.3)
-    # a global delete left the kernel accepting rules but emitting no events at
-    # all, not even the CONFIG_CHANGE for the next one, until a reboot. Deleting
-    # by rule text has no such effect and leaves an operator's own rules alone.
+    # behind, so remove only OUR rules, one at a time -- NOT `auditctl -D`: a
+    # global delete has left this kernel accepting rules but emitting no events
+    # at all, not even CONFIG_CHANGE, until a reboot. Deleting by rule text has
+    # no such effect and leaves an operator's own rules alone.
     if [ -x /usr/sbin/auditctl ]; then
         while IFS= read -r rule; do
             [ -n "$rule" ] || continue
             # -W takes the WATCH PATH, not the whole `-w ...` line. Passing the
-            # line made auditctl read "-w" as the path and fail with "The path
-            # must start with '/'" -- hidden by the `|| true` this replaced --
-            # so nothing was ever removed. augenrules then aborted on the first
-            # duplicate ("Rule exists") and a newly added watch never loaded
-            # (measured here: 7 of 9 after a bootstrap). Only file watches are
-            # ours in this ruleset.
+            # line makes auditctl read "-w" as the path and fail ("The path must
+            # start with '/'"), after which augenrules aborts on the first
+            # duplicate ("Rule exists") and a new watch never loads. Only file
+            # watches are ours in this ruleset.
             case "$rule" in
                 -w\ *) rule="${rule#-w }" ;;
                 *)     continue ;;
@@ -375,8 +323,7 @@ install_root_tier() {
         done <<< "$(/usr/sbin/auditctl -l 2>/dev/null | grep -- '-k stack_' || true)"
     fi
     # augenrules exits non-zero on "Rule exists" even when the ruleset is already
-    # what we want (it replays the whole file), so the verdict is the kernel's
-    # rule list, not the exit code.
+    # right, so the verdict is the kernel's rule list, not the exit code.
     /usr/sbin/augenrules --load >/dev/null 2>&1 || true
     n_expected=$(grep -c -- '-k stack_' /etc/audit/rules.d/60-stack.rules 2>/dev/null || true)
     case "$n_expected" in ''|*[!0-9]*) n_expected=0 ;; esac
@@ -395,10 +342,10 @@ install_root_tier() {
     # ------------------------------------------------------------------
     # stack-bouncer: CrowdSec's decisions -> nftables
     # ------------------------------------------------------------------
-    # Its key is generated by the *user-side* install (it has to be in
-    # secrets.env, where the crowdsec template reads it), so a root phase that
-    # runs before the first ./deploy.sh has nothing to install yet -- the second
-    # bootstrap pass picks it up. Same two-pass reason as the sensor itself.
+    # Its key is generated by the user-side install (it must be in secrets.env,
+    # where the crowdsec template reads it), so a root phase that runs before the
+    # first ./deploy.sh has nothing to install yet; the second bootstrap pass
+    # picks it up.
     local bkey
     bkey=$(env_value "$data/config/stack/secrets.env" CROWDSEC_BOUNCER_KEY)
     if [ -z "$bkey" ]; then
@@ -406,8 +353,7 @@ install_root_tier() {
     else
         root_render "$DEPLOY_DIR/root/bouncer.sh" "$ROOT_CONFIG_DIR/bouncer.sh" 755 "$data"
         # The bouncer's address guard: CIDR classification in stdlib python, so
-        # the private-space rules are exact rather than globs. Root-owned beside
-        # the script; 0644 and no secret, it is only code.
+        # the private-space rules are exact rather than globs. No secret.
         root_render "$DEPLOY_DIR/root/ipguard.py" "$ROOT_CONFIG_DIR/ipguard.py" 644 "$data"
         # Root-owned 0600, deliberately not $DATA_DIR/config: this key reads every
         # decision, and root must not take instructions from a file the stack user
@@ -503,12 +449,10 @@ if [ "${BACKUP_RETENTION+x}" != x ] || [ "${#BACKUP_RETENTION[@]}" -eq 0 ]; then
 fi
 
 # Every unit is rendered. The inventory is the directory, not a list here: every
-# *.container and *.container.in under deploy/ is a Quadlet unit (the .in suffix
-# marks a template, the rendered target drops it) and the podman network is the
-# one .network. A hand-written list was a second copy of `ls deploy/` -- a new
-# unit had to be created and then typed again, and the copy could drift without
-# anything noticing. deploy/root/ is not in this glob: that tier is installed by
-# `install.sh --root`.
+# *.container and *.container.in under deploy/ is a unit (the .in suffix marks a
+# template, the render drops it) and the podman network is the .network. A
+# hand-written list would be a second copy of `ls deploy/` that drifts silently.
+# deploy/root/ is not in this glob: that tier is `install.sh --root`.
 deploy_entry_names() { # glob...
     local f
     for f in "$@"; do
@@ -519,11 +463,9 @@ mapfile -t UNITS < <(deploy_entry_names "$DEPLOY_DIR"/*.container \
     "$DEPLOY_DIR"/*.container.in "$DEPLOY_DIR"/*.network | LC_ALL=C sort)
 [ "${#UNITS[@]}" -gt 0 ] || die "no units found in $DEPLOY_DIR"
 
-# Plain systemd user units (installed to USER_UNIT_DIR, not the quadlet dir):
-# the same derivation over the two unit suffixes. db-dump.service is here rather
-# than in UNITS because it is a host job: the kuma half is `podman exec` into
-# the running container, which a container cannot do (deploy/db-dump.service
-# explains).
+# Plain systemd user units (USER_UNIT_DIR, not the quadlet dir): the same
+# derivation over the two unit suffixes. db-dump.service is a host job -- it
+# `podman exec`s into the running container, which a container cannot do.
 mapfile -t USER_UNITS < <(deploy_entry_names "$DEPLOY_DIR"/*.service \
     "$DEPLOY_DIR"/*.timer | LC_ALL=C sort)
 [ "${#USER_UNITS[@]}" -gt 0 ] || die "no user units found in $DEPLOY_DIR"
@@ -533,11 +475,9 @@ mapfile -t USER_UNITS < <(deploy_entry_names "$DEPLOY_DIR"/*.service \
 # they must not be enabled on their own.
 mapfile -t USER_TIMERS < <(deploy_entry_names "$DEPLOY_DIR"/*.timer)
 
-# Method allowlists for the CLN runes (`method^<prefix>` is a prefix match).
-# The prefixes themselves are declared in stack.conf (CLN_READ_METHODS,
-# CLN_SPEND_METHODS) because scripts/rotate.sh mints the
-# same runes on a rotation; rune_json (scripts/lib.sh) turns each array into the
-# restriction JSON. SPEND is the read set plus the payment methods.
+# Method allowlists for the CLN runes (`method^<prefix>` is a prefix match). The
+# prefixes live in stack.conf because rotate.sh mints the same runes; rune_json
+# turns each array into the restriction JSON. SPEND is READ plus the payments.
 SPEND_RESTRICTIONS=$(rune_json "${CLN_READ_METHODS[@]}" "${CLN_SPEND_METHODS[@]}")
 READ_RESTRICTIONS=$(rune_json "${CLN_READ_METHODS[@]}")
 # ---------------------------------------------------------------------------
@@ -551,9 +491,8 @@ SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 TOR_DIR="$DATA_DIR/tor"
 
-# write_secret (a secret-carrying env file: atomic, mode 600) is scripts/lib.sh's
-# write_env_file; configure.sh writes the BTCPay env files with the same one, so
-# the two halves of the stack no longer have a umask copy and a mktemp copy.
+# write_secret is lib.sh's write_env_file (atomic, 0600); configure.sh writes the
+# BTCPay env files with the same one, so both halves agree on the mode.
 
 # Echo 0 (true) when the file is missing and the caller should write it, so a
 # call site reads: if ensure_secret "$F" "token env"; then write_secret ...; fi
@@ -571,18 +510,16 @@ new_or_reused_token() {
     new_or_reused_env "$1" "$2" announce
 }
 
-# Like new_or_reused_token, but for a value nobody has to present (a JWT
-# signing key, the bootstrap pepper): reuse whatever the running container
-# already carries so adopting a host keeps existing sessions and node tokens
-# valid, otherwise generate. Prints the value on stdout, never the reverse.
+# Like new_or_reused_token, but for a value nobody presents (a JWT signing key,
+# the bootstrap pepper): reuse what the running container carries so adopting a
+# host keeps sessions and node tokens valid. Prints the value on stdout.
 new_or_reused_secret() {
     new_or_reused_env "$1" "$2" quiet
 }
 
-# The one body behind both: read the value the running container already has,
-# else generate one. A generated TOKEN has to be announced -- every client must
-# be updated to match -- while a generated secret is silent, because nobody
-# presents it.
+# The one body behind both: read what the running container already has, else
+# generate. A generated TOKEN is announced (every client must match); a generated
+# secret is silent, because nobody presents it.
 new_or_reused_env() { # container var announce|quiet
     local container="$1" var="$2" mode="$3" val=""
     if command -v podman >/dev/null 2>&1; then
@@ -599,21 +536,18 @@ new_or_reused_env() { # container var announce|quiet
     printf '%s' "$val"
 }
 
-# Seed stdin into PATH when the file is missing, mode 600, with the one log line
-# every seed step used to spell out. A no-op when the file already exists: an
-# existing secret is never overwritten (see the header), so this is that rule in
-# one place instead of twenty.
+# Seed stdin into PATH when missing, mode 600. A no-op when it exists: an existing
+# secret is never overwritten (see the header), in one place instead of twenty.
 seed_env() { # path label
     ensure_secret "$1" "$2" || return 0
     write_secret "$1"
     log "wrote $1 (mode 600)"
 }
 
-# The eight servers whose token.env is one seed-once bearer token: same file
-# shape, same log line, so the table is the whole difference between them. The
-# value is resolved INSIDE the missing-file branch -- a heredoc body would run
-# new_or_reused_token (and announce "a new token") on every install, even when
-# the file is being left alone.
+# The eight servers whose token.env is one seed-once bearer token: same shape,
+# same log line, so the table is the whole difference. The value is resolved
+# INSIDE the missing-file branch -- a heredoc body would announce "a new token" on
+# every install, even when the file is left alone.
 seed_token_env() { # container VAR
     local container="$1" var="$2" token
     ensure_secret "$CONFIG_DIR/$container/token.env" "$container token env" || return 0
@@ -624,35 +558,32 @@ EOF
     log "wrote $CONFIG_DIR/$container/token.env (mode 600)"
 }
 
-# Hand paths to the image's in-container uid 1000 (host subuid, 525287 here).
-# Deliberately NOT recursive: callers pass every path that needs re-owning. A
-# recursive chown over a Bitcoin datadir walked hundreds of GB of block and
-# LevelDB files on every deploy (while bitcoind was running), which is why the
-# call site names the datadir and its config explicitly. Subdirectories are
-# created by the container itself, already as that uid.
+# Hand paths to the image's in-container uid 1000 (a host subuid).
+# Deliberately NOT recursive: a recursive chown over a Bitcoin datadir walked
+# hundreds of GB of block and LevelDB files on every deploy, with bitcoind
+# running. Callers name the datadir and its config; subdirectories are created by
+# the container itself, already as that uid.
 chown_image_uid() {
     command -v podman >/dev/null 2>&1 || return 0
     podman unshare chown 1000:1000 "$@" 2>/dev/null \
         || log "could not chown $* -- run: podman unshare chown 1000:1000 $*"
 }
 
-# The backup set (BACKUP_PATHS in stack.conf) rendered the two ways
-# deploy/backup.container needs it: one read-only Volume= per entry, and the
-# space-separated path list restic backs up in its Exec=. scripts/backup.sh
-# derives its mounts and arguments from the same array, so the declaration is
-# the only place a directory is added or removed.
+# BACKUP_PATHS rendered the two ways deploy/backup.container needs it: one
+# read-only Volume= per entry, and the path list restic backs up in its Exec=.
+# backup.sh derives its mounts and arguments from the same array, so the
+# declaration is the only place a directory is added or removed.
 #
 # `:z` (shared), not `:Z`: lightningd, nginx-proxy-manager and tor mount some of
-# these same directories, and two containers cannot share a path one labels
-# private. No escaping here: these go into the unit verbatim, not through sed.
+# these too, and two containers cannot share a path one labels private. No
+# escaping here: these go into the unit verbatim, not through sed.
 backup_mounts() {
     local p
     for p in "${BACKUP_PATHS[@]}"; do
         # audit/ is also written by the rootful IDS. podman's :z relabel fails on
-        # its root-owned auditd.fim (initrc_tmp_t), which aborted the whole
-        # backup; the directory itself already carries container_file_t, so mount
-        # it read-only without asking for another relabel. restic warns about the
-        # one unreadable root-owned file, exactly as it did before.
+        # its root-owned auditd.fim (initrc_tmp_t) and aborts the whole backup;
+        # the directory already carries container_file_t, so mount it read-only
+        # without another relabel. restic warns about the one unreadable file.
         if [ "$p" = audit ]; then
             printf 'Volume=%s/%s:/data/%s:ro\n' "$DATA_DIR" "$p" "$p"
         else
@@ -669,10 +600,10 @@ backup_restic_paths() {
     printf '%s' "$out"
 }
 
-# BACKUP_EXCLUDES as restic flags, one per entry. Quoted because an entry may be
-# a glob (npm/data/database.sqlite* covers the db and its -journal/-wal/-shm):
-# restic matches the pattern itself, and the container's /bin/sh must not expand
-# it first. scripts/backup.sh builds the same flags for a hand run.
+# BACKUP_EXCLUDES as restic flags. Quoted because an entry may be a glob
+# (npm/data/database.sqlite* covers the db and its -journal/-wal/-shm): restic
+# matches it, and the container's /bin/sh must not expand it first. backup.sh
+# builds the same flags for a hand run.
 backup_excludes() {
     local p out=""
     for p in ${BACKUP_EXCLUDES[@]+"${BACKUP_EXCLUDES[@]}"}; do
@@ -681,10 +612,9 @@ backup_excludes() {
     printf '%s' "${out% }"
 }
 
-# The keep policy (BACKUP_RETENTION in stack.conf) as `restic forget` flags.
-# Space-joined: the entries are flags and counts, never a path, so each one is a
-# separate word in the Exec= line and no quoting is needed. scripts/backup.sh
-# passes the same array to its own forget, so a policy edit moves both.
+# The keep policy (BACKUP_RETENTION) as `restic forget` flags. Space-joined: the
+# entries are flags and counts, never a path, so each is a word in Exec= and no
+# quoting is needed. backup.sh passes the same array to its own forget.
 backup_retention_flags() {
     printf '%s' "${BACKUP_RETENTION[*]}"
 }
@@ -692,13 +622,12 @@ backup_retention_flags() {
 # ---------------------------------------------------------------------------
 # the one template render
 # ---------------------------------------------------------------------------
-# Every template -- a unit or an env file -- goes through this substitution
-# list. The caller owns the output file: render_unit installs it, and the two
-# env writers below apply their own policy (seed-once / write-if-changed). The
-# root tier has its own list (lib.sh's render_root_template, which verify.sh
-# re-renders against), so a placeholder shared with it must be added on both
-# sides. Values that only some templates use are `${x:-}` because this list is
-# evaluated for every template, including the ones that do not mention them.
+# Every template -- a unit or an env file -- goes through this substitution list.
+# The caller owns the output: render_unit installs it, the env writers below
+# apply their own policy. The root tier has its own list (render_root_template,
+# which verify.sh re-renders against), so a placeholder shared with it must be
+# added on both sides. Values only some templates use are `${x:-}` because every
+# template is evaluated against this list.
 render_to() { # src out
     local src="$1" out="$2" vol
     sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
@@ -736,11 +665,9 @@ render_to() { # src out
         -e "s|@BTCPAY_ADMIN_PASSWORD@|$(esc "${BTCPAY_ADMIN_PASSWORD:-}")|g" \
         -e "s|@RESTIC_PASSWORD@|$(esc "${RESTIC_PASSWORD:-}")|g" \
         "$src" > "$out"
-    # @BACKUP_VOLUMES@ becomes one Volume= line per BACKUP_PATHS entry, which a
-    # sed replacement cannot carry (its value is multi-line and would need the
-    # newlines escaped); substitute the whole line here instead. Only
-    # backup.container carries the token, so this is a no-op for every other
-    # template.
+    # @BACKUP_VOLUMES@ becomes one Volume= line per entry, which sed cannot carry
+    # (the value is multi-line); substitute the whole line here. Only
+    # backup.container carries the token, so this is a no-op elsewhere.
     if grep -qF '@BACKUP_VOLUMES@' "$out"; then
         vol="$(mktemp)"
         backup_mounts > "$vol"
@@ -753,13 +680,11 @@ render_to() { # src out
     fi
 }
 
-# Render a template into PATH only when PATH is missing: the seed-once rule for
-# every env file below. An operator edit (boltmesh/app.env) and a rotation
-# (scripts/rotate.sh's set_env_key on bitcoin-node-mcp/upstream.env and
-# btc-explorer/btc-explorer.env) must survive every install, which is why this
-# never calls install(1) over an existing file. The values are resolved by the
-# caller INSIDE the ensure_secret branch -- a value computed before it would
-# announce a new token on every run.
+# Render into PATH only when PATH is missing: the seed-once rule for every env
+# file. An operator edit (boltmesh/app.env) and a rotation (rotate.sh's
+# set_env_key) must survive every install, so this never installs over an
+# existing file. Values are resolved by the caller INSIDE the ensure_secret
+# branch -- one computed earlier would announce a new token on every run.
 seed_rendered() { # path label src [log hint]
     local path="$1" label="$2" src="$3" hint="" tmp
     ensure_secret "$path" "$label" || return 0
@@ -772,9 +697,8 @@ seed_rendered() { # path label src [log hint]
     log "wrote $path (mode 600)$hint"
 }
 
-# Render a machine-owned env file and rewrite it only when the bytes differ. An
-# unchanged file must not churn: a rewritten mtime is what makes an operator
-# think a credential moved.
+# Render a machine-owned env file and rewrite it only when the bytes differ: a
+# rewritten mtime is what makes an operator think a credential moved.
 write_rendered_if_changed() { # path src
     local path="$1" src="$2" tmp
     tmp="$(mktemp)"
@@ -801,18 +725,14 @@ read_secret() {
 
 # The one append-if-missing rule for a key in secrets.env. An existing value is
 # NEVER regenerated: the two CrowdSec bouncer keys are registered in the LAPI
-# under exactly the value the rendered unit carries, so a new one would leave the
-# old registration live and enforcement silently dead. A value that is absent is
-# written once (the caller's candidate, else the first non-empty duplicate
-# already in the file, else a fresh hex secret) and echoed back for the caller to
-# assign and export.
+# under exactly the rendered value, so a new one leaves the old registration live
+# and enforcement silently dead. An absent value is written once (the caller's
+# candidate, else the first non-empty duplicate already in the file, else a fresh
+# hex secret) and echoed for the caller to assign and export.
 #
-# The file is rewritten through write_secret (atomic, 0600) whenever the key is
-# present but its value is empty: appending a second `KEY=value` after an empty
-# `KEY=` would be invisible to env_value (which reads the first match), so every
-# install would mint another key. The append branch makes sure the file ends in
-# a newline first, or the new key glues itself to the previous line and the next
-# run cannot find it either.
+# A key present but empty goes through write_secret rather than an append:
+# appending a second `KEY=value` after an empty `KEY=` is invisible to env_value
+# (which reads the first match), so every install would mint another key.
 ensure_secret_key() { # key [value] -> the value now in the file
     local key="$1" value="${2:-}" cur found
     cur=$(read_secret "$key")
@@ -820,10 +740,10 @@ ensure_secret_key() { # key [value] -> the value now in the file
         printf '%s' "$cur"
         return 0
     fi
-    # An adopted file can already carry the key with an empty value, or a
-    # duplicate left by an older installer. Reuse the first non-empty duplicate:
-    # that is the value the LAPI most likely registered, so a broken host is
-    # repaired instead of being handed a third key that would 403.
+    # An adopted file can carry the key with an empty value, or a duplicate from
+    # an older installer. Reuse the first non-empty duplicate: that is what the
+    # LAPI most likely registered, so a broken host is repaired rather than handed
+    # a third key that would 403.
     found=$(sed -n "s/^$key=//p" "$SECRETS_FILE" 2>/dev/null | grep -v '^$' | head -n1 || true)
     value="${value:-${found:-$(rand_hex)}}"
     if grep -q "^$key=" "$SECRETS_FILE" 2>/dev/null; then
@@ -933,27 +853,23 @@ fi
 # never rewrites it, so add this one key when it is missing.
 BTCPAY_DB_PASSWORD=$(ensure_secret_key BTCPAY_DB_PASSWORD "$BTCPAY_DB_PASSWORD")
 
-# The bouncer's key is the one secret NOT in that heredoc: it has to exist on a
-# host deployed before the bouncer did, and ensure_secret would never touch an
-# existing file. So it is read and only *appended* when missing -- which also
-# covers a fresh host, whose file the block above just wrote.
+# The bouncer's key is not in the heredoc above: it must also exist on a host
+# deployed before the bouncer did, and ensure_secret never touches an existing
+# file. So it is appended when missing, which also covers a fresh host.
 #
-# NEVER regenerate it. deploy/crowdsec.container.in renders it into
-# BOUNCER_KEY_firewall, and the image's entrypoint registers that exact key in
-# its LAPI on start; a new value would leave the old bouncer registered and
-# enforcement silently dead (the LAPI answers 403 and stack-bouncer reports "LAPI
-# unreachable" -- the status file exists for exactly this).
+# NEVER regenerate it. crowdsec.container.in renders it into BOUNCER_KEY_firewall
+# and the entrypoint registers that exact key in its LAPI; a new value leaves the
+# old bouncer registered and enforcement silently dead (LAPI 403, bouncer reports
+# "LAPI unreachable" -- the status file exists for this).
 CROWDSEC_BOUNCER_KEY=$(ensure_secret_key CROWDSEC_BOUNCER_KEY)
 export CROWDSEC_BOUNCER_KEY
 
-# The MCP server's own bouncer key: a second, read-only client of the same
-# LAPI. Separate from the one above so its pulls are attributable in
-# cs_lapi_bouncer_requests_total and so revoking it (`cscli bouncers delete
-# mcp`) never touches enforcement. Appended rather than seeded for the same
-# reason -- a host deployed before this server existed has a secrets.env
-# without it -- and under the same never-regenerate rule: the crowdsec
-# entrypoint only registers a bouncer when the name is absent, so a new value
-# would leave `mcp` holding the old key and every tool answering 403.
+# The MCP server's own bouncer key: a second, read-only client of the same LAPI,
+# separate so its pulls are attributable in cs_lapi_bouncer_requests_total and
+# revoking it (`cscli bouncers delete mcp`) never touches enforcement. Appended
+# for the same reason, under the same never-regenerate rule: the entrypoint
+# registers a bouncer only when the name is absent, so a new value would leave
+# `mcp` holding the old key and every tool answering 403.
 CROWDSEC_MCP_BOUNCER_KEY=$(ensure_secret_key CROWDSEC_MCP_BOUNCER_KEY)
 export CROWDSEC_MCP_BOUNCER_KEY
 
@@ -1003,11 +919,10 @@ fi
 [ -s "$DATA_DIR/bitcoin/bitcoin.conf" ] && chown_image_uid "$DATA_DIR/bitcoin/bitcoin.conf"
 
 # Download and extract the pinned Monero plugin when the pinned artifact is not
-# the one on disk. A failure is a warning, not a fatal error: BTC-LN still works
-# and the bootstrap re-runs the XMR method on the next deploy. Renovate cannot
-# track plugin-builder URLs, so the version and hash in stack.conf are edited
-# together -- and the marker is what makes that edit land, since the DLL's own
-# name does not change between versions.
+# the one on disk. A failure is a warning, not fatal: BTC-LN still works and the
+# next deploy retries. Renovate cannot track plugin-builder URLs, so the version
+# and hash in stack.conf are edited together -- the marker is what makes that edit
+# land, since the DLL's name does not change between versions.
 stage_btcpay_plugin() {
     local dir="$DATA_DIR/btcpay/Plugins/$BTCPAY_PLUGIN_ID"
     local marker="$dir/.artifact-sha256" tmp stage old has_old
@@ -1056,15 +971,14 @@ stage_btcpay_plugin() {
         rm -rf "$stage"
         return 0
     fi
-    # The container keeps its already-loaded assemblies mapped, so replacing the
-    # directory under a running BTCPay is safe; deploy.sh restarts it when the
-    # DLL is newer than the container (btcpay_plugin_newer) and configure.sh
-    # runs the bootstrap.
-    # Move the installed tree aside rather than deleting it: a directory cannot
-    # be replaced atomically, so the old copy is the only thing that keeps BTCPay
-    # loadable if the second rename fails. The aside name is fixed and OUTSIDE
-    # Plugins/ (BTCPay scans that directory for assemblies and must not find a
-    # second copy there), and it is removed only after the new tree is in place.
+    # The container keeps its loaded assemblies mapped, so replacing the
+    # directory under a running BTCPay is safe; deploy.sh restarts it when the DLL
+    # is newer than the container and configure.sh runs the bootstrap.
+    # Move the installed tree aside rather than deleting it: a directory cannot be
+    # replaced atomically, so the old copy is what keeps BTCPay loadable if the
+    # second rename fails. The aside name is fixed and OUTSIDE Plugins/ (BTCPay
+    # scans that directory and must not find a second copy), removed only after
+    # the new tree is in place.
     old="$DATA_DIR/btcpay/.plugin-previous"
     if [ ! -e "$dir" ] && [ -e "$old" ]; then
         # A previous run died between the two renames; the only working copy is
@@ -1114,11 +1028,9 @@ mkdir -p "$DATA_DIR/monero" "$DATA_DIR/cln" "$TOR_DIR"
 # this stays user-owned; only the directory has to exist for the :z mount.
 mkdir -p "$DATA_DIR/fulcrum"
 
-# The onion services' keys ([onion.*] in deploy/services.toml): mounted into tor at
-# /var/lib/tor/onion. Mode 700 here, because tor only checks the leaf
-# HiddenServiceDir it creates -- a world-listable parent leaks the service names
-# (not the keys). Written by tor as container root = the host user under rootless
-# podman, like cln/ and tor/torrc, so a plain mkdir and no uid chown.
+# The onion services' keys ([onion.*] in services.toml): mounted into tor at
+# /var/lib/tor/onion. Mode 700 because tor only checks the leaf HiddenServiceDir
+# it creates -- a world-listable parent leaks the service names (not the keys).
 mkdir -p "$TOR_DIR/onion"
 chmod 700 "$TOR_DIR/onion"
 
@@ -1129,19 +1041,17 @@ chmod 700 "$TOR_DIR/onion"
 mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/postgres-dump"
 
 # Uptime-Kuma's state: its UI-authored monitors/status page, history and login,
-# plus the EMBEDDED MARIADB (kuma v2 runs MariaDB, not sqlite -- db-config.json
-# says embedded-mariadb and the live tree is mariadb/). Written by container
-# root -- the host user under rootless podman, same as cln/ and tor/ -- so a
-# plain mkdir, no uid chown. Nothing is seeded into the state itself: the admin
+# plus the EMBEDDED MARIADB (kuma v2 runs MariaDB, not sqlite). Written by
+# container root = the host user, so a plain mkdir. Nothing is seeded: the admin
 # account and every monitor are created in its web UI, which is therefore the
-# only record of them outside the database dump (scripts/db-dump.sh).
+# only record of them outside the database dump (db-dump.sh).
 mkdir -p "$DATA_DIR/uptime-kuma"
 
 # Every BACKUP_PATHS entry must exist before the job's first run: restic would
-# otherwise create it as root inside the container (the wrong owner), and the
-# unit's :z relabel statfs's the source. postgres-dump and the two dump dirs are
-# listed above so their modes can be set here; the loop is what keeps a new
-# stack.conf entry from needing a second edit in this file.
+# otherwise create it as the wrong owner inside the container, and the unit's :z
+# relabel statfs's the source. postgres-dump and the dump dirs are listed above so
+# their modes can be set here; the loop keeps a new stack.conf entry from needing
+# a second edit.
 for _backup_path in "${BACKUP_PATHS[@]}"; do
     mkdir -p "$DATA_DIR/$_backup_path"
 done
@@ -1149,12 +1059,11 @@ unset _backup_path
 # The pre-backup dumps carry live user tables: keep the staging/dump dirs private.
 chmod 700 "$DATA_DIR/npm-dump" "$DATA_DIR/uptime-kuma-dump" 2>/dev/null || true
 
-# Monitoring: the metrics store, and the textfile node-exporter serves.
-# victoriametrics and node-exporter both run as container root == the login user
-# under rootless podman, so a plain mkdir is enough. The textfile dir is 0755
-# because the exporter runs as uid 65534 (a subuid) and has to read what
-# scripts/metrics.sh writes; the writers chmod the files 0644 for the same
-# reason. $DATA_DIR/monitoring is regenerable and stays out of the backup set.
+# Monitoring: the metrics store and the textfile node-exporter serves. Both run as
+# container root = the login user, so a plain mkdir. The textfile dir is 0755
+# because the exporter runs as uid 65534 (a subuid) and reads what metrics.sh
+# writes, which chmods 0644 for the same reason. $DATA_DIR/monitoring is
+# regenerable and stays out of the backup set.
 mkdir -p "$DATA_DIR/monitoring/vm" "$DATA_DIR/monitoring/textfile"
 chmod 0755 "$DATA_DIR/monitoring/textfile" 2>/dev/null || true
 
@@ -1172,40 +1081,28 @@ mkdir -p "$CONFIG_DIR/monitoring/vm"
 ( umask 077; cat "$DEPLOY_DIR/monitoring/scrape.yml" > "$CONFIG_DIR/monitoring/vm/scrape.yml" )
 log "wrote $CONFIG_DIR/monitoring/vm/scrape.yml"
 
-# Alertmanager: the alert state machine scripts/monitor.sh pushes into.
-#
-# The state dir (silences, notification log) is regenerable -- losing a silence
-# un-mutes an alert for one repeat interval -- so it lives with the rest of
-# $DATA_DIR/monitoring, outside BACKUP_PATHS. The unit runs as container root ==
-# the login user under rootless podman, so a plain mkdir is enough.
+# Alertmanager: the alert state machine monitor.sh pushes into. The state dir
+# (silences, notification log) is regenerable -- losing a silence un-mutes an
+# alert for one repeat interval -- so it lives outside BACKUP_PATHS.
 mkdir -p "$DATA_DIR/monitoring/alertmanager" "$CONFIG_DIR/monitoring/alertmanager"
 
-# The config is seeded ONCE and then belongs to the operator: it carries the
-# SMTP password, so rewriting it on every deploy would both clobber an edited
-# route tree and re-arm a placeholder credential. It goes through write_secret
-# (write_atomic: temp file + rename, mode 600) like every other credential-
-# bearing file, and the unit mounts the DIRECTORY rather than the file so the
-# replaced inode is visible instead of leaving the container on a deleted one.
-# That buys no automatic reload: Alertmanager v0.34 has no config watcher, so an
-# edit takes effect only after `curl -X POST http://127.0.0.1:9093/-/reload` (or
-# SIGHUP) -- see docs/alerting.md and the example's header.
+# The config is seeded ONCE and then belongs to the operator: it carries the SMTP
+# password, so rewriting it would clobber an edited route tree and re-arm a
+# placeholder. It goes through write_secret like every credential-bearing file,
+# and the unit mounts the DIRECTORY so the replaced inode is visible. That buys no
+# reload: Alertmanager v0.34 has no config watcher, so an edit takes effect only
+# after `curl -X POST http://127.0.0.1:9093/-/reload` (docs/alerting.md).
 ALERT_CFG="$CONFIG_DIR/monitoring/alertmanager/alertmanager.yml"
 if ensure_secret "$ALERT_CFG" "alertmanager config"; then
     write_secret "$ALERT_CFG" < "$DEPLOY_DIR/examples/monitoring/alertmanager.yml.example"
     log "wrote $ALERT_CFG (mode 600) -- fill in SMTP before alerts are actually mailed"
 fi
 
-# Logs: the store, the shipper's checkpoint, and the shipper's config.
-#
-# victoria-logs and vector both run as container root == the login user under
-# rootless podman (like victoriametrics), so a plain mkdir is enough -- no
-# podman-unshare chown, unlike bitcoind.
-#
-# The config is rendered on every run from deploy/logs/vector.toml, in place and
-# through the directory mount, for the same two reasons as scrape.yml above: a
-# single-file bind mount keeps the inode it opened, and a replaced inode is
-# invisible to the process watching the directory. The file itself is
-# secret-free (no @PLACEHOLDERS@), so it renders like the other plain configs.
+# Logs: the store, the shipper's checkpoint, and its config. Both run as container
+# root = the login user, so a plain mkdir (no podman-unshare chown, unlike
+# bitcoind). The config is rendered on every run, in place and through the
+# directory mount, for the same two reasons as scrape.yml above. It is
+# secret-free, so it renders like the other plain configs.
 mkdir -p "$DATA_DIR/logs/vl" "$DATA_DIR/logs/vector" "$CONFIG_DIR/logs/vector"
 ( umask 077; cat "$DEPLOY_DIR/logs/vector.toml" > "$CONFIG_DIR/logs/vector/vector.toml" )
 log "wrote $CONFIG_DIR/logs/vector/vector.toml"
@@ -1219,9 +1116,8 @@ mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
 # ---------------------------------------------------------------------------
 # None of these is pulled, so "is it built?" is the wrong question: a base-image
 # bump rewrites only that image's Containerfile (Renovate's dockerfile manager),
-# so leaving an existing image alone forever is how such a bump never reaches
-# the host. The Containerfile's hash is baked in as a label and compared here
-# (scripts/lib.sh), so a stale image is rebuilt and a current one is left alone.
+# so leaving an existing image alone is how such a bump never reaches the host.
+# The Containerfile's hash is baked in as a label and compared here (lib.sh).
 ensure_local_image() { # image build-context
     local image="$1" dir="$2"
     [ -f "$dir/Containerfile" ] || return 0
@@ -1230,10 +1126,9 @@ ensure_local_image() { # image build-context
         return 0
     fi
     if podman image exists "$image" 2>/dev/null; then
-        # A stale image is worth rebuilding, but failing the whole install over
-        # it would take the host down for a helper image: keep the bits that
-        # work and let verify.sh report the drift (a broken Containerfile -- an
-        # apk pin that moved, say -- is a fixable authoring bug, not an outage).
+        # Worth rebuilding, but failing the install over a helper image would take
+        # the host down: keep the bits that work and let verify.sh report the
+        # drift (a broken Containerfile is an authoring bug, not an outage).
         log "$image is stale: its Containerfile changed since it was built"
         podman build --label "$(image_inputs_label "$dir/Containerfile")" \
             -t "$image" "$dir" >/dev/null \
@@ -1246,10 +1141,9 @@ ensure_local_image() { # image build-context
         || die "could not build $image"
 }
 
-# netcheck: the curl client the host-side checks exec into. scripts/lib.sh's
-# net_curl runs it in a long-lived container to read a service by name on
-# npm-network, and net_curl_host the same image in a second one on the host
-# network for nginx-proxy-manager, which binds 127.0.0.1:81 there.
+# netcheck: the curl client the host-side checks exec into. net_curl (lib.sh) runs
+# it in a long-lived container to read a service by name on npm-network, and
+# net_curl_host the same image on the host network for nginx-proxy-manager.
 if command -v podman >/dev/null 2>&1; then
     ensure_local_image "$NETCHECK_IMAGE" "$REPO_DIR/netcheck"
 fi
@@ -1261,13 +1155,12 @@ if command -v podman >/dev/null 2>&1; then
     ensure_local_image "$TOR_IMAGE" "$REPO_DIR/tor"
 fi
 
-# The onion services, rendered from the [onion.*] tables (deploy/services.toml).
-# Tor's own config is a hand-tuned file (the control-password hash is derived once
-# and the SocksPolicy is deliberate), so it is seeded once and never rewritten as
-# a whole. The hidden-service part is the exception: it is a *declaration*, so it
-# lives in a marked region that this installer rewrites on every run. Changing an
-# [onion.*] entry is therefore enough -- deploy.sh digests torrc alongside the
-# units and restarts tor when it changed.
+# The onion services, rendered from the [onion.*] tables. Tor's own config is
+# hand-tuned (the control-password hash is derived once, the SocksPolicy is
+# deliberate), so it is seeded once and never rewritten as a whole. The
+# hidden-service part is a *declaration*, so it lives in a marked region this
+# installer rewrites on every run; deploy.sh digests torrc alongside the units and
+# restarts tor when it changed.
 ONION_BEGIN="# >>> onion services (rendered by deploy/install.sh from [onion.*])"
 ONION_END="# <<< onion services"
 
@@ -1365,15 +1258,12 @@ fi
 # ---------------------------------------------------------------------------
 # 6. per-application env files (under the data dir)
 # ---------------------------------------------------------------------------
-# The SHAPE of every file below is deploy/env/<app>/<file>.env.in, rendered
-# here; this section keeps only the values and the write policy. The three
-# policies are not interchangeable:
-#   - seed_rendered: write only when the file is missing. An operator edit
-#     (boltmesh/app.env) and a rotation (scripts/rotate.sh's set_env_key on
-#     bitcoin-node-mcp/upstream.env and btc-explorer/btc-explorer.env) survive
-#     every install; that is what "install.sh never refreshes them" means.
-#   - write_rendered_if_changed: machine-owned, rewritten whenever the rendered
-#     bytes differ (the LAPI bouncer key, the view-only wallet URL).
+# The SHAPE of every file below is deploy/env/<app>/<file>.env.in; this section
+# keeps only the values and the write policy. The three policies are not
+# interchangeable:
+#   - seed_rendered: write only when missing. An operator edit (boltmesh/app.env)
+#     and a rotation (rotate.sh's set_env_key) survive every install.
+#   - write_rendered_if_changed: machine-owned, rewritten when the bytes differ.
 #   - render_unit: units only, never a config file.
 # The eight one-line token.env files stay table-driven by seed_token_env: a
 # template per file would be worse, not better.
@@ -1408,20 +1298,18 @@ seed_rendered "$CONFIG_DIR/bitcoin-node-mcp/upstream.env" \
     "$DEPLOY_DIR/env/bitcoin-node-mcp/upstream.env.in"
 
 # crowdsec-mcp: the bearer token clients present (seeded above), and the bouncer
-# key it reads decisions with. The key is NOT seed-once -- it is derived from
-# $CROWDSEC_MCP_BOUNCER_KEY in secrets.env, which is the authority (the same
-# value the rendered crowdsec unit registers as the "mcp" bouncer), so this
-# file is rewritten whenever the two disagree. Seeding it once would leave a
-# rotated secret split across two files.
+# key it reads decisions with. NOT seed-once -- derived from
+# $CROWDSEC_MCP_BOUNCER_KEY in secrets.env, which is the authority (the same value
+# the rendered crowdsec unit registers as the "mcp" bouncer), so this is rewritten
+# whenever the two disagree. Seeding once would split a rotated secret.
 write_rendered_if_changed "$CONFIG_DIR/crowdsec-mcp/lapi.env" \
     "$DEPLOY_DIR/env/crowdsec-mcp/lapi.env.in"
 
 # btcpay-mcp: the bearer token clients present (seeded above), and the upstream
-# wiring. The key is NOT seeded from a copy: it is minted by
-# scripts/btcpay_bootstrap.py into config/btcpay/bootstrap.env, and
-# configure.sh's write_btcpay_mcp_env() rewrites this file from that state after
-# every bootstrap. This seed only gives the unit a URL before the first
-# bootstrap.
+# wiring. The key is not seeded from a copy: btcpay_bootstrap.py mints it into
+# config/btcpay/bootstrap.env, and configure.sh's write_btcpay_mcp_env() rewrites
+# this file from that state after every bootstrap. This seed only gives the unit a
+# URL before the first bootstrap.
 seed_env "$CONFIG_DIR/btcpay-mcp/upstream.env" "btcpay-mcp upstream env" <<EOF
 # The BTCPay instance this server reads. configure.sh rewrites this file from
 # config/btcpay/bootstrap.env (URL, the read-only BTCPAY_MCP_KEY, store id and
@@ -1430,10 +1318,9 @@ BTCPAY_URL=http://btcpay:49392
 EOF
 
 # BTC RPC Explorer's configuration. The app is configured entirely through the
-# environment (so the unit uses EnvironmentFile=, not a rendered Exec=), and it
-# needs the same bitcoind RPC credentials plus Fulcrum's Electrum endpoint. It
-# keeps no data of its own. Address history comes from Fulcrum; any txid
-# resolves through bitcoind's txindex (README: "Block explorers").
+# environment (EnvironmentFile=, not a rendered Exec=), needs the same bitcoind
+# RPC credentials plus Fulcrum's Electrum endpoint, and keeps no data of its own.
+# Address history comes from Fulcrum; any txid resolves through bitcoind's txindex.
 seed_rendered "$CONFIG_DIR/btc-explorer/btc-explorer.env" "btc explorer env" \
     "$DEPLOY_DIR/env/btc-explorer/btc-explorer.env.in"
 
@@ -1445,10 +1332,9 @@ if ensure_secret "$XMRW_ENV/token.env" "monero-wallet-mcp token env"; then
             "$DEPLOY_DIR/env/monero-wallet-mcp/token.env.in" \
             "with a read and a spend token"
 fi
-# Derived every run (machine-owned): the MCP reads BTCPay's view-only plugin
-# wallet. The wallet RPC has no login by design (the plugin hardcodes empty
-# credentials) and holds no spend key, so the MCP's spend tools cannot move
-# funds.
+# Derived every run: the MCP reads BTCPay's view-only plugin wallet. The wallet
+# RPC has no login by design (the plugin hardcodes empty credentials) and holds no
+# spend key, so the MCP's spend tools cannot move funds.
 write_rendered_if_changed "$XMRW_ENV/upstream.env" \
     "$DEPLOY_DIR/env/monero-wallet-mcp/upstream.env.in"
 
@@ -1464,10 +1350,10 @@ fi
 # ---------------------------------------------------------------------------
 # BoltMesh env files (under the data dir, like every other app's)
 # ---------------------------------------------------------------------------
-# The app reads one flat environment, so the split here is by who owns each
-# value: install.sh generates the database and the signing keys, the operator
-# fills in the third-party credentials, and btcpay/backend.env is written by
-# configure.sh after the bootstrap has provisioned the store.
+# The app reads one flat environment, so the split is by who owns each value:
+# install.sh generates the database and signing keys, the operator fills in the
+# third-party credentials, and btcpay/backend.env comes from configure.sh after
+# the bootstrap provisioned the store.
 BOLT_DB="$CONFIG_DIR/boltmesh"
 
 if ensure_secret "$BOLT_DB/db.env" "boltmesh db env"; then
@@ -1500,11 +1386,10 @@ if ensure_secret "$BOLT_DB/app.env" "boltmesh app env"; then
         "fill in OAuth/SMTP/GitHub before use"
 fi
 
-# Backup repository settings for deploy/backup.container. The unit is
-# secret-free and reads these through EnvironmentFile; the password is a real
-# secret, so it follows the same resolution order (an operator-supplied value
-# wins, so an offsite repo can be opened on a fresh host before this file
-# exists -- see scripts/backup.sh). Keep a copy off the data disk.
+# Backup repository settings for backup.container. The unit is secret-free and
+# reads these through EnvironmentFile; the password follows the same resolution
+# order (an operator-supplied value wins, so an offsite repo opens on a fresh
+# host before this file exists -- see backup.sh). Keep a copy off the data disk.
 BACKUP_ENV="$CONFIG_DIR/backup/backup.env"
 if ensure_secret "$BACKUP_ENV" "backup env"; then
     restic_password=$(first_nonempty \
@@ -1517,25 +1402,21 @@ if ensure_secret "$BACKUP_ENV" "backup env"; then
 fi
 
 # Monitoring: the alert targets, the dead-man's-switch heartbeat and the
-# thresholds for deploy/monitor.service (scripts/monitor.sh). Empty values mean
-# journal-only / the built-in default, so a fresh host is safe before this file
-# is filled in.
+# thresholds for monitor.service. Empty values mean journal-only / the built-in
+# default, so a fresh host is safe before this file is filled in.
 #
-# The example IS the seeded file, copied verbatim like the alertmanager config
-# above -- the two used to be maintained by hand and drifted (the seeded copy
-# was missing keys the example documented, and scripts/monitor.sh read five keys
-# no file mentioned), so the file a fresh host gets is now always the one that
-# documents every key. install.sh still never overwrites an existing one.
+# The example IS the seeded file, copied verbatim: one file documents every key
+# monitor.sh reads, so the two cannot drift. install.sh never overwrites it.
 MON_ENV="$CONFIG_DIR/monitoring/monitor.env"
 if ensure_secret "$MON_ENV" "monitoring env"; then
     write_secret "$MON_ENV" < "$DEPLOY_DIR/examples/monitoring/monitor.env.example"
     log "wrote $MON_ENV (mode 600) -- fill in the heartbeat (and SMTP in the alertmanager config) to be paged"
 fi
 
-# nginx-proxy-manager's admin API, for scripts/npm-hosts.sh: it reconciles every
-# proxy host the stack serves ([npm.*] in deploy/services.toml). The admin login
-# (or a pre-created API token) is a secret, so the file is mode 600; empty means
-# the script logs a one-line skip rather than failing a deploy.
+# nginx-proxy-manager's admin API, for npm-hosts.sh: it reconciles every proxy
+# host the stack serves ([npm.*] in services.toml). The admin login (or a
+# pre-created API token) is a secret, so mode 600; empty means the script logs a
+# one-line skip rather than failing a deploy.
 NPM_ENV="$CONFIG_DIR/npm/api.env"
 if ensure_secret "$NPM_ENV" "nginx-proxy-manager api env"; then
     write_secret "$NPM_ENV" <<'EOF'
@@ -1569,11 +1450,10 @@ fi
 # backs it up. scripts/spend-audit.sh seeds its own baselines on the first run.
 mkdir -p "$DATA_DIR/audit"
 
-# The runes need a running lightningd. install.sh is re-run by ./configure.sh
-# once the daemon is up, so this is best-effort here and self-heals on re-run.
-# Both the proof and the mint/retry loop live in scripts/lib.sh
-# (cln_rune_usable / cln_mint_rune) because scripts/rotate.sh mints the same
-# runes on a rotation.
+# The runes need a running lightningd. configure.sh re-runs this once the daemon
+# is up, so it is best-effort here and self-heals. The proof and the mint/retry
+# loop live in lib.sh (cln_rune_usable / cln_mint_rune) because rotate.sh mints
+# the same runes on a rotation.
 
 read_rune=""
 spend_rune=""
@@ -1672,14 +1552,13 @@ render_unit() {
 
 # Render a whole directory tree through render_unit, preserving its shape. Used
 # for the CrowdSec config (parsers/, scenarios/, acquis.d/), whose files the
-# container mounts one by one -- a directory mount over /etc/crowdsec would
-# fight the image's own entrypoint, which seeds the rest of that tree.
+# container mounts one by one -- a directory mount over /etc/crowdsec would fight
+# the image's entrypoint, which seeds the rest of that tree.
 #
-# The destination is an install-owned MIRROR, not a merge: a parser, scenario or
-# acquisition deleted from deploy/crowdsec/ must also leave the installed tree,
-# or CrowdSec keeps loading it -- and because unit_digest hashes the installed
-# tree, its removal would never show up as drift and the unit would not be
-# restarted. Runtime state lives under $DATA_DIR/ids/crowdsec, never here.
+# The destination is an install-owned MIRROR, not a merge: a file deleted from
+# deploy/crowdsec/ must leave the installed tree too, or CrowdSec keeps loading
+# it -- and since unit_digest hashes that tree, its removal would not show as
+# drift and the unit would not restart. Runtime state is in $DATA_DIR/ids/crowdsec.
 sync_tree() { # src-dir dest-dir
     local src="$1" dest="$2" rel stale=()
     [ -d "$src" ] || return 0
@@ -1703,30 +1582,24 @@ sync_tree() { # src-dir dest-dir
 # ---------------------------------------------------------------------------
 # runtime files a container runs, but that the checkout owns
 # ---------------------------------------------------------------------------
-# Two units run a file that belongs to this checkout rather than to $DATA_DIR:
-# monerod's --block-notify helper and the BTCPay bootstrap script. Mounting them
-# straight out of the repo made the checkout a *runtime* dependency of a
-# container's start: moving or deleting it broke monerod's next start (podman
-# fails on a missing bind source, naming a path nobody edited). The host scripts
-# in deploy/*.service still run from the checkout -- they are the tooling itself
-# -- but a container that a daemon starts must not. So stage both under
-# $DATA_DIR/bin on every run (small, secret-free, regenerable) and let the units
-# reference only the data dir. CI fails if a container template mentions
-# @REPO_DIR@ again, because this is the rule and not an accident of these two.
+# Two units run a file this checkout owns rather than one in $DATA_DIR: monerod's
+# --block-notify helper and the BTCPay bootstrap script. Mounting them from the
+# repo would make the checkout a *runtime* dependency of a container's start
+# (podman fails on a missing bind source, naming a path nobody edited). Host
+# scripts in deploy/*.service still run from the checkout -- they are the tooling
+# -- but a container a daemon starts must not. So both are staged here, and CI
+# fails if a container template mentions @REPO_DIR@.
 mkdir -p "$DATA_DIR/bin"
 install -m 755 "$DEPLOY_DIR/btcpay/monero-notify.sh" "$DATA_DIR/bin/monero-notify.sh"
 install -m 755 "$REPO_DIR/scripts/btcpay_bootstrap.py" "$DATA_DIR/bin/btcpay_bootstrap.py"
 
-# Render a unit over the one already installed, keeping the render it replaces
-# as <target>.bak. Three things here are load-bearing:
-#   - the backup is the *previous* render, not the first one the host ever had:
-#     that copy was written once and then frozen, so "roll back to the .bak"
-#     reverted every unit edit since the first install;
+# Render a unit over the installed one, keeping the render it replaces as
+# <target>.bak. Three things are load-bearing:
+#   - the backup is the *previous* render, not the first the host ever had;
 #   - cp -p keeps mode 600 -- several rendered units carry @PLACEHOLDER@ secrets;
-#   - it backs up only when this render actually changes the file, because
-#     ./configure.sh re-runs install.sh (the CLN runes need a running node).
-#     An unconditional backup would have the second run record the file the
-#     first run just wrote, i.e. destroy the rollback it exists for.
+#   - it backs up only when the render changes the file, because configure.sh
+#     re-runs install.sh (the runes need a running node). An unconditional backup
+#     would record what the first run just wrote, destroying the rollback.
 render_unit_backedup() { # src target
     local prev="" label
     if [ -e "$2" ] && [ ! -L "$2" ]; then
@@ -1754,10 +1627,9 @@ for u in "${UNITS[@]}"; do
 done
 log "rendered ${#UNITS[@]} units (mode 600)"
 
-# Plain user units go to the user unit dir (see USER_UNIT_DIR): Quadlet will
-# not generate them. The timers activate the services they name --
-# backup.service (generated by Quadlet from backup.container) and
-# monitor.service (a plain host-script unit).
+# Plain user units go to USER_UNIT_DIR: Quadlet will not generate them. The timers
+# activate the services they name -- backup.service (generated by Quadlet from
+# backup.container) and monitor.service (a plain host-script unit).
 mkdir -p "$USER_UNIT_DIR"
 for u in "${USER_UNITS[@]}"; do
     render_unit_backedup "$DEPLOY_DIR/$u" "$USER_UNIT_DIR/$u"
@@ -1768,26 +1640,24 @@ log "installed ${#USER_UNITS[@]} user unit(s) into $USER_UNIT_DIR"
 # the nginx rate-limit zones
 # ---------------------------------------------------------------------------
 # nginx-proxy-manager includes /data/nginx/custom/http.conf inside http {} and
-# never regenerates custom/, so the zones declared there survive every
-# reconciliation of the proxy hosts -- which is why they cannot live in the
-# proxy_host/*.conf files (NPM rewrites those from its database).
+# never regenerates custom/, so zones declared there survive every reconciliation
+# -- which is why they cannot live in proxy_host/*.conf (NPM rewrites those from
+# its database).
 #
-# Seeded here, before deploy.sh starts NPM, because a vhost that references an
-# undeclared zone makes nginx refuse to start -- and on Network=host that takes
-# the admin UI down with the site.
+# Seeded before deploy.sh starts NPM, because a vhost referencing an undeclared
+# zone makes nginx refuse to start -- and on Network=host that takes the admin UI
+# down with the site.
 mkdir -p "$NPM_DIR/data/nginx/custom"
-# vector ships NPM's access and error logs (deploy/logs/vector.toml), and it
-# bind-mounts this directory -- so it has to exist before that unit starts, or
-# podman creates it at the wrong moment and with the wrong owner. NPM creates it
-# itself on first start, which is after install.sh.
+# vector ships NPM's access and error logs and bind-mounts this directory, so it
+# has to exist before that unit starts, or podman creates it at the wrong moment
+# with the wrong owner. NPM creates it itself on first start, after install.sh.
 mkdir -p "$NPM_DIR/data/logs"
 if ! cmp -s "$DEPLOY_DIR/npm/http.conf" "$NPM_DIR/data/nginx/custom/http.conf" 2>/dev/null; then
     install -m 644 "$DEPLOY_DIR/npm/http.conf" "$NPM_DIR/data/nginx/custom/http.conf"
-    # The npm/data tree is mounted with :z, which relabels the whole subtree when
-    # the container starts -- but a file written *after* that is created with the
-    # default label, and nginx then refuses to load it ("open() ... failed (13:
-    # Permission denied)"). Relabel it here rather than relying on a restart that
-    # a deploy may not perform.
+    # The npm/data tree is mounted with :z, which relabels the subtree when the
+    # container starts -- but a file written *after* that keeps the default label,
+    # and nginx then refuses to load it ("failed (13: Permission denied)").
+    # Relabel here rather than relying on a restart a deploy may not perform.
     if [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
         chcon -t container_file_t "$NPM_DIR/data/nginx/custom/http.conf" 2>/dev/null \
             || warn "could not label $NPM_DIR/data/nginx/custom/http.conf for containers"
@@ -1798,13 +1668,11 @@ fi
 # ---------------------------------------------------------------------------
 # the IDS config tree
 # ---------------------------------------------------------------------------
-# CrowdSec's parser, scenarios, whitelists and acquisition, rendered into
-# $CONFIG_DIR/ids/crowdsec and mounted file by file by deploy/crowdsec.container.
-# Rendered rather than mounted from the repo for the same reason as the
-# VictoriaMetrics scrape config: what the container reads is an install artifact,
-# so a change lands on a deploy -- and deploy.sh's unit_digest hashes this tree
-# under the stem "crowdsec", so a changed parser restarts the unit instead of
-# waiting for the next reboot.
+# CrowdSec's parsers, scenarios, whitelists and acquisition, rendered into
+# $CONFIG_DIR/ids/crowdsec and mounted file by file. Rendered rather than mounted
+# from the repo for the same reason as scrape.yml: an install artifact changes on
+# a deploy, and unit_digest hashes this tree under "crowdsec", so a changed parser
+# restarts the unit instead of waiting for a reboot.
 sync_tree "$DEPLOY_DIR/crowdsec" "$CONFIG_DIR/ids/crowdsec"
 # The container's own state: /etc/crowdsec (seeded on first start, then the hub
 # installs live there) and the sqlite decisions DB. Both regenerable, so both
@@ -1813,20 +1681,18 @@ mkdir -p "$DATA_DIR/ids/crowdsec/etc" "$DATA_DIR/ids/crowdsec/data"
 log "rendered the crowdsec config into $CONFIG_DIR/ids/crowdsec"
 
 # What this render produced, for the one question a running container cannot
-# answer: which definition was it started from? deploy.sh compares the live
-# files against $DATA_DIR/audit/units.applied -- the render it last applied --
-# and restarts exactly the units that differ. A hand run of this script
-# therefore shows up as drift instead of consuming the signal, and verify.sh
-# reports it. Written last, after every render above (the units, torrc,
-# vector.toml and the crowdsec tree), because the digest covers all of them.
+# answer: which definition was it started from? deploy.sh compares the live files
+# against units.applied and restarts exactly the units that differ, so a hand run
+# of this script shows up as drift instead of consuming the signal. Written last,
+# after every render, because the digest covers all of them.
 unit_digest_write "$DATA_DIR/audit/units.rendered"
 log "recorded the rendered-unit digests in $DATA_DIR/audit/units.rendered"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload
-    # enable --now so the schedules are live without waiting for a reboot. On a
-    # fresh host with Persistent=true this may run one backup immediately; it
-    # initialises the repository and is harmless.
+    # enable --now so the schedules are live without a reboot. On a fresh host with
+    # Persistent=true this may run one backup immediately; it initialises the
+    # repository and is harmless.
     systemctl --user enable --now "${USER_TIMERS[@]}" >/dev/null 2>&1 \
         || log "could not enable ${USER_TIMERS[*]}; run: systemctl --user enable --now ${USER_TIMERS[*]}"
     log "systemd --user reloaded"

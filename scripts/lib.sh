@@ -8,21 +8,15 @@ log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Escape a value for sed's replacement side (&, \, |). Every @PLACEHOLDER@ whose
-# value can be a path or a secret goes through this: an unescaped `|` in a data
-# dir turns `sed -e "s|@DATA_DIR@|/a|b|g"` into "unknown option to `s'" (so the
-# substitution silently produces nothing and the diff reports permanent drift),
-# and `&` re-inserts the matched text. Shared because deploy/install.sh renders
-# units and verify.sh renders the same files to compare them; one copy is what
-# keeps the comparison honest.
+# Escape a value for sed's replacement side (&, \, |): an unescaped `|` in a
+# data dir breaks the expression, and `&` re-inserts the match. install.sh renders
+# through this and verify.sh re-renders to compare, so one copy keeps them honest.
 esc() { printf '%s' "$1" | sed -e 's/[&\\|]/\\&/g'; }
 
-# The substitutions every deploy/root/ template gets. deploy/install.sh renders
-# the installed files and verify.sh re-renders them to compare, so this is one
-# list: a placeholder added on one side and not the other would make drifted
-# root-tier files look permanently dirty (or, worse, make a real edit compare
-# equal to itself). src and data-dir are arguments rather than globals because
-# install.sh's root pass may be given a data dir other than the user's.
+# The substitutions every deploy/root/ template gets, shared by install.sh's
+# render and verify.sh's comparison: a placeholder added on one side only would
+# make drifted files read as clean. src and data-dir are arguments because the
+# root pass may run with another user's data dir.
 render_root_template() { # src data-dir
     sed -e "s|@DATA_DIR@|$(esc "$2")|g" \
         -e "s|@CONFIG_DIR@|$(esc "$2/config")|g" \
@@ -31,43 +25,28 @@ render_root_template() { # src data-dir
         "$1"
 }
 
-# Echo the value of KEY from a KEY=VALUE env/secrets file (first match). Reads
-# the file line by line and never sources it, and strips a trailing CR so a
-# CRLF file still parses. Prints nothing when the file or the key is absent.
+# Echo KEY's value from a KEY=VALUE file (first match). Never sources the file,
+# and strips a trailing CR so a CRLF file still parses.
 env_value() {
     local file="$1" key="$2"
     [ -s "$file" ] || return 0
     sed -n "s/^$key=//p" "$file" | head -n1 | tr -d '\r'
 }
 
-# A fresh secret. Hex only, on purpose: these values end up in a rendered
-# systemd Exec= line (Quadlet splits it on whitespace and quotes nothing) and in
-# podman argv, so a value with a space, a quote or a dollar sign would be a
-# foot-gun in three places at once. 32 bytes = the 64 characters bitcoind, Tor,
-# Monero and CLN all accept.
+# A fresh secret. Hex only: these reach a rendered systemd Exec= (Quadlet splits
+# on whitespace and quotes nothing) and podman argv, where a space, quote or
+# dollar sign is a foot-gun. 32 bytes is the 64 characters every daemon accepts.
 rand_hex() {
     openssl rand -hex 32 2>/dev/null && return 0
     head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
 # The image the host-side checks speak through: a curl client (see
-# netcheck/Containerfile), built by deploy/install.sh. It is a container, not
-# the host's own curl, because a probe has to reach a service by its
-# npm-network container name, which only a client attached to that network can
-# resolve -- and because several app images carry no curl of their own.
-#
-# The checks EXEC into a long-lived container instead of starting a throwaway
-# one per probe. That is not tidiness: verify.sh makes dozens of probes in a
-# sweep, and each `podman run` created a veth pair and a cgroup scope, which the
-# kernel logged as a line per step -- about 12k lines an hour, the biggest
-# stream in the journal, and a third of what the log store was indexing.
-#
-# The exec *event* is a separate stream and is not this function's business:
-# podman writes two lines per exec (`exec`, `exec_died`) and one per
-# healthcheck run, and deploy/install.sh points the user's event log at a
-# bounded file instead of journald (podman_events_conf). That is the only place
-# it can be set -- a per-call flag cannot reach podman's own healthcheck units,
-# or the next script anyone writes.
+# netcheck/Containerfile), built by deploy/install.sh. A container, not the
+# host's curl, because a probe resolves a service by its npm-network container
+# name, and several app images carry no curl. The checks exec into a long-lived
+# container rather than starting one per probe: each `podman run` added a veth
+# pair and a cgroup scope, which the kernel logs per step (docs/logs.md).
 #
 # Two containers because podman refuses host + bridge on one ("cannot set
 # multiple networks without bridge network mode"), and nginx-proxy-manager's
@@ -76,10 +55,8 @@ NETCHECK_IMAGE="${NETCHECK_IMAGE:-localhost/netcheck:local}"
 NETCHECK_CONTAINER="${NETCHECK_CONTAINER:-netcheck}"
 NETCHECK_HOST_CONTAINER="${NETCHECK_HOST_CONTAINER:-netcheck-host}"
 
-# Is the client up? Fail before podman does, so a host that has not run
-# deploy/install.sh (or whose container was stopped) reads as one clear error
-# rather than a podman stack trace. Takes the container name so each helper
-# checks only the one it uses.
+# Fail before podman does, so a host that never ran install.sh (or whose client
+# is stopped) reads as one clear error rather than a stack trace.
 netcheck_ready() { # container
     local c="${1:-$NETCHECK_CONTAINER}"
     if [ "$(podman inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ]; then
@@ -89,45 +66,32 @@ netcheck_ready() { # container
     return 127
 }
 
-# Run curl against a container on npm-network, from the long-lived netcheck
-# container. Arguments are curl's, verbatim, so call sites read exactly as they
-# did when this was a host curl against a published loopback port:
+# curl from the netcheck container, arguments verbatim:
 #   net_curl -s -o /dev/null -w '%{http_code}' http://searxng-mcp:8000/health
-# -i keeps stdin attached, which is how a caller passes a secret in a curl
-# config (`-K -`) rather than on a command line that `ps` can read.
+# -i keeps stdin attached, so a caller can pass a secret as a curl config
+# (`-K -`) instead of on a command line `ps` can read.
 net_curl() {
     netcheck_ready "$NETCHECK_CONTAINER" || return 127
-    # --events-backend=none is belt to install.sh's braces: deploy/install.sh
-    # moves podman's event log to a bounded file (podman_events_conf), and a
-    # sweep's dozens of probes are not worth an entry even there.
+    # --events-backend=none: a sweep's probes are not worth an event either.
     podman --events-backend=none exec -i "$NETCHECK_CONTAINER" curl "$@"
 }
 
-# The same, from the host's own network namespace -- through netcheck-host, the
-# second long-lived client. It is for the one service that is not on
-# npm-network: nginx-proxy-manager runs on the host network
-# (deploy/nginx-proxy-manager.container) so that its logs and the
-# X-Forwarded-For it sets carry a client's real address. That also means it
-# binds :80/:443/:81 itself and speaks to the app tier on the loopback publishes
-# its units declare, so its admin API is 127.0.0.1:81 and a host name it fronts
-# is reached by looping back to this host:
+# The same from the host's own namespace, for the one service that is not on
+# npm-network: nginx-proxy-manager binds :80/:443/:81 itself (docs/proxy.md), so
+# its admin API is 127.0.0.1:81 and a vhost it fronts is reached by looping back
+# to this host:
 #   net_curl_host -s -o /dev/null -w '%{http_code}' http://127.0.0.1:81/
 net_curl_host() {
     netcheck_ready "$NETCHECK_HOST_CONTAINER" || return 127
     podman --events-backend=none exec -i "$NETCHECK_HOST_CONTAINER" curl "$@"
 }
 
-# "1m30s" / "500ms" / "1h2m3.5s" -> MILLIseconds. Podman prints a healthcheck's
-# durations as Go duration strings, and so does CrowdSec's LAPI ("3h59m59.7s" is
-# what a decision carries), so a fraction can sit on any component. Each
-# component is therefore parsed by its unit and summed in ms. The whole-second
-# regexes this replaced matched the digits AFTER the dot instead of the component
-# before it, which is not a rounding difference: "1m30.5s" became 65s, "2.5h"
-# became 18000s and "1.5m" became 300s. Three details are load-bearing: `ms`
-# precedes `m` in the alternation or "500ms" reads as 500 minutes, 10# keeps
-# "08m" from being parsed as octal, and the fraction is padded/truncated to three
-# digits because bash has no arithmetic on it. Unparsable input (or none, which
-# is an unset healthcheck field) is 0.
+# "1m30s" / "500ms" / "1h2m3.5s" -> MILLIseconds. Podman and CrowdSec's LAPI both
+# print Go duration strings with an optional fraction on any component, so each
+# is parsed by its unit and summed. Three details are load-bearing: `ms` before
+# `m` in the alternation, or "500ms" reads as 500 minutes; `10#`, or "08m" is
+# octal; and the fraction padded to three digits, because bash has no arithmetic
+# on it. Unparsable input (or an unset field) is 0.
 dur_ms() {
     local d="$1" total=0 num frac unit
     while [ -n "$d" ] && [[ $d =~ ^[^0-9]*([0-9]+)(\.([0-9]+))?(ms|h|m|s)(.*)$ ]]; do
@@ -143,33 +107,25 @@ dur_ms() {
     printf '%s' "$total"
 }
 
-# Whole seconds, rounded UP. The caller is wait_healthy's floor, where waiting
-# longer than the unit's own numbers is the safe direction -- so a sub-second
-# value still becomes 1s. Anything that needs the value exactly (healthcheck-lint
-# judging a 5-20s window, or a probe bound against a timeout) rounds in dur_ms
-# instead; rounding here would let a 4.5s timeout pass a 5s floor.
+# Whole seconds, rounded UP: the caller is wait_healthy's floor, where waiting
+# longer than the unit's own numbers is safe. Anything needing the value exactly
+# (healthcheck-lint's 5-20s window) uses dur_ms.
 dur_s() {
     local ms
     ms=$(dur_ms "$1")
     printf '%s' $(( (ms + 999) / 1000 ))
 }
 
-# True when dur_ms would have parsed the WHOLE string. dur_ms answers 0 for
-# anything it cannot read, which is right for "no duration" but hides junk from
-# a caller that must tell a real zero from an unreadable value -- `podman stats`
-# prints cpu_time: "N/A" for a container it cannot account, and that must stay
-# a hole rather than be written as 0.000.
+# True when dur_ms would have parsed the WHOLE string. dur_ms answers 0 for junk,
+# which hides the difference between no duration and an unreadable one -- and
+# `podman stats` prints cpu_time: "N/A", which must stay a hole, not 0.000.
 dur_valid() { [[ ${1:-} =~ ^([0-9]+(\.[0-9]+)?(ms|h|m|s))+$ ]]; }
 
-# Bytes of complete lines in a file: everything through the last newline. A
-# reader that tracks a byte cursor must not advance past the start of a line
-# still being written, or the rest of that line is lost on the next read. No
-# newline at all answers 0, which means "do not advance".
-#
-# The common case is one stat and one byte: a file that ends in a newline is
-# entirely complete. Otherwise the trailing partial line is normally short, so
-# the last newline is found in a 64 KiB block from the end (widened only if a
-# single line longer than that leaves no newline in it).
+# Bytes of complete lines: everything through the last newline. A cursor must
+# not advance past a half-written line, or the rest of it is lost on the next
+# read; no newline at all answers 0 ("do not advance"). A file ending in a
+# newline is one stat and one byte; otherwise the last newline is searched for
+# in a 64 KiB block from the end, widened if one line is longer than that.
 complete_line_bytes() {
     local n block=65536 from bytes last
     n=$(stat -c %s "$1" 2>/dev/null) || return 1
@@ -191,28 +147,20 @@ complete_line_bytes() {
     done
 }
 
-# "4.176GB" -> bytes, the way podman's go-units renders a size in `podman stats`.
-# coreutils' numfmt already parses both spellings it can emit -- SI ("kB", "MB",
-# "GB") and binary ("KiB", "MiB") -- so the awk table this replaced was a wheel.
-# The trailing "B" is stripped because numfmt's suffixes stop at the unit letter
-# ("4.176G", not "4.176GB"). LC_ALL=C pins the decimal point: under a comma
-# locale numfmt would read "4.176" as a grouped integer. Prints nothing and
-# returns non-zero on anything it cannot parse, which is how the metrics
-# collector keeps a hole as a hole.
+# "4.176GB" -> bytes, the way go-units renders a size in `podman stats`. numfmt
+# parses both spellings ("4.176GB" and "2GiB") once the trailing "B" is stripped,
+# since its suffixes stop at the unit letter. LC_ALL=C pins the decimal point: a
+# comma locale reads "4.176" as a grouped integer. Prints nothing and fails on
+# anything unparsable, which is how the metrics collector keeps a hole a hole.
 human_bytes() {
     LC_ALL=C numfmt --from=auto --to=none "${1%B}" 2>/dev/null
 }
 
-# The state of a container's own healthcheck, from the Status column `podman ps`
-# prints. A failing probe is "Up 5 minutes (unhealthy)" and one that has not
-# answered yet is "Up 10 seconds (starting)" -- both still START with "Up",
-# which is why a caller that matches "^Up" reads a red container as a green
-# one. (Podman 5.x prints "(starting)"; Docker and some older builds print
-# "(health: starting)", so both are accepted.) verify.sh is the caller, and
-# scripts/monitor.sh carries only its FAIL lines and exit code, so a probe that
-# fails while the container is up must be a failure there, not a warning.
-# Tested in tests/test-lib.sh. One of:
-#   healthy | unhealthy | starting | up (no probe defined) | down | other
+# The container's healthcheck state from `podman ps`'s Status column. A failing
+# probe still starts with "Up", so matching "^Up" reads a red container as green.
+# Podman 5.x prints "(starting)"; Docker and older builds "(health: starting)" --
+# both accepted. One of: healthy | unhealthy | starting | up | down | other
+# (up = no probe defined; tested in tests/test-lib.sh).
 container_health_state() { # status
     case "$1" in
         '')                                    printf 'down' ;;
@@ -225,23 +173,18 @@ container_health_state() { # status
 }
 
 # Wait for a container's own healthcheck to report healthy. Shared by
-# configure.sh (the post-start step deploy.sh hands off to) and
-# scripts/rotate.sh (which restarts the ones a rotated credential touches), so
-# both wait the same way. Honours DRY_RUN when the caller sets it, and returns
-# non-zero after the timeout rather than dying: the caller decides whether that
-# is fatal.
+# configure.sh and scripts/rotate.sh so both wait the same way. Honours DRY_RUN;
+# returns non-zero after the timeout rather than dying, because the caller
+# decides whether that is fatal.
 wait_healthy() { # container timeout
     local c="$1" t="${2:-180}" deadline st="" hp start_s floor st_result
     [ "${DRY_RUN:-0}" = 1 ] && return 0
 
-    # A one-shot job (Type=oneshot) never reports "(healthy)" and never shows up
-    # in `podman ps`: it *exits*. Waiting for "Up" burns the caller's whole
-    # timeout and then warns about a job that did its work -- which is what a
-    # postgres-dump or btcpay-bootstrap wait used to do (180 s of spin, then
-    # "container missing"). `systemctl restart` already blocked on
-    # the job and failed loudly, so the only thing left to read is its result;
-    # this also catches a job that systemd accepted and that exceeded
-    # TimeoutStartSec, which is a failure however the unit reports it.
+    # A Type=oneshot job never reports "(healthy)" and never appears in
+    # `podman ps`: it exits. Waiting for "Up" would burn the caller's whole
+    # timeout and then warn about a job that did its work. `systemctl restart`
+    # already blocked on the job, so the only thing left to read is its result --
+    # which also catches one that exceeded TimeoutStartSec.
     if [ "$(systemctl --user show -p Type --value "$c.service" 2>/dev/null)" = oneshot ]; then
         st=$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$c" 2>/dev/null || true)
         case "$st" in
@@ -260,10 +203,9 @@ wait_healthy() { # container timeout
         return 1
     fi
 
-    # No healthcheck to wait on: victoria-logs' image is distroless (no shell,
-    # so podman cannot run a health command), and a unit like that would wait
-    # out every timeout for a "(healthy)" that never appears. "Up" is the only
-    # state to wait for; the functional check lives in verify.sh.
+    # No healthcheck to wait on: victoria-logs is distroless (no shell, so no
+    # health command) and a unit like that would wait out every timeout for a
+    # "(healthy)" that cannot appear. The functional check lives in verify.sh.
     if [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$c" 2>/dev/null)" != yes ]; then
         deadline=$(( $(date +%s) + t ))
         while :; do
@@ -279,13 +221,11 @@ wait_healthy() { # container timeout
         done
     fi
 
-    # A unit's own profile can make the caller's timeout unreachable: podman
-    # runs no health check during HealthStartPeriod, so the first possible
-    # "(healthy)" is at StartPeriod + Interval. A caller that waits less than
-    # that reports "not healthy" about a service that never had the chance to
-    # answer -- so the unit's numbers raise the caller's, and the log says which
-    # number won. (The caller's timeout is a give-up bound, not a promise: this
-    # only prevents a give-up that is shorter than one probe cycle.)
+    # A unit's own profile can make the caller's timeout unreachable: podman runs
+    # no probe during HealthStartPeriod, so the first possible "(healthy)" is at
+    # StartPeriod + Interval. A caller that waits less reports "not healthy"
+    # about a service that never had a chance to answer, so the unit's numbers
+    # raise the caller's (a give-up bound, not a promise).
     hp=$(podman inspect -f '{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartPeriod}} {{.Config.Healthcheck.Interval}}{{end}}' "$c" 2>/dev/null || true)
     if [ -n "$hp" ]; then
         start_s=$(dur_s "${hp%% *}")
@@ -296,13 +236,10 @@ wait_healthy() { # container timeout
         fi
     fi
 
-    # Prefer podman's own health wait: it wakes the instant the state changes
-    # instead of a shell `sleep 5` loop that spawns podman and date per tick.
-    # `podman wait` has no --timeout of its own (it was never a flag -- passing
-    # one made every wait fail instantly, so the caller always saw "not
-    # healthy"), so coreutils `timeout` bounds it; killing the client leaves the
-    # container alone. Only when the container defines a healthcheck, else
-    # podman has nothing to wait on.
+    # Prefer podman's own wait: it wakes the instant the state changes instead of
+    # a sleep-and-poll loop. `podman wait` takes no --timeout (passing one made
+    # every wait fail instantly), so coreutils `timeout` bounds it; killing the
+    # client leaves the container alone.
     if command -v timeout >/dev/null 2>&1 \
         && podman wait --help 2>/dev/null | grep -q -- '--condition' \
         && [ "$(podman inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$c" 2>/dev/null)" = yes ]; then
@@ -329,10 +266,9 @@ wait_healthy() { # container timeout
 }
 
 # A CLN rune restriction: one alternatives group naming method prefixes, in the
-# JSON shape `createrune` wants (an array of groups, each an array of
-# alternatives). Declared once in stack.conf (CLN_READ_METHODS and friends) so
-# deploy/install.sh and scripts/rotate.sh mint the SAME runes -- a rotator that
-# granted more, or less, than the installer would be a security bug.
+# JSON shape `createrune` wants. Declared once in stack.conf so install.sh and
+# rotate.sh mint the SAME runes -- a rotator granting more, or less, would be a
+# security bug.
 rune_json() { # prefix...
     local out="" p
     for p in "$@"; do
@@ -342,16 +278,11 @@ rune_json() { # prefix...
 }
 
 # --- the live rune set ------------------------------------------------------
-# A rune carries no label -- this CLN's `createrune` takes no comment -- so the
-# only identity a rune has is its method set. These read the live set off the
-# node and compare it with the prefixes stack.conf declares, which makes "a rune
-# this stack minted" a reproducible fact instead of a remembered id (that is the
-# lesson from a host whose rune table had collected five live leftovers no
-# bookkeeping had ever seen).
-#
-# scripts/rotate.sh blacklists the ones lightning-mcp/node.env does not carry,
-# and scripts/monitor.sh pages on them; both go through here so the pruner and
-# the alarm cannot disagree about what a stack rune is.
+# A rune carries no label (this CLN's `createrune` takes no comment), so its
+# only identity is its method set. These compare the live set with the prefixes
+# stack.conf declares, which makes "a rune this stack minted" reproducible
+# instead of a remembered id. rotate.sh blacklists the leftovers and monitor.sh
+# pages on them, both through here, so the pruner and the alarm agree.
 cln_live_runes() { # -> unique_id<TAB>rune<TAB>methodset, per non-blacklisted rune
     local out
     out=$(lightning_cli showrunes 2>/dev/null) || return 1
@@ -370,12 +301,12 @@ cln_method_set() { # method... -> comma-joined, sorted (the comparison form)
     printf '%s\n' "$@" | sort | paste -sd, -
 }
 
-# Live runes whose method set is EXACTLY one of stack.conf's and that are not one
-# of the runes passed as arguments: the leftovers a rotation blacklists and the
-# monitor pages on. An exact match is deliberate -- a rune minted for something
-# else keeps its methods and must never be touched. Empty output plus exit 0 is
-# the clean case; a non-zero exit means the node could not be read (showrunes or
-# jq failed), which the caller must not mistake for "nothing to do".
+# Live runes whose method set is EXACTLY one of stack.conf's and that are not
+# among the runes passed as arguments: the leftovers rotate.sh blacklists and
+# monitor.sh pages on. An exact match is deliberate -- a rune minted for
+# something else keeps its methods and must never be touched. Empty output with
+# exit 0 is the clean case; non-zero means the node could not be read, which is
+# not "nothing to do".
 cln_orphan_runes() { # keep-rune...
     local keep live id rune methods rset sset
     if [ "${CLN_READ_METHODS+x}" != x ] || [ "${#CLN_READ_METHODS[@]}" -eq 0 ]; then
@@ -405,12 +336,11 @@ cln_rune_usable() { # rune
     lightning_cli -k checkrune rune="$1" method=getinfo >/dev/null 2>&1
 }
 
-# Mint one rune and prove it before handing it back. createrune can return a
-# unique_id the node has already blacklisted, so the only safe shape is
-# mint -> checkrune -> retry; deploy/install.sh and scripts/rotate.sh both used
-# to carry their own copy of this loop. Prints "<rune> <unique_id>" (the shape
-# rotate.sh's caller reads), or nothing after 12 failures -- never an unproven
-# rune, which would leave lightning-mcp unable to read the node.
+# Mint one rune and prove it before handing it back: createrune can return a
+# unique_id the node has already blacklisted, so only mint -> checkrune -> retry
+# is safe. Prints "<rune> <unique_id>" (the shape rotate.sh reads), or nothing
+# after 12 failures -- never an unproven rune, which would leave lightning-mcp
+# unable to read the node.
 cln_mint_rune() { # restriction-json -> "rune unique_id"
     local restrictions="$1" out rune id tries
     command -v jq >/dev/null 2>&1 \
@@ -429,39 +359,30 @@ cln_mint_rune() { # restriction-json -> "rune unique_id"
     return 1
 }
 
-# One KEY from the bitcoind config inside the running container (empty when the
+# One KEY from the bitcoind config inside the RUNNING container (empty when the
 # container or the file cannot be read). The key is a literal from stack.conf or
-# this repo, never user input. Sourcing the installed bitcoind container (not
-# the host copy) is what makes a half-applied rotation visible: this is the file
-# the daemon actually loaded.
+# this repo, never user input. Reading the installed file, not the host copy, is
+# what makes a half-applied rotation visible: this is what the daemon loaded.
 bitcoind_conf_value() { # key
     podman exec bitcoind sh -c "sed -n 's/^$1=//p' /data/.bitcoin/bitcoin.conf" 2>/dev/null \
         | head -n1 || true
 }
 
-# The RPC password bitcoind's OWN bitcoin.conf carries. Compared with secrets.env
-# by scripts/rotate.sh --status and scripts/monitor.sh: the two copies are the
-# ones a half-applied bitcoin-rpc rotation pulls apart, and nothing else would
-# notice before the next restart. Never printed by either caller -- only compared.
+# The RPC password bitcoind's own bitcoin.conf carries, compared with secrets.env
+# by rotate.sh --status and monitor.sh: a half-applied rotation pulls the two
+# copies apart and nothing else would notice before the next restart.
 bitcoind_conf_password() {
     bitcoind_conf_value rpcpassword
 }
 
 # --- asking a daemon through its own client ---------------------------------
-# Every host-side script that puts a question to a daemon used to spell out the
-# transport itself: eleven copies of `podman exec bitcoind bitcoin-cli`, sixteen
-# of `podman exec lightningd lightning-cli`, five of `podman exec crowdsec
-# cscli`, four of `podman exec monerod curl`. The container name and the binary
-# are one fact each, so they are here: a rename is one edit, and a call site
-# reads as the question it asks.
-#
-# These wrap ONLY the transport. Each caller keeps its own error handling -- a
-# monitor read wants the empty answer, a rotation wants the failure -- so it
-# still redirects stderr or `|| true`s exactly as it did.
+# The container name and the binary are one fact each, so they live here: a
+# rename is one edit, and a call site reads as the question it asks. These wrap
+# ONLY the transport; each caller keeps its own error handling (a monitor read
+# wants the empty answer, a rotation wants the failure).
 bitcoind_cli() { # bitcoin-cli args...
-    # -datadir is redundant today (the lncm image runs with HOME=/data, so
-    # bitcoin-cli's default ~/.bitcoin IS /data/.bitcoin -- verified: both forms
-    # answer identically) but it pins the answer against an image change.
+    # -datadir is redundant (the lncm image runs with HOME=/data, so the default
+    # ~/.bitcoin IS /data/.bitcoin) but pins the answer against an image change.
     podman exec bitcoind bitcoin-cli -datadir=/data/.bitcoin "$@"
 }
 
@@ -469,19 +390,17 @@ lightning_cli() { # lightning-cli args...
     podman exec lightningd lightning-cli "$@"
 }
 
-# cscli inside the running container: the same binary the LAPI answers, with no
-# extra credential to hold on the host. `cscli explain` and `cscli decisions`
-# are the two uses (verify.sh, scripts/ids.sh).
+# cscli inside the running container: the binary the LAPI answers, with no extra
+# credential on the host (verify.sh, scripts/ids.sh).
 cscli() { # cscli args...
     podman exec crowdsec cscli "$@"
 }
 
 # The monerod restricted RPC, read with the curl the image ships: the daemon has
-# no CLI, and net_curl is for npm-network peers, not a loopback inside another
-# container. METHOD is the path minus the leading slash (get_info, get_height).
-# The timeout is the caller's budget: a read can block while a --block-sync-size
-# batch holds the chain lock. Empty output (curl's -f) means "did not answer",
-# which is how the collectors keep a hole as a hole.
+# no CLI, and net_curl is for npm-network peers, not a loopback in another
+# container. METHOD is the path minus the slash (get_info). The timeout is the
+# caller's budget: a read can block while a --block-sync-size batch holds the
+# chain lock. Empty output means "did not answer", which keeps a hole a hole.
 monerod_rpc() { # method [timeout] -> the daemon's JSON, empty on failure
     podman exec monerod curl -fsS -m "${2:-5}" "http://127.0.0.1:18089/$1"
 }
@@ -497,25 +416,17 @@ monerod_json_rpc() { # method [timeout] -> the daemon's JSON, empty on failure
 }
 
 # --- the Electrum protocol (Fulcrum) ----------------------------------------
-# Electrum is newline-delimited JSON-RPC over raw TCP, not HTTP: 50001 plaintext
-# and 50002 TLS with a certificate the image self-signs. net_curl cannot read it
-# and nginx-proxy-manager cannot front it, so this is the stack's one protocol
-# that needs a TCP client of its own.
+# Newline-delimited JSON-RPC over raw TCP, not HTTP: 50001 plaintext and 50002
+# TLS with a self-signed certificate. Neither net_curl nor nginx-proxy-manager
+# can speak it, so it is the stack's one protocol with a client of its own:
+# bash's /dev/tcp, because no `nc` is installed and `read -t` is the whole
+# timeout. The call runs in a subshell -- a failed `exec` redirection can end a
+# non-interactive shell, and a refused port must cost an empty string, never the
+# sweep. TLS goes through openssl, already a bootstrap dependency.
 #
-# The client is bash's /dev/tcp. There is no `nc` (bootstrap installs podman,
-# firewalld, git, openssl, jq, curl and python3 -- a curl cannot speak this
-# protocol, and pulling in netcat or socat for one newline-delimited exchange
-# is not worth a package), and `read -t` is the whole timeout, so a probe costs
-# no container start. It runs in
-# a subshell because a failed `exec` redirection can end a non-interactive shell:
-# a refused port has to cost the caller an empty string, never the sweep. TLS
-# goes through openssl, which is already a bootstrap dependency (scripts/monitor.sh
-# reads certificate expiry with it).
-#
-# Callers dial 127.0.0.1 -- deploy/fulcrum.container.in publishes 50001/50002 on
-# every interface, so the published port on the host's loopback is exactly what a
-# wallet on the LAN reaches. Reading the container by name would prove less (it
-# stays up if the publish is lost) and is not what the protocol surface is.
+# Callers dial 127.0.0.1: fulcrum publishes 50001/50002 on every interface, so
+# the host's loopback is exactly what a LAN wallet reaches. Dialling the
+# container name would prove less (it stays up if the publish is lost).
 electrum_call() { # host port request-line -> the server's reply, empty on failure
     bash -c '
         exec 3<>"/dev/tcp/$1/$2" || exit 0
@@ -526,25 +437,21 @@ electrum_call() { # host port request-line -> the server's reply, empty on failu
 }
 
 # The same over TLS. -quiet drops the handshake chatter; stdin has to stay open a
-# moment after the request or s_client closes the connection before the answer
-# arrives, hence the sleep -- two seconds, not a timeout loop (five runs of a
-# local TLS server answered inside it every time).
+# moment after the request, or s_client closes before the answer arrives.
 electrum_call_tls() { # host port request-line -> the server's reply, empty on failure
     { printf '%s\n' "$3"; sleep 2; } \
         | timeout 10 openssl s_client -quiet -connect "$1:$2" 2>/dev/null \
         | head -n1
 }
 
-# The tip height Fulcrum reports, or empty when it does not answer. This is the
-# index-backed question on purpose: `server.version` is answered from memory and
-# stays green on exactly the failure this exists to catch -- an index that has
-# wedged while the process, the port and the healthcheck all still look fine.
-# Callers compare it with bitcoind's `blocks`; a healthy Fulcrum polls every 5s
-# (--polltime), so the gap is 0-1 block once it has caught up.
+# The tip height Fulcrum reports, or empty when it does not answer.
+# `server.version` is answered from memory and stays green on exactly the failure
+# this exists to catch: an index that has wedged while the process, the port and
+# the healthcheck all still look fine. Callers compare it with bitcoind's
+# `blocks`; Fulcrum polls every 5s (--polltime), so the gap is 0-1 block.
 #
-# Fulcrum answers nothing useful while it is still catching up on a fresh host,
-# so an empty result is expected during initial block download: verify.sh warns
-# and scripts/monitor.sh softens it under MONITOR_GRACE_SYNC.
+# Empty is expected during initial block download, so verify.sh warns and
+# monitor.sh softens it under MONITOR_GRACE_SYNC.
 electrum_tip() { # port [tls] -> height, empty on failure
     local port="$1" tls="${2:-}" reply
     local req='{"id":1,"method":"blockchain.headers.subscribe","params":[]}'
@@ -557,68 +464,54 @@ electrum_tip() { # port [tls] -> height, empty on failure
 }
 
 # --- rendered-unit digests -------------------------------------------------
-# A *running* container keeps the definition it started with: re-rendering a
-# unit changes nothing until that unit restarts. deploy.sh therefore has to know
-# which rendered definitions the running containers were started from, and it
-# used to answer that by digesting the files either side of its own install.sh
-# run. That made the baseline "whatever was on disk when this process started",
-# so a hand `deploy/install.sh` (or scripts/rotate.sh's re-render) rewrote the
-# files and the next deploy compared them with themselves -- the edit sat
-# unapplied while every health check reported healthy. The fix is to persist the
-# answer:
+# A running container keeps the definition it started with: re-rendering a unit
+# changes nothing until that unit restarts. So the baseline is persisted rather
+# than compared either side of install.sh -- otherwise a hand install.sh (or
+# rotate.sh's re-render) rewrites the files and the next deploy compares them
+# with themselves.
 #
 #   $DATA_DIR/audit/units.rendered   what install.sh just wrote (every render)
 #   $DATA_DIR/audit/units.applied    the render the containers were started from
 #
 # install.sh owns the first; deploy.sh and rotate.sh advance the second only
-# after they have applied it. Live digests are compared against `applied`, never
-# against the render, so a unit edited after install.sh wrote it is caught too.
-# The format is exactly `sha256sum`'s (`<hash>  <stem>`), with the pseudo-names
-# `tor.unit`, `crowdsec.unit` and `vector.unit` for the three config trees that
-# are not units but are read only at start. A digest is not a secret, but the
-# files are mode 600 like the rest of audit/: several rendered units embed one.
+# after applying it, and live digests are compared against `applied`, never the
+# render. The format is sha256sum's, with tor.unit/crowdsec.unit/vector.unit for
+# the three config trees that are read only at start. Mode 600 like the rest of
+# audit/: several rendered units embed a secret.
 #
-# These live here because deploy/install.sh, deploy.sh, verify.sh and
-# scripts/rotate.sh must agree byte for byte: two implementations would report
-# permanent drift (esc() above exists for the same reason).
+# Here because install.sh, deploy.sh, verify.sh and rotate.sh must agree byte for
+# byte: two implementations would report permanent drift.
 unit_digest() {
     local q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
     [ -d "$q" ] || return 0
     ( cd "$q" && sha256sum -- *.container 2>/dev/null ) || true
-    # torrc is not a unit, but a running tor keeps the config it started with all
-    # the same -- and the onion services are declared in stack.conf and rendered
-    # into it. Hash it under a pseudo-name whose stem is the unit ("tor"), so the
-    # restart pass bounces tor when a hidden service was added, removed or
-    # retargeted.
+    # torrc is not a unit, but a running tor keeps the config it started with,
+    # and the onion services are rendered into it. Hashing it under the stem
+    # "tor" makes the restart pass bounce tor when a service was retargeted.
     if [ -s "$DATA_DIR/tor/torrc" ]; then
         sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 " tor.unit" }'
     fi
-    # The crowdsec config is not a unit either, and the container reads it only
-    # at start: a changed parser, scenario or whitelist would otherwise wait for
-    # the next reboot. One digest over the rendered tree, under the stem
-    # "crowdsec", so exactly that unit is restarted.
+    # The crowdsec config is read only at start, so a changed parser, scenario or
+    # whitelist would otherwise wait for the next reboot. One digest over the
+    # rendered tree, under the stem "crowdsec".
     if [ -d "$DATA_DIR/config/ids/crowdsec" ]; then
         find "$DATA_DIR/config/ids/crowdsec" -type f -print0 2>/dev/null \
             | sort -z | xargs -0 -r sha256sum 2>/dev/null \
             | sha256sum | awk '{ print $1 " crowdsec.unit" }'
     fi
-    # The log shipper's config is rendered by install.sh, not mounted from the
-    # repo, and Vector reads it only at start (there is no reload). Hash it under
-    # the unit's stem so a changed transform restarts exactly that unit, the same
-    # contract as crowdsec's tree.
+    # Vector reads its rendered config only at start (there is no reload), so a
+    # changed transform restarts exactly that unit -- the same contract.
     if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
         sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 " vector.unit" }'
     fi
 }
 
-# Map a running container name to the systemd unit that owns it. Usually the
-# same string, but a unit may set ContainerName to something else
-# (deploy/backup.container is stack-backup under backup.service). Reading the
-# rendered unit is the only way to know, and it matters: `systemctl show
-# stack-backup.service -p NRestarts` answers 0 just like a real unit, so a
-# caller that assumes name == unit records a restart series for a unit that
-# does not exist and a monitor that never sees that job's restarts. Falls back
-# to the name when no rendered unit claims it (a container from somewhere else).
+# Map a running container name to the systemd unit that owns it. Usually the same
+# string, but a unit may set ContainerName to something else (backup.container is
+# stack-backup under backup.service), and `systemctl show stack-backup.service`
+# answers 0 just like a real unit -- so assuming name == unit records restarts
+# for a unit that does not exist. Falls back to the name when no rendered unit
+# claims it.
 unit_for_container() { # container-name -> unit stem
     local name="$1" q f stem cname
     q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
@@ -636,9 +529,8 @@ unit_for_container() { # container-name -> unit stem
     printf '%s' "$name"
 }
 
-# Is a unit in a space-delimited set of unit stems (" bitcoind tor ")? The
-# shape DEFER_UNITS/APPLIED_UNITS/CHANGED_UNITS use, kept in one place so a
-# substring like "tor" never matches "tor-control".
+# Is a unit in a space-delimited set of unit stems (" bitcoind tor ")? Kept in
+# one place so a substring like "tor" never matches "tor-control".
 unit_in_set() { # unit set
     [ -n "${1:-}" ] || return 1
     case " ${2:-} " in
@@ -647,10 +539,9 @@ unit_in_set() { # unit set
     return 1
 }
 
-# The unit stems whose digest differs between two digest sets, one per line.
-# A unit present on only one side is not reported: a newly rendered unit is not
-# running yet (it starts from the new file), and a removed one is not this
-# function's business.
+# The unit stems whose digest differs between two sets, one per line. A unit on
+# only one side is not reported: a new one is not running yet (it starts from the
+# new file), and a removed one is not this function's business.
 unit_digest_changed() { # before-digest after-digest
     awk 'NR==FNR { old[$2] = $1; next }
          ($2 in old) && old[$2] != $1 { print $2 }' \
@@ -658,9 +549,9 @@ unit_digest_changed() { # before-digest after-digest
         | sed 's/\.[^.]*$//' | sort -u
 }
 
-# Write a digest set to a manifest file, atomically and mode 600. Called with an
-# explicit set when the caller already holds one (deploy.sh records the digests
-# that were applied, not whatever is on disk a moment later).
+# Write a digest set to a manifest file, atomically and mode 600. Takes an
+# explicit set when the caller already holds one (deploy.sh records what was
+# applied, not whatever is on disk a moment later).
 unit_digest_write() { # file [digest-set]
     local f="$1" d="${2:-}"
     [ -n "$d" ] || d=$(unit_digest)
@@ -681,11 +572,10 @@ unit_applied_read() {
 }
 
 # The digest set the running containers were last started from. Before that file
-# existed (the first deploy after this change) the only baseline available is the
-# render on disk -- which is what the old before/after comparison used -- so
-# adopt it once, loudly, rather than bouncing every daemon on the host. Drift
-# that predates that first run is invisible; the run that adopts the baseline
-# becomes it. deploy.sh and scripts/rotate.sh both read it here.
+# exists (a fresh host, or the first deploy after it was introduced) the only
+# baseline is the render on disk, so adopt it once, loudly, rather than bouncing
+# every daemon. Drift older than that first run is invisible; the run that adopts
+# the baseline becomes it.
 units_baseline() {
     local applied
     applied=$(unit_applied_read)
@@ -698,18 +588,14 @@ units_baseline() {
 }
 
 # --- locally-built images --------------------------------------------------
-# The images this repo builds itself (btc-explorer, xmr-explorer, netcheck,
-# tor) are described completely by their Containerfile: the base image
-# is digest-pinned in `FROM`, every upstream pin is an `ARG` in the same file,
-# and none of them COPYs anything out of its build context (each directory is
-# that one file). So the
-# hash of that file *is* the image's build identity. Baking it in as a label
-# lets a later deploy answer "is this image the one this Containerfile
-# describes?" without rebuilding to find out -- which is what makes a merged
-# Renovate digest bump reach the host at all: it changes nothing else, no unit
-# file and no tag, so `podman image exists` alone would keep the old bits
-# forever. An image with no label (built before this existed) is stale by
-# definition and is rebuilt once.
+# The images this repo builds (btc-explorer, xmr-explorer, netcheck, tor) are
+# described completely by their Containerfile: base image digest-pinned in FROM,
+# every upstream pin an ARG, nothing COPYed out of the build context. So the hash
+# of that file *is* the build identity, and baking it in as a label answers "is
+# this image the one this Containerfile describes?" without rebuilding. That is
+# what lets a merged Renovate digest bump reach the host: it changes no unit file
+# and no tag, so `podman image exists` alone would keep the old bits forever. No
+# label means stale, and it is rebuilt once.
 image_inputs_digest() { # containerfile -> sha256 of its bytes
     sha256sum "$1" 2>/dev/null | awk '{ print $1 }'
 }
@@ -749,20 +635,19 @@ kuma_image() {
     container_image_or uptime-kuma "${UPTIME_KUMA_IMAGE:-docker.io/louislam/uptime-kuma:2}"
 }
 
-# Write stdin to PATH in one step: a hidden temp file beside it, the mode, then
-# a rename within the same directory. The rename is what makes a reader see the
-# old file or the new one and never half of either, which matters everywhere a
-# timer writes and a sweep reads.
+# Write stdin to PATH in one step: a hidden temp beside it, the mode, then a
+# rename in the same directory. The rename is the point -- a reader sees the old
+# file or the new one, never half of either, wherever a timer writes and a sweep
+# reads.
 #
-# DIR-MODE is for the one case where the reader owns neither the directory nor
-# the file: node-exporter runs as uid 65534 -- a *subuid* under rootless podman
-# -- and if either mode slips, the collector serves nothing, the quietest
-# possible way to lose every metric.
+# DIR-MODE is for the case where the reader owns neither directory nor file:
+# node-exporter runs as uid 65534 (a *subuid* under rootless podman), and if
+# either mode slips the collector serves nothing, the quietest way to lose every
+# metric.
 #
 #   printf 'stack_x 1\n' | write_atomic "$path" 644 755
 #
-# On failure the destination is left as it was and the temp file is removed, so
-# a caller can report the error rather than leave a `.name.XXXXXX` behind.
+# On failure the destination is untouched and the temp file removed.
 write_atomic() { # path mode [dir-mode]
     local path="$1" mode="$2" dmode="${3:-}" dir tmp
     dir=$(dirname "$path")
@@ -788,34 +673,29 @@ prom_write() {
     write_atomic "$1" 644 755
 }
 
-# stdin -> an env file that carries a secret (or a credential-bearing URL): the
-# one writer for both halves of the stack. install.sh seeds them and
-# configure.sh rewrites two from the BTCPay bootstrap state, and those two used
-# to differ -- umask+cat in one, mktemp+install in the other -- which is exactly
-# the kind of split where one side forgets the mode. Atomic, 0600, parent
-# created.
+# The one writer for an env file carrying a secret (or a credential-bearing URL):
+# atomic, 0600, parent created. install.sh seeds them and configure.sh rewrites
+# two from the BTCPay bootstrap state -- one writer, so the two cannot disagree
+# about the mode, which is exactly the split where one side forgets it.
 write_env_file() { # path
     write_atomic "$1" 600
 }
 
-# install.sh's name for it. Kept because every seed site there reads as what it
-# is (a secret being written), and the rename would touch thirty call sites for
-# no behaviour.
+# install.sh's name for it: every seed site there reads as what it is, a secret
+# being written. An alias rather than renaming thirty call sites.
 write_secret() { # path
     write_env_file "$1"
 }
 
-# Write a status file: the one record a oneshot unit leaves for scripts/monitor.sh
-# and verify.sh to read. KEY=VALUE so env_value reads it, never sourced, written
-# atomically so a sweep never sees half a line. ok_epoch is the last SUCCESS and
-# is carried forward by a failure or a skip: age checks key on it, so a job that
-# skips forever (no disk space, an oversized set, a registry that never answers)
-# cannot look healthy just because its timer fired. deploy/root/status.sh is the
-# root tier's own copy of this shape (it cannot source the checkout); the two
-# are cross-checked by tests/test-status.sh so they cannot drift apart.
+# Write a status file: the one record a oneshot unit leaves for monitor.sh and
+# verify.sh. KEY=VALUE so env_value reads it, never sourced, written atomically.
+# ok_epoch is the last SUCCESS carried forward by a failure or a skip, so age
+# checks key on it and a job that skips forever cannot look healthy because its
+# timer fired. deploy/root/status.sh is the root tier's own copy (it cannot
+# source the checkout); tests/test-status.sh keeps the two from drifting.
 #
-# The caller supplies the file, the line naming the unit that scheduled it, its
-# own extra KEY=VALUE fields, and a detail (newlines flattened to one line).
+# The caller supplies the file, the line naming the scheduling unit, its own
+# KEY=VALUE fields, and a detail (newlines flattened to one line).
 status_write() { # path header result detail [KEY=VALUE ...]
     local path="$1" header="$2" result="$3" detail="$4"
     shift 4
@@ -843,22 +723,17 @@ status_write() { # path header result detail [KEY=VALUE ...]
     return 0
 }
 
-# Read one of those status files, in one place. scripts/monitor.sh and verify.sh
-# both judge the oneshot jobs' verdicts (backup-verify.status, ids.status,
-# auditd.status, bouncer.status) with the same three steps -- read result and
-# detail, validate ok_epoch as a number, subtract it from now -- and both used to
-# spell them out at every site, seven copies in all. The judgement itself stays
-# with the caller: thresholds, wording and units (hours for the drills, minutes
-# for the IDS) are per-check, and only the read is common.
+# Read one of those status files, in one place: monitor.sh and verify.sh judge
+# the oneshot jobs' verdicts the same way and used to spell out the read at seven
+# sites. The judgement (thresholds, wording, units) stays with the caller.
 #
-# Sets STATUS_RESULT, STATUS_AGE_S and STATUS_DETAIL rather than printing a line.
-# A delimiter-separated line cannot carry the empty fields this read exists for
-# (a failure with no detail, a skip before the first success): `read` collapses
-# runs of a whitespace IFS, so "skip<TAB><TAB>no disk" arrives shifted. The age
-# is empty when the file records no success yet, or when ok_epoch is not a
-# number (an older or damaged file). It is floored at 0: a host whose clock
-# stepped back reads as "just now", never as a negative age that passes every
-# threshold. A missing file leaves all three empty.
+# Sets STATUS_RESULT, STATUS_AGE_S and STATUS_DETAIL rather than printing a line:
+# a delimiter-separated line cannot carry the empty fields this read exists for
+# (a failure with no detail, a skip before the first success), because `read`
+# collapses runs of a whitespace IFS. The age is empty when no success is
+# recorded or ok_epoch is not a number, and floored at 0 so a clock that stepped
+# back reads "just now" rather than a negative age that passes every threshold.
+# A missing file leaves all three empty.
 # shellcheck disable=SC2034  # set for the caller to read after this returns
 status_verdict() { # file -> STATUS_RESULT, STATUS_AGE_S, STATUS_DETAIL
     local ok
@@ -875,12 +750,10 @@ status_verdict() { # file -> STATUS_RESULT, STATUS_AGE_S, STATUS_DETAIL
 }
 
 # How old the newest restic snapshot is, and how many there are -- one read of
-# `scripts/backup.sh list --json` for both callers. scripts/monitor.sh alerts on
-# the age and reports the count; scripts/rotate.sh refuses to rotate the restic
-# password unless a recent backup exists. Prints "count<TAB>newest-epoch",
-# with an empty epoch when no snapshot carries a time. Returns non-zero when the
-# repository cannot be listed AT ALL -- which is not "no snapshots yet", and the
-# callers tell the two apart.
+# `backup.sh list --json` for monitor.sh (age and count) and rotate.sh (refuses
+# to rotate the restic password without a recent backup). Prints
+# "count<TAB>newest-epoch"; non-zero means the repository could not be listed AT
+# ALL, which is not "no snapshots yet".
 restic_snapshot_summary() { # -> "count<TAB>newest-epoch"
     local backup="${REPO_DIR:-}/scripts/backup.sh" json latest count epoch=""
     [ -n "${REPO_DIR:-}" ] || return 1
@@ -892,25 +765,21 @@ restic_snapshot_summary() { # -> "count<TAB>newest-epoch"
     printf '%s\t%s' "$count" "$epoch"
 }
 
-# The session id the last mcp_initialize was given, the protocol revision the
-# server actually agreed to, the handshake response body (for callers that want
-# to inspect it without capturing the function's stdout, which would run it in a
-# subshell and lose the two globals above), and the marker that -w uses to put
-# the session id after the response body rather than mixed into it.
+# What the last mcp_initialize saw: the session id, the revision the server
+# actually agreed to, the handshake body (kept because capturing the function's
+# stdout would run it in a subshell and lose these globals), and the marker -w
+# uses to put the session id after the body rather than mixed into it.
 MCP_SESSION_ID=""
 MCP_NEGOTIATED_VERSION=""
 MCP_INIT_RESPONSE=""
 MCP_SID_MARKER='__mcp_session_id__'
 
-# MCP servers that are not on npm-network, as "<container>:<port>". One entry
-# today: crowdsec-mcp runs with Network=host, because its upstream (the CrowdSec
-# LAPI) is a loopback bind that a bridge container cannot reach -- pasta's
-# host.containers.internal lands on the host's LAN address, not its loopback.
-# Such a unit binds its own port on the host's loopback instead of publishing
-# one, so it is reached as 127.0.0.1:<port> through netcheck-host, the same
-# client nginx-proxy-manager's admin API needs. Declared once here so every
-# caller (verify.sh, rotate.sh, monitor.sh, spend-audit.sh) keeps naming the
-# container and gets the right transport.
+# MCP servers not on npm-network, as "<container>:<port>". One entry: crowdsec-mcp
+# runs with Network=host, because its upstream (the CrowdSec LAPI) is a loopback
+# bind a bridge cannot reach -- pasta's host.containers.internal lands on the
+# LAN address, not loopback. Such a unit binds the host's loopback itself instead
+# of publishing, so it is reached as 127.0.0.1:<port> through netcheck-host.
+# Declared once so every caller names the container and gets the transport right.
 MCP_HOST_NETNS=("crowdsec-mcp:8113")
 
 # "<curl function> <address>" for a container's MCP endpoint.
@@ -943,24 +812,22 @@ mcp_curl() { # container curl-args...
 }
 
 # The handshake every MCP streamable-HTTP session starts with. The version is
-# the protocol revision, not this stack's: it is what agent-mcp sends
-# (agent-skills' lib/mcp_http.py PROTOCOL_VERSION) and what the servers
-# implement. Named once because it is the one fact this hand-rolled client and
-# the real one disagree about silently when a revision lands -- a bump is this
-# line plus agent-skills', and tests/test-lib.sh asserts the body carries it.
+# the protocol revision, not this stack's: what agent-mcp sends and what the
+# servers implement (agent-skills' lib/mcp_http.py PROTOCOL_VERSION). Named once
+# because this hand-rolled client and the real one disagree about it silently
+# when a revision lands -- a bump is this line plus agent-skills', and
+# tests/test-lib.sh asserts the body carries it.
 #
-# It is a request, not an agreement: the spec lets the server answer with an
-# older revision, and that answer is what every request after the handshake has
-# to name (MCP_NEGOTIATED_VERSION). verify.sh compares the two and warns when a
-# server has moved, which is the only way a bump here is noticed.
+# It is a request, not an agreement: the server may answer with an older
+# revision, and that answer is what every later request must name
+# (MCP_NEGOTIATED_VERSION). verify.sh compares the two and warns when a server
+# has moved, which is the only way a bump here is noticed.
 MCP_PROTOCOL_VERSION='2025-06-18'
 MCP_INIT_BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"$MCP_PROTOCOL_VERSION\",\"capabilities\":{},\"clientInfo\":{\"name\":\"monitor\",\"version\":\"0\"}}}"
 
-# The notification the lifecycle requires once initialize has succeeded. A
-# notification has no id and the server answers 202 with no body, so this cannot
-# return anything useful; it is fire-and-forget on purpose (every server here
-# tolerates its absence, and a failed notification must not fail a probe that
-# already has a working session).
+# The notification the lifecycle requires after a successful initialize. No id,
+# 202 with no body, so nothing useful comes back: fire-and-forget by design (a
+# failed notification must not fail a probe that has a working session).
 #   mcp_initialized CONTAINER TOKEN [timeout]
 mcp_initialized() {
     printf 'header = "Authorization: Bearer %s"\n' "$2" | \
@@ -974,12 +841,10 @@ mcp_initialized() {
             2>/dev/null || true
 }
 
-# Authenticate against CONTAINER's MCP endpoint: do the initialize handshake,
-# print the response body and record the session id in MCP_SESSION_ID and the
-# revision the server agreed to in MCP_NEGOTIATED_VERSION. Returns 1 when the
-# server did not answer with a serverInfo result. The bearer token goes in a
-# curl config on stdin, so it never reaches the host's argv. CONTAINER is the
-# unit's container name; MCP_HOST_NETNS above decides where it is reached.
+# Authenticate against CONTAINER's MCP endpoint: initialize, print the response
+# body, record the session id and the revision the server agreed to. Returns 1
+# when the server did not answer with a serverInfo result. The bearer token goes
+# in a curl config on stdin, so it never reaches the host's argv.
 #   mcp_initialize CONTAINER TOKEN [timeout]
 mcp_initialize() {
     local c="$1" token="$2" t="${3:-20}" resp
@@ -1023,9 +888,8 @@ mcp_tool_call() {
 }
 
 # Call one tool on an MCP streamable-HTTP endpoint and print the response body.
-# Prints nothing and returns 1 when the handshake fails. Used by
-# scripts/monitor.sh and scripts/spend-audit.sh; verify.sh calls the two halves
-# itself, because it also proves the 401 gate and reports the session id.
+# Nothing (and 1) when the handshake fails. verify.sh calls the two halves itself
+# because it also proves the 401 gate and reports the session id.
 #   mcp_call CONTAINER TOKEN TOOL ARGS_JSON [timeout]
 mcp_call() {
     local c="$1" token="$2" tool="$3" args="$4" t="${5:-20}"
@@ -1033,10 +897,9 @@ mcp_call() {
     mcp_tool_call "$c" "$token" "$tool" "$args" "$t"
 }
 
-# The last JSON-RPC envelope in a response body: the body itself when it is
-# plain JSON, or the last `data:` line of the transport's SSE stream -- progress
-# notifications and pings may surround the result. Prints nothing when the body
-# carries no envelope.
+# The last JSON-RPC envelope in a response body: the body when it is plain JSON,
+# or the last `data:` line of an SSE stream, since progress notifications and
+# pings may surround the result. Nothing when the body carries no envelope.
 mcp_envelope() { # response-body -> the last result/error envelope
     local body="$1"
     case "$body" in
@@ -1059,13 +922,10 @@ mcp_protocol() { # response-body -> negotiated protocolVersion
 }
 
 # Unpack the text document a tools/call returned. mcp_call prints the HTTP body
-# verbatim: either a plain JSON-RPC envelope, or an SSE stream ("event: message"
-# / "data: {...}") -- the streamable-HTTP transport answers the latter. The
-# tool's own result is a JSON *string* at .result.content[0].text (MCP's text
-# content), so this prints that text. The last result envelope wins: progress
-# notifications and pings may surround it. Prints nothing when the call failed
-# or the body is not what the transport promises, so callers keep their existing
-# "empty means unavailable" branches.
+# verbatim -- a plain JSON-RPC envelope, or an SSE stream -- and the tool's own
+# result is a JSON *string* at .result.content[0].text (MCP's text content).
+# Nothing when the call failed or the body is not what the transport promises, so
+# callers keep their "empty means unavailable" branches.
 mcp_result_raw() { # response-body -> the tool's text content
     local doc
     doc=$(mcp_envelope "$1")
@@ -1073,12 +933,11 @@ mcp_result_raw() { # response-body -> the tool's text content
     printf '%s' "$doc" | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 
-# The same, but only when the text is a JSON document -- what every caller that
-# runs its own jq filter wants. Some servers answer an RPC error as plain text
-# ("No wallet file (RPC error -13)"), and feeding that to jq would be noise, not
-# data. mcp_result_raw is for callers that only ask "did the tool answer?" (a
-# token proof, verify's deep call), where searxng's get_time legitimately
-# returns human-readable text.
+# The same, but only when the text is a JSON document -- what a caller running
+# its own jq filter wants. Some servers answer an RPC error as plain text ("No
+# wallet file (RPC error -13)"), and feeding that to jq is noise, not data.
+# mcp_result_raw is for callers that only ask "did the tool answer?" (a token
+# proof, verify's deep call), where searxng's get_time returns prose.
 mcp_result() { # response-body -> the tool's text, when it is JSON
     local text
     text=$(mcp_result_raw "$1") || return 0
@@ -1093,10 +952,9 @@ usage_header() {
     awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$1"
 }
 
-# Where the stack keeps everything it must not lose: the daemon data dirs, the
-# nginx-proxy-manager data, AND the config/secrets. That way a rebuild only has
-# to preserve one directory. Resolved in this order, then persisted so it is
-# asked once per host:
+# Where the stack keeps everything it must not lose: the daemon data dirs, NPM's
+# data, and config/secrets, so a rebuild only has to preserve one directory.
+# Resolved in this order, then persisted so it is asked once per host:
 #   1. $STACK_DATA_DIR (environment, or stack.conf)
 #   2. the value saved in $STACK_DATA_ENV by an earlier run
 #   3. an interactive prompt, defaulting to $HOME/data
@@ -1134,13 +992,12 @@ persist_data_dir() {
     printf 'STACK_DATA_DIR=%s\n' "$DATA_DIR" > "$STACK_DATA_ENV"
 }
 
-# Give the data dir a container label when SELinux is enforcing and it does not
-# have one. The units mount their subdirectories with `:z`/`:Z`, which podman
-# relabels rootlessly on every start, so only a path podman cannot relabel (one
-# the login user does not own -- a freshly formatted disk is often unlabeled_t)
-# needs help. We attempt an unprivileged label and, if even that fails, print
-# the exact root commands instead of running sudo: nothing here (or in
-# deploy.sh, install.sh, verify.sh) uses sudo.
+# Give the data dir a container label when SELinux is enforcing and it lacks one.
+# The units mount subdirectories with `:z`/`:Z`, which podman relabels rootlessly
+# on every start, so only a path podman cannot relabel (one the login user does
+# not own -- a freshly formatted disk is often unlabeled_t) needs help. Try an
+# unprivileged label, and if even that fails print the root commands: nothing
+# here (or in deploy.sh, install.sh, verify.sh) uses sudo.
 ensure_data_dir_selinux() {
     [ -d "$DATA_DIR" ] || return 0
     command -v getenforce >/dev/null 2>&1 || return 0
@@ -1171,10 +1028,9 @@ ensure_data_dir_selinux() {
 }
 
 # Create the data dir (and its config / npm subdirs) if missing. A data dir on a
-# separate disk must already be created and owned by you (the README shows the
-# one-time commands); a path we cannot prepare is a clear error rather than an
-# implicit sudo. Only the top-level data dir is owned by us -- subdirs like
-# bitcoin are deliberately the image uid.
+# separate disk must already exist and be yours (README has the one-time
+# commands); a path we cannot prepare is a clear error, never an implicit sudo.
+# Only the top-level dir is ours -- subdirs like bitcoin are the image uid.
 ensure_data_dirs() {
     if [ ! -d "$DATA_DIR" ]; then
         mkdir -p "$DATA_DIR" 2>/dev/null || die "cannot create $DATA_DIR: its parent is not writable by $(id -un). Create it first:
@@ -1189,23 +1045,17 @@ ensure_data_dirs() {
 }
 
 # --- the service manifest -----------------------------------------------------
-# deploy/services.toml is the ONE declaration of the public surface: the
-# *_HOST domain names, the MCP prefixes/containers/ports, the onion services
-# and the proxy hosts (npm-hosts.sh reconciles them through its Python core,
-# scripts/stackctl/). stack.conf no longer carries those lists; this helper is
-# how a bash caller
-# gets them back under the SAME variable names it always sourced, by eval'ing
-# the shell emission of `python3 -m stackctl manifest shell` -- NAME='value'
-# lines and array assignments, nothing else. The MCP table leaves as one array
-# per column (MCP_PREFIXES / MCP_CONTAINERS / MCP_PORTS, then the PROBE_*
-# columns aligned with MCP_CONTAINERS) and the onion table the same way
-# (ONION_NAMES / _TARGETS / _MIRRORS / _PATHS / _CODES), so no caller splits a
-# record apart. python3 is a bootstrap dependency (agent-mcp already needed it).
+# deploy/services.toml is the ONE declaration of the public surface: the *_HOST
+# names, the MCP prefixes/containers/ports, the onion services and the proxy
+# hosts. This is how a bash caller gets them back under the same variable names
+# stack.conf used to carry, by eval'ing `python3 -m stackctl manifest shell` --
+# NAME='value' lines and array assignments, nothing else. Each table leaves as one
+# array per column (MCP_PREFIXES / MCP_CONTAINERS / MCP_PORTS, and ONION_*), so no
+# caller splits a record apart.
 #
-# The one thing it must never do is run inside stack.conf: bootstrap.sh
-# sources that file standalone (curl | bash, no checkout present), so
-# stack.conf stays plain data and the manifest load is each caller's own
-# explicit step, right after it sources stack.conf.
+# It must never run inside stack.conf: bootstrap.sh sources that file standalone
+# (curl | bash, no checkout), so stack.conf stays plain data and the manifest load
+# is each caller's explicit step, right after sourcing it.
 #
 #   . "$REPO_DIR/stack.conf"; load_manifest     # then $MCP_PREFIXES etc. exist
 load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
@@ -1222,16 +1072,14 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
     eval "$out"
 }
 
-# The half of scripts/npm-hosts.sh that is not its CLI: it owns only a CLI
-# (--dry-run, --prune, --help), the data dir and one endpoint override;
-# everything else is its Python core in scripts/stackctl/, which loads
-# deploy/services.toml itself. So the wrapper's whole job is to resolve the
-# data dir and hand the core its facts in the environment -- paths and flags,
+# The half of npm-hosts.sh that is not its CLI: it owns a CLI (--dry-run,
+# --prune, --help), the data dir and one endpoint override; everything else is
+# the Python core in scripts/stackctl/, which loads services.toml itself. So the
+# wrapper resolves the data dir and hands the core its facts -- paths and flags,
 # never a secret.
 #
-# Extra facts are passed as NAME=value arguments, so a wrapper reads as the one
-# thing it adds -- and only when the operator set it, so the core's own default
-# stays the single place the endpoint is written down:
+# Extra facts are NAME=value arguments, so a wrapper reads as the one thing it
+# adds, and only when the operator set it:
 #   stackctl_wrapper npm-hosts "NPM_API=$NPM_API"
 stackctl_wrapper() { # module [NAME=value ...]
     local module="$1"; shift
@@ -1247,21 +1095,16 @@ stackctl_wrapper() { # module [NAME=value ...]
         esac
         shift
     done
-    # The core is stdlib-only (npm.py talks urllib to NPM's admin API), so it
-    # runs on the host's own python3 -- a bootstrap dependency, like
-    # load_manifest. There is no venv to lose any more; a missing python3 is
-    # bootstrap's problem and fails loudly here.
+    # stdlib-only (npm.py talks urllib to NPM's admin API), so the host's own
+    # python3 runs it -- a bootstrap dependency like load_manifest. No venv.
     python_bin=python3
     command -v "$python_bin" >/dev/null 2>&1 \
         || die "python3 is required to run the reconciler (bootstrap.sh installs it)"
     resolve_data_dir
     py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    # The core reads these names directly (the old stdin pipe protocol is gone).
-    # Pass them through env(1) instead of exporting them in a
-    # subshell: the wrapper's own environment stays untouched either way, but a
-    # subshell `export DRY_RUN` reads as a modification shellcheck thinks the
-    # sourcing scripts can lose (SC2031 at every later use). The NAME=value
-    # arguments have to be collected while parsing -- the loop has already
+    # Passed through env(1) rather than exported: a subshell `export DRY_RUN`
+    # makes shellcheck think the sourcing scripts can lose it (SC2031). The
+    # NAME=value arguments are collected while parsing, because the loop has
     # shifted them away by the time the core runs.
     local -a envs=("MANIFEST=$REPO_DIR/deploy/services.toml" "DRY_RUN=$dry_run" "PRUNE=$prune")
     envs+=(${overrides[@]+"${overrides[@]}"})
