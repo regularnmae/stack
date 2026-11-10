@@ -112,7 +112,7 @@ the **host's own curl** (`bootstrap.sh` installs it), because a container
 cannot be what reports a broken container runtime. The proxy
 hosts are declared in `deploy/services.toml`
 and reconciled from this repo by `scripts/npm-hosts.sh` — see
-[Proxy hosts (nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager). The hosts
+[Proxy hosts](#proxy-hosts). The hosts
 themselves live in NPM's database, not in this repo.
 
 Only `80`, `443` and `81` (NPM) are opened on the LAN (`FIREWALL_PORTS` in

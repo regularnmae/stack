@@ -34,12 +34,14 @@ while [ $# -gt 0 ]; do
 done
 
 # The files that carry references. README.md is the target, not a source; the two
-# explorers are vendored app code whose "README" is their own.
+# explorers are vendored app code whose README is their own; this file quotes
+# example references, so scanning it would read its own documentation as prose.
 mapfile -t SOURCES < <(
     cd "$REPO_DIR" && git ls-files -- \
         '*.sh' '*.md' '*.py' '*.yml' '*.yaml' '*.toml' '*.conf' \
         '*.container' '*.container.in' '*.service' '*.timer' \
-        ':!README.md' ':!btc-explorer/*' ':!xmr-explorer/*'
+        ':!README.md' ':!btc-explorer/*' ':!xmr-explorer/*' \
+        ':!scripts/docs-lint.sh'
 )
 
 # Headings of a markdown file, one per line, without the leading #s.
@@ -71,7 +73,24 @@ logical_lines() { # file
 refs_in() {
     grep -oP "(?<![A-Za-z0-9])[\"'][^\"']+[\"']" <<< "$1" \
         | sed -E "s/^[\"']//; s/[\"']$//" \
-        | grep -vE '[/.#=]' || true
+        | grep -vE '[/.#=$]' || true
+}
+
+# In-file anchors: [text](#slug) must resolve to a heading in the same file, with
+# GitHub's slug rule (lowercase, punctuation dropped, spaces to hyphens, not
+# collapsed -- "Backup & restore" is #backup--restore). A renamed heading breaks a
+# link silently, which is the same failure the section names have.
+check_anchors() { # markdown-file
+    local file="$1" have bad=0 slug
+    have=$(sed -n 's/^#\{1,4\}[[:space:]]\{1,\}//p' "$file" \
+        | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 _-]//g; s/ /-/g')
+    while IFS= read -r slug; do
+        [ -n "$slug" ] || continue
+        grep -qxF -- "$slug" <<< "$have" && continue
+        printf '  FAIL %s  #%s  (no such heading in the same file)\n' "${file#"$REPO_DIR"/}" "$slug"
+        bad=$((bad + 1))
+    done < <(grep -oP '\]\(#\K[^)]+' "$file" 2>/dev/null || true)
+    fails=$((fails + bad))
 }
 
 fails=0
@@ -106,6 +125,11 @@ for src in "${SOURCES[@]}"; do
             check "$src" "$ln" "$text" "$REPO_DIR/$target"
         done
     done < <(logical_lines "$REPO_DIR/$src")
+done
+
+check_anchors "$REPO_DIR/README.md"
+for f in "$REPO_DIR"/docs/*.md; do
+    [ -f "$f" ] && check_anchors "$f"
 done
 
 if [ "$fails" -gt 0 ]; then
