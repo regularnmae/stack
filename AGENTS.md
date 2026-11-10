@@ -54,6 +54,19 @@ shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # the CI lint; CI pin
 dispatch on purpose: they are ordinary restarts that `install.sh` re-renders and
 `unit_digest` decides, over `torrc`, the CrowdSec config tree and `vector.toml`.
 
+## Comments
+
+A comment earns its place only if it changes what the next reader does: it names
+a trap (something that looks wrong and is not) or points at the `docs/` file
+that owns the reasoning. Measurements, what a design used to be, and how much
+noise it saved belong in the commit message and `docs/`, not beside code that
+must be re-read. Keep the trap, drop the history around it: past tense is not
+grounds for deletion if the thing it warns about can still happen.
+
+Two comment forms behave like code: a script's leading `#` block is its
+`--help` (`usage_header` prints it verbatim, so it stays one contiguous block
+from line 2), and `# shellcheck source=`/`disable=` are directives.
+
 ## Invariants and traps
 
 - `docs/units.md` — the runtime: render, digest, healthchecks, mounts.

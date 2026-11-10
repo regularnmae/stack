@@ -294,4 +294,22 @@ if unit_in_set "" " tor "; then
     exit 1
 fi
 
+# A script's leading comment block IS its --help: usage_header prints it
+# verbatim, so a header that is not one contiguous block from line 2 gives a
+# truncated usage message, and healthcheck-lint used to hard-code a line range
+# that did exactly that. Compare the two for every script that has a --help.
+for script in "$ROOT_DIR"/deploy.sh "$ROOT_DIR"/verify.sh "$ROOT_DIR"/configure.sh \
+              "$ROOT_DIR"/scripts/*.sh; do
+    grep -q usage_header "$script" || continue
+    case "$script" in */scripts/lib.sh) continue ;; esac
+    want=$(awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$script")
+    [ -n "$want" ] || continue
+    got=$(cd "$ROOT_DIR" && "$script" --help 2>/dev/null) || true
+    # Prefix, not equality: some scripts append an options table after the block.
+    if [ "${got:0:${#want}}" != "$want" ]; then
+        printf 'FAIL: %s --help does not start with its leading comment block\n' "$script" >&2
+        exit 1
+    fi
+done
+
 printf 'shared shell helper tests: ok\n'

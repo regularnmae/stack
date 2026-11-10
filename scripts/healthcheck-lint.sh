@@ -50,11 +50,19 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Sourced before the parse loop so --help can use usage_header, the one reader of
+# a leading block; a hard-coded line range would silently truncate it. lib.sh
+# only defines, so --help still opens no config. It also carries dur_ms (and
+# dur_s, the rounded-up view) shared with wait_healthy: the same parser reads a
+# unit's durations here and in the post-start waits (configure.sh, rotate.sh).
+# shellcheck source=lib.sh
+. "$REPO_DIR/scripts/lib.sh"
+
 STRICT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --strict) STRICT=1 ;;
-        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) usage_header "$0"; exit 0 ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
     shift
@@ -65,11 +73,6 @@ done
 # other declaration too; it sets defaults and runs nothing.
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
-# dur_ms (and dur_s, the rounded-up whole-second view) is shared with
-# wait_healthy: the same parser reads a unit's durations here and in the
-# post-start waits (configure.sh, scripts/rotate.sh).
-# shellcheck source=lib.sh
-. "$REPO_DIR/scripts/lib.sh"
 HEALTHLESS_UNITS=("${HEALTHLESS_UNITS[@]:-}")
 STATEFUL_UNITS=("${STATEFUL_UNITS[@]:-}")
 
