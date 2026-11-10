@@ -447,7 +447,7 @@ ensure_network() {
 }
 
 # The `--only` branches run their checks (verify.sh inside the monitor sweep,
-# npm-hosts, kuma-monitors) through the two curl clients, and never reach
+# npm-hosts) through the two curl clients, and never reach
 # start_infra. Called at the end of sync_units -- after
 # install.sh has had its chance to rebuild the image, and before the branch's own
 # work -- so `./deploy.sh --only monitor` on a freshly booted host finds them up.
@@ -466,8 +466,8 @@ ensure_netcheck() {
 start_infra() {
     ensure_network
     # The curl clients every host-side check execs into. First, because the
-    # checks that read a service by name (verify.sh, npm-hosts.sh,
-    # kuma-monitors.sh, the MCP handshakes) all go through them, and
+    # checks that read a service by name (verify.sh, the MCP handshakes) all go
+    # through them, and
     # refresh_image_unit because install.sh rebuilds the image in place: a
     # `start` on an already-active unit would keep the old bits.
     refresh_image_unit netcheck "$NETCHECK_IMAGE"
@@ -779,20 +779,6 @@ configure_npm_hosts() {
         || warn "the proxy hosts were not (re)configured; see scripts/npm-hosts.sh"
 }
 
-# The status page's monitors: declared in deploy/services.toml, reconciled
-# into uptime-kuma by scripts/kuma-monitors.sh. Runs after the proxy hosts are
-# rewritten (the monitors probe the public URLs) and self-skips with a one-line
-# note while $DATA_DIR/config/uptime-kuma/api.env has no login -- like
-# configure_npm_hosts, a fresh host deploys before the UI-first registration.
-kuma_monitors() {
-    if [ "$DRY_RUN" = 1 ]; then
-        printf '  [dry-run] %s\n' "$REPO_DIR/scripts/kuma-monitors.sh"
-        return 0
-    fi
-    "$REPO_DIR/scripts/kuma-monitors.sh" \
-        || warn "the status-page monitors were not (re)reconciled; see scripts/kuma-monitors.sh"
-}
-
 # ---------------------------------------------------------------------------
 # 6d. nginx-proxy-manager's network mode
 # ---------------------------------------------------------------------------
@@ -978,13 +964,6 @@ if [ -n "$ONLY" ]; then
         sync_units
         configure_npm_hosts
         sync_npm_network
-    elif [ "$ONLY" = kuma-monitors ]; then
-        # Reconcile the status page's monitors after a change to the
-        # [kuma.monitor.*] tables, or after filling in
-        # $DATA_DIR/config/uptime-kuma/api.env. Touches no
-        # container; the reconciler reaches uptime-kuma on its loopback publish.
-        sync_units
-        kuma_monitors
     elif [ "$ONLY" = agent-skills ]; then
         # Client-side tooling only: no unit, no data dir, no secret -- it reads
         # the tokens the stack already wrote and links the skills into the
@@ -1036,9 +1015,7 @@ start_btcpay || warn "BTCPay did not come up; continuing -- run ./verify.sh"
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
 # Configure the proxy hosts before the explorers: their images are local builds,
 # and the rest of the public surface must not wait for them. The explorer hosts
-# point at loopback ports, so NPM starts fine before the containers do; kuma's
-# monitors are reconciled after deploy_explorers, though they are URLs and no
-# wait is involved.
+# point at loopback ports, so NPM starts fine before the containers do.
 configure_npm_hosts
 sync_npm_network
 if [ "$DO_AGENT_SKILLS" = 1 ]; then
@@ -1048,7 +1025,6 @@ else
     log "agent skills skipped (--skip-agent-skills)"
 fi
 deploy_explorers
-kuma_monitors
 note_firewall
 # Record the definitions this deploy applied. The manifest says which unit files
 # the containers were started from, not whether the stack is healthy: health is
@@ -1100,10 +1076,9 @@ read the other services by container name on npm-network.
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $DATA_DIR/config/npm/api.env has the NPM admin login (scripts/npm-hosts.sh
   applies every proxy host the manifest declares).
-The status page's monitors are reconciled once
-  $DATA_DIR/config/uptime-kuma/api.env has the Uptime-Kuma admin login
-  (scripts/kuma-monitors.sh applies every [kuma.monitor.*] in
-  deploy/services.toml).
+The status page's monitors and its published page are created in the
+  Uptime-Kuma UI (https://$UPTIME_KUMA_HOST, the setup wizard's account); the
+  checks it should carry are listed in docs/proxy.md.
 The MCP tools error until their daemons exist. Drop --skip-daemons to bring up
 bitcoind, monerod, fulcrum, lightningd, btcpay, nbxplorer and the BTCPay wallet.
 
@@ -1147,9 +1122,9 @@ Stack deployed.
                     tables in deploy/services.toml); the addresses are printed
                     below once
                     tor has published them
-  Status page:      uptime-kuma on https://$UPTIME_KUMA_HOST, its monitors
-                    declared in deploy/services.toml and reconciled
-                    once $DATA_DIR/config/uptime-kuma/api.env has the login
+  Status page:      uptime-kuma on https://$UPTIME_KUMA_HOST; its monitors and
+                    page are UI-authored (docs/proxy.md lists the expected
+                    checks)
   Spending:         OFF on both money servers (ENABLE_SPENDING=0)
   Backups:          nightly restic job (backup.timer) -> $STACK_BACKUP_DIR;
                     weekly restore drill (backup-verify.timer), verdict in

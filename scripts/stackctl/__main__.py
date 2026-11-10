@@ -8,19 +8,18 @@ from typing import Dict
 
 
 def main(argv) -> int:
-    from . import kuma, manifest, npm
+    from . import manifest, npm
     from .ui import Fatal
 
     commands: Dict[str, object] = {
         "npm-hosts": npm.main,
-        "kuma-monitors": kuma.main,
         "manifest": manifest.main,
     }
     cmd = argv[1] if len(argv) > 1 else ""
     handler = commands.get(cmd)
     if handler is None:
         print(f"usage: python3 -m stackctl {{{'|'.join(commands)}}}", file=sys.stderr)
-        print("run the bash wrapper (scripts/npm-hosts.sh, scripts/kuma-monitors.sh) "
+        print("run the bash wrapper (scripts/npm-hosts.sh) "
               "-- it owns stack.conf and the declarations", file=sys.stderr)
         return 2
     try:

@@ -1190,10 +1190,10 @@ ensure_data_dirs() {
 
 # --- the service manifest -----------------------------------------------------
 # deploy/services.toml is the ONE declaration of the public surface: the
-# *_HOST domain names, the MCP prefixes/containers/ports, the onion services,
-# the proxy hosts and the status page's monitors (npm-hosts.sh and
-# kuma-monitors.sh reconcile it through their Python cores, scripts/stackctl/).
-# stack.conf no longer carries those lists; this helper is how a bash caller
+# *_HOST domain names, the MCP prefixes/containers/ports, the onion services
+# and the proxy hosts (npm-hosts.sh reconciles them through its Python core,
+# scripts/stackctl/). stack.conf no longer carries those lists; this helper is
+# how a bash caller
 # gets them back under the SAME variable names it always sourced, by eval'ing
 # the shell emission of `python3 -m stackctl manifest shell` -- NAME='value'
 # lines and array assignments, nothing else. The MCP table leaves as one array
@@ -1222,10 +1222,10 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
     eval "$out"
 }
 
-# The shared half of scripts/npm-hosts.sh and scripts/kuma-monitors.sh. Both own
-# only a CLI (--dry-run, --prune, --help), the data dir and one endpoint
-# override; everything else is their Python core in scripts/stackctl/, which
-# loads deploy/services.toml itself. So the wrapper's whole job is to resolve the
+# The half of scripts/npm-hosts.sh that is not its CLI: it owns only a CLI
+# (--dry-run, --prune, --help), the data dir and one endpoint override;
+# everything else is its Python core in scripts/stackctl/, which loads
+# deploy/services.toml itself. So the wrapper's whole job is to resolve the
 # data dir and hand the core its facts in the environment -- paths and flags,
 # never a secret.
 #
@@ -1233,8 +1233,6 @@ load_manifest() { # [repo-dir] (defaults to $REPO_DIR)
 # thing it adds -- and only when the operator set it, so the core's own default
 # stays the single place the endpoint is written down:
 #   stackctl_wrapper npm-hosts "NPM_API=$NPM_API"
-# One copy is also what keeps the two flags from drifting apart: a new option
-# cannot land in one wrapper and not the other.
 stackctl_wrapper() { # module [NAME=value ...]
     local module="$1"; shift
     local dry_run=0 prune=0 py
@@ -1249,14 +1247,13 @@ stackctl_wrapper() { # module [NAME=value ...]
         esac
         shift
     done
-    # The reconcilers run on the venv install.sh builds from
-    # scripts/stackctl/requirements.txt (uptime-kuma-api2, because kuma.py
-    # speaks socket.io). A stale venv is install.sh's job, not this wrapper's:
-    # fail with the command that fixes it rather than pip-installing behind the
-    # operator's back.
-    python_bin="$REPO_DIR/.venv/bin/python"
-    [ -x "$python_bin" ] \
-        || die "the reconciler venv is missing: run ./deploy/install.sh (it builds $REPO_DIR/.venv from scripts/stackctl/requirements.txt)"
+    # The core is stdlib-only (npm.py talks urllib to NPM's admin API), so it
+    # runs on the host's own python3 -- a bootstrap dependency, like
+    # load_manifest. There is no venv to lose any more; a missing python3 is
+    # bootstrap's problem and fails loudly here.
+    python_bin=python3
+    command -v "$python_bin" >/dev/null 2>&1 \
+        || die "python3 is required to run the reconciler (bootstrap.sh installs it)"
     resolve_data_dir
     py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     # The core reads these names directly (the old stdin pipe protocol is gone).

@@ -49,7 +49,12 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   mail path depends on (its config still parses, a receiver is filled in) and the
   chain/daemon checks (a
   `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
-  peers/channels, monerod's lag, the wallet's lag).
+  peers/channels, monerod's lag, the wallet's lag). It also probes every
+  clearweb vhost through nginx-proxy-manager on loopback (`NPM_DOMAINS`, from
+  the manifest, so a new `[npm.*]` host is covered the moment it is declared)
+  — the continuous public-surface check the UI-owned status page no longer
+  provides. A `000` or `5xx` there means certificate, proxy host or loopback
+  publish, never DNS: `--connect-to` deliberately bypasses it.
 
 - **`verify.sh` is the on-demand diagnostic; the monitor is the only periodic
   decider.** The schedules, the metrics textfile, the log pipeline and

@@ -725,15 +725,15 @@ fi
 
 # A published status page answers its public data endpoint without auth -- so
 # the check runs from the host by container name and needs no token. A 404
-# means the page does not exist (yet), not that the monitor is broken: the
-# reconciler (scripts/kuma-monitors.sh) creates and publishes it, or it is
-# published in the UI.
+# means the page does not exist (yet), not that the monitor is broken: the page
+# and its monitors are authored in kuma's UI (docs/proxy.md), so this only
+# names the missing publish.
 if [ "${KUMA_STATUS_SLUG+x}" = x ] && [ -n "$KUMA_STATUS_SLUG" ]; then
     slug_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 \
         "http://uptime-kuma:3001/api/status-page/$KUMA_STATUS_SLUG" 2>/dev/null || echo 000)
     case "$slug_code" in
         200) pass "status page '$KUMA_STATUS_SLUG' is published" ;;
-        404) warn "status page '$KUMA_STATUS_SLUG' is not published yet (run scripts/kuma-monitors.sh --dry-run, or publish it in the UI)" ;;
+        404) warn "status page '$KUMA_STATUS_SLUG' is not published yet (publish it in the Uptime-Kuma UI)" ;;
         *)   warn "status page '$KUMA_STATUS_SLUG' -> $slug_code" ;;
     esac
 fi
@@ -873,11 +873,12 @@ fi
 # clients share the address, but poll too rarely to rely on).
 #
 # The monitors no longer hairpin -- deploy/uptime-kuma.container resolves every
-# vhost but MCP_HOST to the container's host gateway -- so MCP_HOST's monitor is
-# the only public Uptime-Kuma source left, and it is the canary this check
-# reads. Private sources are filtered out first: otherwise the internal
-# monitors (192.168.1.112) would be the top entry and the WAN address would look
-# unverified forever.
+# vhost but MCP_HOST to the container's host gateway -- so the status page's
+# MCP_HOST monitor is the only public Uptime-Kuma source left (it is authored in
+# the UI now, so a fresh host must recreate it; docs/proxy.md lists it), and it
+# is the canary this check reads. Private sources are filtered out first:
+# otherwise the internal monitors (192.168.1.112) would be the top entry and the
+# WAN address would look unverified forever.
 npm_logs="$DATA_DIR/npm/data/logs"
 wan_seen=$(grep -h 'Uptime-Kuma/' "$npm_logs"/*_access.log 2>/dev/null \
     | sed -n 's/.*\[Client \([^]]*\)\].*/\1/p' \
@@ -886,7 +887,7 @@ wan_seen=$(grep -h 'Uptime-Kuma/' "$npm_logs"/*_access.log 2>/dev/null \
 if [ -z "${STACK_WAN_IP:-}" ]; then
     warn "no STACK_WAN_IP in stack.conf: a decision against the host's own public address (Uptime-Kuma, the MCP clients) will be enforced"
 elif [ -z "$wan_seen" ]; then
-    warn "STACK_WAN_IP=$STACK_WAN_IP is unverified (no public Uptime-Kuma request in $npm_logs -- the MCP_HOST canary has not run, or its monitor was removed)"
+    warn "STACK_WAN_IP=$STACK_WAN_IP is unverified (no public Uptime-Kuma request in $npm_logs -- the MCP_HOST canary has not run, or the status page's MCP monitor was removed)"
 elif [ "$wan_seen" = "$STACK_WAN_IP" ]; then
     pass "stack-bouncer will not enforce a ban on the host's own public address ($STACK_WAN_IP)"
 else

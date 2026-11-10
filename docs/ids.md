@@ -156,7 +156,7 @@ README's "Intrusion detection".
   handshakes were the host's own hairpin.
 - **The monitors no longer hairpin.** `deploy/install.sh` renders
   `--add-host=<vhost>:host-gateway` into `uptime-kuma.container` for every
-  monitored vhost except `MCP_HOST`, which stays public as the WAN canary that
+  public vhost except `MCP_HOST`, which stays public as the WAN canary that
   `verify.sh` reads. `host-gateway` is pasta's `169.254.1.2`; the host's LAN
   address does **not** work from a pasta container (measured: connection
   refused), and the URL/SNI is unchanged, so certificates still validate. LAN

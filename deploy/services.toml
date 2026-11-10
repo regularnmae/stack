@@ -2,19 +2,20 @@
 #
 # This file owns every cross-cutting registry fact the stack has: the DNS
 # names it answers on, which loopback publishes nginx-proxy-manager forwards
-# to, the MCP path prefixes, the tor onion services, and the status page's
-# monitors. It replaced the five tables stack.conf used to carry (the MCP
-# prefixes, the proxy hosts, the onion services, the monitor list and the *_HOST
-# scalars), each of which had to be edited in step with the others and with the
-# table in AGENTS.md -- the drift class the CI "service manifest" gate checks.
+# to, the MCP path prefixes, and the tor onion services. It replaced the five
+# tables stack.conf used to carry (the MCP prefixes, the proxy hosts, the onion
+# services, the monitor list and the *_HOST scalars), each of which had to be
+# edited in step with the others and with the table in AGENTS.md -- the drift
+# class the CI "service manifest" gate checks.
 #
 # Who reads it:
-#   * scripts/npm-hosts.sh and scripts/kuma-monitors.sh -- their Python cores
-#     (scripts/stackctl/) load it directly; the bash wrappers only pass its
-#     path. `python3 -m stackctl manifest shell` re-emits the same variable
-#     names the bash callers always sourced from stack.conf (every *_HOST, plus
-#     one array per MCP and onion column), via scripts/lib.sh's load_manifest,
-#     so deploy.sh, verify.sh and deploy/install.sh keep reading the same names.
+#   * scripts/npm-hosts.sh -- its Python core (scripts/stackctl/) loads it
+#     directly; the bash wrapper only passes its path.
+#     `python3 -m stackctl manifest shell` re-emits the same variable names the
+#     bash callers always sourced from stack.conf (every *_HOST, plus one array
+#     per MCP and onion column and the clearweb vhost list), via
+#     scripts/lib.sh's load_manifest, so deploy.sh, verify.sh, monitor.sh and
+#     deploy/install.sh keep reading the same names.
 #   * `python3 -m stackctl manifest check` (CI) validates the file itself and
 #     cross-checks it against AGENTS.md's interface table.
 #
@@ -65,9 +66,8 @@ domain = "status.boltmesh.net"
 env = "UPTIME_KUMA_HOST"
 # kuma_add_host: whether deploy/install.sh renders --add-host=<domain>:host-
 # # gateway into the uptime-kuma unit, so its OWN monitors resolve this vhost
-# # on the host instead of hairpinning through the router (see the monitor
-# # entries at the bottom). The status page does not monitor itself, so it
-# # needs none.
+# # on the host instead of hairpinning through the router (see docs/proxy.md).
+# # The status page does not monitor itself, so it needs none.
 kuma_add_host = false
 
 [host.mcp]
@@ -77,10 +77,11 @@ kuma_add_host = false
 # host maps each prefix onto it, so a client never sees /mcp.
 domain = "mcp.boltmesh.net"
 env = "MCP_HOST"
-# The one canary that still leaves the host: kuma's monitor for this name
-# resolves it on the internet, and verify.sh reads the source address NPM
-# logs for it to notice a WAN change (stack.conf's STACK_WAN_IP). An
-# --add-host would defeat that, so it is deliberately absent here.
+# The one canary that still leaves the host: the status page's monitor for this
+# name (docs/proxy.md) resolves it on the internet, and verify.sh reads the
+# source address NPM logs for it to notice a WAN change (stack.conf's
+# STACK_WAN_IP). An --add-host would defeat that, so it is deliberately absent
+# here.
 kuma_add_host = false
 
 # ---------------------------------------------------------------------------
@@ -371,93 +372,33 @@ path = "/searxng"
 codes = [401]
 
 # ---------------------------------------------------------------------------
-# Uptime-Kuma (status.boltmesh.net): the status page's monitors, declared.
-# Reconciled by scripts/kuma-monitors.sh (create missing, update changed,
-# --prune destructive) onto the page named by [kuma.page]. UI-tuned settings
-# on an existing monitor (notifications it picked up, tweaks) are preserved;
-# the page's layout is never rewritten once it exists. Notifications
-# themselves stay UI-configured (kuma embeds Apprise).
+# Uptime-Kuma (status.boltmesh.net): the status page is UI-authored.
 #
-# The URLs stay public on purpose, but only [host.mcp]'s monitor actually
-# resolves one on the internet: deploy/install.sh renders
-# --add-host=<vhost>:host-gateway into the uptime-kuma unit for every host
-# with kuma_add_host = true, so the checks reach nginx-proxy-manager over the
-# container's host gateway instead of hairpinning through the router.
+# Its monitors, their page and the page's layout are created and edited in
+# kuma's own UI -- the setup wizard's account owns them, notifications
+# included (kuma embeds Apprise). Nothing here reconciles them: a reconciler
+# whose rules are "only touch the declared fields, keep the UI's tuning, only
+# fill an empty page" is a reconciler that has already conceded the UI is the
+# source of truth, and it cost a socket.io client, a pinned venv and a CI step
+# to say so. The monitors are now data, so they live and die with kuma's
+# embedded MariaDB -- which is why uptime-kuma-dump/ stays in BACKUP_PATHS.
 #
-#   host     a [host.*] key: the monitor probes https://<domain><path>
-#   codes    comma-ranges of accepted status codes; a token-gated endpoint
-#            answers 401 without a token, which counts as up
-#   tcp      a tcp://host:port target declares kuma's TCP-port monitor
-#            instead of an HTTP one: no status code applies. Only Fulcrum
-#            needs it -- Electrum is raw TCP, so it cannot be probed as a
-#            URL. A port monitor proves the socket accepts a connection and
-#            nothing more; the index behind it is read by verify.sh --deep /
-#            scripts/monitor.sh (scripts/lib.sh's electrum_tip).
-#   interval / retries   the seconds between beats (default 60) and attempts
-#            before down (default 2)
+# What the repo still owns is the host side of them:
+#   * deploy/install.sh still renders --add-host=<vhost>:host-gateway into the
+#     uptime-kuma unit for every [host.*] with kuma_add_host = true, so the
+#     checks reach nginx-proxy-manager over the container's host gateway
+#     instead of hairpinning through the router as the WAN address;
+#   * scripts/monitor.sh probes every clearweb vhost through NPM on loopback
+#     (the NPM_DOMAINS emission), which is the continuous public-surface check
+#     the status page used to be the only one for;
+#   * the checks the page is expected to carry are listed in docs/proxy.md
+#     (create them once in the UI: site, /health, search, the token-gated MCP
+#     edge, BTCPay, both explorers, and Fulcrum as a TCP-port monitor).
 #
-# No tokens enter kuma's database: everything declared here checks the public
-# surface; the authenticated MCP handshakes stay in verify.sh/monitor.sh.
+# [kuma.page] stays only so verify.sh can tell "not published yet" from
+# "broken". No tokens enter kuma's database: the authenticated MCP handshakes
+# stay in verify.sh/monitor.sh.
 # ---------------------------------------------------------------------------
-
-[kuma.monitor.site]
-name = "BoltMesh site"
-host = "frontend"
-codes = ["200-299"]
-
-[kuma.monitor.api]
-name = "BoltMesh API (/health)"
-host = "api"
-path = "/health"
-codes = ["200-299"]
-
-[kuma.monitor.search]
-name = "SearXNG"
-host = "search"
-codes = ["200-299"]
-
-[kuma.monitor.mcp_edge]
-name = "MCP edge (token-gated)"
-host = "mcp"
-codes = ["200-299", "400-499"]
-
-[kuma.monitor.btcpay]
-name = "BTCPay"
-host = "btcpay"
-path = "/api/v1/health"
-codes = ["200-299"]
-
-[kuma.monitor.btc_explorer]
-name = "BTC explorer"
-host = "btc_explorer"
-codes = ["200-299", "400-499"]
-
-[kuma.monitor.xmr_explorer]
-name = "Monero explorer"
-host = "xmr_explorer"
-path = "/style.css"
-codes = ["200-299"]
-
-[kuma.monitor.fulcrum]
-# The publish, not the container: Fulcrum's 50001 is the stack's one raw-TCP
-# LAN surface (stack.conf's FIREWALL_PORTS), and a container-name monitor
-# would stay green if that publish were ever lost. host.containers.internal
-# is pasta's gateway to this host, the same name the *.onion proxy host
-# forwards to.
-name = "Fulcrum (Electrum TCP)"
-tcp = "host.containers.internal:50001"
-interval = 60
-retries = 2
 
 [kuma.page]
 slug = "stack"
-title = "BoltMesh services"
-group = "Public services"
-
-[uptime_kuma]
-# The unit's loopback publish (PublishPort=127.0.0.1:8107:3001 in
-# deploy/uptime-kuma.container): the reconciler's default URL points here,
-# and a moved publish must move with it. Proving the publish (rather than the
-# container name on npm-network) is deliberate -- it is the same surface
-# nginx-proxy-manager forwards the dashboard through.
-loopback_port = 8107

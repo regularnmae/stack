@@ -24,28 +24,50 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 
 ## uptime-kuma
 
-- **`uptime-kuma` is UI-configured for its own account, declared for everything
-  else:** no env file, nothing seeded into its state — kuma v2 runs an
-  **embedded MariaDB** (`UPTIME_KUMA_ENABLE_EMBEDDED_MARIADB=1`,
-  `db-config.json` says `embedded-mariadb`; the sqlite-era `kuma.db` is a 0-byte
-  leftover) — and its monitors are
-  the `[kuma.monitor.*]` tables in `deploy/services.toml`, reconciled by
-  `scripts/kuma-monitors.sh` —
-  a Python socket.io client (`scripts/stackctl/kuma.py` over
-  `uptime-kuma-api2`, pinned in `scripts/stackctl/requirements.txt` and
-  installed into `$REPO_DIR/.venv` by `deploy/install.sh`), because kuma has no
-  REST write API. The `kuma-ctl`
-  Node image that used to carry the client is retired: no image build, no
-  container and no bind mount stand between the declaration and the server,
-  and the reconciler reaches kuma through its loopback publish
-  (`127.0.0.1:8107`, the unit's `PublishPort=`) rather than by container name
-  on `npm-network`. The admin
-  login the setup wizard creates lives in `config/uptime-kuma/api.env` (UI-first
-  like `npm/api.env`), and the reconciler, `deploy.sh` and `verify.sh` self-skip
-  until it is filled in. The declaration format and the reconcile rules are in
-  `scripts/kuma-monitors.sh` and `scripts/stackctl/kuma.py` — don't reimplement
-  the reconcile as curl. Note v2 answers `/` with a **302 to `/dashboard`**, so
-  a probe must follow redirects. Notifications stay UI-configured.
+- **`uptime-kuma` is UI-configured, full stop:** no env file, nothing seeded into
+  its state, no reconciler — kuma v2 runs an **embedded MariaDB**
+  (`UPTIME_KUMA_ENABLE_EMBEDDED_MARIADB=1`, `db-config.json` says
+  `embedded-mariadb`; the sqlite-era `kuma.db` is a 0-byte leftover). The admin
+  account, the monitors, the status page and its layout are all created and
+  edited in kuma's own UI, which is why `uptime-kuma-dump/` is in `BACKUP_PATHS`:
+  the database is now the only record of them. The reconciler that used to
+  write them (a socket.io client over `uptime-kuma-api2`, in a pinned venv) was
+  removed: its own rules — only touch declared fields, preserve UI tuning, only
+  create the page while empty — had already conceded that the UI is the source
+  of truth, so the venv, the freeze and the CI step bought nothing.
+  `[kuma.page] slug` stays in `deploy/services.toml` only so `verify.sh` can
+  tell "not published yet" from "broken". Note v2 answers `/` with a **302 to
+  `/dashboard`**, so a probe must follow redirects.
+
+- **The repo still owns the host side of kuma's checks.** `deploy/install.sh`
+  renders `--add-host=<vhost>:host-gateway` into the unit for every `[host.*]`
+  with `kuma_add_host = true` (all but the status host and MCP, which are the
+  WAN canary), so UI-authored monitors resolve their vhosts on the host instead
+  of hairpinning through the router as the WAN address. And `scripts/monitor.sh`
+  probes every clearweb vhost through NPM on loopback (`NPM_DOMAINS`, from the
+  manifest), which is the continuous public-surface check the status page used
+  to be the only one for.
+
+- **The monitors to create in the UI, once** (this is the knowledge the deleted
+  declaration carried; keep it in step with the public hosts):
+
+  | monitor | URL / target | accepted |
+  | --- | --- | --- |
+  | BoltMesh site | `https://boltmesh.net/` | 200-299 |
+  | BoltMesh API | `https://api.boltmesh.net/health` | 200-299 |
+  | SearXNG | `https://search.boltmesh.net/` | 200-299 |
+  | MCP edge (token-gated) | `https://mcp.boltmesh.net/` | 200-299, 400-499 |
+  | BTCPay | `https://btcpay.boltmesh.net/api/v1/health` | 200-299 |
+  | BTC explorer | `https://btc.boltmesh.net/` | 200-299, 400-499 |
+  | Monero explorer | `https://xmr.boltmesh.net/style.css` | 200-299 |
+  | Fulcrum (Electrum TCP) | `host.containers.internal:50001`, type **TCP port** | — |
+
+  A token-gated endpoint answers `401` without a token, which counts as up.
+  A port monitor still needs accepted status codes on *add* (kuma's handler
+  validates the field before it looks at the type — leave the default). Fulcrum
+  is declared against the **publish**, not the container, so a lost publish
+  turns it red; whether the index behind it is current is `verify.sh --deep` /
+  `monitor.sh` (`scripts/lib.sh`'s `electrum_tip`).
 
 ## Rate limiting is per ingress
 

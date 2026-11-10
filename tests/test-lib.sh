@@ -204,9 +204,9 @@ fi
 # NAME=value overrides in the environment, and nothing more. The overrides are
 # the easy part to lose: the parse loop shifts every argument away, so they
 # must be collected as they are seen. They were silently dropped for one
-# refactor, and both cores have a loopback default, so nothing failed.
-mkdir -p "$TMP_DIR/ctl/.venv/bin" "$TMP_DIR/ctl/deploy"
-cat > "$TMP_DIR/ctl/.venv/bin/python" <<'SH'
+# refactor, and the core has a loopback default, so nothing failed.
+mkdir -p "$TMP_DIR/ctl/bin" "$TMP_DIR/ctl/deploy"
+cat > "$TMP_DIR/ctl/bin/python3" <<'SH'
 #!/usr/bin/env bash
 printf 'argv=%s\n' "$*"
 printf 'MANIFEST=%s\n' "${MANIFEST:-}"
@@ -214,9 +214,10 @@ printf 'DRY_RUN=%s\n' "${DRY_RUN:-}"
 printf 'PRUNE=%s\n' "${PRUNE:-}"
 printf 'NPM_API=%s\n' "${NPM_API:-}"
 SH
-chmod +x "$TMP_DIR/ctl/.venv/bin/python"
+chmod +x "$TMP_DIR/ctl/bin/python3"
 : > "$TMP_DIR/ctl/deploy/services.toml"
 got=$(
+    PATH="$TMP_DIR/ctl/bin:$PATH" \
     REPO_DIR="$TMP_DIR/ctl" STACK_DATA_DIR="$TMP_DIR" \
     STACK_DATA_ENV="$TMP_DIR/data-dir.env" \
         stackctl_wrapper npm-hosts "NPM_API=http://example.invalid:81" --dry-run

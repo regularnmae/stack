@@ -2,20 +2,20 @@
 #
 # This file owns every cross-cutting registry fact the stack has -- the DNS
 # names it answers on, which loopback publishes nginx-proxy-manager forwards to,
-# the MCP path prefixes, the tor onion services, and the status page's monitors
-# -- so there is one declaration and no parallel lists. It replaced the five
-# tables stack.conf used to carry (the MCP prefixes, the proxy hosts, the onion
-# services, the status-page monitors and the *_HOST scalars), each of which had
-# to be edited in step with the others and with the table in AGENTS.md.
+# the MCP path prefixes, and the tor onion services -- so there is one
+# declaration and no parallel lists. It replaced the five tables stack.conf used
+# to carry (the MCP prefixes, the proxy hosts, the onion services, the
+# status-page monitors and the *_HOST scalars), each of which had to be edited in
+# step with the others and with the table in AGENTS.md.
 #
 # Two audiences read the TOML, and neither sees a second grammar:
 #
-#   * the Python reconcilers (npm.py, kuma.py) -- these typed objects, directly;
-#   * the bash callers (deploy.sh, verify.sh, deploy/install.sh, rotate.sh) --
-#     through `manifest shell`, which emits the same variable names they always
-#     sourced from stack.conf (plus the probe table verify.sh and rotate.sh need,
-#     which has no stack.conf predecessor). scripts/lib.sh's load_manifest is a
-#     one-line addition per consumer.
+#   * the Python reconciler (npm.py) -- these typed objects, directly;
+#   * the bash callers (deploy.sh, verify.sh, monitor.sh, deploy/install.sh,
+#     rotate.sh) -- through `manifest shell`, which emits the same variable names
+#     they always sourced from stack.conf (plus the probe table verify.sh and
+#     rotate.sh need, which has no stack.conf predecessor). scripts/lib.sh's
+#     load_manifest is a one-line addition per consumer.
 #
 # The fields are validated here, once, as they are read: each table is checked
 # field by field and an error names the TOML table it came from. Nothing composes
@@ -41,8 +41,6 @@ try:
 except ImportError:  # pragma: no cover - the host bootstrap installs 3.12
     tomllib = None
 
-# A status-code field is one or more `NNN-NNN` ranges (kuma's own shape).
-_CODES_RE = re.compile(r"^[0-9]{3}-[0-9]{3}$")
 # A vhost flag ("force-ssl", "mcp", ...) and a container name.
 _FLAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _CONTAINER_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
@@ -63,12 +61,14 @@ class Host:
 
 
 class KumaPage:
-    __slots__ = ("slug", "title", "group")
+    """The [kuma] page slug, kept only so verify.sh can tell "not published yet"
+    from "broken". The page itself -- title, group, monitors, layout -- belongs to
+    the Uptime-Kuma UI, which is the only thing that writes it."""
 
-    def __init__(self, slug: str, title: str, group: str):
+    __slots__ = ("slug",)
+
+    def __init__(self, slug: str):
         self.slug = slug
-        self.title = title
-        self.group = group
 
 
 class NpmHost:
@@ -134,45 +134,13 @@ class OnionService:
         self.codes = codes
 
 
-class KumaMonitor:
-    """One [kuma.monitor.*] declaration, in the shape kuma's add/edit handlers
-    read. `type` is "http" (url + codes) or "port" (hostname + port, kuma's TCP
-    check). interval/retryInterval/maxretries default as the old bash wrapper did
-    (60/interval/2)."""
-
-    __slots__ = ("name", "type", "url", "hostname", "port", "codes",
-                 "interval", "retry_interval", "maxretries")
-
-    def __init__(self, name: str, type: str, url: str = "",
-                 hostname: Optional[str] = None, port: Optional[int] = None,
-                 codes: Optional[List[str]] = None, interval: int = 60,
-                 retry_interval: int = 60, maxretries: int = 2):
-        self.name = name
-        self.type = type
-        self.url = url
-        self.hostname = hostname
-        self.port = port
-        self.codes = codes or []
-        self.interval = interval
-        self.retry_interval = retry_interval
-        self.maxretries = maxretries
-
-    def describe(self) -> str:
-        """How a declaration reads in a log line."""
-        if self.type == "port":
-            return f"{self.hostname}:{self.port} (tcp)"
-        return f"{self.url} (codes {','.join(self.codes)})"
-
-
 class Manifest:
     def __init__(self) -> None:
         self.hosts: Dict[str, Host] = {}
         self.mcp: List[McpHost] = []
         self.npm: List[NpmHost] = []
         self.onion: List[OnionService] = []
-        self.kuma_monitors: List[KumaMonitor] = []
         self.kuma_page: Optional[KumaPage] = None
-        self.kuma_loopback: int = 8107
 
     # --- the emission the bash callers eval -------------------------------
     # Bash cannot read JSON, so each table leaves as one array per column,
@@ -205,8 +173,15 @@ class Manifest:
             lines.append(_array("ONION_PATHS", [o.path for o in self.onion]))
             lines.append(_array("ONION_CODES",
                                 [",".join(o.codes) for o in self.onion]))
-        # The vhosts uptime-kuma's own monitors may resolve on the host
-        # (install.sh renders --add-host=<domain>:host-gateway per entry):
+        # The clearweb vhosts, for monitor.sh's public-surface probe (the onion
+        # wildcard has no name to probe; tor publishes those separately). One
+        # entry per [npm.*] host, so a new public name is monitored the moment
+        # it is declared.
+        public = [h.domain for h in self.npm if not h.domain.endswith(".onion")]
+        if public:
+            lines.append(_array("NPM_DOMAINS", public))
+        # The vhosts uptime-kuma's own UI-authored monitors may resolve on the
+        # host (install.sh renders --add-host=<domain>:host-gateway per entry):
         # every host whose [host.*] did not opt out.
         add_hosts = [h.domain for h in self.hosts.values() if h.kuma_add_host]
         if add_hosts:
@@ -214,8 +189,6 @@ class Manifest:
             lines.append(f"KUMA_ADD_HOST_HOSTS=({entries})")
         if self.kuma_page is not None:
             lines.append(f"KUMA_STATUS_SLUG={shlex.quote(self.kuma_page.slug)}")
-            lines.append(f"KUMA_STATUS_TITLE={shlex.quote(self.kuma_page.title)}")
-            lines.append(f"KUMA_STATUS_GROUP={shlex.quote(self.kuma_page.group)}")
         return "\n".join(lines) + "\n"
 
 
@@ -415,58 +388,12 @@ def load(path: str) -> Manifest:
         m.onion.append(OnionService(key, target, mirrors, path,
                                     [str(c) for c in codes]))
 
-    # --- the status page's monitors --------------------------------------------
-    # [kuma.monitor.*] nests two levels deep in TOML, unlike the flat tables
-    # above: data["kuma"]["monitor"][<key>].
-    names: Dict[str, str] = {}
-    for key, table in _table(_table(data, "kuma"), "monitor").items():
-        where = f"[kuma.monitor.{key}]"
-        if not isinstance(table, dict):
-            die(f"deploy/services.toml: {where} must be a table")
-        name = _text(table, "name", where)
-        if name in names:
-            die(f"deploy/services.toml: {where} and "
-                f"[kuma.monitor.{names[name]}] are both named \"{name}\"")
-        names[name] = key
-        interval = _number(table.get("interval", 60), where, "interval", 1, 86400)
-        retries = _number(table.get("retries", 2), where, "retries", 1, 10)
-        if "tcp" in table:
-            if "host" in table or "path" in table or "codes" in table:
-                die(f"deploy/services.toml: {where} declares tcp AND host/path/codes; "
-                    f"a port monitor takes no URL or status codes")
-            target = _text(table, "tcp", where)
-            if not _TARGET_RE.fullmatch(target):
-                die(f"deploy/services.toml: {where} tcp '{target}' is not host:port")
-            hostname, _, port_s = target.rpartition(":")
-            m.kuma_monitors.append(KumaMonitor(
-                name, "port", url=f"tcp://{target}", hostname=hostname,
-                port=int(port_s), interval=interval, retry_interval=interval,
-                maxretries=retries))
-            continue
-        host = _host(data, str(table.get("host", "")), m.hosts, f"kuma.monitor.{key}")
-        codes = table.get("codes", ["200-299"])
-        if not isinstance(codes, list) or not codes or not all(
-                isinstance(c, str) and _CODES_RE.fullmatch(c) for c in codes):
-            die(f"deploy/services.toml: {where} codes must be ranges like "
-                f"\"200-299\" (a token-gated endpoint answers 401, which counts as up)")
-        mon_path = str(table.get("path", ""))
-        if mon_path and not mon_path.startswith("/"):
-            die(f"deploy/services.toml: {where} path '{mon_path}' must start with /")
-        m.kuma_monitors.append(KumaMonitor(
-            name, "http", url=f"https://{host.domain}{mon_path}", codes=list(codes),
-            interval=interval, retry_interval=interval, maxretries=retries))
-
+    # --- the status page ------------------------------------------------------
+    # The page, its monitors and their layout are authored in Uptime-Kuma's UI.
+    # Only the slug is declared, so verify.sh can probe the published page.
     page = _table(_table(data, "kuma"), "page")
     if page:
-        m.kuma_page = KumaPage(
-            slug=str(page.get("slug", "")),
-            title=str(page.get("title", "BoltMesh services")),
-            group=str(page.get("group", "Public services")),
-        )
-
-    kuma = _table(data, "uptime_kuma")
-    m.kuma_loopback = _number(kuma.get("loopback_port", 8107), "[uptime_kuma]",
-                              "loopback_port", 1, _MAX_PORT)
+        m.kuma_page = KumaPage(slug=str(page.get("slug", "")))
     return m
 
 
@@ -475,8 +402,7 @@ def check(path: str, agents_path: Optional[str] = None) -> int:
     m = load(path)
     _validate_probes(m)
     print(f"manifest: {len(m.hosts)} host(s), {len(m.mcp)} mcp server(s), "
-          f"{len(m.npm)} proxy host(s), {len(m.onion)} onion service(s), "
-          f"{len(m.kuma_monitors)} monitor(s)")
+          f"{len(m.npm)} proxy host(s), {len(m.onion)} onion service(s)")
     if agents_path:
         _check_agents(m, agents_path)
     return 0

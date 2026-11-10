@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
-# Offline tests for the Python core behind the bash wrappers (scripts/stackctl/).
+# Offline tests for the Python core behind the bash wrapper (scripts/stackctl/).
 #
-# Run: .venv/bin/python tests/test_stackctl.py     (CI runs it from the venv;
-# the kuma tests only need the code, not the library -- the socket client sits
-# behind KumaClient and the tests drive a fake of it)
+# Run: python3 tests/test_stackctl.py     (stdlib only -- there is no venv)
 #
 # What is covered, and why each layer exists:
 #   * manifest.py -- the declarations, their per-field validation, and the
 #     shell emission bash evaluates;
 #   * npm.py -- payload construction byte-for-byte (field order included,
 #     which is what made the golden diff against the bash original a real
-#     check), plus a full reconcile against a fake NPM admin API;
-#   * kuma.py -- the declared fields that reach an add/edit, the UI-tuned
-#     fields that must not, prune, the status page's "only while empty" rule,
-#     and the login failure, all against a fake of the library client (the
-#     socket.io protocol itself is uptime-kuma-api2's to test).
+#     check), plus a full reconcile against a fake NPM admin API.
 #
 # The live behaviour was additionally proven against the running stack before
-# this suite was written: both reconcilers' --dry-run output matched the bash
-# and Node originals byte for byte, and the kuma add/edit/prune write paths
-# were exercised against the live server and restored. That cannot run in CI;
-# this file is what keeps those semantics from regressing afterwards.
+# this suite was written: the reconciler's --dry-run output matched the bash
+# original byte for byte. That cannot run in CI; this file is what keeps those
+# semantics from regressing afterwards.
 import contextlib
 import io
 import json
@@ -35,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from stackctl import envfile, kuma, manifest, npm  # noqa: E402
+from stackctl import envfile, manifest, npm  # noqa: E402
 from stackctl.ui import Fatal  # noqa: E402
 
 
@@ -89,7 +82,7 @@ class TestEnvfile(unittest.TestCase):
 
 class TestDeclarations(unittest.TestCase):
     """The declaration types themselves. Reading them out of TOML is
-    TestManifest's job; these pin the small behaviours the reconcilers rely on."""
+    TestManifest's job; these pin the small behaviours the reconciler relies on."""
 
     def test_npm_host_flags(self):
         h = manifest.NpmHost("status.example.net", "http", "127.0.0.1", 8107,
@@ -109,18 +102,6 @@ class TestDeclarations(unittest.TestCase):
         self.assertEqual((m.token_var, m.probe_tool, m.probe_args,
                           m.needs_nodes, m.spend_token_var),
                          ("", "", "{}", False, ""))
-
-    def test_kuma_describe_and_defaults(self):
-        p = manifest.KumaMonitor("Fulcrum (Electrum TCP)", "port",
-                                 url="tcp://h.internal:50001",
-                                 hostname="h.internal", port=50001)
-        self.assertEqual(p.describe(), "h.internal:50001 (tcp)")
-        self.assertEqual(p.url, "tcp://h.internal:50001")
-        self.assertEqual((p.codes, p.interval, p.retry_interval, p.maxretries),
-                         ([], 60, 60, 2))
-        h = manifest.KumaMonitor("X", "http", url="https://x", codes=["200-299"],
-                                 interval=120, retry_interval=120, maxretries=3)
-        self.assertEqual(h.describe(), "https://x (codes 200-299)")
 
 
 # ---------------------------------------------------------------------------
@@ -182,34 +163,6 @@ class TestNpmPayloads(unittest.TestCase):
                  {"id": 6, "domain_names": ["b.net", "c.net"]}]
         self.assertEqual(npm.find_host_id(hosts, "c.net"), 6)
         self.assertIsNone(npm.find_host_id(hosts, "zzz"))
-
-
-class TestKumaLogic(unittest.TestCase):
-    def test_normalized_codes_array_and_json_string(self):
-        self.assertEqual(kuma.normalized_codes({"accepted_statuscodes": ["400-499", "200-299"]}),
-                         ["200-299", "400-499"])
-        self.assertEqual(kuma.normalized_codes(
-            {"accepted_statuscodes_json": '["200-299"]'}), ["200-299"])
-        self.assertEqual(kuma.normalized_codes({}), [])
-        self.assertEqual(kuma.normalized_codes({"accepted_statuscodes": "junk"}), [])
-
-    def test_differs(self):
-        http = manifest.KumaMonitor("n", "http", url="https://x", codes=["200-299"])
-        self.assertFalse(kuma.differs({"type": "http", "url": "https://x",
-                                       "accepted_statuscodes": ["200-299"]}, http))
-        self.assertTrue(kuma.differs({"type": "http", "url": "https://y",
-                                      "accepted_statuscodes": ["200-299"]}, http))
-        self.assertTrue(kuma.differs({"type": "http", "url": "https://x",
-                                      "accepted_statuscodes": ["200-299,300-399"]}, http))
-        port = manifest.KumaMonitor("n", "port", url="tcp://h:50001",
-                                    hostname="h", port=50001)
-        self.assertFalse(kuma.differs({"type": "port", "hostname": "h", "port": 50001}, port))
-        self.assertTrue(kuma.differs({"type": "port", "hostname": "h", "port": "50002"}, port))
-        self.assertTrue(kuma.differs({"type": "http", "url": "https://x",
-                                      "accepted_statuscodes": ["200-299"]}, port))
-        # an existing type of None reads as http, like the mjs's `?? "http"`
-        self.assertFalse(kuma.differs({"url": "https://x",
-                                       "accepted_statuscodes": ["200-299"]}, http))
 
 
 # ---------------------------------------------------------------------------
@@ -483,274 +436,10 @@ class TestNpmReconcile(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
 
 
-# A fake of uptime-kuma-api2's client, i.e. of what KumaClient exposes to a
-# reconcile: the monitors the server would list, the status page it stores, and
-# a record of every write. The socket.io protocol itself is the library's to
-# test; what this file pins down is the decisions -- which fields reach an add
-# or an edit, what prune deletes, when a page may be filled.
-class FakeKumaApi:
-    # KumaClient exposes the library's exception classes as attributes so
-    # reconcile can catch them without importing the library at module load; a
-    # fake has no library errors to raise.
-    errors = ()
-    timeout_error = TimeoutError
-
-    def __init__(self, monitors=None, page=None):
-        self._monitors = list(monitors or [])
-        self._page = page
-        self.calls = []
-        self.next_id = 10
-
-    def login(self, username, password):
-        self.calls.append(("login", username, password))
-        return {"token": "t"}
-
-    def monitors(self):
-        return [dict(m) for m in self._monitors]
-
-    def add_monitor(self, **fields):
-        self.calls.append(("add", fields))
-        self.next_id += 1
-        return {"monitorID": self.next_id, "msg": "Added Successfully."}
-
-    def edit_monitor(self, id_, **fields):
-        self.calls.append(("editMonitor", id_, fields))
-        return {"monitorID": id_, "msg": "Saved."}
-
-    def delete_monitor(self, id_):
-        self.calls.append(("deleteMonitor", id_))
-        return {}
-
-    def status_page(self, slug):
-        return self._page
-
-    def add_status_page(self, slug, title):
-        self.calls.append(("addStatusPage", slug, title))
-        return {"msg": "OK!"}
-
-    def save_status_page(self, slug, **fields):
-        self.calls.append(("saveStatusPage", slug, fields))
-        return {}
-
-    def close(self):
-        self.calls.append(("close",))
-
-    def writes(self):
-        return [c for c in self.calls if c[0] not in ("login", "close")]
-
-
-class KumaFailure(Exception):
-    """Stands in for uptime_kuma_api.UptimeKumaException."""
-
-
-class FailingKumaApi(FakeKumaApi):
-    errors = (KumaFailure,)
-
-    def login(self, username, password):
-        raise KumaFailure("Incorrect username or password")
-
-
-class TestKumaReconcile(unittest.TestCase):
-    def setUp(self):
-        import tempfile
-        self.tmp = tempfile.mkdtemp(prefix="stackctl-kuma-")
-        self.config = os.path.join(self.tmp, "config")
-        os.makedirs(os.path.join(self.config, "uptime-kuma"))
-        with open(os.path.join(self.config, "uptime-kuma", "api.env"), "w") as f:
-            f.write("KUMA_USERNAME=admin\nKUMA_PASSWORD=secret\n")
-
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def write_manifest(self, monitors, slug="stack"):
-        """Expand the old pipe-shaped monitor entries into the manifest tables
-        ([host.*] per HTTP URL, [kuma.monitor.*], [kuma.page])."""
-        blocks = []
-        seen_hosts = {}
-        for i, entry in enumerate(monitors):
-            name, url, codes, interval, retries = (entry.split("|") + ["", "", "", ""])[:5]
-            extra = f'interval = {interval or 60}\nretries = {retries or 2}\n'
-            if url.startswith("tcp://"):
-                blocks.append(f'[kuma.monitor.m{i}]\nname = "{name}"\n'
-                              f'tcp = "{url[6:]}"\n{extra}')
-                continue
-            scheme, _, rest = url.partition("://")
-            hostpart, _, path = rest.partition("/")
-            path = "/" + path if path else ""
-            if hostpart not in seen_hosts:
-                key = f"k{i}"
-                seen_hosts[hostpart] = key
-                blocks.append(f'[host.{key}]\ndomain = "{hostpart}"\n')
-            codes_list = json.dumps(codes.split(",") if codes else ["200-299"])
-            blocks.append(f'[kuma.monitor.m{i}]\nname = "{name}"\n'
-                          f'host = "{seen_hosts[hostpart]}"\npath = "{path}"\n'
-                          f'codes = {codes_list}\n{extra}')
-        if slug:
-            blocks.append(f'[kuma.page]\nslug = "{slug}"\n'
-                          'title = "Test services"\ngroup = "Public"\n')
-        path = os.path.join(self.tmp, "services.toml")
-        with open(path, "w") as f:
-            f.write("\n".join(blocks))
-        return path
-
-    def facts(self, monitors, dry="0", prune="0", slug="stack"):
-        """Put the wrapper's facts in the environment, where the reconciler
-        reads them."""
-        env = {
-            "MANIFEST": self.write_manifest(monitors, slug),
-            "CONFIG_DIR": self.config,
-            "DRY_RUN": dry,
-            "PRUNE": prune,
-        }
-        for key, value in env.items():
-            os.environ[key] = value
-            self.addCleanup(os.environ.pop, key, None)
-
-    def reconcile(self, api):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = kuma.reconcile(client_factory=lambda url: api)
-        return rc, out.getvalue(), err.getvalue()
-
-    def test_all_unchanged_and_page_left_alone(self):
-        api = FakeKumaApi(
-            monitors=[
-                {"id": 1, "name": "SearXNG", "type": "http", "url": "https://s",
-                 "accepted_statuscodes": ["200-299"], "notificationIDList": {"5": True}},
-                {"id": 2, "name": "Fulcrum", "type": "port", "hostname": "h", "port": 50001},
-            ],
-            page={"id": 7, "publicGroupList": [{"monitorList": [{"id": 1}]}]},
-        )
-        self.facts(["SearXNG|https://s|200-299", "Fulcrum|tcp://h:50001"])
-        rc, out, _ = self.reconcile(api)
-        self.assertEqual(rc, 0)
-        self.assertIn('monitor "SearXNG" unchanged (id 1)', out)
-        self.assertIn('monitor "Fulcrum" unchanged (id 2)', out)
-        self.assertIn("status page 'stack' exists and carries monitors; "
-                      "the layout stays with the UI", out)
-        # nothing was written, and the credentials came from api.env
-        self.assertEqual(api.writes(), [])
-        self.assertEqual(api.calls[0], ("login", "admin", "secret"))
-        self.assertEqual(api.calls[-1], ("close",))
-
-    def test_add_edit_and_dry_run(self):
-        api = FakeKumaApi(monitors=[
-            {"id": 3, "name": "SearXNG", "type": "http", "url": "https://old",
-             "accepted_statuscodes": ["200-299"], "notificationIDList": {"9": True},
-             "interval": 300, "conditions": ["cond"]},
-        ])
-        self.facts([
-            "SearXNG|https://new|200-299,400-499",
-            "New port|tcp://p:50001",
-            "New http|https://n|200-299",
-        ])
-        rc, out, _ = self.reconcile(api)
-        self.assertEqual(rc, 0)
-        self.assertIn('updated monitor "SearXNG" (id 3)', out)
-        self.assertIn('created monitor "New port" (id 11', out)
-        self.assertIn('created monitor "New http" (id 12', out)
-
-        edits = [c for c in api.writes() if c[0] == "editMonitor"]
-        adds = [c for c in api.writes() if c[0] == "add"]
-        self.assertEqual(len(edits), 1)
-        self.assertEqual(len(adds), 2)
-        edit, (add_port, add_http) = edits[0], adds
-        # EXACTLY the declared fields: the library merges the stored monitor
-        # back in, so the UI's notification list, interval and conditions are
-        # never rewritten by a reconcile.
-        self.assertEqual(edit, ("editMonitor", 3,
-                                {"url": "https://new",
-                                 "accepted_statuscodes": ["200-299", "400-499"]}))
-        fields = add_port[1]
-        self.assertEqual(fields["type"], "port")
-        self.assertEqual(fields["hostname"], "p")
-        self.assertEqual(fields["port"], 50001)
-        self.assertEqual(fields["url"], "tcp://p:50001")
-        self.assertEqual(fields["accepted_statuscodes"], ["200-299"])  # the .every() trap
-        self.assertEqual(fields["interval"], 60)
-        self.assertEqual(fields["retryInterval"], 60)
-        self.assertEqual(fields["maxretries"], 2)
-        fields = add_http[1]
-        self.assertEqual(fields["type"], "http")
-        self.assertEqual(fields["method"], "GET")
-        self.assertEqual(fields["url"], "https://n")
-        self.assertEqual(fields["accepted_statuscodes"], ["200-299"])
-
-        # dry-run plans the same edits but writes nothing
-        api = FakeKumaApi(monitors=[
-            {"id": 3, "name": "SearXNG", "type": "http", "url": "https://old",
-             "accepted_statuscodes": ["200-299"]},
-        ])
-        self.facts([
-            "SearXNG|https://newer|200-299", "New port|tcp://p:50001"], dry="1")
-        rc, out, _ = self.reconcile(api)
-        self.assertIn("[dry-run] would update monitor", out)
-        self.assertIn("[dry-run] would create monitor", out)
-        self.assertEqual(api.writes(), [])
-
-    def test_prune_and_fill_an_empty_page(self):
-        api = FakeKumaApi(
-            monitors=[
-                {"id": 1, "name": "Keep", "type": "http", "url": "https://k",
-                 "accepted_statuscodes": ["200-299"]},
-                {"id": 9, "name": "Stale", "type": "http", "url": "https://s",
-                 "accepted_statuscodes": ["200-299"]},
-            ],
-            page={"id": 7, "publicGroupList": []},  # exists but empty -> we fill it
-        )
-        self.facts(["Keep|https://k|200-299"], prune="1")
-        rc, out, _ = self.reconcile(api)
-        self.assertEqual(rc, 0)
-        self.assertIn('deleted monitor "Stale" (id 9, not declared)', out)
-        self.assertIn("published status page 'stack' (1 monitor(s))", out)
-        self.assertIn(("deleteMonitor", 9), api.calls)
-        self.assertNotIn("addStatusPage", [c[0] for c in api.calls])
-        save = [c for c in api.calls if c[0] == "saveStatusPage"][0]
-        self.assertEqual(save[1], "stack")
-        self.assertEqual(save[2]["title"], "Test services")
-        self.assertIs(save[2]["published"], True)
-        self.assertEqual(save[2]["publicGroupList"][0]["monitorList"],
-                         [{"id": 1, "weight": 1}])
-
-    def test_new_page_is_created_then_filled(self):
-        api = FakeKumaApi(
-            monitors=[{"id": 1, "name": "Keep", "type": "http", "url": "https://k",
-                       "accepted_statuscodes": ["200-299"]}],
-            page=None,
-        )
-        self.facts(["Keep|https://k|200-299"])
-        rc, out, _ = self.reconcile(api)
-        self.assertEqual(rc, 0)
-        self.assertIn("created status page 'stack'", out)
-        names = [c[0] for c in api.calls]
-        self.assertLess(names.index("addStatusPage"), names.index("saveStatusPage"))
-        self.assertEqual([c for c in api.calls if c[0] == "addStatusPage"][0],
-                         ("addStatusPage", "stack", "Test services"))
-
-    def test_bad_login_dies(self):
-        api = FailingKumaApi()
-        self.facts(["X|https://x"])
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(Fatal) as ctx:
-                kuma.reconcile(client_factory=lambda url: api)
-        self.assertIn("Incorrect username", ctx.exception.msg)
-        self.assertEqual(api.calls[-1], ("close",))
-
-    def test_missing_credentials_self_skip(self):
-        os.remove(os.path.join(self.config, "uptime-kuma", "api.env"))
-        api = FakeKumaApi()
-        self.facts(["X|https://x"])
-        rc, out, _ = self.reconcile(api)
-        self.assertEqual(rc, 0)
-        self.assertIn("no Uptime-Kuma admin login", out)
-        self.assertEqual(api.calls, [])
-
-
 # ---------------------------------------------------------------------------
 # deploy/services.toml: the loader, the shell emission and the CI gate. The
 # real manifest is exercised (not just fixtures) because it IS the declaration
-# of this host's public surface -- if it stops loading, every reconciler does.
+# of this host's public surface -- if it stops loading, the reconciler does.
 MANIFEST = os.path.join(ROOT, "deploy", "services.toml")
 AGENTS = os.path.join(ROOT, "AGENTS.md")
 
@@ -777,7 +466,6 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(len(m.mcp), 10)
         self.assertEqual(len(m.npm), 9)
         self.assertEqual(len(m.onion), 5)
-        self.assertEqual(len(m.kuma_monitors), 8)
         self.assertEqual(m.hosts["frontend"].domain, "boltmesh.net")
         self.assertEqual(m.hosts["frontend"].env, "BOLTMESH_FRONTEND_HOST")
         self.assertEqual(m.mcp[0].prefix, "/searxng")
@@ -788,10 +476,11 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(wallet.spend_token_var, "MONERO_MCP_SPEND_TOKEN")
         self.assertEqual(m.onion[2].name, "btc-explorer")   # HiddenServiceDir name
         self.assertEqual((m.onion[2].path, m.onion[2].codes), ("/", ["200", "401"]))
-        self.assertEqual(m.kuma_loopback, 8107)
         self.assertEqual(m.kuma_page.slug, "stack")
-        fulcrum = [x for x in m.kuma_monitors if x.type == "port"][0]
-        self.assertEqual((fulcrum.hostname, fulcrum.port), ("host.containers.internal", 50001))
+        # The clearweb surface monitor.sh probes: every [npm.*] name but the
+        # onion wildcard, which has no name to resolve.
+        self.assertEqual(m.shell().count("NPM_DOMAINS=("), 1)
+        self.assertNotIn("*.onion", m.shell().split("NPM_DOMAINS=(")[1].split(")", 1)[0])
 
     def test_env_override_keeps_the_stack_conf_contract(self):
         from stackctl import manifest
@@ -948,23 +637,6 @@ target = "noport"
 mirrors = "a"
 """, "is not host:port")
 
-        bad("bad-kuma-codes.toml", """
-[host.a]
-domain = "a.example"
-[kuma.monitor.x]
-name = "X"
-host = "a"
-codes = ["200"]
-""", "codes must be ranges")
-        bad("tcp-and-host.toml", """
-[host.a]
-domain = "a.example"
-[kuma.monitor.x]
-name = "X"
-host = "a"
-tcp = "h:1"
-""", "declares tcp AND")
-
     def test_probe_fields_are_required_and_valid(self):
         from stackctl import manifest
         base = """
@@ -983,9 +655,6 @@ host = "mcp"
 forward_host = "127.0.0.1"
 forward_port = 8100
 flags = ["mcp"]
-
-[uptime_kuma]
-loopback_port = 8107
 """
         agents = self.write("AGENTS.md", "| `one-mcp` | ... | `127.0.0.1:8100` |\n")
 
@@ -1024,9 +693,6 @@ host = "mcp"
 forward_host = "127.0.0.1"
 forward_port = 8100
 flags = ["mcp"]
-
-[uptime_kuma]
-loopback_port = 8107
 """)
         agents = self.write("AGENTS.md", "| Server | Container | ... | NPM target |\n"
                             "| --- | --- | --- | --- |\n"
@@ -1039,6 +705,8 @@ loopback_port = 8107
         self.assertIn("MCP_PREFIXES=(/one)", out)
         self.assertIn("MCP_CONTAINERS=(one-mcp)", out)
         self.assertIn("MCP_PORTS=(8100)", out)
+        # The public-surface list monitor.sh probes: one clearweb vhost.
+        self.assertIn("NPM_DOMAINS=(mcp.example.net)", out)
 
 
 if __name__ == "__main__":

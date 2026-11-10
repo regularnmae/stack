@@ -1128,13 +1128,13 @@ chmod 700 "$TOR_DIR/onion"
 # own PGDATA, so neither dir needs the image-uid chown the other apps need.
 mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/postgres-dump"
 
-# Uptime-Kuma's state: its UI-configured monitors/history and login, plus the
-# EMBEDDED MARIADB (kuma v2 runs MariaDB, not sqlite -- db-config.json says
-# embedded-mariadb and the live tree is mariadb/). Written by container root --
-# the host user under rootless podman, same as cln/ and tor/ -- so a plain mkdir,
-# no uid chown. Nothing is seeded into the state itself: the admin account is
-# created in its web UI on first use, and the monitors are reconciled by
-# scripts/kuma-monitors.sh once the api.env has the login.
+# Uptime-Kuma's state: its UI-authored monitors/status page, history and login,
+# plus the EMBEDDED MARIADB (kuma v2 runs MariaDB, not sqlite -- db-config.json
+# says embedded-mariadb and the live tree is mariadb/). Written by container
+# root -- the host user under rootless podman, same as cln/ and tor/ -- so a
+# plain mkdir, no uid chown. Nothing is seeded into the state itself: the admin
+# account and every monitor are created in its web UI, which is therefore the
+# only record of them outside the database dump (scripts/db-dump.sh).
 mkdir -p "$DATA_DIR/uptime-kuma"
 
 # Every BACKUP_PATHS entry must exist before the job's first run: restic would
@@ -1559,28 +1559,10 @@ EOF
     log "wrote $NPM_ENV (mode 600) -- fill in NPM_EMAIL/NPM_PASSWORD (or NPM_TOKEN)"
 fi
 
-# Uptime-Kuma's admin login, for scripts/kuma-monitors.sh: it reconciles the
-# status page's monitors (declared in deploy/services.toml) and creates
-# + publishes the public status page. Same UI-first flow as npm/api.env: the
-# account is created on the setup wizard's first visit, the login is recorded
-# here, and the reconciler self-skips until it is filled in.
-KUMA_ENV="$CONFIG_DIR/uptime-kuma/api.env"
-if ensure_secret "$KUMA_ENV" "uptime-kuma api env"; then
-    write_secret "$KUMA_ENV" <<'EOF'
-# Credentials for the Uptime-Kuma admin account, used by
-# scripts/kuma-monitors.sh to reconcile the status page's monitors (declared
-# in deploy/services.toml) and create + publish the status page. See
-# deploy/examples/kuma/api.env.example. Never committed.
-#
-# The username and password the setup wizard asked for on the first visit to
-# https://$UPTIME_KUMA_HOST (status.boltmesh.net) — kuma's login is
-# username-based, not email-based. Leave empty and the reconciler self-skips;
-# the monitors are still configurable in the UI.
-KUMA_USERNAME=
-KUMA_PASSWORD=
-EOF
-    log "wrote $KUMA_ENV (mode 600) -- fill in KUMA_USERNAME/KUMA_PASSWORD (or leave empty: the reconciler skips)"
-fi
+# Uptime-Kuma's admin login is NOT seeded: the account is created in its setup
+# wizard on first visit, and the UI owns the monitors and the status page (see
+# docs/proxy.md). Nothing host-side reads that login any more, so there is no
+# api.env to fill in.
 
 # The monitor's record: the audit log, the spend baseline and its state file.
 # Deliberately NOT under config/ (it is not secret); deploy/backup.container
@@ -1677,41 +1659,7 @@ if ensure_secret "$BTC_CONFIG/xmr-wallet.env" "btcpay xmr wallet env"; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. the Python venv the reconcilers run on
-# ---------------------------------------------------------------------------
-# scripts/stackctl/kuma.py speaks Uptime-Kuma's socket.io API through
-# uptime-kuma-api2, pinned in scripts/stackctl/requirements.txt, so the two
-# reconciler wrappers (npm-hosts, kuma-monitors) exec a venv. Everything else in
-# scripts/stackctl/ -- the `manifest` reader install.sh itself calls through
-# load_manifest, verify.sh and CI included -- stays stdlib and runs on the bare
-# interpreter; kuma.py imports the client lazily so that stays true.
-#
-# The venv is a build artifact of the checkout: .venv/ is gitignored and rebuilt
-# here from the pinned freeze, never edited by hand. The stamp makes an
-# unchanged requirements.txt a no-op (a deploy should not hit the network for
-# pip when nothing moved), and a changed one a reinstall.
-STACKCTL_VENV="$REPO_DIR/.venv"
-STACKCTL_REQS="$REPO_DIR/scripts/stackctl/requirements.txt"
-[ -r "$STACKCTL_REQS" ] || die "$STACKCTL_REQS is missing (the reconcilers need it)"
-STACKCTL_REQS_HASH=$(sha256sum "$STACKCTL_REQS" | cut -d' ' -f1)
-STACKCTL_REQS_STAMP="$STACKCTL_VENV/.requirements.sha256"
-if [ ! -x "$STACKCTL_VENV/bin/python" ]; then
-    log "creating $STACKCTL_VENV (the socket.io client behind kuma-monitors)"
-    rm -rf "$STACKCTL_VENV"
-    python3 -m venv "$STACKCTL_VENV" \
-        || die "could not create $STACKCTL_VENV (python3 -m venv); bootstrap.sh installs python3"
-fi
-if [ "$(cat "$STACKCTL_REQS_STAMP" 2>/dev/null || true)" != "$STACKCTL_REQS_HASH" ]; then
-    log "installing $STACKCTL_REQS into $STACKCTL_VENV"
-    mkdir -p "$STACKCTL_VENV"
-    "$STACKCTL_VENV/bin/python" -m pip install --disable-pip-version-check \
-        --quiet -r "$STACKCTL_REQS" \
-        || die "could not install $STACKCTL_REQS into $STACKCTL_VENV (pip needs network here, like a podman pull)"
-    printf '%s\n' "$STACKCTL_REQS_HASH" > "$STACKCTL_REQS_STAMP"
-fi
-
-# ---------------------------------------------------------------------------
-# 8. units: render every one (they all reference the data or config dir)
+# 7. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
 render_unit() {
     local src="$1" target="$2" tmp
@@ -1910,9 +1858,6 @@ Done. Everything the stack owns lives under:
     $DATA_DIR/audit/backup-verify.status), and backup-verify-db.timer replays
     the postgres dump into a throwaway cluster every month (verdict in
     $DATA_DIR/audit/backup-verify-db.status)
-  $REPO_DIR/.venv
-    the reconcilers' Python (uptime-kuma-api2 for kuma-monitors), rebuilt from
-    scripts/stackctl/requirements.txt whenever that pin changes (regenerable)
 
 Next:  ./deploy.sh         # build images, start/restart everything
        ./configure.sh      # wait, then mint runes / wallets / BTCPay state / migrations
@@ -1944,9 +1889,10 @@ Logs are shipped from journald every second into $DATA_DIR/logs/vl and kept for
 The MCP servers are served as https://$MCP_HOST/<prefix> once
   $CONFIG_DIR/npm/api.env has the nginx-proxy-manager admin login
   (scripts/npm-hosts.sh, which ./deploy.sh runs).
-The status page's monitors are reconciled by scripts/kuma-monitors.sh once
-  $CONFIG_DIR/uptime-kuma/api.env has the login the setup wizard asked for;
-  the declaration is deploy/services.toml.
+The status page's monitors and its published page are created in the
+  Uptime-Kuma UI (https://$UPTIME_KUMA_HOST, the setup wizard's account);
+  nothing reconciles them, so keep the database dump in the backup set.
+  docs/proxy.md lists the checks the public surface expects.
 Keep a copy of RESTIC_PASSWORD ($BACKUP_ENV) off the data disk: it is the only
 key to the backups.
 EOF

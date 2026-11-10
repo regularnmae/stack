@@ -10,7 +10,8 @@
 # Read-only: it starts nothing, restarts nothing and rewrites no config. It
 # reuses verify.sh for the container/MCP base checks and adds the ones nothing
 # else does -- chain freshness, CLN peers and channels, the Monero wallet's lag,
-# and the spend tripwire in scripts/spend-audit.sh.
+# the public vhosts through nginx-proxy-manager, and the spend tripwire in
+# scripts/spend-audit.sh.
 #
 # This script decides WHAT is wrong; it does not decide when to say it. Each
 # check section becomes one alert, pushed to Alertmanager
@@ -1113,7 +1114,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. the spend tripwire
+# 4. the public surface -- every clearweb vhost through nginx-proxy-manager.
+#
+# The status page's monitors used to be the only continuous check of this; they
+# are UI-owned now (deploy/services.toml says why), so the sweep owns it. The
+# probe connects to 127.0.0.1, not to the public address: NPM terminates TLS and
+# every vhost is a proxy host, so this proves the certificate, the server block
+# and the loopback publish -- not DNS or the router, which --connect-to
+# deliberately bypasses (without NAT reflection a hairpin would fail and the
+# vhost would look down for the wrong reason).
+#
+# The list is the manifest's own [npm.*] declarations (NPM_DOMAINS), so a new
+# public name is checked the moment it is declared. load_manifest is the same
+# call verify.sh makes; a manifest that cannot be read stops the sweep here,
+# which the dead-man's-switch heartbeat reports.
+#
+# What counts as down: no answer at all (000 -- NPM, the certificate or the
+# socket) or a 5xx (the upstream died). A 4xx is accepted on purpose: the
+# app roots legitimately 404, and the token-gated endpoints 401. Whether a
+# declared host is missing from NPM is not distinguishable from that default
+# vhost's 404 here; the status page (UI) and verify.sh's per-surface probes
+# are what name a missing proxy host.
+# ---------------------------------------------------------------------------
+head3 "public surface"
+load_manifest "$REPO_DIR"
+public_bad=0
+if [ -z "${NPM_DOMAINS+x}" ] || [ "${#NPM_DOMAINS[@]}" -eq 0 ]; then
+    soft "no [npm.*] hosts are declared; skipped the public-surface check"
+else
+    for vhost in "${NPM_DOMAINS[@]}"; do
+        # http first: an HTTP-only vhost (no certificate issued yet) must not
+        # read as down. A force-ssl host answers 301/308, and the https probe
+        # then carries the certificate check.
+        pcode=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 \
+            --connect-to "$vhost:80:127.0.0.1:80" "http://$vhost/" 2>/dev/null) || pcode=000
+        case "$pcode" in
+            301|302|307|308)
+                pcode=$(curl -sS -o /dev/null -w '%{http_code}' -m 15 \
+                    --connect-to "$vhost:443:127.0.0.1:443" "https://$vhost/" 2>/dev/null) || pcode=000
+                ;;
+        esac
+        case "$pcode" in
+            000|5??)
+                public_bad=$((public_bad + 1))
+                fail "$vhost does not answer through nginx-proxy-manager ($pcode): certificate, proxy host or loopback publish"
+                ;;
+            *) ok "$vhost answers through nginx-proxy-manager ($pcode)" ;;
+        esac
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# 5. the spend tripwire
 # ---------------------------------------------------------------------------
 head3 "spend tripwire"
 audit_out=$("$REPO_DIR/scripts/spend-audit.sh" 2>&1) || audit_rc=$?
@@ -1135,7 +1187,7 @@ if [ "$audit_trips" = 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. intrusion detection -- through ids.sh's status file, never directly
+# 6. intrusion detection -- through ids.sh's status file, never directly
 # ---------------------------------------------------------------------------
 head3 "intrusion detection"
 # The engines are not touched from here: Suricata is a rootful system unit whose
@@ -1255,7 +1307,7 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. the alert path itself
+# 7. the alert path itself
 # ---------------------------------------------------------------------------
 # Checked before the record so a broken path shows up in the same sweep's exit
 # code and audit log. Two failures are distinguishable here and nowhere else:
@@ -1313,7 +1365,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. the record, the heartbeat, the alert
+# 8. the record, the heartbeat, the alert
 # ---------------------------------------------------------------------------
 status=ok
 [ "${#PROBLEMS[@]}" -gt 0 ] && status=fail
@@ -1366,6 +1418,7 @@ fi
     printf '# written by scripts/monitor.sh (deploy/monitor.timer)\n'
     printf 'stack_sweep_timestamp %s\n' "$(date +%s)"
     printf 'stack_verify_failures %s\n' "${verify_failures:-0}"
+    printf 'stack_public_vhosts_bad %s\n' "${public_bad:-0}"
     printf 'stack_spend_trips %s\n' "${audit_trips:-0}"
     printf 'stack_monitor_problems %s\n' "${#PROBLEMS[@]}"
     printf 'stack_monitor_warnings %s\n' "${#WARNS[@]}"

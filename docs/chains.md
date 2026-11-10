@@ -112,7 +112,8 @@ its status is captured instead of letting `set -e` abort at the RPC.
   (MoneroBlock) is **RPC-only**
   against monerod's restricted RPC, with no chain copy and no LMDB reader. Both
   are loopback-published, NPM-fronted with `force-ssl`, mirrored as onions,
-  declared as status-page monitors (`[kuma.monitor.*]`), and built by
+  watched by `scripts/monitor.sh` through NPM (and, if you add them to the
+  status page, by its UI monitors), and built by
   `deploy.sh` only when missing
   (`--only btc-explorer|xmr-explorer|explorers` forces a rebuild). Neither has
   state in the backup set; `config/btc-explorer/btc-explorer.env` is the BTC

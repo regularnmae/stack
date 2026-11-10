@@ -182,34 +182,24 @@ jobs:
           fi
           printf 'deploy.sh has no health wait\n'
       # deploy/services.toml is the single declaration of the public surface
-      # (hostnames, MCP prefixes and ports, proxy hosts, onion services,
-      # status-page monitors); this validates the file and cross-checks it
-      # against the interface table in AGENTS.md, the hand-maintained contract
-      # with the app repos.
+      # (hostnames, MCP prefixes and ports, proxy hosts, onion services);
+      # this validates the file and cross-checks it against the interface
+      # table in AGENTS.md, the hand-maintained contract with the app repos.
       - name: service manifest agrees with AGENTS.md
         run: PYTHONPATH=scripts python3 -m stackctl manifest check deploy/services.toml --agents AGENTS.md
-      # The one lazy import is a rule, not a habit: load_manifest runs this
-      # package on the bare interpreter (install.sh, verify.sh, CI itself), so
-      # importing the reconcilers must never need the venv.
-      - name: stackctl imports without the venv
-        run: PYTHONPATH=scripts python3 -c 'import stackctl.kuma, stackctl.manifest, stackctl.npm'
-      # The reconcilers' venv. deploy/install.sh builds the same one on the
-      # host from the pinned freeze; building it here proves the install path
-      # CI runs is the one a deploy runs (uptime-kuma-api2 replaced the
-      # hand-rolled ws.py/socketio.py pair, and this is what pays for it).
-      - name: reconciler venv
-        run: |
-          python3 -m venv .venv
-          .venv/bin/python -m pip install --disable-pip-version-check -q \
-            -r scripts/stackctl/requirements.txt
-      # The Python core behind the two reconciler wrappers (scripts/stackctl/),
-      # offline: declaration parsing, payload construction, full reconciles
-      # against a fake NPM admin API and a fake of the kuma client. The two
-      # shell Go-duration parsers (scripts/lib.sh and deploy/root/bouncer.sh)
-      # are cross-checked against one shared fixture file
-      # (tests/fixtures/durations.txt) by the shell-helper steps below.
+      # load_manifest runs this package on the bare interpreter (install.sh,
+      # verify.sh, monitor.sh, CI itself), so every command in it must stay
+      # stdlib-only -- importing them proves it without a venv.
+      - name: stackctl imports without extras
+        run: PYTHONPATH=scripts python3 -c 'import stackctl.manifest, stackctl.npm'
+      # The Python core behind the npm-hosts reconciler (scripts/stackctl/),
+      # offline: declaration parsing, payload construction, a full reconcile
+      # against a fake NPM admin API. The two shell Go-duration parsers
+      # (scripts/lib.sh and deploy/root/bouncer.sh) are cross-checked against
+      # one shared fixture file (tests/fixtures/durations.txt) by the
+      # shell-helper steps below.
       - name: stackctl python tests
-        run: .venv/bin/python tests/test_stackctl.py
+        run: python3 tests/test_stackctl.py
       - name: shared shell helper tests
         run: tests/test-lib.sh
       # deploy/root/bouncer.sh cannot source scripts/lib.sh (it runs as root and

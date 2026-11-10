@@ -437,8 +437,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   fails with the one-line fix when either is stopped; `deploy.sh` starts them
   first in `start_infra`, after `refresh_image_unit` because install.sh rebuilds
   the image in place (a plain `start` on an active unit keeps the old bits), and
-  `ensure_netcheck` covers every `--only` branch (the monitor's verify sweep,
-  npm-hosts, kuma-monitors all probe). One-shot `podman run`s elsewhere keep
+  `ensure_netcheck` covers every `--only` branch (the monitor's verify sweep and
+  npm-hosts both probe). One-shot `podman run`s elsewhere keep
   `--log-driver=none`: the driver only
   controls persistence, so their stdout still reaches the caller's command
   substitution while the journal stays clean. `wait_healthy` treats a container

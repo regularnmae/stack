@@ -198,10 +198,9 @@ sysctl, firewalld); `sudo` needs a terminal to prompt, so run it from an
 interactive shell (over SSH, `ssh -t`). `deploy.sh`, `configure.sh` and
 `verify.sh` never use `sudo`.
 
-`deploy/install.sh` also builds `$REPO_DIR/.venv` from the pinned
-`scripts/stackctl/requirements.txt` — the reconcilers' socket.io client. It is
-a build artifact of the checkout, not state: delete it and the next
-`./deploy.sh` recreates it (and a pin change reinstalls it in place).
+`deploy.sh` and `configure.sh` need only the host's own `python3`: the
+reconciler (`scripts/stackctl/`) is stdlib-only, so there is no venv and no
+pip step in a deploy.
 
 On the first run, `deploy.sh` asks **where the stack keeps its data** (default
 `$HOME/data`) and remembers the answer; point it at a separate disk to survive
@@ -719,8 +718,9 @@ first means every seed-once file is derived from the snapshot.
 
 4. Deploy. This adopts the restored secrets (never overwriting an existing
    file), seeds `bitcoin.conf`/`torrc` from them, builds the images, and
-   reconciles the proxy hosts and the status page. `./configure.sh` then does
-   the work that needs the restored daemons up: it proves the restored CLN
+   reconciles the proxy hosts (the status page is UI-configured, so the
+   restore covers it). `./configure.sh` then does the work that needs the
+   restored daemons up: it proves the restored CLN
    runes with `checkrune` (minting new ones if the node does not know them) and
    writes `config/btcpay/backend.env` from the bootstrap state.
 
@@ -1040,7 +1040,10 @@ path are in `docs/units.md`, "Healthchecks follow a contract".
   drill, dump, metrics, signup and monitor timers), the metrics collector going
   quiet, the log pipeline going quiet, journald's persistence and podman's
   event backend, a live CLN rune the stack does not reference, and bitcoind's
-  RPC password disagreeing with `secrets.env`) — then the spend tripwire.
+  RPC password disagreeing with `secrets.env`), the public vhosts through
+  nginx-proxy-manager (certificate, proxy host and loopback publish — the
+  continuous public-surface check the UI-owned status page no longer provides)
+  — then the spend tripwire.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user**
   unit (Quadlet has no `.timer` type) and its one-shot service, installed to
   `~/.config/systemd/user/` and enabled by `install.sh`, like `backup.timer`.
@@ -1495,7 +1498,7 @@ threshold is a self-inflicted outage on this host, not a false positive:
 * the onion proxies and Uptime-Kuma's self-checks are logged as the host's **own**
   address (`192.168.1.112` / the WAN IP), so banning it would take every onion
   service and the status page down at once;
-* Uptime-Kuma probes every declared monitor once a minute, including a
+* Uptime-Kuma probes every monitor on its page once a minute, including a
   permanent 401 on the token-gated ones;
 * the podman network (`10.89.0.0/24`) and the LAN are internal by definition.
 
@@ -1597,55 +1600,53 @@ Four things about it are worth knowing:
 
 `uptime-kuma` serves a public status page on
 `https://status.boltmesh.net` (`[host.status]` in `deploy/services.toml`,
-proxied by nginx-proxy-manager like every public hostname). It complements the monitor
-above, not replaces it: the monitor is the host-side, alert-only sweep that
-knows the tokens and the wallets, while the status page watches the public
-surface — the sites and the token-gated endpoints — and shows it to the world.
+proxied by nginx-proxy-manager like every public hostname). It complements the
+monitor above, not replaces it: the monitor is the host-side, alert-only sweep,
+while the status page watches the same public surface for visitors.
 
-The **monitors are declared, like the proxy hosts**: the `[kuma.monitor.*]`
-tables in `deploy/services.toml` — a `host` reference plus accepted status
-codes (or a `tcp` target for kuma's port monitor) — are reconciled into
-Uptime-Kuma by `scripts/kuma-monitors.sh` (which
-`./deploy.sh` runs after the proxy hosts): a missing monitor is created, one
-whose *declared* fields changed is updated in place, notifications and other
-UI-tuned settings an existing monitor has picked up are carried over
-untouched, and `--prune` is the only destructive mode. The script creates the
-status page (`[kuma.page]`) with one group holding every declared
-monitor — and only while the page has nothing on it yet: an existing page's
-layout is never rewritten, so rearranging it in the UI is safe.
+**The page is UI-authored, not declared.** Its monitors, the page and the
+page's layout are created and edited in kuma's own UI (the setup wizard's
+account); nothing reconciles them, and nothing host-side holds a kuma
+credential any more. That is a deliberate reversal: the reconciler this replaced only ever
+touched its declared fields and preserved everything the UI had tuned, which
+meant the UI was already the source of truth — it cost a socket.io client, a
+pinned venv and a CI step to say so. The monitors are now data, so they live in
+kuma's embedded MariaDB and come back with the
+[backup](#backup--restore) (`uptime-kuma-dump/`). [Proxy hosts
+(nginx-proxy-manager)](#proxy-hosts-nginx-proxy-manager) is the contrast: those
+*are* declared and reconciled, because NPM's admin API replaces a whole host
+object and the UI has no safe way to share ownership of one.
 
-A url of the form `tcp://host:port` declares Uptime-Kuma's **TCP-port** monitor
-instead of an HTTP one — there is no status code to accept, so that field stays
-empty while interval and retries keep their positions. `fulcrum`'s `50001` is
-the only entry that needs it (Electrum is raw TCP, so it cannot be probed as a
-URL), and it is declared against `host.containers.internal:50001` — pasta's
-gateway to this host — so it watches the **published** port wallets use, not the
-container. A port monitor proves the socket accepts a connection and nothing
-more; whether the index behind it is current is what `verify.sh --deep` and
-`scripts/monitor.sh` read (above).
+`docs/proxy.md` lists the checks the public surface expects and the two traps
+that are easy to get wrong in the UI (a token-gated endpoint answering `401`
+counts as up; adding a **TCP-port** monitor still requires accepted status
+codes, because kuma validates the field before it looks at the type). Fulcrum's
+`50001` is the one TCP-port monitor — Electrum is raw TCP, so it cannot be
+probed as a URL — and it watches the **published** port wallets use
+(`host.containers.internal:50001`), not the container. A port monitor proves
+the socket accepts a connection and nothing more; whether the index behind it
+is current is what `verify.sh --deep` and `scripts/monitor.sh` read (above).
 
-Uptime-Kuma has no REST write API, so the reconciler speaks its socket.io
-API directly: `scripts/kuma-monitors.sh` feeds the declarations to a Python
-client (`scripts/stackctl/kuma.py` over `uptime-kuma-api2`, pinned in
-`scripts/stackctl/requirements.txt` and installed into `$REPO_DIR/.venv` by
-`deploy/install.sh`), which reaches kuma through its loopback publish
-(`127.0.0.1:8107`). The `kuma-ctl` Node image that used to carry the client is
-retired. The admin login lives in
-`$DATA_DIR/config/uptime-kuma/api.env` (mode 600, seeded empty — fill in what
-the setup wizard asked for and re-run `./deploy.sh --only kuma-monitors`); the
-reconciler self-skips until it is filled in. The login never reaches a command
-line: the Python core reads the file itself. The page's
-**notifications** stay UI-configured — kuma embeds Apprise, so its targets are
-chosen once in its own settings. That is the *status page's* channel, not the
-alerting path: the stack's own alerts go monitor → Alertmanager → mail (above),
-and the two are independent on purpose, so a kuma that dies with the host does
-not take the pager with it.
+The host side of those monitors is still the repo's: `deploy/install.sh`
+renders `--add-host=<vhost>:host-gateway` into the uptime-kuma unit for every
+`[host.*]` with `kuma_add_host = true`, so the checks resolve their vhosts on
+the host instead of hairpinning through the router and arriving as the WAN
+address. And `scripts/monitor.sh` now probes every clearweb vhost through NPM
+on loopback itself, which is the continuous public-surface check the status
+page used to be the only one for — the page stays for visitors, the sweep is
+what pages.
+
+The page's **notifications** stay UI-configured too — kuma embeds Apprise, so
+its targets are chosen once in its own settings. That is the *status page's*
+channel, not the alerting path: the stack's own alerts go monitor → Alertmanager
+→ mail (above), and the two are independent on purpose, so a kuma that dies
+with the host does not take the pager with it.
 
 Notes:
 
-- **No tokens enter kuma's database.** Everything the declared monitors check
-  is on the public surface (a token-gated endpoint answering 401 counts as
-  up); the authenticated MCP handshakes stay in `verify.sh`/`monitor.sh`.
+- **No tokens enter kuma's database.** Every monitor checks the public surface
+  (a token-gated endpoint answering 401 counts as up); the authenticated MCP
+  handshakes stay in `verify.sh`/`monitor.sh`.
 - Its state (`$DATA_DIR/uptime-kuma`, including the embedded MariaDB it runs in
   v2) is part of the [backup set](#backup--restore) — as a `mariadb-dump`, not a
   copy of the live datadir.
@@ -2121,7 +2122,6 @@ stack/
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   scripts/rotate.sh       # rotate one credential + every dependent service
   scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
-  scripts/kuma-monitors.sh # the status page's monitors (deploy/services.toml) + page, via socket.io
   scripts/healthcheck-lint.sh # the healthcheck contract every unit is checked against
   deploy/
     install.sh            # the ONLY installer: units + secrets + data dirs
@@ -2152,7 +2152,6 @@ stack/
     examples/stack/*.example      # bitcoin.conf / torrc / secrets templates
     examples/monitoring/*.example # the monitor env (seeded verbatim) + alertmanager.yml
     examples/npm/*.example        # npm/api.env shape (the NPM admin API login)
-    examples/kuma/*.example       # uptime-kuma/api.env shape (the kuma login)
   tor/Containerfile       # built by install.sh: the Tor proxy + onion services
   netcheck/Containerfile  # built by install.sh: the curl client the host checks run
   btc-explorer/Containerfile # built by deploy.sh: BTC RPC Explorer (stateless)
