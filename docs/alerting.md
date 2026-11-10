@@ -81,7 +81,7 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   every finding under its `head3` section, pushes one alert per section to
   `alertmanager` (`POST /api/v2/alerts`, loopback `9093`) and resolves a section
   explicitly with an `endsAt` in the past when it clears. Alertmanager owns
-  grouping, `repeat_interval`, inhibition, silences and delivery. Four traps
+  grouping, `repeat_interval`, inhibition, silences and delivery. Five traps
   found by running it, all load-bearing:
   (1) **`resolve_timeout` must be far longer than the sweep.** A pushed alert
   carries no `endsAt`, so Alertmanager resolves it once it has not been updated
@@ -89,7 +89,10 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   `0` does not disable it (the API sets `EndsAt = now + resolveTimeout`, so `0`
   resolves instantly). It is **24h** here, and explicit `endsAt` is what
   actually ends an alert, which also keeps a dead monitor from mailing
-  "recovered".
+  "recovered". **A severity change is a label change**, so it is a *different*
+  alert: the monitor resolves the old label set in the same push. Without that
+  the stale critical lives to `resolve_timeout` and its inhibition — `equal:
+  ['instance']` — keeps every warning on the host silent meanwhile.
   (2) **`email_configs` defaults `send_resolved: false`**, so recoveries are
   silent unless it is set. The seeded example sets it.
   (3) **The flap damper cannot live in Alertmanager.** It only sees what is

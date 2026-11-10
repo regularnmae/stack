@@ -481,6 +481,16 @@ class TestManifest(unittest.TestCase):
         # onion wildcard, which has no name to resolve.
         self.assertEqual(m.shell().count("NPM_DOMAINS=("), 1)
         self.assertNotIn("*.onion", m.shell().split("NPM_DOMAINS=(")[1].split(")", 1)[0])
+        # needs_nodes per vhost, index-aligned with NPM_DOMAINS: btcpay and the
+        # two explorers front daemon-tier publishes, so a --skip-daemons host
+        # skips those names instead of reading their 502 as a fault.
+        out = m.shell()
+        domains = out.split("NPM_DOMAINS=(")[1].split(")", 1)[0].split()
+        nodes = out.split("NPM_NEEDS_NODES=(")[1].split(")", 1)[0].split()
+        self.assertEqual(len(nodes), len(domains))
+        self.assertEqual([d for d, n in zip(domains, nodes) if n == "1"],
+                         ["btcpay.boltmesh.net", "btc.boltmesh.net",
+                          "xmr.boltmesh.net"])
 
     def test_env_override_keeps_the_stack_conf_contract(self):
         from stackctl import manifest
@@ -763,6 +773,9 @@ flags = ["mcp"]
         self.assertIn("MCP_PORTS=(8100)", out)
         # The public-surface list monitor.sh probes: one clearweb vhost.
         self.assertIn("NPM_DOMAINS=(mcp.example.net)", out)
+        # ... and the needs_nodes column that goes with it, so the two arrays
+        # cannot drift apart.
+        self.assertIn("NPM_NEEDS_NODES=(0)", out)
 
 
 class TestUnits(unittest.TestCase):

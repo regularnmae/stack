@@ -54,7 +54,7 @@ _RESERVED_ENVS = frozenset({
     "PROBE_TOKEN_VARS", "PROBE_TOOLS", "PROBE_ARGS",
     "PROBE_NEEDS_NODES", "PROBE_SPEND_VARS",
     "ONION_NAMES", "ONION_TARGETS", "ONION_MIRRORS", "ONION_PATHS", "ONION_CODES",
-    "NPM_DOMAINS", "KUMA_ADD_HOST_HOSTS", "KUMA_STATUS_SLUG",
+    "NPM_DOMAINS", "NPM_NEEDS_NODES", "KUMA_ADD_HOST_HOSTS", "KUMA_STATUS_SLUG",
     "PATH", "IFS", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME",
     "ENV", "BASH_ENV", "PS1", "PS4", "CDPATH", "GLOBIGNORE", "SHELLOPTS",
 })
@@ -85,9 +85,14 @@ class KumaPage:
 
 
 class NpmHost:
-    """One [npm.*] proxy host: the name NPM serves and where it forwards."""
+    """One [npm.*] proxy host: the name NPM serves and where it forwards.
 
-    __slots__ = ("domain", "scheme", "host", "port", "flags")
+    `needs_nodes` marks a vhost whose upstream is in stack.conf's CHAIN_UNITS:
+    on a host deployed with ./deploy.sh --skip-daemons nothing answers on that
+    publish, and scripts/monitor.sh skips the name instead of failing a 502.
+    """
+
+    __slots__ = ("domain", "scheme", "host", "port", "flags", "needs_nodes")
 
     def __init__(self, domain: str, scheme: str, host: str, port: int, flags: str):
         self.domain = domain
@@ -95,6 +100,7 @@ class NpmHost:
         self.host = host
         self.port = port
         self.flags = flags  # the comma-separated string, as declared
+        self.needs_nodes = False
 
     def has_flag(self, flag: str) -> bool:
         # lib.sh's has_flag(): match on the comma-wrapped string, so "mcp"
@@ -189,10 +195,14 @@ class Manifest:
         # The clearweb vhosts, for monitor.sh's public-surface probe (the onion
         # wildcard has no name to probe; tor publishes those separately). One
         # entry per [npm.*] host, so a new public name is monitored the moment
-        # it is declared.
-        public = [h.domain for h in self.npm if not h.domain.endswith(".onion")]
+        # it is declared. NPM_NEEDS_NODES is index-aligned with it: the sweep
+        # cannot tell a dead upstream from one that --skip-daemons never
+        # started, so the declaration says which.
+        public = [h for h in self.npm if not h.domain.endswith(".onion")]
         if public:
-            lines.append(_array("NPM_DOMAINS", public))
+            lines.append(_array("NPM_DOMAINS", [h.domain for h in public]))
+            lines.append(_array("NPM_NEEDS_NODES",
+                                ["1" if h.needs_nodes else "0" for h in public]))
         # The vhosts uptime-kuma's own UI-authored monitors may resolve on the
         # host (install.sh renders --add-host=<domain>:host-gateway per entry):
         # every host whose [host.*] did not opt out.
@@ -387,6 +397,7 @@ def load(path: str) -> Manifest:
             die(f"deploy/services.toml: {where} flags must be a list of names "
                 f"like force-ssl, http2, ws, block, mcp")
         host = NpmHost(domain, scheme, forward_host, forward_port, ",".join(flags))
+        host.needs_nodes = _bool(table, "needs_nodes", where, False)
         if host.domain in npm_domains:
             die(f"deploy/services.toml: {where} and [npm.{npm_domains[host.domain]}] "
                 f"both serve {host.domain}")

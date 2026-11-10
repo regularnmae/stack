@@ -215,6 +215,10 @@ needs_nodes = true
 #                 so it cannot resolve a container name and every service it
 #                 fronts publishes its port on the host's loopback.
 #   forward_port  that publish: the PublishPort= of the service's unit
+#   needs_nodes   the upstream is one of stack.conf's CHAIN_UNITS, so a host
+#                 deployed with ./deploy.sh --skip-daemons fronts nothing: the
+#                 sweep skips the name there (MONITOR_SKIP_NODES) instead of
+#                 reading the 502 as a fault
 #   scheme        http (the default) or https, for an upstream that speaks TLS
 #                 if one is ever added
 #   flags    force-ssl  redirect :80 to :443 (needs a certificate)
@@ -254,18 +258,21 @@ flags = ["ws", "block"]
 host = "btcpay"
 forward_host = "127.0.0.1"
 forward_port = 49392
+needs_nodes = true
 flags = ["ws", "force-ssl", "block"]
 
 [npm.btc_explorer]
 host = "btc_explorer"
 forward_host = "127.0.0.1"
 forward_port = 8108
+needs_nodes = true
 flags = ["force-ssl", "block"]
 
 [npm.xmr_explorer]
 host = "xmr_explorer"
 forward_host = "127.0.0.1"
 forward_port = 8109
+needs_nodes = true
 flags = ["force-ssl", "block"]
 
 [npm.status]

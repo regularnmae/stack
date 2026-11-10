@@ -486,8 +486,11 @@ carries one line there and its reasoning is here.
   cannot define a health command, with the reason; the second is the units whose
   on-disk database must be closed cleanly, and the test is whether a SIGKILL
   mid-write costs a rebuild or a resync -- not whether the unit writes at all.
-- **`CHAIN_UNITS` is the one list `deploy.sh --skip-daemons` and
-  `verify.sh --no-nodes` share**, so a skipped unit is not reported missing.
+- **`CHAIN_UNITS` is the one list `deploy.sh --skip-daemons`, `verify.sh
+  --no-nodes` and `MONITOR_SKIP_NODES` share**, so a skipped unit is not
+  reported missing. The monitor's flag is what a long-lived skip-daemons host
+  sets: it skips the chain section and the declared `needs_nodes` vhosts, and
+  appends `--no-nodes` to its own verify sweep.
 - **`BTCPAY_PLUGIN_URL`/`_SHA256` are edited together.** Renovate cannot track a
   plugin-builder URL, and the marker file install.sh writes is what makes the edit
   land, since the DLL's name does not change between versions.

@@ -481,12 +481,14 @@ else
         warn "servers.json not compared with the declared prefixes (no $AGENT_DIR clone, no python3, or none declared)"
     fi
 
-    if [ "$DEEP" = 1 ]; then
+    if [ "$DEEP" = 1 ] && [ "$NO_NODES" = 0 ]; then
         if out=$("$AGENT_BIN" bitcoin-node get_blockchain_info 2>&1); then
             pass "agent-mcp read the bitcoin node (chain $(printf '%s' "$out" | jq -r '.chain // "?"'))"
         else
             bad "agent-mcp could not call bitcoin-node: $(printf '%s' "$out" | head -1)"
         fi
+    elif [ "$DEEP" = 1 ]; then
+        warn "agent-mcp deep call skipped (needs a chain node)"
     fi
 fi
 

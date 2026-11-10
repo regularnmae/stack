@@ -90,6 +90,18 @@ MONITOR_GRACE_SYNC=$(monitor_var MONITOR_GRACE_SYNC)
 MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-1}"
 MONITOR_VERIFY_ARGS=$(monitor_var MONITOR_VERIFY_ARGS)
 MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:---deep}"
+# A host deployed with ./deploy.sh --skip-daemons runs none of CHAIN_UNITS, so
+# every chain check here and the chain-backed vhosts would fail forever. One
+# declaration rather than two: --no-nodes is appended to the verify sweep below,
+# so the flag and the sweep cannot disagree.
+MONITOR_SKIP_NODES=$(monitor_var MONITOR_SKIP_NODES)
+MONITOR_SKIP_NODES="${MONITOR_SKIP_NODES:-0}"
+if [ "$MONITOR_SKIP_NODES" = 1 ]; then
+    case " $MONITOR_VERIFY_ARGS " in
+        *" --no-nodes "*) ;;
+        *) MONITOR_VERIFY_ARGS="$MONITOR_VERIFY_ARGS --no-nodes" ;;
+    esac
+fi
 # What every alert carries as its instance label: inhibition rules key on it,
 # which is what makes "critical here mutes the warnings here" expressible.
 ALERT_INSTANCE="$(hostname -s 2>/dev/null || echo stack)"
@@ -225,7 +237,8 @@ emit_alerts() { # take the state lock, then emit_alerts_locked
 
 emit_alerts_locked() { # push the current set; resolve the sections that cleared
     local now url i s name psev psince psent body starts ends
-    local -A sev=() desc=() p_since=() p_sent=() p_svc=() p_sev=() current=()
+    local -A sev=() desc=() p_since=() p_sent=() p_svc=() p_sev=() current=() \
+               pending_sev=()
     local payload='[]' resolved='[]' new_state='' retry_state=''
     now=$(date +%s)
     url="${MONITOR_ALERTMANAGER_URL%/}"
@@ -260,12 +273,25 @@ emit_alerts_locked() { # push the current set; resolve the sections that cleared
         current[$name]=1
         psince="${p_since[$name]:-$now}"
         psent="${p_sent[$name]:-0}"
+        # A different severity is a different alert -- severity is a label -- and
+        # nothing else will ever end the one Alertmanager already holds, so hand
+        # it to the resolution loop below (which sends the label set from the
+        # state file). Its retry row is that loop's too: on a failed push the
+        # memory has to keep naming the old severity, or the next sweep no longer
+        # knows a resolution is owed and the stale alert lives out the 24h
+        # resolve_timeout, muting the new one's warnings all the while. p_sent
+        # guards the held case: an alert never pushed needs no ending.
+        if [ -n "${p_sev[$name]:-}" ] && [ "${p_sev[$name]}" != "${sev[$s]}" ] \
+           && [ "${p_sent[$name]:-0}" -gt 0 ]; then
+            pending_sev[$name]="${p_sev[$name]}"
+        fi
         # Hold-down: bad for THRESH_ALERT_FOR before it is ever pushed. Held
         # alerts are remembered but not posted, so first-seen survives a sweep in
         # which the check recovers and fails again.
         if [ "$s" != alerting ] && [ "$((now - psince))" -lt "$THRESH_ALERT_FOR" ]; then
             new_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
-            retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
+            [ -n "${pending_sev[$name]:-}" ] \
+                || retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
             continue
         fi
         starts=$(date -u -d "@$psince" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
@@ -277,14 +303,19 @@ emit_alerts_locked() { # push the current set; resolve the sections that cleared
               startsAt:$st}')
         payload=$(jq -c --argjson a "$body" '. + [$a]' <<< "$payload")
         new_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$now"$'\n'
-        retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
+        [ -n "${pending_sev[$name]:-}" ] \
+            || retry_state+="$name"$'\t'"$s"$'\t'"${sev[$s]}"$'\t'"$psince"$'\t'"$psent"$'\n'
     done
 
-    # What cleared. Resolving needs the ALERT's own labels, not the ones it would
-    # have now, so they come back out of the state file. An alert that never left
-    # (held, then cleared) is not "resolved": Alertmanager never heard of it.
+    # What ended. Resolving needs the ALERT's own labels, not the ones it would
+    # have now, so they come back out of the state file. Two ways to end: the
+    # section cleared, or its severity changed -- the same event, because the
+    # severity is part of the label set. An alert that never left (held, then
+    # cleared) is not "resolved": Alertmanager never heard of it.
     for name in ${p_since[@]+"${!p_since[@]}"}; do
-        [ -n "${current[$name]:-}" ] && continue
+        if [ -n "${current[$name]:-}" ]; then
+            [ -n "${pending_sev[$name]:-}" ] || continue
+        fi
         [ "${p_sent[$name]:-0}" -gt 0 ] || continue
         ends=$(date -u -d "@$((now - 1))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
             || ends=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -364,170 +395,181 @@ fi
 # ---------------------------------------------------------------------------
 # 2. chain freshness -- the chain daemons, read at their RPCs
 # ---------------------------------------------------------------------------
-head3 "chain daemons"
-
-info=$(bitcoind_cli getblockchaininfo 2>/dev/null) || info=""
-if [ -z "$info" ]; then
-    fail "bitcoind RPC unreachable"
-else
-    blocks=$(printf '%s' "$info" | jq -r '.blocks // empty' 2>/dev/null)
-    headers=$(printf '%s' "$info" | jq -r '.headers // empty' 2>/dev/null)
-    ibd=$(printf '%s' "$info" | jq -r 'if has("initialblockdownload") then .initialblockdownload else empty end' 2>/dev/null)
-    if [ "$ibd" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
-        ok "bitcoind is in initial block download (blocks=$blocks, not paged)"
-    elif [ -n "$blocks" ] && [ -n "$headers" ] && [ "$((headers - blocks))" -gt 6 ]; then
-        fail "bitcoind is behind: blocks=$blocks headers=$headers"
+# One function so a host that runs no daemon tier can skip it whole: with
+# MONITOR_SKIP_NODES=1 those units are absent on purpose, and every check below
+# would fail on the same missing daemon. head3 runs at the call site, so the
+# section -- the alert's identity -- is set before anything here can report.
+chain_checks() {
+    info=$(bitcoind_cli getblockchaininfo 2>/dev/null) || info=""
+    if [ -z "$info" ]; then
+        fail "bitcoind RPC unreachable"
     else
-        ok "bitcoind at height $blocks"
-    fi
-    # Peers: the freshness check has a blind spot -- a node whose only peers
-    # vanished keeps its height while its sync stalls. The floor defaults to 1, so
-    # any 0-peer read fails, and this deliberately looks past IBD, where a stalled
-    # download is the same fault as a stalled tip.
-    json_peers=$(bitcoind_cli getpeerinfo 2>/dev/null) || json_peers=""
-    n_peers=$(printf '%s' "$json_peers" | jq -r 'if type == "array" then length else empty end' 2>/dev/null) || n_peers=""
-    if [ -z "$n_peers" ]; then
-        soft "could not read bitcoind getpeerinfo; skipped the peer check"
-    elif [ "$n_peers" -lt "$THRESH_BTC_PEERS" ]; then
-        fail "bitcoind has $n_peers peer(s) (floor $THRESH_BTC_PEERS): its sync cannot advance without one"
-    else
-        ok "bitcoind has $n_peers peer(s)"
-    fi
-    # The mempool cap: a warn only, since Core fills it well into a fee storm
-    # before rejecting and the right response is "look at the fees", not a page.
-    mp=$(bitcoind_cli getmempoolinfo 2>/dev/null) || mp=""
-    mp_mb=$(printf '%s' "$mp" | jq -r 'if type == "object" then ((.bytes // 0) / 1048576 | floor) else empty end' 2>/dev/null) || mp_mb=""
-    if [ -n "$mp_mb" ]; then
-        if [ "$mp_mb" -ge "$THRESH_MEMPOOL_MB" ]; then
-            soft "bitcoind's mempool holds ${mp_mb} MB (warn threshold ${THRESH_MEMPOOL_MB} MB) -- fee storm or a packed signal"
+        blocks=$(printf '%s' "$info" | jq -r '.blocks // empty' 2>/dev/null)
+        headers=$(printf '%s' "$info" | jq -r '.headers // empty' 2>/dev/null)
+        ibd=$(printf '%s' "$info" | jq -r 'if has("initialblockdownload") then .initialblockdownload else empty end' 2>/dev/null)
+        if [ "$ibd" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
+            ok "bitcoind is in initial block download (blocks=$blocks, not paged)"
+        elif [ -n "$blocks" ] && [ -n "$headers" ] && [ "$((headers - blocks))" -gt 6 ]; then
+            fail "bitcoind is behind: blocks=$blocks headers=$headers"
         else
-            ok "bitcoind's mempool at ${mp_mb} MB"
+            ok "bitcoind at height $blocks"
         fi
-    fi
-fi
-
-# Fulcrum, the Electrum server: the one daemon whose own port says the least. Its
-# healthcheck is the process table, it keeps answering server.version while the
-# index is wedged, and the wallet/explorer surface then serves stale heights. So
-# ask the index-backed question -- the tip it reports -- and compare with bitcoind.
-ftip=$(electrum_tip 50001)
-if [ -z "$ftip" ]; then
-    if [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
-        ok "fulcrum is not serving Electrum yet (bitcoind is in initial block download)"
-    else
-        fail "fulcrum does not answer Electrum on 50001"
-    fi
-elif [ -z "${blocks:-}" ]; then
-    soft "fulcrum reports tip $ftip; bitcoind height unreadable, so lag is not compared"
-elif [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
-    ok "fulcrum index at $ftip (bitcoind is in initial block download; lag $((blocks - ftip)) not paged)"
-else
-    behind=$((blocks - ftip))
-    if [ "$behind" -gt "$THRESH_FULCRUM_LAG" ]; then
-        fail "fulcrum index is $behind block(s) behind bitcoind (tip $ftip, bitcoind $blocks)"
-    else
-        ok "fulcrum index at $ftip (bitcoind $blocks)"
-    fi
-fi
-
-lninfo=$(lightning_cli getinfo 2>/dev/null) || lninfo=""
-if [ -z "$lninfo" ]; then
-    fail "lightningd RPC unreachable"
-else
-    if printf '%s' "$lninfo" | jq -e 'has("warning_bitcoind_sync")' >/dev/null 2>&1; then
-        fail "lightningd reports warning_bitcoind_sync (its view of bitcoind is stale)"
-    fi
-    # Peers and channels come from the node's own view, not getinfo: getinfo's
-    # num_peers counts peers "connected or with channels", so it stays >= 1 for a
-    # node whose only peer is offline. listpeers carries `connected` per peer.
-    #
-    # listchannels is the gossip table: one entry per direction, and its `active`
-    # is the channel_update's enabled bit, an operator setting that stays true
-    # while the peer is offline -- a check against it passes every sweep.
-    # listpeerchannels is the node's own view (peer_connected plus a state), and
-    # only operational channels count (an ONCHAIN one is meant to be alone).
-    lpeers=$(lightning_cli listpeers 2>/dev/null) || lpeers=""
-    npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
-    if [ -z "$npeers" ]; then
-        soft "could not read lightningd listpeers; skipped the peer check"
-    elif [ "$npeers" = 0 ]; then
-        soft "lightningd has no connected peers"
-    else
-        ok "lightningd has $npeers connected peer(s)"
-    fi
-    chans=$(lightning_cli listpeerchannels 2>/dev/null) || chans=""
-    offline=$(printf '%s' "$chans" | jq -r \
-        '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
-        2>/dev/null) || offline=""
-    if [ -z "$offline" ]; then
-        soft "could not read lightningd listpeerchannels; skipped the offline-channel check"
-    elif [ "$offline" -gt 0 ]; then
-        fail "$offline lightning channel(s) have their peer offline"
-    else
-        ok "no lightning channel with an offline peer"
-    fi
-fi
-
-# Monero heights are read through the node MCP and the wallet MCP (the daemons
-# carry no curl/wget), so this goes through mcp_call. Missing or unparseable
-# output is a warning only -- verify.sh already fails if the endpoint is down.
-#
-# The node's own probe is the process, not its RPC (the handler blocks while a
-# --block-sync-size batch holds the chain lock), so "alive but not answering" is
-# owned HERE and only here: an RPC that returns nothing is either that documented
-# stall or a wedged daemon, and the grace flag tells them apart. Under grace it is
-# a warning; with MONITOR_GRACE_SYNC=0 the node is expected to be current, so it
-# fails. The history is metrics.sh's stack_xmr_rpc_up.
-node_h=""
-sync=""
-xmrnode_token=$(env_value "$CONFIG_DIR/monero-node-mcp/token.env" MONERO_MCP_TOKEN)
-if [ -n "$xmrnode_token" ]; then
-    node_body=$(mcp_call monero-node-mcp "$xmrnode_token" get_info '{}') || node_body=""
-    node_h=$(mcp_result "$node_body" | jq -r '.height // empty' 2>/dev/null)
-    sync=$(mcp_result "$node_body" | jq -r 'if has("synchronized") then .synchronized else empty end' 2>/dev/null)
-    if [ -z "$node_h" ] && [ -z "$sync" ]; then
-        if [ "$MONITOR_GRACE_SYNC" != 1 ]; then
-            fail "monerod restricted RPC did not answer get_info (wedged handler, or the chain lock held; stack_xmr_rpc_up carries the history)"
+        # Peers: the freshness check has a blind spot -- a node whose only peers
+        # vanished keeps its height while its sync stalls. The floor defaults to 1, so
+        # any 0-peer read fails, and this deliberately looks past IBD, where a stalled
+        # download is the same fault as a stalled tip.
+        json_peers=$(bitcoind_cli getpeerinfo 2>/dev/null) || json_peers=""
+        n_peers=$(printf '%s' "$json_peers" | jq -r 'if type == "array" then length else empty end' 2>/dev/null) || n_peers=""
+        if [ -z "$n_peers" ]; then
+            soft "could not read bitcoind getpeerinfo; skipped the peer check"
+        elif [ "$n_peers" -lt "$THRESH_BTC_PEERS" ]; then
+            fail "bitcoind has $n_peers peer(s) (floor $THRESH_BTC_PEERS): its sync cannot advance without one"
         else
-            soft "monerod restricted RPC did not answer get_info (normal while a sync batch holds the chain lock; raise MONITOR_GRACE_SYNC=0 to page on it)"
+            ok "bitcoind has $n_peers peer(s)"
         fi
-    elif [ "$sync" = false ] && [ "$MONITOR_GRACE_SYNC" != 1 ]; then
-        fail "monerod is not synchronized (height ${node_h:-?})"
-    else
-        ok "monerod height ${node_h:-?} (synchronized=${sync:-?})"
-        # Lag behind the network tip. A synchronized node above the threshold is
-        # a fault: the RPC surface answers, but serves a stale chain. While not
-        # synchronized, the grace covers it as usual.
-        target_h=$(mcp_result "$node_body" | jq -r '.target_height // empty' 2>/dev/null)
-        if [ -n "$node_h" ] && [ -n "$target_h" ] && [ "$target_h" -ge "$node_h" ]; then
-            xlag=$(( target_h - node_h ))
-            if [ "$sync" = true ] && [ "$xlag" -gt "$THRESH_XMR_LAG" ]; then
-                fail "monerod reports synchronized but is $xlag block(s) behind its target (height $node_h, target $target_h)"
+        # The mempool cap: a warn only, since Core fills it well into a fee storm
+        # before rejecting and the right response is "look at the fees", not a page.
+        mp=$(bitcoind_cli getmempoolinfo 2>/dev/null) || mp=""
+        mp_mb=$(printf '%s' "$mp" | jq -r 'if type == "object" then ((.bytes // 0) / 1048576 | floor) else empty end' 2>/dev/null) || mp_mb=""
+        if [ -n "$mp_mb" ]; then
+            if [ "$mp_mb" -ge "$THRESH_MEMPOOL_MB" ]; then
+                soft "bitcoind's mempool holds ${mp_mb} MB (warn threshold ${THRESH_MEMPOOL_MB} MB) -- fee storm or a packed signal"
             else
-                ok "monerod is $xlag block(s) from its target"
+                ok "bitcoind's mempool at ${mp_mb} MB"
             fi
         fi
     fi
-else
-    soft "no MONERO_MCP_TOKEN; skipped the monerod height check"
-fi
-
-xmrwallet_token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
-if [ -n "$xmrwallet_token" ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
-    soft "the BTCPay view-only XMR wallet is not imported yet (config/btcpay/xmr-wallet.env); skipped the wallet height check"
-elif [ -n "$xmrwallet_token" ]; then
-    w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
-    w_h=$(mcp_result "$w_body" | jq -r '.height // empty' 2>/dev/null)
-    if [ -z "$w_h" ]; then
-        # No answer is not "fine": the wallet RPC is down, wedged or (usually)
-        # rebuilding its cache, and the container can sit "Up (unhealthy)" for
-        # hours while every sweep reports the height as "?".
-        fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-btcpay)"
-    elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
-        soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
+    
+    # Fulcrum, the Electrum server: the one daemon whose own port says the least. Its
+    # healthcheck is the process table, it keeps answering server.version while the
+    # index is wedged, and the wallet/explorer surface then serves stale heights. So
+    # ask the index-backed question -- the tip it reports -- and compare with bitcoind.
+    ftip=$(electrum_tip 50001)
+    if [ -z "$ftip" ]; then
+        if [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
+            ok "fulcrum is not serving Electrum yet (bitcoind is in initial block download)"
+        else
+            fail "fulcrum does not answer Electrum on 50001"
+        fi
+    elif [ -z "${blocks:-}" ]; then
+        soft "fulcrum reports tip $ftip; bitcoind height unreadable, so lag is not compared"
+    elif [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
+        ok "fulcrum index at $ftip (bitcoind is in initial block download; lag $((blocks - ftip)) not paged)"
     else
-        ok "monero-wallet height $w_h"
+        behind=$((blocks - ftip))
+        if [ "$behind" -gt "$THRESH_FULCRUM_LAG" ]; then
+            fail "fulcrum index is $behind block(s) behind bitcoind (tip $ftip, bitcoind $blocks)"
+        else
+            ok "fulcrum index at $ftip (bitcoind $blocks)"
+        fi
     fi
+    
+    lninfo=$(lightning_cli getinfo 2>/dev/null) || lninfo=""
+    if [ -z "$lninfo" ]; then
+        fail "lightningd RPC unreachable"
+    else
+        if printf '%s' "$lninfo" | jq -e 'has("warning_bitcoind_sync")' >/dev/null 2>&1; then
+            fail "lightningd reports warning_bitcoind_sync (its view of bitcoind is stale)"
+        fi
+        # Peers and channels come from the node's own view, not getinfo: getinfo's
+        # num_peers counts peers "connected or with channels", so it stays >= 1 for a
+        # node whose only peer is offline. listpeers carries `connected` per peer.
+        #
+        # listchannels is the gossip table: one entry per direction, and its `active`
+        # is the channel_update's enabled bit, an operator setting that stays true
+        # while the peer is offline -- a check against it passes every sweep.
+        # listpeerchannels is the node's own view (peer_connected plus a state), and
+        # only operational channels count (an ONCHAIN one is meant to be alone).
+        lpeers=$(lightning_cli listpeers 2>/dev/null) || lpeers=""
+        npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
+        if [ -z "$npeers" ]; then
+            soft "could not read lightningd listpeers; skipped the peer check"
+        elif [ "$npeers" = 0 ]; then
+            soft "lightningd has no connected peers"
+        else
+            ok "lightningd has $npeers connected peer(s)"
+        fi
+        chans=$(lightning_cli listpeerchannels 2>/dev/null) || chans=""
+        offline=$(printf '%s' "$chans" | jq -r \
+            '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
+            2>/dev/null) || offline=""
+        if [ -z "$offline" ]; then
+            soft "could not read lightningd listpeerchannels; skipped the offline-channel check"
+        elif [ "$offline" -gt 0 ]; then
+            fail "$offline lightning channel(s) have their peer offline"
+        else
+            ok "no lightning channel with an offline peer"
+        fi
+    fi
+    
+    # Monero heights are read through the node MCP and the wallet MCP (the daemons
+    # carry no curl/wget), so this goes through mcp_call. Missing or unparseable
+    # output is a warning only -- verify.sh already fails if the endpoint is down.
+    #
+    # The node's own probe is the process, not its RPC (the handler blocks while a
+    # --block-sync-size batch holds the chain lock), so "alive but not answering" is
+    # owned HERE and only here: an RPC that returns nothing is either that documented
+    # stall or a wedged daemon, and the grace flag tells them apart. Under grace it is
+    # a warning; with MONITOR_GRACE_SYNC=0 the node is expected to be current, so it
+    # fails. The history is metrics.sh's stack_xmr_rpc_up.
+    node_h=""
+    sync=""
+    xmrnode_token=$(env_value "$CONFIG_DIR/monero-node-mcp/token.env" MONERO_MCP_TOKEN)
+    if [ -n "$xmrnode_token" ]; then
+        node_body=$(mcp_call monero-node-mcp "$xmrnode_token" get_info '{}') || node_body=""
+        node_h=$(mcp_result "$node_body" | jq -r '.height // empty' 2>/dev/null)
+        sync=$(mcp_result "$node_body" | jq -r 'if has("synchronized") then .synchronized else empty end' 2>/dev/null)
+        if [ -z "$node_h" ] && [ -z "$sync" ]; then
+            if [ "$MONITOR_GRACE_SYNC" != 1 ]; then
+                fail "monerod restricted RPC did not answer get_info (wedged handler, or the chain lock held; stack_xmr_rpc_up carries the history)"
+            else
+                soft "monerod restricted RPC did not answer get_info (normal while a sync batch holds the chain lock; raise MONITOR_GRACE_SYNC=0 to page on it)"
+            fi
+        elif [ "$sync" = false ] && [ "$MONITOR_GRACE_SYNC" != 1 ]; then
+            fail "monerod is not synchronized (height ${node_h:-?})"
+        else
+            ok "monerod height ${node_h:-?} (synchronized=${sync:-?})"
+            # Lag behind the network tip. A synchronized node above the threshold is
+            # a fault: the RPC surface answers, but serves a stale chain. While not
+            # synchronized, the grace covers it as usual.
+            target_h=$(mcp_result "$node_body" | jq -r '.target_height // empty' 2>/dev/null)
+            if [ -n "$node_h" ] && [ -n "$target_h" ] && [ "$target_h" -ge "$node_h" ]; then
+                xlag=$(( target_h - node_h ))
+                if [ "$sync" = true ] && [ "$xlag" -gt "$THRESH_XMR_LAG" ]; then
+                    fail "monerod reports synchronized but is $xlag block(s) behind its target (height $node_h, target $target_h)"
+                else
+                    ok "monerod is $xlag block(s) from its target"
+                fi
+            fi
+        fi
+    else
+        soft "no MONERO_MCP_TOKEN; skipped the monerod height check"
+    fi
+    
+    xmrwallet_token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
+    if [ -n "$xmrwallet_token" ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
+        soft "the BTCPay view-only XMR wallet is not imported yet (config/btcpay/xmr-wallet.env); skipped the wallet height check"
+    elif [ -n "$xmrwallet_token" ]; then
+        w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
+        w_h=$(mcp_result "$w_body" | jq -r '.height // empty' 2>/dev/null)
+        if [ -z "$w_h" ]; then
+            # No answer is not "fine": the wallet RPC is down, wedged or (usually)
+            # rebuilding its cache, and the container can sit "Up (unhealthy)" for
+            # hours while every sweep reports the height as "?".
+            fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-btcpay)"
+        elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
+            soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
+        else
+            ok "monero-wallet height $w_h"
+        fi
+    fi
+}
+
+head3 "chain daemons"
+if [ "$MONITOR_SKIP_NODES" = 1 ]; then
+    ok "chain daemons skipped by request (MONITOR_SKIP_NODES=1: this host runs no daemon tier)"
+else
+    chain_checks
 fi
 
 # ---------------------------------------------------------------------------
@@ -1077,6 +1119,11 @@ fi
 # upstream died). A 4xx is accepted on purpose: app roots 404 and token-gated
 # endpoints 401. A declared host missing from NPM is indistinguishable from that
 # default vhost's 404 here; verify.sh's per-surface probes name it.
+#
+# A 502 is also what a host deployed with --skip-daemons gets from every vhost
+# whose upstream is in CHAIN_UNITS: the declaration marks those needs_nodes, so
+# the same MONITOR_SKIP_NODES that drops the chain section reports them as
+# skipped rather than as a fault it cannot clear.
 # ---------------------------------------------------------------------------
 head3 "public surface"
 load_manifest "$REPO_DIR"
@@ -1084,7 +1131,12 @@ public_bad=0
 if [ -z "${NPM_DOMAINS+x}" ] || [ "${#NPM_DOMAINS[@]}" -eq 0 ]; then
     soft "no [npm.*] hosts are declared; skipped the public-surface check"
 else
-    for vhost in "${NPM_DOMAINS[@]}"; do
+    for i in "${!NPM_DOMAINS[@]}"; do
+        vhost="${NPM_DOMAINS[$i]}"
+        if [ "$MONITOR_SKIP_NODES" = 1 ] && [ "${NPM_NEEDS_NODES[$i]:-0}" = 1 ]; then
+            ok "$vhost skipped by request (its upstream is in the daemon tier)"
+            continue
+        fi
         # http first: an HTTP-only vhost (no certificate issued yet) must not
         # read as down. A force-ssl host answers 301/308, and the https probe
         # then carries the certificate check.

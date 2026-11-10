@@ -165,4 +165,10 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   still validates. BTCPay's admin UI is gated by its own login (2FA expected),
   and its API by the store-scoped key the backend carries; no daemon RPC has a
   public NPM host any more.
+- **`needs_nodes` marks a vhost whose upstream is in `CHAIN_UNITS`** (`btcpay`,
+  both explorers). The name and its certificate exist on every host — the
+  reconciler does not know what is running — so on one deployed with
+  `deploy.sh --skip-daemons` they answer 502 forever. The key is how the sweep
+  can tell that from a dead upstream: with `MONITOR_SKIP_NODES=1`
+  `scripts/monitor.sh` reports those names as skipped instead of failing them.
 
