@@ -458,6 +458,14 @@ ensure_secret() {
     return 0
 }
 
+# A seed-once file is never rewritten, so a mode set by an older seed path
+# outlives the fix: tighten it on every run. A file the container owns is a
+# warning, not a failed install (SearXNG's settings.yml, torrc).
+tighten_secret() { # path
+    [ -e "$1" ] || return 0
+    chmod 600 "$1" 2>/dev/null || warn "could not tighten $1 to mode 600"
+}
+
 new_or_reused_token() {
     new_or_reused_env "$1" "$2" announce
 }
@@ -580,49 +588,55 @@ backup_retention_flags() {
 # which verify.sh re-renders against), so a placeholder shared with it must be
 # added on both sides. Values only some templates use are `${x:-}` because every
 # template is evaluated against this list.
+#
+# The script goes to sed on stdin (`-f -`), never as `-e` arguments: the list
+# carries every rendered secret (the RPC and Tor passwords, BTCPay's DB role
+# password, both bouncer keys, the MCP tokens, the JWT keys), and `ps` reads a
+# command line.
 render_to() { # src out
     local src="$1" out="$2" vol
-    sed -e "s|@DATA_DIR@|$(esc "$DATA_DIR")|g" \
-        -e "s|@CONFIG_DIR@|$(esc "$CONFIG_DIR")|g" \
-        -e "s|@REPO_DIR@|$(esc "$REPO_DIR")|g" \
-        -e "s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g" \
-        -e "s|@BACKUP_PATHS@|$(esc "$(backup_restic_paths)")|g" \
-        -e "s|@BACKUP_EXCLUDES@|$(esc "$(backup_excludes)")|g" \
-        -e "s|@BACKUP_RETENTION@|$(esc "$(backup_retention_flags)")|g" \
-        -e "s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g" \
-        -e "s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g" \
-        -e "s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g" \
-        -e "s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g" \
-        -e "s|@BTCPAY_HOST@|$(esc "$BTCPAY_HOST")|g" \
-        -e "s|@KUMA_ADD_HOSTS@|$(esc "$kuma_add_hosts")|g" \
-        -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
-        -e "s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g" \
-        -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
-        -e "s|@MONITOR_ALERT_FOR@|$(esc "$MONITOR_ALERT_FOR")|g" \
-        -e "s|@MONITOR_ALERT_HOLD_S@|$(esc "$MONITOR_ALERT_HOLD_S")|g" \
-        -e "s|@MONITOR_SWEEP_MAX_AGE_S@|$(esc "$MONITOR_SWEEP_MAX_AGE_S")|g" \
-        -e "s|@MONITOR_RESTART_MAX@|$(esc "$MONITOR_RESTART_MAX")|g" \
-        -e "s|@MONITOR_IO_UTIL_PCT@|$(esc "$MONITOR_IO_UTIL_PCT")|g" \
-        -e "s|@MONITOR_IDS_ALERT_WARN@|$(esc "$MONITOR_IDS_ALERT_WARN")|g" \
-        -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
-        -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \
-        -e "s|@MONERO_MCP_TOKEN@|$(esc "${MONERO_MCP_TOKEN:-}")|g" \
-        -e "s|@MONERO_MCP_SPEND_TOKEN@|$(esc "${MONERO_MCP_SPEND_TOKEN:-}")|g" \
-        -e "s|@LIGHTNING_MCP_TOKEN@|$(esc "${LIGHTNING_MCP_TOKEN:-}")|g" \
-        -e "s|@LIGHTNING_MCP_SPEND_TOKEN@|$(esc "${LIGHTNING_MCP_SPEND_TOKEN:-}")|g" \
-        -e "s|@PG_PASSWORD@|$(esc "${PG_PASSWORD:-}")|g" \
-        -e "s|@SECRET_KEY@|$(esc "${SECRET_KEY:-}")|g" \
-        -e "s|@REFRESH_SECRET_KEY@|$(esc "${REFRESH_SECRET_KEY:-}")|g" \
-        -e "s|@NODE_SECRET_KEY@|$(esc "${NODE_SECRET_KEY:-}")|g" \
-        -e "s|@BOOTSTRAP_SECRET_PEPPER@|$(esc "${BOOTSTRAP_SECRET_PEPPER:-}")|g" \
-        -e "s|@BOLTMESH_API_HOST@|$(esc "$BOLTMESH_API_HOST")|g" \
-        -e "s|@BOLTMESH_FRONTEND_HOST@|$(esc "$BOLTMESH_FRONTEND_HOST")|g" \
-        -e "s|@BOLTMESH_COMPANY_NAME@|$(esc "$BOLTMESH_COMPANY_NAME")|g" \
-        -e "s|@BOLTMESH_SUPPORT_EMAIL@|$(esc "$BOLTMESH_SUPPORT_EMAIL")|g" \
-        -e "s|@BOLTMESH_AGENT_REPO@|$(esc "$BOLTMESH_AGENT_REPO")|g" \
-        -e "s|@BTCPAY_ADMIN_PASSWORD@|$(esc "${BTCPAY_ADMIN_PASSWORD:-}")|g" \
-        -e "s|@RESTIC_PASSWORD@|$(esc "${RESTIC_PASSWORD:-}")|g" \
-        "$src" > "$out"
+    sed -f - "$src" > "$out" <<EOF
+s|@DATA_DIR@|$(esc "$DATA_DIR")|g
+s|@CONFIG_DIR@|$(esc "$CONFIG_DIR")|g
+s|@REPO_DIR@|$(esc "$REPO_DIR")|g
+s|@BACKUP_DIR@|$(esc "$STACK_BACKUP_DIR")|g
+s|@BACKUP_PATHS@|$(esc "$(backup_restic_paths)")|g
+s|@BACKUP_EXCLUDES@|$(esc "$(backup_excludes)")|g
+s|@BACKUP_RETENTION@|$(esc "$(backup_retention_flags)")|g
+s|@BITCOIN_RPC_USER@|$(esc "$BITCOIN_RPC_USER")|g
+s|@BITCOIN_RPC_PASSWORD@|$(esc "$BITCOIN_RPC_PASSWORD")|g
+s|@TOR_SERVICE_PASSWORD@|$(esc "$TOR_SERVICE_PASSWORD")|g
+s|@BTCPAY_DB_PASSWORD@|$(esc "$BTCPAY_DB_PASSWORD")|g
+s|@BTCPAY_HOST@|$(esc "$BTCPAY_HOST")|g
+s|@KUMA_ADD_HOSTS@|$(esc "$kuma_add_hosts")|g
+s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g
+s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g
+s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g
+s|@MONITOR_ALERT_FOR@|$(esc "$MONITOR_ALERT_FOR")|g
+s|@MONITOR_ALERT_HOLD_S@|$(esc "$MONITOR_ALERT_HOLD_S")|g
+s|@MONITOR_SWEEP_MAX_AGE_S@|$(esc "$MONITOR_SWEEP_MAX_AGE_S")|g
+s|@MONITOR_RESTART_MAX@|$(esc "$MONITOR_RESTART_MAX")|g
+s|@MONITOR_IO_UTIL_PCT@|$(esc "$MONITOR_IO_UTIL_PCT")|g
+s|@MONITOR_IDS_ALERT_WARN@|$(esc "$MONITOR_IDS_ALERT_WARN")|g
+s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g
+s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g
+s|@MONERO_MCP_TOKEN@|$(esc "${MONERO_MCP_TOKEN:-}")|g
+s|@MONERO_MCP_SPEND_TOKEN@|$(esc "${MONERO_MCP_SPEND_TOKEN:-}")|g
+s|@LIGHTNING_MCP_TOKEN@|$(esc "${LIGHTNING_MCP_TOKEN:-}")|g
+s|@LIGHTNING_MCP_SPEND_TOKEN@|$(esc "${LIGHTNING_MCP_SPEND_TOKEN:-}")|g
+s|@PG_PASSWORD@|$(esc "${PG_PASSWORD:-}")|g
+s|@SECRET_KEY@|$(esc "${SECRET_KEY:-}")|g
+s|@REFRESH_SECRET_KEY@|$(esc "${REFRESH_SECRET_KEY:-}")|g
+s|@NODE_SECRET_KEY@|$(esc "${NODE_SECRET_KEY:-}")|g
+s|@BOOTSTRAP_SECRET_PEPPER@|$(esc "${BOOTSTRAP_SECRET_PEPPER:-}")|g
+s|@BOLTMESH_API_HOST@|$(esc "$BOLTMESH_API_HOST")|g
+s|@BOLTMESH_FRONTEND_HOST@|$(esc "$BOLTMESH_FRONTEND_HOST")|g
+s|@BOLTMESH_COMPANY_NAME@|$(esc "$BOLTMESH_COMPANY_NAME")|g
+s|@BOLTMESH_SUPPORT_EMAIL@|$(esc "$BOLTMESH_SUPPORT_EMAIL")|g
+s|@BOLTMESH_AGENT_REPO@|$(esc "$BOLTMESH_AGENT_REPO")|g
+s|@BTCPAY_ADMIN_PASSWORD@|$(esc "${BTCPAY_ADMIN_PASSWORD:-}")|g
+s|@RESTIC_PASSWORD@|$(esc "${RESTIC_PASSWORD:-}")|g
+EOF
     # @BACKUP_VOLUMES@ becomes one Volume= line per entry, which sed cannot carry
     # (the value is multi-line); substitute the whole line here. Only
     # backup.container carries the token, so this is a no-op elsewhere.
@@ -1060,12 +1074,16 @@ else
     if command -v podman >/dev/null 2>&1 && podman image exists "$TOR_IMAGE" 2>/dev/null; then
         # `tor --hash-password` prints a warning line to *stdout* first ("You
         # are running Tor as root..."), so take the hash by its shape -- Tor
-        # writes it as 16:<hex> -- rather than the first line.
-        hash=$(podman run --rm "$TOR_IMAGE" tor --hash-password "$TOR_SERVICE_PASSWORD" 2>/dev/null \
-            | grep -E '^16:' | head -n1 || true)
+        # writes it as 16:<hex> -- rather than the first line. The password goes
+        # to the container on stdin, never as a `podman run` argument `ps` can
+        # read (rotate.sh's tor_hash does the same).
+        hash=$(printf '%s\n' "$TOR_SERVICE_PASSWORD" | podman run --rm -i "$TOR_IMAGE" sh -c '
+            read -r pw
+            tor --hash-password "$pw" 2>/dev/null
+        ' | grep -E '^16:' | head -n1 || true)
     fi
     if [ -n "$hash" ]; then
-        cat > "$TOR_DIR/torrc" <<EOF
+        write_secret "$TOR_DIR/torrc" <<EOF
 SocksPort 0.0.0.0:9050
 ControlPort 0.0.0.0:9051
 
@@ -1082,6 +1100,7 @@ EOF
         log "could not seed $TOR_DIR/torrc (tor image '$TOR_IMAGE' not built?) -- re-run after the build"
     fi
 fi
+tighten_secret "$TOR_DIR/torrc"
 sync_torrc_onions "$TOR_DIR/torrc"
 
 # ---------------------------------------------------------------------------
@@ -1094,8 +1113,10 @@ else
     secret=$(rand_hex)
     log "seeding $SEARXNG_DATA_DIR/settings.yml with a fresh secret_key"
     sed "s/^  secret_key: .*/  secret_key: \"${secret}\"/" \
-        "$DEPLOY_DIR/searxng/settings.yml" > "$SEARXNG_DATA_DIR/settings.yml"
+        "$DEPLOY_DIR/searxng/settings.yml" \
+        | write_secret "$SEARXNG_DATA_DIR/settings.yml"
 fi
+tighten_secret "$SEARXNG_DATA_DIR/settings.yml"
 if [ -s "$SEARXNG_DATA_DIR/limiter.toml" ]; then
     log "keeping existing $SEARXNG_DATA_DIR/limiter.toml"
 else

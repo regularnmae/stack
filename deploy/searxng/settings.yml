@@ -4,7 +4,7 @@
 # search fails.
 #
 # `secret_key` is deliberately blank here: install.sh substitutes a fresh
-# random key when it seeds this file, so no secret is committed.
+# random key, mode 600, when it seeds this file, so no secret is committed.
 #
 # Read the documentation before extending the defaults:
 # https://docs.searxng.org/admin/settings/

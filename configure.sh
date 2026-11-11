@@ -235,15 +235,19 @@ ensure_btcpay_db() {
     pw=$(env_value "$CONFIG_DIR/stack/secrets.env" BTCPAY_DB_PASSWORD)
     [ -n "$pw" ] || { warn "no BTCPAY_DB_PASSWORD in $CONFIG_DIR/stack/secrets.env; run deploy/install.sh first"; return 1; }
     # Roles and databases are idempotent. The password is hex from install.sh,
-    # so embedding it in the SQL is safe.
+    # so the SQL literal needs no escaping -- and both CREATE statements go in on
+    # stdin, never as `psql -c`: a command line is what `ps` reads (rotate.sh's
+    # pg_sql has the same shape).
     if ! podman exec postgres psql -U vpnuser -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='btcpay'" | grep -q 1; then
-        podman exec postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1             -c "CREATE ROLE btcpay LOGIN PASSWORD '$pw' CREATEDB" >/dev/null || return 1
+        printf "CREATE ROLE btcpay LOGIN PASSWORD '%s' CREATEDB;\n" "$pw" \
+            | podman exec -i postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1 -q >/dev/null || return 1
         log "created the btcpay Postgres role"
     fi
     local db
     for db in btcpay nbxplorer; do
         if ! podman exec postgres psql -U vpnuser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1; then
-            podman exec postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1                 -c "CREATE DATABASE $db OWNER btcpay" >/dev/null || return 1
+            printf 'CREATE DATABASE %s OWNER btcpay;\n' "$db" \
+                | podman exec -i postgres psql -U vpnuser -d postgres -v ON_ERROR_STOP=1 -q >/dev/null || return 1
             log "created the $db database"
         fi
     done

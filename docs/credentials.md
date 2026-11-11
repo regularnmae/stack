@@ -89,9 +89,23 @@ token on a command line.
   durable (the `RESTIC_PASSWORD_NEXT` line), add, prove, promote, then remove —
   never remove first, and never let the durable copy lag the repository.
 
-## Tokens never reach the host's argv
+## Secrets never reach the host's argv
 
 - **The bearer tokens never reach the host's argv** — `mcp_initialize` /
   `mcp_tool_call` pass them in a curl config on stdin (`-K -`), so `ps` cannot
   read a token out of a running verify/monitor/audit sweep. `npm-hosts.sh`
   does the same with the NPM admin password and the API token it mints.
+- **`install.sh`'s renderer carries no secret on its command line** — the
+  substitution list goes to `sed -f -` on stdin, so the deploy's `sed` argv (and
+  `ps`) carries no substituted value: not the Bitcoin RPC password, Tor's service
+  password, BTCPay's DB password, the bouncer keys, MCP tokens or JWT keys.
+- **`configure.sh` feeds its BTCPay SQL on stdin** — the role's password and both
+  `CREATE DATABASE` statements go through `podman exec -i`, never as a `psql -c`
+  argument.
+- **The Tor control password reaches the hash helper on stdin** — `install.sh`
+  mirrors `rotate.sh`'s `tor_hash`, so the plaintext is not an argument of the
+  `podman run` that hashes it.
+
+The one deliberate exception is a unit's own `Exec=` (lightningd's Bitcoin RPC
+password): that is the container's argv, which `rotate.sh`'s
+`container_runs_secret` inspects, not a host shell command line.

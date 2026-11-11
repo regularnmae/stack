@@ -100,7 +100,9 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 
 - **`torrc`'s `HashedControlPassword` must hash to `TOR_SERVICE_PASSWORD`**;
   `install.sh` derives it with `tor --hash-password` on a fresh host and
-  otherwise leaves `torrc` alone. tor logs a `ControlPort ... non-local address`
+  otherwise leaves `torrc` alone. The file is seeded and kept mode 600: the hash
+  verifies the control password, so a world-readable copy is an offline
+  brute-force target. tor logs a `ControlPort ... non-local address`
   warning because lightningd drives the statictor service over `10.89.0.240:9051`;
   that is deliberate, the port is password-protected and only on `npm-network`.
 
