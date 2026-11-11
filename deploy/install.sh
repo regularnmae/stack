@@ -424,7 +424,7 @@ SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 TOR_DIR="$DATA_DIR/tor"
 
-# The alert-rule timings, resolved the way monitor.sh resolves its own keys:
+# The alert-rule values, resolved the way monitor.sh resolves its own keys:
 # process environment, then the installed monitor.env, then the default. They are
 # rendered into the vmalert rules rather than read at runtime -- vmalert parses
 # its rules at start, so monitor.env is a deploy-time input for these.
@@ -439,6 +439,9 @@ resolve_monitor_timing() { # NAME default
 MONITOR_ALERT_FOR=$(resolve_monitor_timing MONITOR_ALERT_FOR 600)
 MONITOR_ALERT_HOLD_S=$(resolve_monitor_timing MONITOR_ALERT_HOLD_S 900)
 MONITOR_SWEEP_MAX_AGE_S=$(resolve_monitor_timing MONITOR_SWEEP_MAX_AGE_S 900)
+MONITOR_RESTART_MAX=$(resolve_monitor_timing MONITOR_RESTART_MAX 3)
+MONITOR_IO_UTIL_PCT=$(resolve_monitor_timing MONITOR_IO_UTIL_PCT 90)
+MONITOR_IDS_ALERT_WARN=$(resolve_monitor_timing MONITOR_IDS_ALERT_WARN 20)
 
 # write_secret is lib.sh's write_env_file (atomic, 0600); configure.sh writes the
 # BTCPay env files with the same one, so both halves agree on the mode.
@@ -598,6 +601,9 @@ render_to() { # src out
         -e "s|@MONITOR_ALERT_FOR@|$(esc "$MONITOR_ALERT_FOR")|g" \
         -e "s|@MONITOR_ALERT_HOLD_S@|$(esc "$MONITOR_ALERT_HOLD_S")|g" \
         -e "s|@MONITOR_SWEEP_MAX_AGE_S@|$(esc "$MONITOR_SWEEP_MAX_AGE_S")|g" \
+        -e "s|@MONITOR_RESTART_MAX@|$(esc "$MONITOR_RESTART_MAX")|g" \
+        -e "s|@MONITOR_IO_UTIL_PCT@|$(esc "$MONITOR_IO_UTIL_PCT")|g" \
+        -e "s|@MONITOR_IDS_ALERT_WARN@|$(esc "$MONITOR_IDS_ALERT_WARN")|g" \
         -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
         -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \
         -e "s|@MONERO_MCP_TOKEN@|$(esc "${MONERO_MCP_TOKEN:-}")|g" \

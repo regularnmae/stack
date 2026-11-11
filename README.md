@@ -890,12 +890,14 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
   Read-only: it starts nothing and rewrites no config. It runs `verify.sh` for the
   container/MCP base checks and adds the ones nothing else does: chain freshness
   (bitcoind, Fulcrum's Electrum tip against bitcoind's height, `monerod`, the
-  wallet's lag), CLN peers and offline channels, host space/inodes/I/O/disk
-  saturation, backup and dump age, certificate expiry, restart deltas, the
-  schedules themselves, the metrics and log pipelines going quiet, journald
-  persistence and podman's event backend, live runes the stack does not reference,
-  bitcoind's RPC password against `secrets.env`, the public vhosts through
-  nginx-proxy-manager — then the spend tripwire.
+  wallet's lag), CLN peers and offline channels, host space and inodes, backup and
+  dump age, certificate expiry, the schedules themselves, the metrics and log
+  pipelines going quiet, journald persistence and podman's event backend, live
+  runes the stack does not reference, bitcoind's RPC password against
+  `secrets.env`, the public vhosts through nginx-proxy-manager — then the spend
+  tripwire. It also writes the numbers behind the three checks whose fact is a
+  rate — unit restarts over an hour, disk saturation and Suricata bursts over 15
+  minutes — and those rules, not the sweep, decide when they are worth a warning.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user** unit
   (Quadlet has no `.timer` type), like `backup.timer`.
 - `scripts/registrations.sh` — one alert per **BoltMesh signup**, every minute. It

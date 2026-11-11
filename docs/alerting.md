@@ -23,6 +23,11 @@ not faults").
   "how long before I page" knob, and vmalert's own end-stamp (4x the group
   interval) is what ends a live alert.
 - **`send_resolved: false` by default** makes every recovery silent.
+- **A check whose fact is a rate is decided by a rule over a window**, not by the
+  sweep: unit restarts (`increase` over an hour), disk saturation and Suricata
+  bursts (`avg`/`max` over 15 minutes). The sweep writes the number. A per-sweep
+  verdict on a rate is an event -- true for one sweep -- so the section fired and
+  resolved around every burst.
 - **The flap damper is a pair: `for:` holds the onset and `keep_firing_for:`
   holds the reset**, rendered from `MONITOR_ALERT_FOR` and `MONITOR_ALERT_HOLD_S`.
   Nothing in the producer holds alert state.
@@ -54,8 +59,8 @@ not faults").
   and `monitor.sh` read five keys no file mentioned. `ci.yml` therefore fails
   when `monitor.sh` resolves a `MONITOR_*` key the example does not declare —
   that check is the only thing keeping a new threshold discoverable. It carries
-  the host checks (disk, inodes, disk saturation,
-  backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
+  the host checks (disk space, inodes,
+  backup age, certificate expiry, NIC errors/drops, the
   hottest sensor, a stale metrics textfile, the exporter that serves it, the
   backup/drill/dump/metrics and registrations **schedules**, journald's persistence, podman's event backend,
   the syslog socket, the signup watcher's freshness), the alert path itself
@@ -100,10 +105,12 @@ not faults").
   `$DATA_DIR/config/monitoring/vmalert/stack.yml`) fire one alert per section
   after `for: MONITOR_ALERT_FOR`, hold it for `keep_firing_for:
   MONITOR_ALERT_HOLD_S` after the section clears, and pull the detail into the
-  annotation with vmalert's `query` template function. Alertmanager owns
-  grouping, inhibition, silences and delivery, and a recovery is vmalert's
-  transition to inactive -- there is no `endsAt` for the producer to send and no
-  producer state to keep. Five traps, all load-bearing:
+  annotation with vmalert's `query` template function. Three checks are not
+  sections but rules of their own over a window -- `stack_unit_restarting`,
+  `stack_disk_saturated`, `stack_ids_noisy` -- because their fact is a rate.
+  Alertmanager owns grouping, inhibition, silences and delivery, and a recovery
+  is vmalert's transition to inactive -- there is no `endsAt` for the producer to
+  send and no producer state to keep. Five traps, all load-bearing:
   (1) **`resolve_timeout` is neither the paging delay nor a resolution
   override.** vmalert ends a normal alert itself, by sending an update whose
   endsAt is the moment the rule went inactive, so a real recovery does not wait

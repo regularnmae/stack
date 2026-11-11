@@ -61,6 +61,39 @@ groups:
           summary: 'stack: {{ $labels.service }} is warning'
           description: '{{ with query (printf "stack_monitor_detail_info{service=%q}" $labels.service) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
 
+      # Three checks live here rather than in the sweep because their natural
+      # shape is a rate, not a snapshot: monitor.sh writes the number, these
+      # windows decide. Deciding them per sweep made the `host` and
+      # `intrusion_detection` sections fire and resolve around every burst, since
+      # a per-sweep delta is true for exactly one sweep.
+      - alert: stack_unit_restarting
+        expr: increase(stack_systemd_restarts[1h]) > @MONITOR_RESTART_MAX@
+        for: @MONITOR_ALERT_FOR@s
+        keep_firing_for: @MONITOR_ALERT_HOLD_S@s
+        labels:
+          severity: critical
+        annotations:
+          summary: 'stack: {{ $labels.unit }} is restarting'
+          description: '{{ $labels.unit }} restarted {{ $value | humanize }} time(s) in the last hour (threshold @MONITOR_RESTART_MAX@) -- a crash loop that a green healthcheck hides. podman logs --tail 50 {{ $labels.unit }}'
+
+      - alert: stack_disk_saturated
+        expr: avg_over_time(stack_disk_util_pct[15m]) > @MONITOR_IO_UTIL_PCT@
+        keep_firing_for: @MONITOR_ALERT_HOLD_S@s
+        labels:
+          severity: warning
+        annotations:
+          summary: 'stack: {{ $labels.device }} is saturated'
+          description: '{{ $labels.device }} (holding @DATA_DIR@) averaged {{ $value | humanize }}% busy over 15 minutes (threshold @MONITOR_IO_UTIL_PCT@%): everything on it is queueing, including the chains.'
+
+      - alert: stack_ids_noisy
+        expr: max_over_time(stack_ids_alerts[15m]) > @MONITOR_IDS_ALERT_WARN@
+        keep_firing_for: @MONITOR_ALERT_HOLD_S@s
+        labels:
+          severity: warning
+        annotations:
+          summary: 'stack: Suricata is reporting a burst'
+          description: '{{ $value | humanize }} Suricata alert(s) in one report (threshold @MONITOR_IDS_ALERT_WARN@) within the last 15 minutes -- read @DATA_DIR@/ids/suricata/eve.json'
+
       # The producer's own liveness. A stopped monitor writes nothing, so its
       # last sample lives on in the store and `time() - value` keeps growing --
       # which is the only thing that notices a sweep that never ran on a host

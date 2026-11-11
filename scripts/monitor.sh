@@ -6,13 +6,17 @@
 #   scripts/monitor.sh --no-verify  # skip the verify.sh base sweep
 #   scripts/monitor.sh --test       # send one real alert through Alertmanager
 #
-# It decides WHAT is wrong and writes it as metrics: one stack_monitor_section
-# series per failing section, plus that section's text as an info series. The
-# rules vmalert loads (deploy/monitoring/rules/) decide WHEN a fault has lasted
-# long enough to page, and Alertmanager owns grouping, repeat intervals,
-# inhibition, silences and delivery. No alert state lives in this script --
-# `for:` in the rules is the flap damper, and vmalert's transition to inactive is
-# the recovery, so there is no explicit endsAt to remember and no lock to take.
+# It finds WHAT is wrong and writes it as metrics: one stack_monitor_section
+# series per failing section, plus that section's text as an info series, and the
+# numbers some checks produce. The rules vmalert loads (deploy/monitoring/rules/)
+# decide WHEN a fault has lasted long enough to page, and Alertmanager owns
+# grouping, inhibition, silences and delivery. No alert state lives in this
+# script -- `for:` damps the onset and `keep_firing_for:` the reset, so there is
+# no explicit endsAt to remember and no lock to take.
+#
+# Three checks (unit restarts, disk saturation, Suricata bursts) are decided in
+# the rules over a window, not here: their fact is a rate, and a per-sweep
+# verdict on a rate is an event that fires and resolves around every burst.
 #
 # A failure fails the dead-man's-switch heartbeat: a host that is down cannot
 # report itself, and neither can one whose mail is not leaving, so the heartbeat
@@ -110,13 +114,11 @@ ALERT_FAILED_FILE="$AUDIT_DIR/alertmanager.failed"
 # run alerts on exactly what the timer would.
 MONITOR_DISK_FREE_PCT=$(monitor_var MONITOR_DISK_FREE_PCT)
 MONITOR_INODES_FREE_PCT=$(monitor_var MONITOR_INODES_FREE_PCT)
-MONITOR_IO_UTIL_PCT=$(monitor_var MONITOR_IO_UTIL_PCT)
 MONITOR_BACKUP_MAX_AGE_H=$(monitor_var MONITOR_BACKUP_MAX_AGE_H)
 MONITOR_BACKUP_VERIFY_MAX_AGE_H=$(monitor_var MONITOR_BACKUP_VERIFY_MAX_AGE_H)
 MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H=$(monitor_var MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H)
 MONITOR_DUMP_MAX_AGE_H=$(monitor_var MONITOR_DUMP_MAX_AGE_H)
 MONITOR_CERT_MIN_DAYS=$(monitor_var MONITOR_CERT_MIN_DAYS)
-MONITOR_RESTART_MAX=$(monitor_var MONITOR_RESTART_MAX)
 MONITOR_METRICS_MAX_AGE_S=$(monitor_var MONITOR_METRICS_MAX_AGE_S)
 MONITOR_LOGS_MAX_AGE_S=$(monitor_var MONITOR_LOGS_MAX_AGE_S)
 MONITOR_FULCRUM_LAG_BLOCKS=$(monitor_var MONITOR_FULCRUM_LAG_BLOCKS)
@@ -126,7 +128,6 @@ MONITOR_BTC_MIN_PEERS=$(monitor_var MONITOR_BTC_MIN_PEERS)
 MONITOR_MEMPOOL_MB=$(monitor_var MONITOR_MEMPOOL_MB)
 MONITOR_XMR_LAG_BLOCKS=$(monitor_var MONITOR_XMR_LAG_BLOCKS)
 MONITOR_IDS_MAX_AGE_MIN=$(monitor_var MONITOR_IDS_MAX_AGE_MIN)
-MONITOR_IDS_ALERT_WARN=$(monitor_var MONITOR_IDS_ALERT_WARN)
 MONITOR_BOUNCER_MAX_AGE_MIN=$(monitor_var MONITOR_BOUNCER_MAX_AGE_MIN)
 MONITOR_AUDIT_MAX_AGE_MIN=$(monitor_var MONITOR_AUDIT_MAX_AGE_MIN)
 MONITOR_REGISTRATIONS_MAX_AGE_MIN=$(monitor_var MONITOR_REGISTRATIONS_MAX_AGE_MIN)
@@ -158,10 +159,6 @@ THRESH_XMR_LAG=$(num_or "${MONITOR_XMR_LAG_BLOCKS:-}" 3)
 # is the check that notices a sensor that died quietly -- its unit can read
 # "active" while the engine inside has stopped turning.
 THRESH_IDS_AGE_M=$(num_or "${MONITOR_IDS_MAX_AGE_MIN:-}" 20)
-# A warn threshold, not a failure: one Suricata alert is not a page, and an
-# operator who gets paged per alert stops reading them. The rate lives in
-# VictoriaMetrics.
-THRESH_IDS_ALERTS=$(num_or "${MONITOR_IDS_ALERT_WARN:-}" 20)
 # The applier runs every minute; five missed runs is a stopped timer or a wedged
 # nft, and either one means decisions are being made but nothing is enforcing.
 THRESH_BOUNCER_AGE_M=$(num_or "${MONITOR_BOUNCER_MAX_AGE_MIN:-}" 5)
@@ -445,13 +442,11 @@ head3 "host"
 # reads a threshold through it first.
 THRESH_DISK=$(num_or "${MONITOR_DISK_FREE_PCT:-}" 10)
 THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
-THRESH_IO=$(num_or "${MONITOR_IO_UTIL_PCT:-}" 90)
 THRESH_BACKUP_H=$(num_or "${MONITOR_BACKUP_MAX_AGE_H:-}" 36)
 THRESH_VERIFY_H=$(num_or "${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-}" 192)
 THRESH_VERIFY_DB_H=$(num_or "${MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H:-}" 1080)
 THRESH_DUMP_H=$(num_or "${MONITOR_DUMP_MAX_AGE_H:-}" 36)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
-THRESH_RESTART=$(num_or "${MONITOR_RESTART_MAX:-}" 3)
 THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
 # The log pipeline: how old the newest entry in the store may be. A "stopped
 # shipping" alarm, not a threshold -- 15 minutes gives a restart room to come back.
@@ -510,17 +505,21 @@ block_device() { # path -> the device that owns its I/O
     return 1
 }
 dev=$(block_device "$DATA_DIR" || true)
+disk_dev=""
+disk_util=""
 if [ -n "${dev:-}" ] && [ -r "/sys/block/$dev/stat" ]; then
     io_a=$(awk '{print $10}' "/sys/block/$dev/stat")
     sleep 3
     io_b=$(awk '{print $10}' "/sys/block/$dev/stat")
     util=$(( (io_b - io_a) * 100 / 3000 ))
     [ "$util" -gt 100 ] && util=100
-    if [ "$util" -ge "$THRESH_IO" ]; then
-        soft "$dev (holding $DATA_DIR) was ${util}% busy over 3s; everything on it is queueing"
-    else
-        ok "$dev (holding $DATA_DIR) ${util}% busy"
-    fi
+    # The measurement, not a verdict: a 3-second sample is a coin flip on a disk
+    # that is syncing two chains and taking a backup, so `host` must not change
+    # severity on it. The rule averages 15 minutes of these samples and pages on
+    # sustained saturation, which is the thing worth waking somebody for.
+    disk_dev="$dev"
+    disk_util="$util"
+    ok "$dev (holding $DATA_DIR) ${util}% busy over 3s"
 else
     soft "could not identify the block device holding $DATA_DIR"
 fi
@@ -747,37 +746,11 @@ else
     soft "no nginx-proxy-manager certificate yet (fill in $CONFIG_DIR/npm/api.env)"
 fi
 
-# Restart deltas between sweeps: systemd restarts a crashed unit and podman
-# briefly reports it healthy again, so a crash loop can hide inside a green
-# health check.
-RESTART_STATE="$AUDIT_DIR/restarts"
-declare -A prev_restarts=()
-if [ -f "$RESTART_STATE" ]; then
-    while read -r rname rcount; do
-        [ -n "${rname:-}" ] && prev_restarts[$rname]="${rcount:-0}"
-    done < "$RESTART_STATE"
-fi
-restart_state=""
-restarted=0
-if command -v systemctl >/dev/null 2>&1; then
-    for c in $(podman ps --format '{{.Names}}' 2>/dev/null); do
-        # Container name != unit stem for anything that sets ContainerName, and
-        # systemctl answers 0 for a unit that does not exist -- so assuming the
-        # two are equal silently stops watching that job's restarts.
-        u=$(unit_for_container "$c")
-        nr=$(systemctl --user show "$u.service" -p NRestarts --value 2>/dev/null || true)
-        [ -n "$nr" ] || continue
-        case "$nr" in (*[!0-9]*) continue ;; esac
-        was="${prev_restarts[$u]:-0}"
-        if [ "$nr" -gt "$((was + THRESH_RESTART))" ]; then
-            fail "$u restarted $((nr - was)) time(s) since the last sweep"
-            restarted=$((restarted + 1))
-        fi
-        restart_state+="$u $nr"$'\n'
-    done
-    printf '%s' "$restart_state" > "$RESTART_STATE" 2>/dev/null || true
-    [ "$restarted" = 0 ] && ok "no unit restarted more than $THRESH_RESTART time(s) since the last sweep"
-fi
+# Restart counts are not checked here. A per-sweep delta ("restarted 9 times
+# since the last sweep") is an event: true for exactly one sweep, so the section
+# fired and resolved around every burst. metrics.sh exports the monotonic
+# stack_systemd_restarts{unit}, and the rules alert on increase() over an hour --
+# the same fact as a condition, which stays true while the loop is running.
 
 # The collector that produces every graph: if it stops, the history stops and
 # nothing else notices, so it is checked from the outside.
@@ -1078,12 +1051,9 @@ else
             ok "IDS: suricata=$isuri crowdsec=$icrowd, $ids_alerts alert(s), $ids_decisions decision(s)"
         fi
     fi
-    # Alerts are a report, not a page: Suricata's output needs a human to read it,
-    # and a page per alert makes the sweep's signal unreadable. The counter goes to
-    # VictoriaMetrics so a change in *rate* is visible without one.
-    if [ "$ids_alerts" -gt "$THRESH_IDS_ALERTS" ]; then
-        soft "$ids_alerts Suricata alert(s) since the last report (threshold $THRESH_IDS_ALERTS) -- read $DATA_DIR/ids/suricata/eve.json"
-    fi
+    # A report, not a page: the count goes to VictoriaMetrics as
+    # stack_ids_alerts, and the rule holds a burst for 15 minutes. Deciding it
+    # here made the section fire and resolve around every spike.
 fi
 
 # The audit report: host-level changes no script in this repo makes (account
@@ -1345,6 +1315,7 @@ prom_ok=1
     printf 'stack_monitor_alertmanager_up %s\n' "${am_ok:-1}"
     printf 'stack_monitor_vmalert_up %s\n' "${vmalert_ok:-1}"
     printf 'stack_monitor_vm_up %s\n' "${vm_ok:-1}"
+    [ -n "${disk_util:-}" ] && printf 'stack_disk_util_pct{device="%s"} %s\n' "$disk_dev" "$disk_util"
     [ -n "$backup_age_s" ] && printf 'stack_backup_age_seconds %s\n' "$backup_age_s"
     [ -n "$backup_count" ] && printf 'stack_backup_snapshots %s\n' "$backup_count"
     [ -n "$backup_verify_age_s" ] && printf 'stack_backup_verify_age_seconds %s\n' "$backup_verify_age_s"
