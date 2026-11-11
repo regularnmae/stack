@@ -62,7 +62,7 @@ from line 2), and `# shellcheck source=`/`disable=` are directives.
 - `docs/ids.md` — Suricata sees packets, CrowdSec reads the logs, enforcement is ours.
 - `docs/backup.md` — a oneshot job, a verdict file, dumps never files.
 - `docs/proxy.md` — the manifest is the public surface; NPM owns the host network.
-- `docs/alerting.md` — the monitor produces, Alertmanager speaks; metrics are history.
+- `docs/alerting.md` — the monitor produces, vmalert decides, Alertmanager speaks; metrics are history.
 - `docs/chains.md` — archival daemons; peers come from `listpeerchannels`.
 - `docs/credentials.md` — spending stays off; rotation re-runs install.
 - `docs/btcpay.md` — view-only XMR wallet; the plugin is a file.

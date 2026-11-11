@@ -450,9 +450,10 @@ start_infra() {
     # captures the whole initial sync in the metrics history.
     start_unit node-exporter
     start_unit victoriametrics
-    # Alertmanager: the monitor pushes into it, so start it before the first
-    # sweep (a start is a no-op when active).
+    # Alertmanager, then vmalert: the evaluator feeds Alertmanager, so both start
+    # before the first sweep (a start is a no-op when they are active).
     start_unit alertmanager
+    start_unit vmalert
     # The log pipeline: journald -> vector -> victoria-logs (docs/logs.md). It
     # depends on nothing, so it starts before the daemons; vector buffers and
     # retries, so the order inside this pair is not gating.

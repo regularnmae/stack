@@ -382,4 +382,11 @@ for script in "$ROOT_DIR"/deploy.sh "$ROOT_DIR"/verify.sh "$ROOT_DIR"/configure.
     fi
 done
 
+# node-exporter rejects the WHOLE textfile over one malformed label, so a daemon
+# message's quote, backslash or newline must never reach it raw.
+assert_eq 'a\"b\\c' "$(prom_label_value 'a"b\c')" 'label values escape quotes and backslashes'
+assert_eq 'one two' "$(prom_label_value "$(printf 'one\ntwo')")" 'a newline becomes a separator'
+assert_eq 'a b'     "$(prom_label_value "$(printf 'a\tb')")"     'a tab becomes a separator'
+assert_eq 'plain'   "$(prom_label_value plain)"                  'plain text is untouched'
+
 printf 'shared shell helper tests: ok\n'

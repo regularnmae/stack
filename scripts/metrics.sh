@@ -6,9 +6,10 @@
 #   scripts/metrics.sh --quiet    # no stdout (what deploy/metrics.service runs)
 #
 # Driven by metrics.timer every minute. This is the *observation* half of the
-# monitoring pair: monitor.sh DECIDES and NOTIFIES, reading the daemons directly
-# and never the store, so the pipeline can be down without the alerts going with
-# it; this script only observes, for history, and never alerts.
+# monitoring pair: monitor.sh decides what is wrong and writes the facts,
+# reading the daemons directly and never the store, so the checks survive a
+# wedged pipeline; vmalert evaluates the rules against the store, and this
+# script only observes, for history, and never alerts.
 #
 # A metric that cannot be collected is omitted and its collector recorded as
 # stack_collector_error{collector="..."} 1, so a hole in a graph is never mistaken

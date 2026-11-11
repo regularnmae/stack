@@ -1,28 +1,37 @@
 # The monitor and alerting
 
-How a fault becomes a page: the host-side sweep, the Alertmanager hop, and the
-one place metrics and alerting touch. Read this before touching
-`scripts/monitor.sh`, `monitor.env.example`, `alertmanager.yml`, or
-`scripts/metrics.sh`. The operator narrative is README's "Monitoring & the spend
-tripwire". Signups are the one event on this path rather than a fault; they are
-produced by `scripts/registrations.sh` (see "Events are not faults").
+How a fault becomes a page: the host-side sweep writes facts, the rules decide
+when, and Alertmanager speaks. Read this before touching `scripts/monitor.sh`,
+`deploy/monitoring/rules/`, `deploy/vmalert.container`, `monitor.env.example`,
+`alertmanager.yml`, or `scripts/metrics.sh`. The operator narrative is README's
+"Monitoring & the spend tripwire". Signups are the one event on this path rather
+than a fault; they are produced by `scripts/registrations.sh` (see "Events are
+not faults").
 
 ## Invariants
 
-- **The monitor is alert-only and never queries the metrics store** -- that is
-  what keeps a wedged store from silencing an alert. The log store's health is
-  the one exception, and a failure there can only add an alert.
+- **The producer writes facts and never queries the metrics store.** That is what
+  keeps a wedged store from silencing the checks themselves. The evaluator does
+  query it (`for:` is a query), so the store is on the paging path: the sweep's
+  `alerting` section checks the store, vmalert and Alertmanager every run and
+  fails the external heartbeat when any is down. It is not a backstop but the
+  primary channel for that failure: a dead evaluator mails a false "recovered"
+  about two minutes later, and only the heartbeat can say it died. The log
+  store's health is the one exception on the producer's side, and a failure
+  there can only add an alert.
 - **`resolve_timeout` must be far longer than the sweep** (24h); it is not a
-  "how long before I page" knob.
+  "how long before I page" knob, and vmalert's own end-stamp (4x the group
+  interval) is what ends a live alert.
 - **`send_resolved: false` by default** makes every recovery silent.
-- **The flap damper lives in the producer**, not in Alertmanager.
+- **The flap damper is the rule's `for:`**, rendered from `MONITOR_ALERT_FOR`.
+  Nothing in the producer holds alert state.
 - **A failed delivery is read back on the next sweep**, because the alert path
   cannot report itself.
 - **The alert path is the host's own `curl`/`jq`, never `net_curl`.**
-- **Events ride the alert path but never the monitor's state machine.** A
-  signup is not a condition that clears: it is pushed once, from its own timer,
-  with `severity="info"` and its own label, and ends by `endsAt`. The monitor's
-  hold-down and explicit resolution would turn one event into two mails.
+- **Events ride the alert path but never the rules' state machine.** A signup is
+  not a condition that clears: it is pushed once, from its own timer, with
+  `severity="info"` and its own label, and ends by `endsAt`. A rule's `for:` and
+  its inactive transition would turn one event into two mails.
 
 ## The monitor
 
@@ -31,8 +40,8 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   `scripts/monitor.sh --quiet` with an optional
   `EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env` — the leading `-` keeps
   an unfilled file from stopping the sweep. The script reads that file through
-  `env_value` (environment first, never sourcing it), so a hand run alerts on
-  exactly what the timer would. It is alert-only (never restarts a unit).
+  `env_value` (environment first, never sourcing it), so a hand run reports on
+  exactly what the timer would. It writes facts and never restarts a unit.
   Thresholds are `MONITOR_*` keys **with defaults in the script**, so an env
   file written before a check existed still monitors. The file itself is
   `deploy/examples/monitoring/monitor.env.example` **copied verbatim** by
@@ -45,8 +54,10 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   backup age, certificate expiry, `NRestarts` deltas, NIC errors/drops, the
   hottest sensor, a stale metrics textfile, the exporter that serves it, the
   backup/drill/dump/metrics and registrations **schedules**, journald's persistence, podman's event backend,
-  the syslog socket, the signup watcher's freshness), the Alertmanager facts the
-  mail path depends on (its config still parses, a receiver is filled in) and the
+  the syslog socket, the signup watcher's freshness), the alert path itself
+  (the store answers, vmalert answers and its rules loaded, Alertmanager answers
+  and its config parses, a receiver is filled in, and nothing failed to deliver
+  since the last sweep), and the
   chain/daemon checks (a
   `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
   peers/channels, monerod's lag, the wallet's lag). It also probes every
@@ -57,9 +68,9 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   publish, never DNS: `--connect-to` deliberately bypasses it.
 
 - **`verify.sh` is the on-demand diagnostic; the monitor is the only periodic
-  decider.** The schedules, the metrics textfile, the log pipeline and
+  producer.** The schedules, the metrics textfile, the log pipeline and
   Alertmanager's config used to be checked in both places, so one fault arrived
-  as two alerts with two hold-downs and two resolutions. `verify.sh` no longer
+  as two alerts with two holds and two recoveries. `verify.sh` no longer
   carries its Backups/Monitoring/Metrics/Alerting/Logs sections; its header says
   which section owns each fact now. The rule that follows: a check belongs in the
   sweep when it is a condition that clears and should page, and in `verify.sh`
@@ -74,50 +85,63 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   comes back out of the journal: that is the only probe covering the whole path,
   and `/var/log/secure` is root-only so the file cannot be the check.
 
-## Alerting is two processes
+## Alerting is three processes
 
-- **Alerting is two processes because they fail differently: the monitor finds
-  faults, Alertmanager decides when to speak.** `scripts/monitor.sh` groups
-  every finding under its `head3` section, pushes one alert per section to
-  `alertmanager` (`POST /api/v2/alerts`, loopback `9093`) and resolves a section
-  explicitly with an `endsAt` in the past when it clears. Alertmanager owns
-  grouping, `repeat_interval`, inhibition, silences and delivery. Five traps
-  found by running it, all load-bearing:
-  (1) **`resolve_timeout` must be far longer than the sweep.** A pushed alert
-  carries no `endsAt`, so Alertmanager resolves it once it has not been updated
-  for `resolve_timeout` — the default 5m is exactly the timer interval, and
-  `0` does not disable it (the API sets `EndsAt = now + resolveTimeout`, so `0`
-  resolves instantly). It is **24h** here, and explicit `endsAt` is what
-  actually ends an alert, which also keeps a dead monitor from mailing
-  "recovered". **A severity change is a label change**, so it is a *different*
-  alert: the monitor resolves the old label set in the same push. Without that
-  the stale critical lives to `resolve_timeout` and its inhibition — `equal:
-  ['instance']` — keeps every warning on the host silent meanwhile.
+- **Alerting is three processes because they fail differently: the producer finds
+  faults, vmalert decides when one has lasted, Alertmanager decides how to
+  speak.** `scripts/monitor.sh` groups every finding under its `head3` section
+  and writes one `stack_monitor_section{service,severity}` series per bad section
+  plus a `stack_monitor_detail_info{service,detail}` line carrying that section's
+  text. The rules in `deploy/monitoring/rules/stack.yml.in` (rendered to
+  `$DATA_DIR/config/monitoring/vmalert/stack.yml`) fire one alert per section
+  after `for: MONITOR_ALERT_FOR`, and pull the detail into the annotation with
+  vmalert's `query` template function. Alertmanager owns grouping,
+  `repeat_interval`, inhibition, silences and delivery, and a recovery is
+  vmalert's transition to inactive -- there is no `endsAt` for the producer to
+  send and no producer state to keep. Five traps, all load-bearing:
+  (1) **`resolve_timeout` is neither the paging delay nor a resolution
+  override.** vmalert ends a normal alert itself, by sending an update whose
+  endsAt is the moment the rule went inactive, so a real recovery does not wait
+  for this. It applies only to an alert nothing updates any more (the signup
+  watcher's alerts carry their own endsAt, so they bypass it too); it is **24h**
+  here. The evaluator's own
+  end-stamp is shorter: vmalert refreshes `endsAt` to now + 4x the group interval
+  (two minutes at 30s), so a **dead vmalert** has Alertmanager mail "recovered"
+  about two minutes later -- a false recovery for a fault that never cleared.
+  That is the behaviour of every Prometheus-style notifier, and no Alertmanager
+  setting can tell it from a real one, which is why the external heartbeat is
+  mandatory here: it is the only thing that reports the evaluator itself dying.
+  When vmalert returns, the rule re-fires after a fresh `for:`, so the fault is
+  re-announced. **A severity change is a different alertname**, so the old rule
+  goes inactive and the new one starts its own `for:`; because the selector
+  itself changed, there is no stale critical left to inhibit the warnings.
   (2) **`email_configs` defaults `send_resolved: false`**, so recoveries are
   silent unless it is set. The seeded example sets it.
-  (3) **The flap damper cannot live in Alertmanager.** It only sees what is
-  pushed at it, so it cannot tell a check that fails every other sweep from one
-  that has been down for an hour. The producer holds that state
-  (`$DATA_DIR/audit/alerts.state`: name, service, severity, first seen, last
-  pushed) and pushes nothing until `MONITOR_ALERT_FOR` (600s) has passed. The
-  `alerting` section bypasses it, because a broken alert path is never a flap.
+  (3) **The alert's identity is (alertname, service), and the text is not a
+  label.** Putting the section's message in a label would make "disk 9% free" and
+  "disk 8% free" two alerts, and every sweep a state change; it lives in
+  `stack_monitor_detail_info` and is fetched at notification time instead. The
+  same split is why `for:` replaced the producer-side hold-down: Alertmanager
+  only sees what is pushed at it, but vmalert evaluates the query, so it can tell
+  a check that fails every other sweep from one that has been down an hour. A
+  `for:` in flight resets on a vmalert restart (there is no `-remoteRead.url`),
+  which is a page late by at most one hold-down, never lost.
   (4) **A delivery failure cannot report itself.** `alertmanager_notifications_failed_total`
   is read back on the next sweep and turned into a failure; the heartbeat is
-  pushed *after* the alert push and fails when the push failed, so "all checks
-  pass but you cannot be told" is a page rather than a silent host. A sweep
-  that cannot read `/metrics` leaves the stored counter untouched, so the
+  pushed *after* the facts are written and fails when they could not be, so "all
+  checks pass but you cannot be told" is a page rather than a silent host. A
+  sweep that cannot read `/metrics` leaves the stored counter untouched, so the
   outage is not later misread as a burst of delivery failures.
   (5) **The alert path is the host's own `curl` (and `jq`), not
-  `net_curl`.** Alertmanager is a `127.0.0.1` bind and the heartbeat an
-  outbound POST, so making them from a container would put the host's only
+  `net_curl`.** Alertmanager and vmalert are `127.0.0.1` binds and the heartbeat
+  an outbound POST, so making them from a container would put the host's only
   paging path behind the thing that is most likely to be broken — which is
   exactly what an unmounted host `curl` was: the package was only in the
   bundle that runs when podman is *missing*, so a host provisioned earlier
   could pass every check and deliver nothing. `bootstrap.sh` now checks `curl`
   and `openssl` individually, `verify.sh`'s "Host tools" section names a gap,
-  and `scripts/monitor.sh` refuses to run without `curl`/`jq` (one journal
-  line, `alerts.state` untouched) rather than burn the sweep into a
-  half-written flap-damper state.
+  and `scripts/monitor.sh` refuses to run without `curl`/`jq` (one journal line,
+  no facts written) rather than report a half-sweep as a clean one.
   Two smaller things: a **config with no receiver integrations is valid** (that
   is what makes a fresh host safe before SMTP is filled in; the "inert" warning
   follows the default route's receiver, so filling in only a signups sub-route
@@ -144,8 +168,8 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   `app/auth/services/registration.py`) carries neither username nor email, and an
   OAuth signup (`app/auth/services/oauth.py`) writes no such line at all. It is
   not folded into `monitor.sh` because every monitor section is a condition that
-  clears: the flap damper would hold a signup for `MONITOR_ALERT_FOR` and the
-  explicit resolution would mail a second time.
+  clears: the rules' `for:` would hold a signup for `MONITOR_ALERT_FOR` and the
+  transition back to inactive would mail a second time.
 - **Each signup is pushed once, with its own label and its own group.** The
   alert is `alertname=boltmesh_signup`, `severity=info`, plus `signup=<uuid>`;
   without that per-signup label Alertmanager sees one label set and folds a
@@ -180,9 +204,14 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
 - **Metrics are history, not alerting, and the two must not be coupled:**
   `victoriametrics` (loopback `8428`, 30d via `METRICS_RETENTION`) +
   `node-exporter` + `scripts/metrics.sh` on `metrics.timer` every minute.
-  `monitor.sh` never queries the store — that is what keeps a wedged or deleted
-  VM from silencing an alert — and `vmui` gets **no** NPM host (it has no auth
-  of its own), so nothing is added to `FIREWALL_PORTS`. node-exporter runs on
+  `monitor.sh` never queries the store — the *producer* must be able to speak
+  while the pipeline is wedged, which is also why it reads the daemons and the
+  host directly. The rules do query it (`for:` is an evaluation against the
+  datasource), so the paging path does depend on the store; the sweep's
+  `alerting` section and the external heartbeat are what cover that, and it is
+  the one accepted regression of moving the hold-down out of the producer.
+  Neither `vmui` nor `vmalert` gets an NPM host (neither has auth of its own), so
+  nothing is added to `FIREWALL_PORTS`. node-exporter runs on
   the **host network** bound to the wildcard: a containered exporter's netdev
   and netstat collectors only ever saw its own `eth0`/`lo`, and pasta delivers a
   container's `host.containers.internal` dial into the host netns but not onto
@@ -193,7 +222,11 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   checks both halves: `stack.prom`'s mtime (the writer) and whether
   node-exporter actually serves a `stack_*` series (the reader).
   `$DATA_DIR/monitoring` is regenerable and outside the backup set, and
-  `monitor.prom` carries the sweep's own numbers. The series and the
+  `monitor.prom` carries the sweep's own numbers. One series there is
+  deliberately high-churn: `stack_monitor_detail_info`'s label is the section's
+  free text, so each distinct message is a short-lived series. It exists so the
+  mail can carry the findings, it is bounded by the number of sections (not by
+  traffic), and nothing queries or graphs it. The series and the
   observe/decide split are documented in `scripts/metrics.sh`.
   `victoriametrics-mcp` is the authenticated front door (`/metrics` on the
   MCP host), for the same reason as the log store: the store's own API has
@@ -206,7 +239,7 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
   same network -- the unit publishes only to loopback) with the verify,
   chain and job series, and reports `ok`/`warning`/`critical`/`unknown`
   plus the alerts themselves. It is a convenience for an agent, not a second
-  alerting path: severity still comes from the monitor, and a dead store or
+  alerting path: severity still comes from the rules, and a dead store or
   Alertmanager is named in the answer rather than turned into a green one.
   A series with no sample is `null`, never `0` -- a collector skips an
   unreachable daemon.
@@ -230,10 +263,10 @@ produced by `scripts/registrations.sh` (see "Events are not faults").
 
 ## The one store query
 
-- **The monitor queries a store exactly once, and only to prove the log
+- **The producer queries a store exactly once, and only to prove the log
   pipeline is alive.** `scripts/logs.sh --health` (newest entry within
-  `MONITOR_LOGS_MAX_AGE_S`, default 900) is the one exception to "alerting never
-  queries the pipeline": the failure it catches is the pipeline's own silent
+  `MONITOR_LOGS_MAX_AGE_S`, default 900) is the one exception to "the producer
+  never queries a store": the failure it catches is the pipeline's own silent
   death, and a failure there can only *add* an alert. The same call also proves
   the nginx-proxy-manager **file** source is being read (the access log's mtime
   against the store's newest `npm_access` entry, because a quiet site and a dead

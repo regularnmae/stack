@@ -6,11 +6,14 @@
 # does not arrive:
 #
 #   scripts/monitor.sh   decides WHAT is wrong (it reads the daemons and the
-#                        host directly) and holds an alert for MONITOR_ALERT_FOR
-#                        seconds so a flapping check does not mail anything.
-#                        It pushes the alert set every five minutes.
-#   this file            decides WHEN a still-firing alert is repeated, how
-#                        alerts are grouped into one mail, what inhibits what,
+#                        host directly) and writes it as metrics; it holds no
+#                        alert state at all.
+#   vmalert              decides WHEN a fault has lasted long enough: the rules
+#                        in $DATA_DIR/config/monitoring/vmalert/stack.yml carry
+#                        `for: MONITOR_ALERT_FOR`, and a transition back to
+#                        inactive is the recovery it reports to Alertmanager.
+#   this file            decides how alerts are grouped into one mail, what
+#                        inhibits what, how often a still-firing alert repeats,
 #                        and where it is delivered.
 #
 # Alertmanager does NOT watch this file (v0.34 has no config file watcher; there
@@ -30,10 +33,12 @@
 #   scripts/monitor.sh --test      # one warning mail now, one resolved in ~2 min
 
 global:
-  # Explicit resolution (monitor.sh sends an endsAt in the past when a check
-  # clears) is how an alert ends. This timeout only applies to alerts that never
-  # carry an endsAt, i.e. the ones monitor.sh stopped refreshing because the
-  # monitor itself died: 24h keeps that from faking a recovery between sweeps.
+  # vmalert reports a recovery as soon as its rule goes inactive, so an alert
+  # that clears does not wait for this. The timeout only applies to an alert
+  # nothing updates any more, and even then it is a backstop: vmalert stamps its
+  # own endsAt on a firing alert (4x the group interval), so a dead vmalert is
+  # resolved long before 24h -- and that false "recovered" is exactly what the
+  # heartbeat exists for (docs/alerting.md).
   resolve_timeout: 24h
 
   # --- SMTP -----------------------------------------------------------------
@@ -74,12 +79,13 @@ route:
   #       matchers: [ severity = "critical" ]
   receiver: stack-email
   # Group by severity, not by alertname: one mail listing every critical check
-  # beats fifteen mails. monitor.sh already aggregates per check section, so
-  # each alert's description is a bullet list.
+  # beats fifteen mails. vmalert emits one alert per check section (the `service`
+  # label) with every finding for that section in its description, so a group is
+  # still "everything wrong, by severity".
   group_by: ['severity']
   # An alert that resolves inside group_wait is never mailed at all. This is a
-  # second, smaller flap damper behind monitor.sh's hold-down; it only has to
-  # absorb a resolution already in flight.
+  # smaller flap damper behind the rules' `for:`; it only has to absorb a
+  # resolution already in flight.
   group_wait: 30s
   group_interval: 5m
   # A still-firing alert is repeated this often -- the "you missed the first
@@ -130,8 +136,9 @@ receivers:
 
 # Inhibition: one real fault usually produces several warnings -- a full disk
 # makes every chain look stale, a dead node makes every MCP check look slow. A
-# critical on the same instance mutes the warnings. `instance` is the label
-# monitor.sh sets to this host's short hostname.
+# critical on the same instance mutes the warnings. `instance` comes from the
+# node scrape the facts arrive through (all of the sweep's series share it), so
+# the rule holds whatever that scrape is relabelled to.
 inhibit_rules:
   - name: critical-mutes-warnings
     source_matchers:

@@ -1,0 +1,61 @@
+# The rules vmalert evaluates, rendered by install.sh to
+# $DATA_DIR/config/monitoring/vmalert/stack.yml.
+#
+# The split: scripts/monitor.sh reads the daemons and the host and writes the
+# facts (stack_monitor_section, stack_monitor_detail_info, stack_sweep_timestamp)
+# into node-exporter's textfile; these rules decide when a fact has been true
+# long enough to speak; Alertmanager groups, repeats, inhibits and delivers.
+# monitor.sh therefore owns no alert state at all, and a recovery is vmalert's
+# transition to inactive -- not an endsAt the producer has to remember.
+#
+# Three things are load-bearing:
+#   * the alert's identity is (alertname, service): the section is the label, and
+#     the free text is fetched from stack_monitor_detail_info at notification
+#     time. Putting the text in a label instead would make "disk 9% free" and
+#     "disk 8% free" two different alerts, and every sweep would look like a
+#     state change.
+#   * the detail IS a label on a one-sample info series, so each distinct text is
+#     a short-lived series. That is the price of putting the findings in the
+#     mail: bounded by the number of sections, not by traffic, and nothing
+#     queries or graphs it.
+#   * `for:` is the flap damper. It is evaluated against the datasource, so a
+#     wedged VictoriaMetrics stops it -- the sweep's `alerting` section and the
+#     external heartbeat are what cover that hole (docs/alerting.md).
+groups:
+  - name: stack
+    # The scrape is 30s and the sweep rewrites its file every five minutes, so a
+    # shorter interval only re-reads the same sample.
+    interval: 30s
+    rules:
+      - alert: stack_critical
+        expr: stack_monitor_section{severity="critical"} > 0
+        # monitor.sh's hold-down, rendered from MONITOR_ALERT_FOR. Two sweeps is
+        # the default: anything shorter is the flapping this exists to stop.
+        for: @MONITOR_ALERT_FOR@s
+        labels:
+          severity: critical
+        annotations:
+          summary: 'stack: {{ $labels.service }} is critical'
+          description: '{{ with query (printf "stack_monitor_detail_info{service=%q}" $labels.service) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
+
+      - alert: stack_warning
+        expr: stack_monitor_section{severity="warning"} > 0
+        for: @MONITOR_ALERT_FOR@s
+        labels:
+          severity: warning
+        annotations:
+          summary: 'stack: {{ $labels.service }} is warning'
+          description: '{{ with query (printf "stack_monitor_detail_info{service=%q}" $labels.service) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
+
+      # The producer's own liveness. A stopped monitor writes nothing, so its
+      # last sample lives on in the store and `time() - value` keeps growing --
+      # which is the only thing that notices a sweep that never ran on a host
+      # where everything else still answers.
+      - alert: stack_monitor_stale
+        expr: (time() - stack_sweep_timestamp) > @MONITOR_SWEEP_MAX_AGE_S@
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'stack: the health sweep has stopped'
+          description: 'stack_sweep_timestamp is {{ $value | humanizeDuration }} old (threshold @MONITOR_SWEEP_MAX_AGE_S@s); the sweep is not deciding anything, so only this rule and the external heartbeat can page.'

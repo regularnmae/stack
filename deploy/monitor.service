@@ -5,14 +5,15 @@
 # install.sh renders it into ~/.config/systemd/user/, and it has no [Install]
 # because the timer activates it.
 #
-# It changes nothing: it starts no unit and rewrites no config. A failure
-# pushes its alert set to Alertmanager and fails the dead-man's-switch
-# heartbeat.
+# It changes nothing: it starts no unit and rewrites no config. A failure is
+# written as metrics for vmalert's rules to act on, and fails the
+# dead-man's-switch heartbeat.
 [Unit]
 Description=Stack health monitor and spend tripwire
-# The heartbeat and the alert push are outbound (the latter to alertmanager on
-# npm-network's loopback publish), so wait for the network.
-After=network-online.target alertmanager.service
+# The heartbeat is an outbound POST, and the alert path is probed on loopback
+# (store, vmalert, Alertmanager), so wait for the network. Nothing here pushes
+# alerts: the sweep writes facts and vmalert decides.
+After=network-online.target alertmanager.service victoriametrics.service vmalert.service
 Wants=network-online.target
 
 [Service]

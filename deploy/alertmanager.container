@@ -1,20 +1,21 @@
 # Quadlet unit for Alertmanager, the stack's alert state machine.
 #
-# It owns what monitor.sh deliberately does not: grouping, repeat intervals,
-# inhibition, silences, routing, and a delivery path that reports its own
-# failures. monitor.sh still decides WHAT is wrong; Alertmanager decides WHEN
-# to say it and over which channel.
+# It owns what neither producer does: grouping, repeat intervals, inhibition,
+# silences, routing, and a delivery path that reports its own failures. vmalert
+# decides WHEN a fault has lasted long enough; Alertmanager decides how to say
+# it and over which channel.
 #
-# Push-only, nothing is scraped: monitor.sh POSTs the current alert set to
-# /api/v2/alerts every five minutes and resolves an alert EXPLICITLY (an endsAt
-# in the past) when its check goes away. That is why the config's
-# resolve_timeout is 24h -- anything near the push interval would declare a
-# healthy alert resolved between two sweeps and mail "recovered" for something
-# that never recovered. 24h only bounds the damage if monitor.sh stops pushing
-# altogether.
+# Push-only, nothing is scraped: vmalert POSTs the rules' alerts to
+# /api/v2/alerts -- including a resolution when a rule goes inactive -- and the
+# signup watcher pushes its own. That is why the config's resolve_timeout is
+# 24h: an alert nothing refreshes any more (a dead vmalert, a store that stopped
+# answering) must not be declared recovered between evaluations and mailed as
+# such, and 24h is long enough that only that case reaches it.
 #
-# Nothing here reads the metrics store, so a wedged or deleted VictoriaMetrics
-# cannot silence an alert.
+# Nothing here reads the metrics store, so a store that is down cannot stop a
+# delivery. It can stop every rule from being evaluated, which is why the
+# sweep's `alerting` section checks the store, vmalert and this process and
+# fails the external heartbeat (docs/alerting.md).
 #
 # Not behind nginx-proxy-manager: the UI and the API have no authentication of
 # their own, so this is loopback only, like vmui, and absent from
@@ -30,8 +31,8 @@ ContainerName=alertmanager
 Image=docker.io/prom/alertmanager:v0.34.2
 Network=npm-network.network
 
-# Loopback only: the API accepts alert pushes from a host script and has no
-# authentication. Same rule as victoriametrics.
+# Loopback only: the API accepts alert pushes from vmalert and the signup
+# watcher and has no authentication. Same rule as victoriametrics.
 PublishPort=127.0.0.1:9093:9093
 
 # The image's default user is uid 65534 (nobody), which cannot read the 0600

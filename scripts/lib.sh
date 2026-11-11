@@ -483,6 +483,13 @@ unit_digest() {
     if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
         sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 " vector.unit" }'
     fi
+    # The vmalert rules are read only at start too, and they carry
+    # MONITOR_ALERT_FOR: editing the hold-down in monitor.env has to reach a
+    # running vmalert, or the file says one thing and the process does another.
+    if [ -s "$DATA_DIR/config/monitoring/vmalert/stack.yml" ]; then
+        sha256sum -- "$DATA_DIR/config/monitoring/vmalert/stack.yml" \
+            | awk '{ print $1 " vmalert.unit" }'
+    fi
 }
 
 # Map a running container name to the systemd unit that owns it. Usually the same
@@ -644,6 +651,14 @@ kuma_image() {
 #   printf 'stack_x 1\n' | prom_write "$DATA_DIR/monitoring/textfile/stack.prom"
 prom_write() {
     write_atomic "$1" 644 755
+}
+
+# A label value for that textfile. A daemon message carries quotes, backslashes
+# and newlines, and node-exporter rejects the WHOLE textfile over one malformed
+# line -- so the detail is escaped here rather than at each writer, and a
+# newline becomes a separator (the format has no escape for a literal newline).
+prom_label_value() { # text -> escaped for label="..."
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\r\t' '   '
 }
 
 # The one writer for an env file carrying a secret (or a credential-bearing URL):

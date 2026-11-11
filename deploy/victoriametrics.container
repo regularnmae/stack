@@ -1,8 +1,9 @@
 # Quadlet unit for VictoriaMetrics, the stack's metrics store: the history
 # behind vmui and the /api/v1 query API -- how fast a chain synced, when a
-# service went unhealthy, what the disk did at 03:00. It feeds nothing in the
-# alerting path: monitor.sh reads the daemons directly, so a VM that is down
-# cannot silence an alert and a broken scrape cannot page anyone at 4am.
+# service went unhealthy, what the disk did at 03:00. vmalert evaluates the
+# alert rules against it, so a store that is down stops paging as well as
+# graphing; the sweep's `alerting` section checks this endpoint every run and
+# fails the external heartbeat when it does not answer (docs/alerting.md).
 #
 # Single node, one process, Prometheus-compatible: it scrapes node-exporter and
 # itself (deploy/monitoring/scrape.yml), and everything else arrives through

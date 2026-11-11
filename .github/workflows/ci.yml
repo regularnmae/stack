@@ -131,16 +131,18 @@ jobs:
           printf '%d env templates, all referenced, none carry a secret\n' "${#files[@]}"
       # deploy/install.sh seeds monitor.env from the example, so the file a fresh
       # host gets and the documentation cannot drift. This catches the other
-      # direction: a key scripts/monitor.sh starts reading that the example never
+      # direction: a key the stack starts reading that the example never
       # documents (five of them were in that state), which leaves a fresh host
       # unable to discover or tune it from the file its own installer wrote.
-      # The read side is monitor_var (scripts/monitor.sh), which is also what
-      # makes this grep complete: the key is now the call's argument, not the
-      # tail of an expansion that a hand-written variant could imitate.
-      - name: monitor.env documents every key the sweep reads
+      # The read sides are monitor_var (scripts/monitor.sh, read at sweep time)
+      # and resolve_monitor_timing (deploy/install.sh, rendered into the vmalert
+      # rules) -- the two functions that make this grep complete, because the key
+      # is the call's argument and not the tail of an expansion.
+      - name: monitor.env documents every key the stack reads
         run: |
-          read_keys=$(grep -oE 'monitor_var MONITOR_[A-Z_]+' scripts/monitor.sh \
-            | awk '{print $2}' | sort -u)
+          read_keys=$( { grep -oE 'monitor_var MONITOR_[A-Z_]+' scripts/monitor.sh
+                         grep -oE 'resolve_monitor_timing MONITOR_[A-Z_]+' deploy/install.sh
+                       } | awk '{print $2}' | sort -u )
           declared=$(grep -oE '^MONITOR_[A-Z_]+=' deploy/examples/monitoring/monitor.env.example \
             | tr -d '=' | sort -u)
           missing=$(comm -23 <(printf '%s\n' "$read_keys") <(printf '%s\n' "$declared"))
@@ -149,6 +151,17 @@ jobs:
             exit 1
           fi
           printf 'all %s monitor.env keys documented\n' "$(printf '%s\n' "$read_keys" | wc -l)"
+      # The sweep turns a finding into a stack_monitor_section series and stops
+      # there; the rules are the only thing that makes it a page. A rule missing
+      # for one of the two severities is a whole class of checks going silent,
+      # and nothing on the host would ever say so.
+      - name: the vmalert rules cover every severity the sweep emits
+        run: |
+          for s in critical warning; do
+            grep -q "severity=\"$s\"" deploy/monitoring/rules/stack.yml.in \
+              || { echo "::error::deploy/monitoring/rules/stack.yml.in has no rule for severity $s"; exit 1; }
+          done
+          printf 'the vmalert rules cover every severity the sweep emits\n'
       # The applied-unit baseline (scripts/lib.sh) is what makes a hand render
       # visible drift instead of a swallowed restart signal. The helpers are pure
       # file work, so the contract is testable without podman or a host: a

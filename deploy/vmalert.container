@@ -1,0 +1,58 @@
+# Quadlet unit for vmalert, the rule evaluator between the sweep and
+# Alertmanager: scripts/monitor.sh writes the facts (stack_monitor_section and
+# friends) into node-exporter's textfile, VictoriaMetrics stores and serves them,
+# and this process decides when one has been true long enough to page. The rules
+# it loads are deploy/monitoring/rules/stack.yml.in, rendered by install.sh --
+# thresholds are not tunable here, they come from monitor.env.
+#
+# It is on the same network as both ends and publishes nothing public: :8880 is
+# loopback only, for the sweep's health probe and reading /api/v1/alerts by hand
+# (`ssh -L 8880:127.0.0.1:8880`), the same reasoning as vmui. Nothing is opened
+# in the firewall.
+[Unit]
+Description=vmalert (alert rules for the stack's metrics)
+After=network-online.target npm-network-network.service victoriametrics.service alertmanager.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=vmalert
+Image=docker.io/victoriametrics/vmalert:v1.155.0
+Network=npm-network.network
+
+PublishPort=127.0.0.1:8880:8880
+
+# The rendered rules. A DIRECTORY mount, not a single file, for scrape.yml's
+# reason: a single-file bind keeps the inode it opened, and the atomic rewrite
+# install.sh makes would never reach a running process.
+Volume=@CONFIG_DIR@/monitoring/vmalert:/etc/vmalert:ro,z
+
+# One Exec= line. No -remoteWrite.url: recording rules are not used, and without
+# it vmalert keeps no state of its own -- which is also why a restart resets
+# every `for:` (a page can be late by one hold-down, never lost). No
+# -external.label: the series arrive through the node scrape, so every alert
+# already carries that instance, which is what Alertmanager's inhibition keys on.
+#
+# A firing alert is stamped endsAt = now + 4x the group interval (2 minutes here)
+# and refreshed on every evaluation, so if this process dies Alertmanager mails
+# "recovered" about two minutes later -- a false recovery for a fault that never
+# cleared. No flag widens that window (maxResolveDuration only shortens it), which
+# is why the dead-man's switch is not optional for this design: it is the only
+# thing that reports a dead evaluator (docs/alerting.md).
+Exec=-rule=/etc/vmalert/stack.yml -datasource.url=http://victoriametrics:8428 -notifier.url=http://alertmanager:9093 -evaluationInterval=30s -httpListenAddr=:8880
+
+# The image ships wget (verified on this tag); /-/healthy is vmalert's own
+# liveness endpoint. The rules are parsed at start, so a unit that is healthy has
+# accepted the rendered file -- a bad rule is a crash loop, not a silent one.
+HealthCmd=wget -q -T 4 -t 1 -O /dev/null http://127.0.0.1:8880/-/healthy
+HealthInterval=30s
+HealthTimeout=10s
+HealthStartPeriod=30s
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

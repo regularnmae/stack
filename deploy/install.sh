@@ -424,6 +424,21 @@ SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 TOR_DIR="$DATA_DIR/tor"
 
+# The two alert-rule timings, resolved the way monitor.sh resolves its own keys:
+# process environment, then the installed monitor.env, then the default. They are
+# rendered into the vmalert rules rather than read at runtime -- vmalert parses
+# its rules at start, so monitor.env is a deploy-time input for these two.
+resolve_monitor_timing() { # NAME default
+    local v="${!1:-}"
+    [ -n "$v" ] || v=$(env_value "$CONFIG_DIR/monitoring/monitor.env" "$1")
+    case "$v" in
+        ''|*[!0-9]*) v="$2" ;;
+    esac
+    printf '%s' "$v"
+}
+MONITOR_ALERT_FOR=$(resolve_monitor_timing MONITOR_ALERT_FOR 600)
+MONITOR_SWEEP_MAX_AGE_S=$(resolve_monitor_timing MONITOR_SWEEP_MAX_AGE_S 900)
+
 # write_secret is lib.sh's write_env_file (atomic, 0600); configure.sh writes the
 # BTCPay env files with the same one, so both halves agree on the mode.
 
@@ -579,6 +594,8 @@ render_to() { # src out
         -e "s|@CROWDSEC_BOUNCER_KEY@|$(esc "${CROWDSEC_BOUNCER_KEY:-}")|g" \
         -e "s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
+        -e "s|@MONITOR_ALERT_FOR@|$(esc "$MONITOR_ALERT_FOR")|g" \
+        -e "s|@MONITOR_SWEEP_MAX_AGE_S@|$(esc "$MONITOR_SWEEP_MAX_AGE_S")|g" \
         -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
         -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \
         -e "s|@MONERO_MCP_TOKEN@|$(esc "${MONERO_MCP_TOKEN:-}")|g" \
@@ -887,9 +904,20 @@ mkdir -p "$CONFIG_DIR/monitoring/vm"
 ( umask 077; cat "$DEPLOY_DIR/monitoring/scrape.yml" > "$CONFIG_DIR/monitoring/vm/scrape.yml" )
 log "wrote $CONFIG_DIR/monitoring/vm/scrape.yml"
 
-# Alertmanager: the alert state machine monitor.sh pushes into. The state dir
-# (silences, notification log) is regenerable -- losing a silence un-mutes an
-# alert for one repeat interval -- so it lives outside BACKUP_PATHS.
+# The vmalert rules: structural config, rendered on every run like scrape.yml,
+# because the hold-down is a threshold monitor.env carries. unit_digest hashes
+# this file, so a changed rule or a new MONITOR_ALERT_FOR restarts vmalert instead
+# of leaving the process on the file it started with. The unit mounts the
+# DIRECTORY (a single-file bind keeps the inode it opened).
+mkdir -p "$CONFIG_DIR/monitoring/vmalert"
+write_rendered_if_changed "$CONFIG_DIR/monitoring/vmalert/stack.yml" \
+    "$DEPLOY_DIR/monitoring/rules/stack.yml.in"
+log "wrote $CONFIG_DIR/monitoring/vmalert/stack.yml"
+
+# Alertmanager: the alert state machine vmalert and the signup watcher push
+# into. The state dir (silences, notification log) is regenerable -- losing a
+# silence un-mutes an alert for one repeat interval -- so it lives outside
+# BACKUP_PATHS.
 mkdir -p "$DATA_DIR/monitoring/alertmanager" "$CONFIG_DIR/monitoring/alertmanager"
 
 # The config is seeded ONCE and then belongs to the operator: it carries the SMTP
@@ -1549,11 +1577,13 @@ Spending is OFF on both money servers until you set ENABLE_SPENDING=1 under
 BoltMesh is wired to BTCPay; fill in the OAuth / SMTP / GitHub values in
   $CONFIG_DIR/boltmesh/app.env before first use, and put the XMR address / view
   key / restore height in $CONFIG_DIR/btcpay/xmr-wallet.env to enable XMR-CHAIN.
-The monitor runs every 5 minutes (monitor.timer) and pushes its alert set to
-  Alertmanager (loopback :9093). Mail needs SMTP in
+The monitor runs every 5 minutes (monitor.timer) and writes its findings as
+  metrics; vmalert (rules in $CONFIG_DIR/monitoring/vmalert/stack.yml) decides
+  when one has held long enough and hands it to Alertmanager (loopback :9093).
+  Mail needs SMTP in
   $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, and the dead-man's
   switch (MONITOR_PING_URL) is set in $CONFIG_DIR/monitoring/monitor.env.
-  Prove the path with scripts/monitor.sh --test.
+  Prove the delivery path with scripts/monitor.sh --test.
 BoltMesh signups are mailed one per registration (registrations.timer, every
   minute): scripts/registrations.sh --dry-run shows what would be sent and
   --test proves the severity=info route. The existing accounts are seeded as

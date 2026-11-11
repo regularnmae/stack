@@ -35,6 +35,7 @@ deployment problem.
 | `netcheck`, `netcheck-host` | `localhost/netcheck:local` (built from `netcheck/Containerfile`) | — | — |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
 | `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
+| `vmalert` | `docker.io/victoriametrics/vmalert:v1.155.0` | `127.0.0.1:8880` | — (rules in `$DATA_DIR/config/monitoring/vmalert`) |
 | `alertmanager` | `docker.io/prom/alertmanager:v0.34.2` | `127.0.0.1:9093` | `$DATA_DIR/monitoring/alertmanager` (silences, notification log) |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network, `:9100` (wildcard bind; LAN closed by firewall) | — (serves `$DATA_DIR/monitoring/textfile`) |
 | `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.53.0` | `127.0.0.1:9428` | `$DATA_DIR/logs/vl` |
@@ -108,10 +109,10 @@ the services by container name on `npm-network`, through `net_curl` in
 `scripts/lib.sh`, which execs into the long-lived **`netcheck`** container
 (`netcheck/Containerfile`); `net_curl_host` uses **`netcheck-host`**, the same
 image on the host network, for NPM's own admin API on `127.0.0.1:81`. One path
-is deliberately the exception: the monitor's alerts go to Alertmanager on
-`127.0.0.1:9093` and its dead-man's-switch heartbeat out to the internet with
-the **host's own curl** (`bootstrap.sh` installs it), because a container
-cannot be what reports a broken container runtime. The proxy
+is deliberately the exception: the alert path reaches Alertmanager on
+`127.0.0.1:9093` (and vmalert on `:8880`), and its dead-man's-switch heartbeat
+goes out to the internet with the **host's own curl** (`bootstrap.sh` installs
+it), because a container cannot be what reports a broken container runtime. The proxy
 hosts are declared in `deploy/services.toml`
 and reconciled from this repo by `scripts/npm-hosts.sh` — see
 [Proxy hosts](#proxy-hosts). The hosts
@@ -904,18 +905,30 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
 - `scripts/spend-audit.sh` — the tripwire (below).
 
 The monitor reads the daemons and the host **directly**; it never queries the
-metrics store, so the pipeline can be down without silencing an alert. The
-healthcheck contract it relies on — and why a probe must not touch the data path —
-is `docs/units.md`, "Healthchecks follow a contract"; the alert path's design is
+metrics store, so a wedged pipeline cannot silence a check. The healthcheck
+contract it relies on — and why a probe must not touch the data path — is
+`docs/units.md`, "Healthchecks follow a contract"; the alert path's design is
 `docs/alerting.md`.
 
-**The monitor decides *what* is wrong; Alertmanager decides *when* to say it.**
-`deploy/alertmanager.container` (`prom/alertmanager`, loopback `:9093`, no public
-host: `ssh -L 9093:127.0.0.1:9093`) owns grouping, repeat intervals, inhibition,
-silences and delivery, and reports failed deliveries back to the next sweep. What
-stays in `monitor.sh` is the one thing it cannot do — the **flap damper**, because
-it only sees what is pushed at it: an alert is held until
-`MONITOR_ALERT_FOR` (600s, two sweeps), and a recovery is pushed explicitly.
+**The monitor decides *what* is wrong, the rules decide *when*, Alertmanager
+decides *how* to speak.** `scripts/monitor.sh` writes one `stack_monitor_section`
+series per failing section (plus its text) into the textfile; `vmalert`
+(`victoriametrics/vmalert`, loopback `:8880`, rules rendered by `install.sh` from
+`deploy/monitoring/rules/stack.yml.in`) fires one alert per section once
+`MONITOR_ALERT_FOR` (600s, two sweeps) has passed — the **flap damper** is the
+rule's `for:`, not state the script keeps — and reports the recovery itself when
+the rule goes inactive. `deploy/alertmanager.container` (`prom/alertmanager`,
+loopback `:9093`, no public host: `ssh -L 9093:127.0.0.1:9093`) owns grouping,
+repeat intervals, inhibition, silences and delivery, and reports failed
+deliveries back to the next sweep.
+
+That puts the store on the paging path: `for:` is evaluated against
+VictoriaMetrics, so a wedged store means no rule fires. The sweep's `alerting`
+section checks the store, `vmalert` and Alertmanager every run and fails the
+heartbeat if any of them is down — which is why the heartbeat, not the rules, is
+the one channel that survives this. It has to be: a dead `vmalert` also mails a
+false "recovered" about two minutes later, so the heartbeat is the only thing
+that can say the evaluator itself died.
 
 **Mail is off until you fill in
 `$DATA_DIR/config/monitoring/alertmanager/alertmanager.yml`** (mode 600, seeded
@@ -929,18 +942,23 @@ spam for want of SPF, DKIM and a matching PTR.
 `$DATA_DIR/config/monitoring/monitor.env` (mode 600) holds the two things only you
 can set:
 
-- `MONITOR_ALERTMANAGER_URL` — default `http://127.0.0.1:9093`; `off` keeps alerts
-  in the journal only.
+- `MONITOR_ALERTMANAGER_URL` — default `http://127.0.0.1:9093`; `off` stops the sweep
+  writing alert facts, so no rule can fire and only the heartbeat can page.
 - `MONITOR_PING_URL` — a dead-man's-switch heartbeat (a healthchecks.io ping URL):
   `curl` on success, `<url>/fail` with the failure list. This is the only thing
   that notices when the **whole host** is down, which is why it is not an email —
-  and it also fails when the alert push fails, so a broken mail path is never
+  and it is also the only thing that says the evaluator died, because a dead
+  vmalert mails a false "recovered" within minutes and then nothing more. It
+  fails when the facts cannot be written or the alert path (store, `vmalert`,
+  Alertmanager, its deliveries) is broken, so a broken mail path is never
   silent. Set the check's period to the timer interval.
 
 The thresholds are the same file (`MONITOR_DISK_FREE_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
 `MONITOR_ALERT_FOR`, …); each falls back to its default in the script, so an env
-file written before a check existed still monitors. With no heartbeat the sweep
-still runs and records to `$DATA_DIR/audit/audit.log`.
+file written before a check existed still monitors. `MONITOR_ALERT_FOR` and
+`MONITOR_SWEEP_MAX_AGE_S` are rendered into the vmalert rules by `install.sh`, so
+changing either needs `./deploy.sh` (it re-renders and restarts `vmalert`). With no
+heartbeat the sweep still runs and records to `$DATA_DIR/audit/audit.log`.
 
 ### Metrics and history
 
@@ -950,9 +968,10 @@ bad it got and whether it is improving*.
 | | |
 | --- | --- |
 | `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION`), `127.0.0.1:8428` |
+| `vmalert` | the rules: one alert per failing sweep section, the `for:` hold-down, and the stale-sweep check (`127.0.0.1:8880`) |
 | `node-exporter` | the host: disk, inodes, I/O saturation, memory, load, NIC, temperatures — plus the **textfile collector**, which is how the stack's own numbers get in |
 | `scripts/metrics.sh` (every minute) | `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, peers and mempool, Fulcrum's Electrum reachability and lag, CLN peers/offline channels, `monerod`'s RPC reachability and lag, the wallet's lag, restart counters, per-container CPU/memory/pids/network |
-| `scripts/monitor.sh` (every five) | `monitor.prom` beside it: backup age and count, verify failures, spend trips, sweep timestamp |
+| `scripts/monitor.sh` (every five) | `monitor.prom` beside it: the failing sections (`stack_monitor_section` + detail), backup age and count, verify failures, spend trips, sweep timestamp |
 
 **Read it over an SSH tunnel, by design:**
 
@@ -1245,7 +1264,7 @@ what pages.
 
 The page's **notifications** stay UI-configured too (kuma embeds Apprise). That is
 the *status page's* channel, not the alerting path: the stack's alerts go monitor →
-Alertmanager → mail, and the two are independent on purpose, so a kuma that dies
+vmalert → Alertmanager → mail, and the two are independent on purpose, so a kuma that dies
 with the host does not take the pager with it.
 
 - **No tokens enter kuma's database.** Every monitor checks the public surface; the

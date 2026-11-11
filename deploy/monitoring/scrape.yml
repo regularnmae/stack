@@ -4,8 +4,9 @@
 # install.sh copies this file to $DATA_DIR/config/monitoring/vm/scrape.yml on
 # every run (the VM unit mounts that directory, and the copy is written in place
 # so the running VM's watcher sees it). It is structural config (which exporters
-# exist), not operator tuning: thresholds and their grace periods live in
-# monitor.env, and the numbers no exporter produces are written as a Prometheus
+# exist), not operator tuning: thresholds live in monitor.env, the two rule
+# timings in it are rendered into the vmalert rules by install.sh, and the
+# numbers no exporter produces are written as a Prometheus
 # textfile by scripts/metrics.sh -- node_exporter serves them from the same
 # endpoint, so they arrive under the `node` job below.
 global:
