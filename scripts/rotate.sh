@@ -389,31 +389,6 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# A rotation is not spend-policy drift, but scripts/spend-audit.sh hashes the
-# files it touches. Rehash exactly those rows: --rebaseline would also accept
-# an unrelated edit, which is the one thing the tripwire exists to notice.
-rehash_audit() { # file...
-    local baseline="$DATA_DIR/audit/spend-baseline.tsv" f h tmp
-    [ -s "$baseline" ] || return 0
-    if [ "$DRY_RUN" = 1 ]; then say "would rehash $* in the spend baseline"; return 0; fi
-    tmp=$(mktemp "${baseline}.XXXXXX")
-    cp "$baseline" "$tmp"
-    for f in "$@"; do
-        [ -f "$f" ] || continue
-        h=$(sha256sum "$f" | awk '{ print $1 }')
-        F="$f" H="$h" awk '
-            BEGIN { FS = OFS = "\t"; f = ENVIRON["F"]; h = ENVIRON["H"]; found = 0 }
-            $1 == f { $2 = h; found = 1 }
-            { print }
-            END { if (!found) print f, h }
-        ' "$tmp" > "$tmp.new"
-        mv -f "$tmp.new" "$tmp"
-    done
-    chmod 600 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$baseline"
-    log "rehashed the rotated file(s) in the spend baseline"
-}
-
 # A nightly backup taken mid-rotation would carry one side of a credential
 # pair. The restore would recover a config that cannot open what it points at,
 # which is worse than waiting. Shared because a target that health-checks
@@ -750,7 +725,6 @@ apply_runes() {
 
     verify_runes
     prune_orphan_runes
-    rehash_audit "$node_env"
     complete
 }
 
@@ -825,8 +799,6 @@ apply_token() {
 
     verify_token "$server" "$envf" "$readvar" "$tool" "$args" "$SPEND_ONLY"
 
-    # token.env of the two money servers is hash-baselined by spend-audit.
-    rehash_audit "$envf"
     complete
 }
 

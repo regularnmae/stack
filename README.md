@@ -205,8 +205,9 @@ reconciler (`scripts/stackctl/`) is stdlib-only, so there is no venv and no
 pip step in a deploy.
 
 On the first run, `deploy.sh` asks **where the stack keeps its data** (default
-`$HOME/data`) and remembers the answer; point it at a separate disk to survive
-an OS reinstall. See [Where the data lives](#where-the-data-lives).
+`$HOME/data`) and records the answer; point it at a separate disk to survive
+an OS reinstall. A script that is not on a terminal only reads that answer and
+stops if it is missing. See [Where the data lives](#where-the-data-lives).
 
 `deploy.sh` is idempotent and never destructive: re-running reuses every
 existing secret, leaves the running daemons alone, and rebuilds the ten MCP
@@ -364,8 +365,10 @@ basic auth is on).
 ## Where the data lives
 
 Everything the stack must not lose sits under **one directory**, `$DATA_DIR`
-(`STACK_DATA_DIR`, default `$HOME/data`). `deploy.sh` asks for it once and
-remembers the answer in `~/.config/stack/data-dir.env`:
+(`STACK_DATA_DIR`, default `$HOME/data`). The first run from a terminal asks for
+it once and records the answer in `~/.config/stack/data-dir.env`; scripts that
+are not on a terminal only read that file and stop if it is missing, rather than
+invent a second data dir:
 
 - `bitcoin/ monero/ fulcrum/ btcpay/ nbxplorer/ cln/ tor/ searxng/` — daemon state
   (`tor/onion/` holds the onion services' keys, `tor/torrc` the config; `fulcrum/`
@@ -805,8 +808,8 @@ Then the things a sweep cannot judge:
 - `scripts/rotate.sh --status` — only the rune pair in
   `lightning-mcp/node.env` is live, and bitcoind's `rpcpassword` matches
   `secrets.env`.
-- `audit/` came back from the snapshot, so if anything happened after it,
-  `scripts/spend-audit.sh --rebaseline` is the deliberate "known-good now" act.
+- `audit/` came back from the snapshot, so if anything happened after it, the
+  spend log and the monitor's alert history say what.
 
 ### Verifying the backups
 
@@ -1018,16 +1021,13 @@ own 7 days cover a restore.
 Spending is **off** (`ENABLE_SPENDING=0`) on both money servers, and the tripwire
 makes that impossible to change or spend silently:
 
-1. **Policy drift.** `scripts/spend-audit.sh` keeps a hash baseline
-   (`$DATA_DIR/audit/spend-baseline.tsv`) of both `spend.env` files, both token
-   files and `lightning-mcp/node.env`. Any edit or removal trips, and
-   `ENABLE_SPENDING` is asserted `0` on every run whatever the baseline says. A
-   trip repeats until you accept it with `./scripts/spend-audit.sh --rebaseline`.
+1. **Policy.** `ENABLE_SPENDING` must read `0` in both `spend.env` files on
+   every run; an edited or missing value trips.
 2. **Activity.** It reads outgoing payments (`lightning listpays`) and transfers
-   (monero-wallet `get_transfers`, outgoing only) through the **read** tokens and
-   diffs them against `$DATA_DIR/audit/outgoing-baseline.txt`. A new entry trips
-   on every run until `--rebaseline` records the current set, and a source that
-   cannot be read leaves the old baseline alone rather than recording half of it.
+   (monero-wallet `get_transfers`, outgoing only) through the **read** tokens.
+   Spending is off, so any entry trips on every run -- there is no baseline to
+   keep or accept. A source that cannot be read is a note, not a trip; the
+   monitor already checks that server.
 
 Trips are appended to `$DATA_DIR/audit/spend.log` and folded into the monitor's
 alert and heartbeat. It is **not** a gate: it cannot stop a spend, only make one

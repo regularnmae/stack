@@ -56,8 +56,7 @@ token on a command line.
   removes the superseded keys, so no crash leaves the repository openable only
   by a password nobody holds (and it refuses without a snapshot inside
   `MONITOR_BACKUP_MAX_AGE_H`, 36h, or while a backup is running — `--force`
-  overrides both); the spend baseline is rehashed per file rather
-  than `--rebaseline`d, and `rotation.log` records the act without the value. A
+  overrides both); `rotation.log` records the act without the value. A
   re-run also skips a restart when the container's own PID 1 already carries the
   value (`container_runs_secret` for argv, `container_env_is` for an
   `EnvironmentFile=`), which is the only restart-avoidance there is: anything a

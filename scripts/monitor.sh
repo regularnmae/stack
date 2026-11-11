@@ -1180,7 +1180,7 @@ while IFS= read -r line; do
 done <<< "$audit_out"
 if [ "$audit_trips" = 0 ]; then
     if [ "${audit_rc:-0}" = 0 ]; then
-        ok "no spend drift, no outgoing spends, ENABLE_SPENDING=0"
+        ok "ENABLE_SPENDING=0 and no outgoing spends"
     else
         fail "spend-audit reported a problem"
     fi

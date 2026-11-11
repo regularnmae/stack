@@ -15,9 +15,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # The secrets live under the configured data dir ($DATA_DIR/config) now, so we
 # resolve that dir the same way deploy.sh/configure.sh/verify.sh do: stack.conf
-# -> data-dir.env -> prompt/default -> $HOME/data. The caller exports
-# STACK_DATA_DIR, so an invoked run never re-prompts. The resolution happens
-# after the TTY check below, so --help and the no-TTY skip stay side-effect free.
+# -> data-dir.env -> prompt. The caller exports STACK_DATA_DIR, so an invoked
+# run never re-prompts. The resolution happens after the TTY check below, so
+# --help and the no-TTY skip stay side-effect free.
 # shellcheck source=../stack.conf
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # shellcheck source=lib.sh

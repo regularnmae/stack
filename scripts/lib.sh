@@ -932,13 +932,13 @@ usage_header() {
 
 # Where the stack keeps everything it must not lose: the daemon data dirs, NPM's
 # data, and config/secrets, so a rebuild only has to preserve one directory.
-# Resolved in this order, then persisted so it is asked once per host:
+# Resolved in this order; only an answer a person gives is persisted, and a
+# non-interactive run with nothing recorded stops instead of guessing:
 #   1. $STACK_DATA_DIR (environment, or stack.conf)
 #   2. the value saved in $STACK_DATA_ENV by an earlier run
-#   3. an interactive prompt, defaulting to $HOME/data
-#   4. $HOME/data
+#   3. an interactive prompt, defaulting to $HOME/data -- this one is saved
 resolve_data_dir() {
-    local default="${HOME}/data" answer=""
+    local default="${HOME}/data" answer="" asked=0
     STACK_DATA_ENV="${STACK_DATA_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/stack/data-dir.env}"
 
     if [ -z "${STACK_DATA_DIR:-}" ] && [ -s "$STACK_DATA_ENV" ]; then
@@ -946,28 +946,37 @@ resolve_data_dir() {
         . "$STACK_DATA_ENV"
     fi
     if [ -z "${STACK_DATA_DIR:-}" ]; then
-        if [ -t 0 ] && [ -t 1 ]; then
-            read -r -p "Data directory for the stack [${default}]: " answer || answer=""
-            STACK_DATA_DIR="${answer:-$default}"
-        else
-            STACK_DATA_DIR="$default"
+        # Only a person at a terminal picks the data dir. A non-interactive run
+        # must never invent one: guessing $HOME/data is how a host ends up with
+        # two data dirs -- the second one empty.
+        if [ ! -t 0 ] || [ ! -t 1 ]; then
+            die "no data directory recorded in $STACK_DATA_ENV; run ./deploy.sh from a terminal once, or set STACK_DATA_DIR"
         fi
+        read -r -p "Data directory for the stack [${default}]: " answer || answer=""
+        STACK_DATA_DIR="${answer:-$default}"
+        asked=1
     fi
 
     STACK_DATA_DIR="${STACK_DATA_DIR%/}"
-    [ -n "$STACK_DATA_DIR" ] || STACK_DATA_DIR="$default"
+    [ -n "$STACK_DATA_DIR" ] || die "STACK_DATA_DIR resolves to an empty path"
     DATA_DIR="$STACK_DATA_DIR"
     CONFIG_DIR="$DATA_DIR/config"
     NPM_DIR="$DATA_DIR/npm"
     export STACK_DATA_DIR DATA_DIR CONFIG_DIR NPM_DIR STACK_DATA_ENV
-    persist_data_dir
+    # Record only the answer a person gave; a value that was merely read is not
+    # ours to rewrite.
+    if [ "$asked" = 1 ]; then persist_data_dir; fi
 }
 
 persist_data_dir() {
+    local tmp
     [ -n "${STACK_DATA_ENV:-}" ] || return 0
     [ "${DRY_RUN:-0}" = 1 ] && return 0
     mkdir -p "$(dirname "$STACK_DATA_ENV")"
-    printf 'STACK_DATA_DIR=%s\n' "$DATA_DIR" > "$STACK_DATA_ENV"
+    # Rename, not truncate: a concurrent resolve that sources this file
+    # mid-write would see no value, fall back to $HOME/data and persist it.
+    tmp="$STACK_DATA_ENV.$$"
+    printf 'STACK_DATA_DIR=%s\n' "$DATA_DIR" > "$tmp" && mv -f "$tmp" "$STACK_DATA_ENV"
 }
 
 # Give the data dir a container label when SELinux is enforcing and it lacks one.
