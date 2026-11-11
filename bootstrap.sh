@@ -61,61 +61,55 @@ log "provisioning on ${PRETTY_NAME:-this host}"
 # ---------------------------------------------------------------------------
 # 2. packages
 # ---------------------------------------------------------------------------
-if ! command -v podman >/dev/null 2>&1; then
-    log "installing podman"
-    sudo dnf install -y podman
-else
-    log "podman already installed ($(podman --version))"
-fi
-# firewalld is checked on its own, not with the podman bundle: a host that
-# already has podman (README's "One-click install", second flow) would
-# otherwise reach step 7 with no firewall-cmd, and every port-open below skips.
-command -v firewall-cmd >/dev/null 2>&1 \
-    || { log "installing firewalld"; sudo dnf install -y firewalld; }
-# Rotates Suricata's EVE files (a static filename is never rotated by
-# rotate-interval; deploy/root/logrotate-stack-ids does it and SIGHUPs the
-# sensor). The config is rendered by install.sh --root, the timer is the
-# distro's.
-command -v logrotate >/dev/null 2>&1 \
-    || { log "installing logrotate (Suricata EVE rotation)"; sudo dnf install -y logrotate; }
-command -v git >/dev/null 2>&1 || { log "installing git"; sudo dnf install -y git; }
+# The checks are independent on purpose: a host that already has podman
+# (README's "One-click install", second flow) still needs firewalld for step 7
+# and curl for the monitor's alert path. Everything missing goes to dnf in one
+# transaction, so a bare host pays one resolve instead of one per package.
+missing=()
+want() { command -v "$1" >/dev/null 2>&1 || missing+=("$2"); }
+
+want podman       podman
+want firewall-cmd firewalld   # step 7 skips every port-open without it
+# Rotates Suricata's EVE files (deploy/root/logrotate-stack-ids; a static
+# filename is never rotated by rotate-interval). install.sh --root renders the
+# config, the timer is the distro's.
+want logrotate    logrotate
+want git          git
 # jq parses the nginx-proxy-manager admin API responses in scripts/npm-hosts.sh
 # and builds the monitor's alert payload. (net_curl exists so a host-side check
 # can address a container by name and reach NPM's 127.0.0.1 admin bind, not
 # because the host has no curl.)
-command -v jq >/dev/null 2>&1 || { log "installing jq"; sudo dnf install -y jq; }
-# curl is the monitor's alert path, and it must be the host's own: monitor.sh
-# pushes to Alertmanager on 127.0.0.1:9093 and pings the dead-man's-switch. A
-# container cannot report a broken container runtime, so this is a requirement:
-# without it every alert is lost with nothing able to say so. Checked separately
-# from the podman bundle, or a host that already had podman would never get it.
-command -v curl >/dev/null 2>&1 || { log "installing curl (monitor alert path)"; sudo dnf install -y curl; }
-# openssl reads certificate expiry for the monitor, runs the Electrum TLS probe in
-# verify.sh --deep, and generates the stack's secrets (rand_hex).
-command -v openssl >/dev/null 2>&1 || { log "installing openssl"; sudo dnf install -y openssl; }
-# python3 runs agent-mcp (the CLI behind the agent skills), the stackctl core
-# (scripts/stackctl/: the npm-hosts reconciler and the load_manifest reader that
-# install.sh, verify.sh, monitor.sh and CI share). Stdlib only, no venv -- but a
-# minimal install has no interpreter, and then every skill call fails with "bad
-# interpreter".
-command -v python3 >/dev/null 2>&1 || { log "installing python3 (agent-mcp)"; sudo dnf install -y python3; }
+want jq           jq
+# curl is the monitor's alert path and must be the host's own: monitor.sh pushes
+# to Alertmanager on 127.0.0.1:9093 and pings the dead-man's-switch. A container
+# cannot report a broken container runtime, so without it every alert is lost
+# with nothing able to say so.
+want curl         curl
+# openssl reads certificate expiry for the monitor, runs the Electrum TLS probe
+# in verify.sh --deep, and generates the stack's secrets (rand_hex).
+want openssl      openssl
+# python3 runs agent-mcp (the CLI behind the agent skills) and the stackctl core
+# (scripts/stackctl/). Stdlib only, no venv -- but a minimal install has no
+# interpreter, and then every skill call fails with "bad interpreter".
+want python3      python3
 
 # audit-rules provides auditctl/augenrules, which load the stack's audit rules
 # (deploy/root/audit.rules). EL10 split them out of the `audit` package, so a
-# host with auditd running can still have no way to add a rule -- which is
-# exactly the state this host was in: a daemon watching nothing.
-if [ ! -x /usr/sbin/augenrules ]; then
-    log "installing audit-rules (auditctl/augenrules)"
-    sudo dnf install -y audit-rules >/dev/null 2>&1 \
-        || warn "could not install audit-rules; the stack's audit watches will not load"
-fi
+# host with auditd running can still have no way to add a rule.
+want /usr/sbin/augenrules audit-rules
+# Nothing here runs semanage: lib.sh labels the data dir with chcon and, when
+# that is not enough, prints the semanage command for the operator (README's
+# "data dir on another disk"). Bootstrap installs it so that printed fix is
+# runnable.
+want semanage policycoreutils-python-utils
 
-# Rootless networking needs one of these; both are optional per release.
-command -v slirp4netns >/dev/null 2>&1 || sudo dnf install -y slirp4netns >/dev/null 2>&1 || true
-command -v pasta >/dev/null 2>&1 || sudo dnf install -y passt >/dev/null 2>&1 || true
-# semanage (policycoreutils-python-utils) lets the deploy label a data disk
-# persistently; without it the deploy falls back to chcon.
-command -v semanage >/dev/null 2>&1 || sudo dnf install -y policycoreutils-python-utils >/dev/null 2>&1 || true
+if [ "${#missing[@]}" -gt 0 ]; then
+    log "installing packages: ${missing[*]}"
+    sudo dnf install -y "${missing[@]}" \
+        || die "dnf install failed for: ${missing[*]}; fix the repo/network and re-run"
+else
+    log "all host packages already installed ($(podman --version 2>/dev/null || echo podman missing))"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. subuid / subgid (rootless user namespaces)
