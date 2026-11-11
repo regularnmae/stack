@@ -916,11 +916,14 @@ series per failing section (plus its text) into the textfile; `vmalert`
 (`victoriametrics/vmalert`, loopback `:8880`, rules rendered by `install.sh` from
 `deploy/monitoring/rules/stack.yml.in`) fires one alert per section once
 `MONITOR_ALERT_FOR` (600s, two sweeps) has passed — the **flap damper** is the
-rule's `for:`, not state the script keeps — and reports the recovery itself when
-the rule goes inactive. `deploy/alertmanager.container` (`prom/alertmanager`,
-loopback `:9093`, no public host: `ssh -L 9093:127.0.0.1:9093`) owns grouping,
-repeat intervals, inhibition, silences and delivery, and reports failed
-deliveries back to the next sweep.
+rule's `for:` for the onset and `keep_firing_for: MONITOR_ALERT_HOLD_S` (900s)
+for the reset, not state the script keeps — and reports the recovery itself when
+the rule finally goes inactive. `deploy/alertmanager.container`
+(`prom/alertmanager`, loopback `:9093`, no public host: `ssh -L
+9093:127.0.0.1:9093`) owns grouping, inhibition, silences and delivery,
+reports failed deliveries back to the next sweep, and **notifies on the state
+change only** (`repeat_interval: 8760h`): one mail when a section starts failing,
+one when it recovers, nothing in between.
 
 That puts the store on the paging path: `for:` is evaluated against
 VictoriaMetrics, so a wedged store means no rule fires. The sweep's `alerting`
@@ -955,10 +958,11 @@ can set:
 
 The thresholds are the same file (`MONITOR_DISK_FREE_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
 `MONITOR_ALERT_FOR`, …); each falls back to its default in the script, so an env
-file written before a check existed still monitors. `MONITOR_ALERT_FOR` and
-`MONITOR_SWEEP_MAX_AGE_S` are rendered into the vmalert rules by `install.sh`, so
-changing either needs `./deploy.sh` (it re-renders and restarts `vmalert`). With no
-heartbeat the sweep still runs and records to `$DATA_DIR/audit/audit.log`.
+file written before a check existed still monitors. `MONITOR_ALERT_FOR`,
+`MONITOR_ALERT_HOLD_S` and `MONITOR_SWEEP_MAX_AGE_S` are rendered into the vmalert
+rules by `install.sh`, so changing any of them needs `./deploy.sh` (it re-renders
+and restarts `vmalert`). With no heartbeat the sweep still runs and records to
+`$DATA_DIR/audit/audit.log`.
 
 ### Metrics and history
 

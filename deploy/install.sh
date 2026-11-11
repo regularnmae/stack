@@ -424,10 +424,10 @@ SECRETS_FILE="$CONFIG_DIR/stack/secrets.env"
 SEARXNG_DATA_DIR="$DATA_DIR/searxng"
 TOR_DIR="$DATA_DIR/tor"
 
-# The two alert-rule timings, resolved the way monitor.sh resolves its own keys:
+# The alert-rule timings, resolved the way monitor.sh resolves its own keys:
 # process environment, then the installed monitor.env, then the default. They are
 # rendered into the vmalert rules rather than read at runtime -- vmalert parses
-# its rules at start, so monitor.env is a deploy-time input for these two.
+# its rules at start, so monitor.env is a deploy-time input for these.
 resolve_monitor_timing() { # NAME default
     local v="${!1:-}"
     [ -n "$v" ] || v=$(env_value "$CONFIG_DIR/monitoring/monitor.env" "$1")
@@ -437,6 +437,7 @@ resolve_monitor_timing() { # NAME default
     printf '%s' "$v"
 }
 MONITOR_ALERT_FOR=$(resolve_monitor_timing MONITOR_ALERT_FOR 600)
+MONITOR_ALERT_HOLD_S=$(resolve_monitor_timing MONITOR_ALERT_HOLD_S 900)
 MONITOR_SWEEP_MAX_AGE_S=$(resolve_monitor_timing MONITOR_SWEEP_MAX_AGE_S 900)
 
 # write_secret is lib.sh's write_env_file (atomic, 0600); configure.sh writes the
@@ -595,6 +596,7 @@ render_to() { # src out
         -e "s|@CROWDSEC_MCP_BOUNCER_KEY@|$(esc "${CROWDSEC_MCP_BOUNCER_KEY:-}")|g" \
         -e "s|@METRICS_RETENTION@|$(esc "$METRICS_RETENTION")|g" \
         -e "s|@MONITOR_ALERT_FOR@|$(esc "$MONITOR_ALERT_FOR")|g" \
+        -e "s|@MONITOR_ALERT_HOLD_S@|$(esc "$MONITOR_ALERT_HOLD_S")|g" \
         -e "s|@MONITOR_SWEEP_MAX_AGE_S@|$(esc "$MONITOR_SWEEP_MAX_AGE_S")|g" \
         -e "s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g" \
         -e "s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g" \

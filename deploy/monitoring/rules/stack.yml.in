@@ -18,9 +18,19 @@
 #     a short-lived series. That is the price of putting the findings in the
 #     mail: bounded by the number of sections, not by traffic, and nothing
 #     queries or graphs it.
-#   * `for:` is the flap damper. It is evaluated against the datasource, so a
-#     wedged VictoriaMetrics stops it -- the sweep's `alerting` section and the
-#     external heartbeat are what cover that hole (docs/alerting.md).
+#   * `for:` damps onset and `keep_firing_for:` damps the reset. Both are
+#     evaluated against the datasource, so a wedged VictoriaMetrics stops them --
+#     the sweep's `alerting` section and the external heartbeat are what cover
+#     that hole (docs/alerting.md).
+#
+# The reset half is not optional. A section only exists while something in it is
+# bad, so a sweep with nothing to report makes it vanish, and without
+# keep_firing_for that is an immediate "recovered" mail -- then a fresh alert on
+# the next bad sweep. The same goes for a critical dropping back to warning: two
+# different alerts, so the pair is a resolve plus a fire. keep_firing_for holds a
+# firing alert through both, and a section that returns inside the window
+# cancels the pending resolve (vmalert resets KeepFiringSince), so a flicker
+# costs nothing at all.
 groups:
   - name: stack
     # The scrape is 30s and the sweep rewrites its file every five minutes, so a
@@ -32,6 +42,9 @@ groups:
         # monitor.sh's hold-down, rendered from MONITOR_ALERT_FOR. Two sweeps is
         # the default: anything shorter is the flapping this exists to stop.
         for: @MONITOR_ALERT_FOR@s
+        # The mirror of `for:`, rendered from MONITOR_ALERT_HOLD_S. A section
+        # that clears for a sweep, or drops to warning, is not a recovery.
+        keep_firing_for: @MONITOR_ALERT_HOLD_S@s
         labels:
           severity: critical
         annotations:
@@ -41,6 +54,7 @@ groups:
       - alert: stack_warning
         expr: stack_monitor_section{severity="warning"} > 0
         for: @MONITOR_ALERT_FOR@s
+        keep_firing_for: @MONITOR_ALERT_HOLD_S@s
         labels:
           severity: warning
         annotations:

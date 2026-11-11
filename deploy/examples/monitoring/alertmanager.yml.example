@@ -87,11 +87,18 @@ route:
   # smaller flap damper behind the rules' `for:`; it only has to absorb a
   # resolution already in flight.
   group_wait: 30s
-  group_interval: 5m
-  # A still-firing alert is repeated this often -- the "you missed the first
-  # mail" path. Without it, one lost mail means the fault is silent until the
-  # next state change.
-  repeat_interval: 4h
+  # The minimum gap between two notifications for the same group when its
+  # content CHANGES (a new alert joins, one resolves). This is not a repeat: an
+  # unchanged set is never re-mailed. 10m coalesces two sections flapping in the
+  # same window into one mail.
+  group_interval: 10m
+  # Nagios' `notification_interval 0`: notify on the state change, never again
+  # while the alert is unchanged. Alertmanager rejects 0 ("repeat_interval
+  # cannot be zero"), so this is a duration longer than any incident -- one
+  # problem mail and one recovery mail per episode, and nothing in between. The
+  # trade-off is that a lost problem mail is never re-sent; verify the path with
+  # scripts/monitor.sh --test rather than relying on a reminder.
+  repeat_interval: 8760h
   routes:
     # Registrations are EVENTS, not faults (scripts/registrations.sh). Each one
     # is pushed once, with its own `signup` label, and carries an endsAt ten

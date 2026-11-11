@@ -23,8 +23,12 @@ not faults").
   "how long before I page" knob, and vmalert's own end-stamp (4x the group
   interval) is what ends a live alert.
 - **`send_resolved: false` by default** makes every recovery silent.
-- **The flap damper is the rule's `for:`**, rendered from `MONITOR_ALERT_FOR`.
+- **The flap damper is a pair: `for:` holds the onset and `keep_firing_for:`
+  holds the reset**, rendered from `MONITOR_ALERT_FOR` and `MONITOR_ALERT_HOLD_S`.
   Nothing in the producer holds alert state.
+- **A notification is a state change, never a reminder** (`repeat_interval:
+  8760h`). One mail when a section starts failing, one when it recovers, and
+  nothing while it stays the same.
 - **A failed delivery is read back on the next sweep**, because the alert path
   cannot report itself.
 - **The alert path is the host's own `curl`/`jq`, never `net_curl`.**
@@ -94,11 +98,12 @@ not faults").
   plus a `stack_monitor_detail_info{service,detail}` line carrying that section's
   text. The rules in `deploy/monitoring/rules/stack.yml.in` (rendered to
   `$DATA_DIR/config/monitoring/vmalert/stack.yml`) fire one alert per section
-  after `for: MONITOR_ALERT_FOR`, and pull the detail into the annotation with
-  vmalert's `query` template function. Alertmanager owns grouping,
-  `repeat_interval`, inhibition, silences and delivery, and a recovery is
-  vmalert's transition to inactive -- there is no `endsAt` for the producer to
-  send and no producer state to keep. Five traps, all load-bearing:
+  after `for: MONITOR_ALERT_FOR`, hold it for `keep_firing_for:
+  MONITOR_ALERT_HOLD_S` after the section clears, and pull the detail into the
+  annotation with vmalert's `query` template function. Alertmanager owns
+  grouping, inhibition, silences and delivery, and a recovery is vmalert's
+  transition to inactive -- there is no `endsAt` for the producer to send and no
+  producer state to keep. Five traps, all load-bearing:
   (1) **`resolve_timeout` is neither the paging delay nor a resolution
   override.** vmalert ends a normal alert itself, by sending an update whose
   endsAt is the moment the rule went inactive, so a real recovery does not wait
@@ -113,8 +118,10 @@ not faults").
   mandatory here: it is the only thing that reports the evaluator itself dying.
   When vmalert returns, the rule re-fires after a fresh `for:`, so the fault is
   re-announced. **A severity change is a different alertname**, so the old rule
-  goes inactive and the new one starts its own `for:`; because the selector
-  itself changed, there is no stale critical left to inhibit the warnings.
+  goes inactive and the new one starts its own `for:` -- but it does not
+  *inactivate* at once: `keep_firing_for` holds it, so the flip is one resolve
+  for the critical and one fire for the warning, not a pair per sweep. While
+  both are active the critical inhibits the warning, so the overlap is silent.
   (2) **`email_configs` defaults `send_resolved: false`**, so recoveries are
   silent unless it is set. The seeded example sets it.
   (3) **The alert's identity is (alertname, service), and the text is not a
