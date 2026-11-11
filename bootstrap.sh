@@ -68,7 +68,7 @@ else
     log "podman already installed ($(podman --version))"
 fi
 # firewalld is checked on its own, not with the podman bundle: a host that
-# already has podman (the README's "with git already present" flow) would
+# already has podman (README's "One-click install", second flow) would
 # otherwise reach step 7 with no firewall-cmd, and every port-open below skips.
 command -v firewall-cmd >/dev/null 2>&1 \
     || { log "installing firewalld"; sudo dnf install -y firewalld; }
