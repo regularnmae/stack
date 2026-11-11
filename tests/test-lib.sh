@@ -374,7 +374,12 @@ for script in "$ROOT_DIR"/deploy.sh "$ROOT_DIR"/verify.sh "$ROOT_DIR"/configure.
     case "$script" in */scripts/lib.sh) continue ;; esac
     want=$(awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$script")
     [ -n "$want" ] || continue
-    got=$(cd "$ROOT_DIR" && "$script" --help 2>/dev/null) || true
+    # Run it with no data dir recorded. A host that runs these tests has one,
+    # which hid a real failure until CI: resolve_data_dir stops when nothing is
+    # recorded, so a script that resolves it before its argument loop answered
+    # --help with nothing here and with the header there.
+    got=$(cd "$ROOT_DIR" && env -u STACK_DATA_DIR -u STACK_DATA_ENV -u XDG_CONFIG_HOME \
+        HOME="$TMP_DIR/no-data-dir" "$script" --help 2>/dev/null) || true
     # Prefix, not equality: some scripts append an options table after the block.
     if [ "${got:0:${#want}}" != "$want" ]; then
         printf 'FAIL: %s --help does not start with its leading comment block\n' "$script" >&2

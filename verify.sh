@@ -23,9 +23,9 @@
 # nginx-proxy-manager, which owns the host network and is read on 127.0.0.1.
 #
 # Read-only against the stack: it starts nothing, writes nothing in $DATA_DIR and
-# changes no unit. It does resolve the data dir like every host script, so a host
-# whose pointer is missing gets ~/.config/stack/data-dir.env written. Exits
-# non-zero if anything is wrong.
+# changes no unit. It resolves the data dir to find the tokens, and a
+# non-interactive run with nothing recorded stops rather than inventing a path.
+# Exits non-zero if anything is wrong.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,13 +33,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -r "$REPO_DIR/stack.conf" ] && . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
 . "$REPO_DIR/scripts/lib.sh"
-# The public surface (the *_HOST names, the MCP prefixes, the onion services) is
-# declared in deploy/services.toml; stack.conf keeps the non-registry knobs.
-load_manifest "$REPO_DIR"
-# The tokens live under the data dir, so resolving it is how we find them.
-resolve_data_dir
 
-
+# Arguments before the data dir: --help must answer on a host that has none
+# recorded (a fresh checkout, CI), and resolve_data_dir stops in that case.
 DEEP=0
 NO_NODES=0
 while [ $# -gt 0 ]; do
@@ -51,6 +47,12 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# The public surface (the *_HOST names, the MCP prefixes, the onion services) is
+# declared in deploy/services.toml; stack.conf keeps the non-registry knobs.
+load_manifest "$REPO_DIR"
+# The tokens live under the data dir, so resolving it is how we find them.
+resolve_data_dir
 
 fails=0
 pass() { printf '  \033[32mok\033[0m   %s\n' "$*"; }
