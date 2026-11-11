@@ -87,8 +87,11 @@ MONITOR_ALERTMANAGER_URL=$(monitor_var MONITOR_ALERTMANAGER_URL)
 MONITOR_ALERTMANAGER_URL="${MONITOR_ALERTMANAGER_URL:-http://127.0.0.1:9093}"
 MONITOR_GRACE_SYNC=$(monitor_var MONITOR_GRACE_SYNC)
 MONITOR_GRACE_SYNC="${MONITOR_GRACE_SYNC:-1}"
+# The shallow sweep is the default: this runs every five minutes, and --deep adds
+# a read-tool round trip to every MCP server on each one. No fallback below on
+# purpose -- empty means shallow, and a `${x:---deep}` default would silently keep
+# paying for the read tools.
 MONITOR_VERIFY_ARGS=$(monitor_var MONITOR_VERIFY_ARGS)
-MONITOR_VERIFY_ARGS="${MONITOR_VERIFY_ARGS:---deep}"
 # A host deployed with ./deploy.sh --skip-daemons runs none of CHAIN_UNITS, so
 # every chain check here and the chain-backed vhosts would fail forever. One
 # declaration rather than two: --no-nodes is appended to the verify sweep below,
@@ -164,10 +167,10 @@ THRESH_IDS_AGE_M=$(num_or "${MONITOR_IDS_MAX_AGE_MIN:-}" 20)
 THRESH_BOUNCER_AGE_M=$(num_or "${MONITOR_BOUNCER_MAX_AGE_MIN:-}" 5)
 # The audit report runs every five minutes; four missed runs is a stopped timer.
 THRESH_AUDIT_AGE_M=$(num_or "${MONITOR_AUDIT_MAX_AGE_MIN:-}" 20)
-# The signup watcher runs every minute. Twenty missed runs is a stopped timer or
+# The signup watcher runs every minute. Thirty missed runs is a stopped timer or
 # a host that cannot reach postgres. A warning, not a failure: nothing about the
 # site is wrong, only the notification that somebody signed up.
-THRESH_REG_AGE_M=$(num_or "${MONITOR_REGISTRATIONS_MAX_AGE_MIN:-}" 20)
+THRESH_REG_AGE_M=$(num_or "${MONITOR_REGISTRATIONS_MAX_AGE_MIN:-}" 30)
 
 PROBLEMS=()
 WARNS=()

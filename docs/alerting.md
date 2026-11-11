@@ -67,9 +67,10 @@ not faults").
   (the store answers, vmalert answers and its rules loaded, Alertmanager answers
   and its config parses, a receiver is filled in, and nothing failed to deliver
   since the last sweep), and the
-  chain/daemon checks (a
-  `verify.sh` sweep, bitcoind freshness/peers/mempool, Fulcrum's tip, CLN
-  peers/channels, monerod's lag, the wallet's lag). It also probes every
+  chain/daemon checks (a shallow `verify.sh` sweep -- the `--deep` read-tool pass
+  is on demand, not part of the five-minute cadence -- bitcoind
+  freshness/peers/mempool, Fulcrum's tip, CLN peers/channels, monerod's lag, the
+  wallet's lag). It also probes every
   clearweb vhost through nginx-proxy-manager on loopback (`NPM_DOMAINS`, from
   the manifest, so a new `[npm.*]` host is covered the moment it is declared)
   — the continuous public-surface check the UI-owned status page no longer
@@ -208,7 +209,7 @@ not faults").
   `--test` proves the `info` route without touching the watermark, and it runs
   before the app-tier check, so a `--skip-apps` host can use it too.
 - **A dead watcher is a warning, not a page.** The sweep reads the status
-  file's `ok_epoch` against `MONITOR_REGISTRATIONS_MAX_AGE_MIN` (20, i.e. twenty
+  file's `ok_epoch` against `MONITOR_REGISTRATIONS_MAX_AGE_MIN` (30, i.e. thirty
   missed runs) and warns; the site is fine, only the notification is missing.
   `--skip-apps` hosts have no postgres unit at all, so the watcher records
   `skipped=1` instead of failing every minute.
