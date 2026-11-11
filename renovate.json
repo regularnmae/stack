@@ -136,6 +136,18 @@
     },
     {
       "customType": "regex",
+      "description": "the README's 'What runs' table, which `stackctl units check` holds to each unit's own Image= line. Without this, a Quadlet tag bump left the row behind and every image PR failed that gate; the same depName from both managers gives the same branch name, so the row and the unit move in one PR",
+      "matchStrings": [
+        "`(?<depName>(?:docker\\.io|ghcr\\.io)/[^:`\\s]+):(?<currentValue>[^`\\s]+)`"
+      ],
+      "autoReplaceStringTemplate": "`{{depName}}{{#if newValue}}:{{newValue}}{{/if}}{{#if newDigest}}@{{newDigest}}{{/if}}`",
+      "datasourceTemplate": "docker",
+      "managerFilePatterns": [
+        "/^README\\.md$/"
+      ]
+    },
+    {
+      "customType": "regex",
       "description": "the shellcheck release CI pins and downloads (SHELLCHECK_VERSION in .github/workflows/ci.yml)",
       "matchStrings": [
         "SHELLCHECK_VERSION: (?<currentValue>v[0-9.]+)"

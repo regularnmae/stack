@@ -319,10 +319,12 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `scripts/backup.sh` and `scripts/rotate.sh` define — no manager reads a shell
   default), are matched by `renovate.json`'s regex manager. Both files are
   matched so a restic bump moves them together. The wallet tag appears in
-  the `btcpayserver/monero` unit, and one PR moves both; it also appears in
-  the README's "What runs" table, which `stackctl units check` holds to the
-  units' own `Image=` lines. `postgres` (hand
-  pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
+  the `btcpayserver/monero` unit, and one PR moves both. The README's "What
+  runs" table carries the same image again, held to the units' own `Image=`
+  lines by `stackctl units check`, so a second regex manager matches the tag
+  there too: two files, one `depName`, one branch. Without it a Quadlet bump
+  left the row on the old tag and every image PR failed that gate.
+  `postgres` (hand pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
   (`pinDigests` off): kuma's `2` and searxng's date tags move on their own, a
   digest pin would turn a reviewable version bump into a PR per upstream
   rebuild, and a regex manager can only *update* a digest, never add one —
