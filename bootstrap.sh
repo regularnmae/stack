@@ -62,11 +62,16 @@ log "provisioning on ${PRETTY_NAME:-this host}"
 # 2. packages
 # ---------------------------------------------------------------------------
 if ! command -v podman >/dev/null 2>&1; then
-    log "installing podman, firewalld, git, openssl, jq"
-    sudo dnf install -y podman firewalld git openssl jq
+    log "installing podman"
+    sudo dnf install -y podman
 else
     log "podman already installed ($(podman --version))"
 fi
+# firewalld is checked on its own, not with the podman bundle: a host that
+# already has podman (the README's "with git already present" flow) would
+# otherwise reach step 7 with no firewall-cmd, and every port-open below skips.
+command -v firewall-cmd >/dev/null 2>&1 \
+    || { log "installing firewalld"; sudo dnf install -y firewalld; }
 # Rotates Suricata's EVE files (a static filename is never rotated by
 # rotate-interval; deploy/root/logrotate-stack-ids does it and SIGHUPs the
 # sensor). The config is rendered by install.sh --root, the timer is the
@@ -207,7 +212,8 @@ fi
 # 7. firewalld
 # ---------------------------------------------------------------------------
 log "enabling firewalld"
-sudo systemctl enable --now firewalld >/dev/null 2>&1 || warn "could not enable firewalld"
+sudo systemctl enable --now firewalld >/dev/null \
+    || warn "could not enable firewalld (systemctl status firewalld); the stack's ports stay closed"
 
 # ---------------------------------------------------------------------------
 # 8. directories
