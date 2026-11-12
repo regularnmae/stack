@@ -16,8 +16,9 @@
 #     per MCP and onion column and the clearweb vhost list), via
 #     scripts/lib.sh's load_manifest, so deploy.sh, verify.sh, monitor.sh and
 #     deploy/install.sh keep reading the same names.
-#   * `python3 -m stackctl manifest check` (CI) validates the file itself and
-#     cross-checks it against AGENTS.md's interface table.
+#   * `python3 -m stackctl manifest check` (CI) validates the file itself;
+#     `python3 -m stackctl docs render|check` derives README's "What runs" and
+#     AGENTS.md's interface tables from it and the units.
 #
 # Operator overrides keep the old contract: every [host.*] carries an `env`
 # name, and a non-empty $<env> in the process environment wins over the
@@ -109,12 +110,18 @@ kuma_add_host = false
 # PROBE_* columns aligned with MCP_CONTAINERS, so adding a server here adds its
 # probe and its rotation target -- there is no second table in verify.sh or
 # rotate.sh to keep in step.
+#
+# `upstream` is the image's own default endpoint (the app repo's README), read
+# by nothing but `stackctl docs`: it is the one column of AGENTS.md's generated
+# interface table this repo cannot derive from a unit or an env file, so it is
+# declared here instead of being typed into the table again.
 # ---------------------------------------------------------------------------
 
 [mcp.searxng]
 prefix = "/searxng"
 container = "searxng-mcp"
 port = 8100
+upstream = "searxng:8080/search"
 token_var = "SEARXNG_MCP_TOKEN"
 probe_tool = "get_time"
 probe_args = '{"tz":"UTC"}'
@@ -124,6 +131,7 @@ needs_nodes = false
 prefix = "/bitcoin"
 container = "bitcoin-node-mcp"
 port = 8101
+upstream = "bitcoind:8332"
 token_var = "BITCOIN_MCP_TOKEN"
 probe_tool = "get_blockchain_info"
 probe_args = '{}'
@@ -133,6 +141,7 @@ needs_nodes = true
 prefix = "/monero"
 container = "monero-node-mcp"
 port = 8102
+upstream = "monerod:18089"
 token_var = "MONERO_MCP_TOKEN"
 probe_tool = "get_info"
 probe_args = '{}'
@@ -142,6 +151,7 @@ needs_nodes = true
 prefix = "/monero-wallet"
 container = "monero-wallet-mcp"
 port = 8103
+upstream = "monero-wallet-btcpay:18083/json_rpc"
 token_var = "MONERO_MCP_TOKEN"
 spend_token_var = "MONERO_MCP_SPEND_TOKEN"
 probe_tool = "get_balance"
@@ -152,6 +162,7 @@ needs_nodes = true
 prefix = "/lightning"
 container = "lightning-mcp"
 port = 8104
+upstream = "lightningd:3010"
 token_var = "LIGHTNING_MCP_TOKEN"
 spend_token_var = "LIGHTNING_MCP_SPEND_TOKEN"
 probe_tool = "getinfo"
@@ -162,6 +173,7 @@ needs_nodes = true
 prefix = "/fulcrum"
 container = "fulcrum-mcp"
 port = 8110
+upstream = "fulcrum:50001"
 token_var = "FULCRUM_MCP_TOKEN"
 probe_tool = "get_chain_tip"
 probe_args = '{}'
@@ -171,6 +183,7 @@ needs_nodes = true
 prefix = "/logs"
 container = "victoria-logs-mcp"
 port = 8111
+upstream = "victoria-logs:9428"
 token_var = "LOGS_MCP_TOKEN"
 probe_tool = "get_log_health"
 probe_args = '{}'
@@ -180,6 +193,7 @@ needs_nodes = false
 prefix = "/metrics"
 container = "victoriametrics-mcp"
 port = 8112
+upstream = "victoriametrics:8428"
 token_var = "METRICS_MCP_TOKEN"
 probe_tool = "get_metrics_health"
 probe_args = '{}'
@@ -189,6 +203,7 @@ needs_nodes = false
 prefix = "/crowdsec"
 container = "crowdsec-mcp"
 port = 8113
+upstream = "127.0.0.1:8080"
 token_var = "CROWDSEC_MCP_TOKEN"
 probe_tool = "list_decisions"
 probe_args = '{}'
@@ -198,6 +213,7 @@ needs_nodes = false
 prefix = "/btcpay"
 container = "btcpay-mcp"
 port = 8114
+upstream = "btcpay:49392"
 token_var = "BTCPAY_MCP_TOKEN"
 probe_tool = "list_stores"
 probe_args = '{}'

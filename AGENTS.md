@@ -35,9 +35,9 @@ owns the render, the digest and the secret resolution.
 # the CI gates, each runnable on its own
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract
 ./scripts/docs-lint.sh              # every README/docs section reference resolves
+./scripts/docs-render.sh --check    # generated README/AGENTS tables are current
 # markdown lint; the tag matches the CLI the CI action bundles -- bump both together
 podman run --rm -v "$PWD":/work:z -w /work docker.io/davidanson/markdownlint-cli2:v0.24.0
-PYTHONPATH=scripts python3 -m stackctl units check  # README's "What runs" vs the units
 shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # CI pins v0.11.0
 ```
 
@@ -72,21 +72,32 @@ from line 2), and `# shellcheck source=`/`disable=` are directives.
 
 The MCP servers read only env vars — never a stack path, config file or data dir —
 so a container name, port or variable name changes on both sides at once.
-`deploy/services.toml` is the declaration; the table below is the copy
-`manifest check --agents` holds to it.
+`deploy/services.toml` is the declaration and the table below is generated from
+it and the units (`./scripts/docs-render.sh`): edit the declaration, never the
+row.
 
-| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | On npm-network | NPM target | Bind + health |
-| --- | --- | --- | --- | --- | --- | --- |
-| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `searxng-mcp:8000` | `127.0.0.1:8100` | `0.0.0.0:8000`, `/health` |
-| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `bitcoin-node-mcp:8000` | `127.0.0.1:8101` | `0.0.0.0:8000`, `/health` |
-| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `monero-node-mcp:8000` | `127.0.0.1:8102` | `0.0.0.0:8000`, `/health` |
-| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-btcpay:18083/json_rpc` | `monero-wallet-mcp:8000` | `127.0.0.1:8103` | `0.0.0.0:8000`, `/health` |
-| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `127.0.0.1:8104` | `0.0.0.0:8000`, `/health` |
-| `fulcrum-mcp` | `fulcrum-mcp` / `localhost/fulcrum-mcp:latest` | `token.env`, `upstream.env` | `fulcrum:50001` | `fulcrum-mcp:8000` | `127.0.0.1:8110` | `0.0.0.0:8000`, `/health` |
-| `victoria-logs-mcp` | `victoria-logs-mcp` / `localhost/victoria-logs-mcp:latest` | `token.env`, `upstream.env` | `victoria-logs:9428` | `victoria-logs-mcp:8000` | `127.0.0.1:8111` | `0.0.0.0:8000`, `/health` |
-| `victoriametrics-mcp` | `victoriametrics-mcp` / `localhost/victoriametrics-mcp:latest` | `token.env`, `upstream.env` | `victoriametrics:8428`, `alertmanager:9093` (`ALERTMANAGER_URL`) | `victoriametrics-mcp:8000` | `127.0.0.1:8112` | `0.0.0.0:8000`, `/health` |
-| `crowdsec-mcp` | `crowdsec-mcp` / `localhost/crowdsec-mcp:latest` | `token.env`, `lapi.env` | CrowdSec LAPI, `127.0.0.1:8080` | **— (`Network=host`)** | `127.0.0.1:8113` | `127.0.0.1:8113` (host net), `/health` |
-| `btcpay-mcp` | `btcpay-mcp` / `localhost/btcpay-mcp:latest` | `token.env`, `upstream.env` | `btcpay:49392` | `btcpay-mcp:8000` | `127.0.0.1:8114` | `0.0.0.0:8000`, `/health` |
+Every server binds `0.0.0.0:8000` and answers `/health`, except `crowdsec-mcp`,
+which binds the host's `127.0.0.1:8113` because it runs on the host network and
+reaches the CrowdSec LAPI on `127.0.0.1:8080`. `victoriametrics-mcp` also reads
+`ALERTMANAGER_URL` (`alertmanager:9093`); the rest reach only the single
+upstream named above.
+
+<!-- BEGIN GENERATED: agents-mcp -->
+
+| Server | Container / unit / image | Env files (`$DATA_DIR/config/<app>/`) | Upstream it defaults to | On npm-network | NPM target |
+| --- | --- | --- | --- | --- | --- |
+| `searxng-mcp` | `searxng-mcp` / `localhost/searxng-mcp:latest` | `token.env` | `searxng:8080/search` | `searxng-mcp:8000` | `127.0.0.1:8100` |
+| `bitcoin-node-mcp` | `bitcoin-node-mcp` / `localhost/bitcoin-node-mcp:latest` | `token.env`, `upstream.env` | `bitcoind:8332` | `bitcoin-node-mcp:8000` | `127.0.0.1:8101` |
+| `monero-node-mcp` | `monero-node-mcp` / `localhost/monero-node-mcp:latest` | `token.env`, `upstream.env` | `monerod:18089` | `monero-node-mcp:8000` | `127.0.0.1:8102` |
+| `monero-wallet-mcp` | `monero-wallet-mcp` / `localhost/monero-wallet-mcp:latest` | `token.env`, `upstream.env`, `spend.env` | `monero-wallet-btcpay:18083/json_rpc` | `monero-wallet-mcp:8000` | `127.0.0.1:8103` |
+| `lightning-mcp` | `lightning-mcp` / `localhost/lightning-mcp:latest` | `token.env`, `node.env`, `spend.env` | `lightningd:3010` | `lightning-mcp:8000` | `127.0.0.1:8104` |
+| `fulcrum-mcp` | `fulcrum-mcp` / `localhost/fulcrum-mcp:latest` | `token.env`, `upstream.env` | `fulcrum:50001` | `fulcrum-mcp:8000` | `127.0.0.1:8110` |
+| `victoria-logs-mcp` | `victoria-logs-mcp` / `localhost/victoria-logs-mcp:latest` | `token.env`, `upstream.env` | `victoria-logs:9428` | `victoria-logs-mcp:8000` | `127.0.0.1:8111` |
+| `victoriametrics-mcp` | `victoriametrics-mcp` / `localhost/victoriametrics-mcp:latest` | `token.env`, `upstream.env` | `victoriametrics:8428` | `victoriametrics-mcp:8000` | `127.0.0.1:8112` |
+| `crowdsec-mcp` | `crowdsec-mcp` / `localhost/crowdsec-mcp:latest` | `token.env`, `lapi.env` | `127.0.0.1:8080` | — (`Network=host`) | `127.0.0.1:8113` |
+| `btcpay-mcp` | `btcpay-mcp` / `localhost/btcpay-mcp:latest` | `token.env`, `upstream.env` | `btcpay:49392` | `btcpay-mcp:8000` | `127.0.0.1:8114` |
+
+<!-- END GENERATED -->
 
 `NPM target` is each unit's `PublishPort=`; NPM terminates TLS and is the only
 client path, so nothing here is LAN-reachable (`docs/proxy.md`).
@@ -99,12 +110,23 @@ Names are compiler-baked upstream, so a rename breaks the server.
 
 Not MCP servers, so absent from the table above; same contract with `boltmesh-labs`.
 
-| Unit | Image | Env files (`$DATA_DIR/config/boltmesh/`) | Upstream it reaches | On npm-network | NPM target | Health |
-| --- | --- | --- | --- | --- | --- | --- |
-| `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` (`POSTGRES_*`) | — | — | — | `pg_isready -h 127.0.0.1` |
-| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `config/btcpay/backend.env` | `postgres:5432`, `valkey:6379`, `btcpay:49392` | `boltmesh-backend:8000` | `127.0.0.1:8105` | `0.0.0.0:8000`, `/health` (deep) |
-| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | the same four | the same | — | — | liveness file `/tmp/arq-worker-liveness` |
-| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — (`VITE_*` baked at build) | — | `boltmesh-frontend:80` | `127.0.0.1:8106` | `0.0.0.0:80`, `/` |
+<!-- BEGIN GENERATED: agents-app -->
+
+| Unit | Image | Env files | On npm-network | NPM target | Health |
+| --- | --- | --- | --- | --- | --- |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `backend.env` | `boltmesh-backend:8000` | `127.0.0.1:8105` | `curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:8000/health` |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — | `boltmesh-frontend:80` | `127.0.0.1:8106` | `wget -q -T 4 -t 1 -O /dev/null http://127.0.0.1/` |
+| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `backend.env` | — | — | `find /tmp/arq-worker-liveness -mmin -3 -print -quit \| grep -q .` |
+| `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` | — | — | `pg_isready -h 127.0.0.1 -U vpnuser -d vpndb` |
+
+<!-- END GENERATED -->
+
+The env files live under `$DATA_DIR/config/`: the three `boltmesh/` ones plus
+`btcpay/backend.env`, which `configure.sh` writes. The worker runs the same four
+and reaches the same upstreams as the backend (`postgres:5432`, `valkey:6379`,
+`btcpay:49392`); the frontend has none (its `VITE_*` are baked at build) and is
+probed on `/`. `Health` is each unit's own `HealthCmd`, so a probe change is a
+unit change and the table follows on the next render.
 
 `db.env`/`secrets.env` are generated, `app.env` is operator-editable (seeded from
 `BOLTMESH_*`) and `btcpay/backend.env` comes from `configure.sh`. `APP_ENV=prod` keeps

@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from stackctl import envfile, manifest, npm, units  # noqa: E402
+from stackctl import docs, envfile, manifest, npm  # noqa: E402
 from stackctl.ui import Fatal  # noqa: E402
 
 
@@ -441,7 +441,6 @@ class TestNpmReconcile(unittest.TestCase):
 # real manifest is exercised (not just fixtures) because it IS the declaration
 # of this host's public surface -- if it stops loading, the reconciler does.
 MANIFEST = os.path.join(ROOT, "deploy", "services.toml")
-AGENTS = os.path.join(ROOT, "AGENTS.md")
 
 
 class TestManifest(unittest.TestCase):
@@ -471,6 +470,7 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(m.mcp[0].prefix, "/searxng")
         self.assertEqual(m.mcp[0].port, 8100)
         self.assertEqual(m.mcp[0].token_var, "SEARXNG_MCP_TOKEN")
+        self.assertEqual(m.mcp[0].upstream, "searxng:8080/search")
         self.assertEqual(m.mcp[0].probe_tool, "get_time")
         wallet = [x for x in m.mcp if x.container == "monero-wallet-mcp"][0]
         self.assertEqual(wallet.spend_token_var, "MONERO_MCP_SPEND_TOKEN")
@@ -501,6 +501,10 @@ class TestManifest(unittest.TestCase):
         # ... and the composed entries follow the resolved domain.
         self.assertTrue(any(n.domain == "staging.example.net" for n in m.npm))
         self.assertTrue(any(o.mirrors == "staging.example.net" for o in m.onion))
+        # The generated docs are committed, so they read the declaration only:
+        # a host that exports an override must not bake its name into a table.
+        self.assertEqual(manifest.load(MANIFEST, overrides=False)
+                         .hosts["frontend"].domain, "boltmesh.net")
 
     def test_shell_emission_is_eval_safe_in_bash(self):
         # The contract load_manifest relies on: bash evaluates the emission and
@@ -538,22 +542,6 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(out[16], '{"tz":"UTC"}')
         self.assertEqual(out[17], "1")
         self.assertEqual(out[18], "MONERO_MCP_SPEND_TOKEN")
-
-    def test_real_manifest_agrees_with_agents_md(self):
-        from stackctl import manifest
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(manifest.check(MANIFEST, AGENTS), 0)
-
-    def test_agents_drift_is_caught(self):
-        from stackctl import manifest
-        text = open(AGENTS, encoding="utf-8").read()
-        # Remove the row of a declared server: the count gate must fire.
-        line = next(l for l in text.splitlines() if "`searxng-mcp`" in l and "127.0.0.1:8100" in l)
-        path = self.write("AGENTS.md", text.replace(line + "\n", ""))
-        with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(Fatal) as ctx:
-                manifest.check(MANIFEST, path)
-        self.assertIn("row", ctx.exception.msg)
 
     def test_validation_errors(self):
         from stackctl import manifest
@@ -743,6 +731,7 @@ env = "MCP_HOST"
 prefix = "/one"
 container = "one-mcp"
 port = 8100
+upstream = "one:1"
 %s
 
 [npm.one]
@@ -751,12 +740,11 @@ forward_host = "127.0.0.1"
 forward_port = 8100
 flags = ["mcp"]
 """
-        agents = self.write("AGENTS.md", "| `one-mcp` | ... | `127.0.0.1:8100` |\n")
-
         missing = self.write("missing-probe.toml", base % "")
+
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(Fatal) as ctx:
-                manifest.check(missing, agents)
+                manifest.check(missing)
         self.assertIn("token_var", ctx.exception.msg)
 
         bad_args = self.write("bad-args.toml", base % (
@@ -764,8 +752,16 @@ flags = ["mcp"]
             "probe_args = 'not json'"))
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(Fatal) as ctx:
-                manifest.check(bad_args, agents)
+                manifest.check(bad_args)
         self.assertIn("not JSON", ctx.exception.msg)
+
+        no_upstream = self.write("no-upstream.toml", (base % (
+            'token_var = "ONE_MCP_TOKEN"\nprobe_tool = "get_one"\n'
+            "probe_args = '{}'")).replace('upstream = "one:1"\n', ""))
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(Fatal) as ctx:
+                manifest.check(no_upstream)
+        self.assertIn("upstream", ctx.exception.msg)
 
     def test_minimal_manifest_check(self):
         from stackctl import manifest
@@ -778,6 +774,7 @@ env = "MCP_HOST"
 prefix = "/one"
 container = "one-mcp"
 port = 8100
+upstream = "one:1"
 token_var = "ONE_MCP_TOKEN"
 probe_tool = "get_one"
 probe_args = '{}'
@@ -789,11 +786,8 @@ forward_host = "127.0.0.1"
 forward_port = 8100
 flags = ["mcp"]
 """)
-        agents = self.write("AGENTS.md", "| Server | Container | ... | NPM target |\n"
-                            "| --- | --- | --- | --- |\n"
-                            "| `one-mcp` | `one-mcp` | ... | `127.0.0.1:8100` |\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(manifest.check(path, agents), 0)
+            self.assertEqual(manifest.check(path), 0)
             m = manifest.load(path)
         out = m.shell()
         self.assertIn("MCP_HOST=mcp.example.net", out)
@@ -807,133 +801,127 @@ flags = ["mcp"]
         self.assertIn("NPM_NEEDS_NODES=(0)", out)
 
 
-class TestUnits(unittest.TestCase):
-    """README's "What runs" against the unit files. The three facts checked are
-    the ones a Renovate bump can invalidate without touching the README, plus the
-    reverse direction (a row left behind by a deleted unit)."""
+class TestDocs(unittest.TestCase):
+    """README's "What runs" and AGENTS.md's interface tables are rendered from
+    the units and deploy/services.toml; `docs check` is the one gate left, so a
+    bumped Image= or a new [mcp.*] makes the committed block stale until it is
+    rendered again."""
 
     def setUp(self):
         import tempfile
-        self.tmp = tempfile.mkdtemp(prefix="stackctl-units-")
+        self.tmp = tempfile.mkdtemp(prefix="stackctl-docs-")
         self.deploy = os.path.join(self.tmp, "deploy")
         os.makedirs(os.path.join(self.deploy, "root"))
-        self.readme = os.path.join(self.tmp, "README.md")
+        self.write("deploy/services.toml", """
+[host.mcp]
+domain = "mcp.example.net"
+
+[mcp.one]
+prefix = "/one"
+container = "one-mcp"
+port = 8100
+upstream = "one:1"
+
+[npm.one]
+host = "mcp"
+forward_host = "127.0.0.1"
+forward_port = 8100
+flags = ["mcp"]
+""")
+        self.unit("one-mcp", ports=["127.0.0.1:8100:8000"])
+        self.write("README.md", "# stack\n\n## What runs\n\n"
+                   "<!-- BEGIN GENERATED: what-runs -->\n\nold\n\n"
+                   "<!-- END GENERATED -->\n\nprose\n")
+        self.write("AGENTS.md", "<!-- BEGIN GENERATED: agents-mcp -->\n\nold\n\n"
+                   "<!-- END GENERATED -->\n\n"
+                   "<!-- BEGIN GENERATED: agents-app -->\n\nold\n\n"
+                   "<!-- END GENERATED -->\n")
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def unit(self, name, image="docker.io/x/y:1", ports=(), oneshot=False, root=False):
+    def write(self, rel, text):
+        path = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def read(self, rel):
+        with open(os.path.join(self.tmp, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def unit(self, name, image="docker.io/x/y:1", ports=(), extra=(), root=False):
         body = ["[Container]", f"ContainerName={name}", f"Image={image}"]
         body += [f"PublishPort={p}" for p in ports]
-        if oneshot:
-            body.append("Type=oneshot")
-        path = os.path.join(self.deploy, "root" if root else "", f"{name}.container")
-        with open(path, "w") as f:
-            f.write("\n".join(body) + "\n")
+        body += list(extra)
+        self.write(os.path.join("deploy", "root" if root else "",
+                                f"{name}.container"), "\n".join(body) + "\n")
 
-    def rows(self, rows):
-        text = ["# stack", "", "## What runs", "",
-                "| Unit | Image | Published | Data |",
-                "| --- | --- | --- | --- |"]
-        for names, image, published in rows:
-            text.append(f"| {', '.join(f'`{n}`' for n in names)} | {image} "
-                        f"| {published} | — |")
-        text += ["", "The prose below the table is not a row.", "", "## Next", ""]
-        with open(self.readme, "w") as f:
-            f.write("\n".join(text) + "\n")
+    def docs(self, mode):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = docs.main([mode, "--root", self.tmp])
+        return rc, out.getvalue() + err.getvalue()
 
-    def run_check(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = units.check(self.deploy, self.readme)
-        return rc, out.getvalue()
+    def test_real_tree_is_current(self):
+        rc, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(rc), contextlib.redirect_stderr(out):
+            self.assertEqual(docs.main(["check", "--root", ROOT]), 0,
+                             rc.getvalue() + out.getvalue())
 
-    def test_real_tree_agrees(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = units.check(os.path.join(ROOT, "deploy"),
-                             os.path.join(ROOT, "README.md"))
-        self.assertEqual(rc, 0, out.getvalue())
+    def test_render_is_idempotent(self):
+        self.assertEqual(self.docs("render")[0], 0)
+        first = self.read("README.md")
+        self.assertEqual(self.docs("render")[0], 0)
+        self.assertEqual(self.read("README.md"), first)
+        self.assertEqual(self.docs("check")[0], 0)
 
-    def test_a_matching_row_passes(self):
-        self.unit("bitcoind", ports=["8333:8333"])
-        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "`8333`")])
-        rc, out = self.run_check()
-        self.assertEqual(rc, 0, out)
+    def test_a_bumped_image_makes_the_block_stale(self):
+        self.assertEqual(self.docs("render")[0], 0)
+        self.unit("one-mcp", image="docker.io/x/y:2",
+                  ports=["127.0.0.1:8100:8000"])
+        rc, out = self.docs("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("what-runs", out)
+        self.assertIn("docker.io/x/y:2", out)
 
-    def test_bumped_image_is_caught(self):
-        # The drift this exists for: Renovate moves Image=, the table keeps the tag.
-        self.unit("bitcoind", image="docker.io/lncm/bitcoind:v29.0")
-        self.rows([(["bitcoind"], "`docker.io/lncm/bitcoind:v28.0`", "—")])
-        rc, out = self.run_check()
-        self.assertEqual(rc, 1)
-        self.assertIn("does not carry its Image=", out)
-        self.assertIn("v29.0", out)
+    def test_oneshot_and_markers(self):
+        self.unit("stack-backup", extra=["Type=oneshot"])
+        self.unit("wallet-mcp", ports=["127.0.0.1:8103:8000"],
+                  extra=["EnvironmentFile=$DATA_DIR/config/wallet-mcp/spend.env"])
+        self.unit("suricata", root=True, extra=["Network=host"])
+        self.assertEqual(self.docs("render")[0], 0)
+        text = self.read("README.md")
+        self.assertNotIn("`stack-backup`", text)      # a job has no steady state
+        self.assertIn("| `wallet-mcp` 🔑 |", text)
+        self.assertIn("| `suricata` ⚙️ |", text)
+        self.assertIn("host network", text)
+        self.assertIn("`stack-bouncer` ⚙️", text)     # the one host-script row
 
-    def test_missing_row_is_caught(self):
-        self.unit("bitcoind")
-        self.rows([(["monerod"], "`docker.io/x/y:1`", "—")])
-        # ... and monerod has no unit, so that row is stale in the other direction.
-        self.unit("monerod")
-        rc, out = self.run_check()
-        self.assertEqual(rc, 1)
-        self.assertIn("no ", out)
-        self.assertIn("row names the unit `bitcoind`", out)
+    def test_an_mcp_entry_with_no_unit_dies(self):
+        self.write("deploy/services.toml", """
+[host.mcp]
+domain = "mcp.example.net"
 
-    def test_oneshot_needs_no_row(self):
-        self.unit("stack-backup", oneshot=True)
-        self.unit("bitcoind")
-        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "`8333`")])
-        rc, out = self.run_check()
-        self.assertEqual(rc, 0, out)
-
-    def test_new_publish_port_is_caught(self):
-        self.unit("fulcrum", ports=["50001:50001", "50003:50003"])
-        self.rows([(["fulcrum"], "`docker.io/x/y:1`", "`50001`")])
-        rc, out = self.run_check()
-        self.assertEqual(rc, 1)
-        self.assertIn("port 50003", out)
-
-    def test_a_row_may_name_two_units(self):
-        self.unit("netcheck")
-        self.unit("netcheck-host")
-        self.rows([(["netcheck", "netcheck-host"], "`docker.io/x/y:1`", "—")])
-        rc, out = self.run_check()
-        self.assertEqual(rc, 0, out)
-
-    def test_a_host_unit_row_is_allowed(self):
-        # stack-bouncer is a root oneshot script: a row, no ContainerName.
-        self.unit("bitcoind")
-        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "—"),
-                   (["stack-bouncer"], "— (a host script)", "—")])
-        rc, out = self.run_check()
-        self.assertEqual(rc, 0, out)
-
-    def test_a_stale_row_is_caught(self):
-        self.unit("bitcoind")
-        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "—"),
-                   (["gone-unit"], "`docker.io/x/z:1`", "—")])
-        rc, out = self.run_check()
-        self.assertEqual(rc, 1)
-        self.assertIn("not a container unit", out)
-
-    def test_no_table_is_an_error(self):
-        with open(self.readme, "w") as f:
-            f.write("# stack\n\n## Next\n")
-        self.unit("bitcoind")
+[mcp.ghost]
+prefix = "/ghost"
+container = "ghost-mcp"
+port = 8101
+upstream = "ghost:1"
+""")
         with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(Fatal):
-                self.run_check()
+            with self.assertRaises(Fatal) as ctx:
+                self.docs("check")
+        self.assertIn("no unit", ctx.exception.msg)
 
-    def test_main_arg_handling(self):
-        self.unit("bitcoind")
-        self.rows([(["bitcoind"], "`docker.io/x/y:1`", "`8333`")])
+    def test_a_missing_marker_dies(self):
+        self.write("README.md", "# stack\n\nno generated block here\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(units.main(["check", self.readme,
-                                         "--units", self.deploy]), 0)
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(units.main(["nope"]), 2)
+            with self.assertRaises(Fatal) as ctx:
+                self.docs("check")
+        self.assertIn("no '<!-- BEGIN GENERATED: what-runs -->'", ctx.exception.msg)
 
 
 if __name__ == "__main__":

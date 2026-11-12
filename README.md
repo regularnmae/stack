@@ -17,46 +17,57 @@ deployment problem.
 
 ## What runs
 
-| Unit | Image | Published on the host | Data |
-| --- | --- | --- | --- |
-| `bitcoind` | `docker.io/lncm/bitcoind:v28.0` | — | `$DATA_DIR/bitcoin` |
-| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.4` | — | `$DATA_DIR/monero` |
-| `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` | `$DATA_DIR/fulcrum` |
-| `btc-explorer` | `localhost/btc-explorer:local` (built from `btc-explorer/Containerfile`) | `127.0.0.1:8108` | — |
-| `xmr-explorer` | `localhost/xmr-explorer:local` (MoneroBlock, built from `xmr-explorer/Containerfile`) | `127.0.0.1:8109` | — |
-| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` (NPM: `btcpay.boltmesh.net`; an SSH tunnel to the same port still works) | `$DATA_DIR/btcpay` |
-| `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.21` | — | `$DATA_DIR/nbxplorer` |
-| `monero-wallet-btcpay` | `docker.io/btcpayserver/monero:0.18.5.4` | — (BTCPay only) | `$DATA_DIR/btcpay/xmr-wallet` |
-| `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | — (clnrest internal for the MCP) | `$DATA_DIR/cln` |
-| `tor` | `localhost/tor:local` (built from `tor/Containerfile`) | — | `$DATA_DIR/tor` |
-| `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — | — |
-| `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8082` | `$DATA_DIR/searxng` |
-| `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | `80`, `443`, `81` | `$DATA_DIR/npm/{data,letsencrypt}` |
-| `netcheck`, `netcheck-host` | `localhost/netcheck:local` (built from `netcheck/Containerfile`) | — | — |
-| `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` | `$DATA_DIR/uptime-kuma` |
-| `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | `$DATA_DIR/monitoring/vm` |
-| `vmalert` | `docker.io/victoriametrics/vmalert:v1.155.0` | `127.0.0.1:8880` | — (rules in `$DATA_DIR/config/monitoring/vmalert`) |
-| `alertmanager` | `docker.io/prom/alertmanager:v0.34.2` | `127.0.0.1:9093` | `$DATA_DIR/monitoring/alertmanager` (silences, notification log) |
-| `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network, `:9100` (wildcard bind; LAN closed by firewall) | — (serves `$DATA_DIR/monitoring/textfile`) |
-| `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.53.0` | `127.0.0.1:9428` | `$DATA_DIR/logs/vl` |
-| `vector` | `docker.io/timberio/vector:0.61.0-debian` | — | `$DATA_DIR/logs/vector` (checkpoint) |
-| `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` | — |
-| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` | — |
-| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` | — |
-| `monero-wallet-mcp` | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` 🔑 | — |
-| `lightning-mcp` | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` 🔑 | — |
-| `fulcrum-mcp` | `localhost/fulcrum-mcp:latest` | `127.0.0.1:8110` | — |
-| `victoria-logs-mcp` | `localhost/victoria-logs-mcp:latest` | `127.0.0.1:8111` | — |
-| `victoriametrics-mcp` | `localhost/victoriametrics-mcp:latest` | `127.0.0.1:8112` | — |
-| `crowdsec-mcp` | `localhost/crowdsec-mcp:latest` | host network, `127.0.0.1:8113` (the app's own bind) | — |
-| `btcpay-mcp` | `localhost/btcpay-mcp:latest` | `127.0.0.1:8114` | — |
-| `postgres` | `docker.io/library/postgres:18-alpine` | — | `$DATA_DIR/postgres` |
-| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` | — |
-| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — | — |
-| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` | — |
-| `crowdsec` | `docker.io/crowdsecurity/crowdsec:v1.8.2` | host network, `127.0.0.1:8080` (LAPI, key-gated) | `$DATA_DIR/ids/crowdsec` |
-| `suricata` ⚙️ | `docker.io/jasonish/suricata:8.0.8` | host network (IDS only, publishes nothing) | `$DATA_DIR/ids/suricata` |
-| `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — (writes the `inet stack_bans` nft set) | `$DATA_DIR/audit/bouncer.status` |
+<!-- BEGIN GENERATED: what-runs -->
+
+| Unit | Image | Published on the host |
+| --- | --- | --- |
+| `alertmanager` | `docker.io/prom/alertmanager:v0.34.2` | `127.0.0.1:9093` |
+| `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` |
+| `bitcoind` | `docker.io/lncm/bitcoind:v28.0` | — |
+| `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` |
+| `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` |
+| `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — |
+| `btc-explorer` | `localhost/btc-explorer:local` | `127.0.0.1:8108` |
+| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` |
+| `btcpay-mcp` | `localhost/btcpay-mcp:latest` | `127.0.0.1:8114` |
+| `crowdsec` | `docker.io/crowdsecurity/crowdsec:v1.8.2` | host network |
+| `crowdsec-mcp` | `localhost/crowdsec-mcp:latest` | host network |
+| `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` |
+| `fulcrum-mcp` | `localhost/fulcrum-mcp:latest` | `127.0.0.1:8110` |
+| `lightning-mcp` 🔑 | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` |
+| `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | — |
+| `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` |
+| `monero-wallet-btcpay` | `docker.io/btcpayserver/monero:0.18.5.4` | — |
+| `monero-wallet-mcp` 🔑 | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` |
+| `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.4` | — |
+| `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.21` | — |
+| `netcheck` | `localhost/netcheck:local` | — |
+| `netcheck-host` | `localhost/netcheck:local` | host network |
+| `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | host network |
+| `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network |
+| `postgres` | `docker.io/library/postgres:18-alpine` | — |
+| `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8082` |
+| `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` |
+| `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — |
+| `suricata` ⚙️ | `docker.io/jasonish/suricata:8.0.8` | host network |
+| `tor` | `localhost/tor:local` | — |
+| `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` |
+| `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — |
+| `vector` | `docker.io/timberio/vector:0.61.0-debian` | — |
+| `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.53.0` | `127.0.0.1:9428` |
+| `victoria-logs-mcp` | `localhost/victoria-logs-mcp:latest` | `127.0.0.1:8111` |
+| `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` |
+| `victoriametrics-mcp` | `localhost/victoriametrics-mcp:latest` | `127.0.0.1:8112` |
+| `vmalert` | `docker.io/victoriametrics/vmalert:v1.155.0` | `127.0.0.1:8880` |
+| `xmr-explorer` | `localhost/xmr-explorer:local` | `127.0.0.1:8109` |
+
+<!-- END GENERATED -->
+
+The table is generated from the unit templates and `deploy/services.toml`
+(`./scripts/docs-render.sh`): a new unit appears in it on the next render, and
+a row is never edited by hand. What each unit keeps on disk is the backup set's
+business (below), and the build details of the `localhost/*` images are under
+[Block explorers](#block-explorers) and [Layout](#layout).
 
 `bitcoind` and `monerod` are **full (archival) nodes**, storing and validating
 the whole chain; `fulcrum` indexes that chain for Bitcoin wallets over the

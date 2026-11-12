@@ -28,6 +28,11 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 - **A container unit mounts only from `$DATA_DIR` (or a podman volume).** A bind
   source from the checkout breaks at the container's *next* start, not at
   deploy time.
+- **The tables that repeat a unit are generated.** README's "What runs" and
+  AGENTS.md's interface tables are rendered from these templates by
+  `scripts/docs-render.sh`, and its `--check` is the CI gate: changing an
+  `Image=`, a `PublishPort=` or an `[mcp.*]` entry means a render, never a
+  table edit.
 
 ## The render, and what the host is running
 
@@ -320,10 +325,10 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   default), are matched by `renovate.json`'s regex manager. Both files are
   matched so a restic bump moves them together. The wallet tag appears in
   the `btcpayserver/monero` unit, and one PR moves both. The README's "What
-  runs" table carries the same image again, held to the units' own `Image=`
-  lines by `stackctl units check`, so a second regex manager matches the tag
-  there too: two files, one `depName`, one branch. Without it a Quadlet bump
-  left the row on the old tag and every image PR failed that gate.
+  runs" table is generated from the units (`scripts/docs-render.sh`), and a
+  second regex manager matches the tag there too: two files, one `depName`, one
+  branch, so the rendered row and the unit move in the same PR and
+  `docs-render.sh --check` stays green.
   `postgres` (hand pinned) and `localhost/*` are disabled. Units stay **tag**-pinned
   (`pinDigests` off): kuma's `2` and searxng's date tags move on their own, a
   digest pin would turn a reviewable version bump into a PR per upstream

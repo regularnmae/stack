@@ -136,7 +136,7 @@
     },
     {
       "customType": "regex",
-      "description": "the README's 'What runs' table, which `stackctl units check` holds to each unit's own Image= line. Without this, a Quadlet tag bump left the row behind and every image PR failed that gate; the same depName from both managers gives the same branch name, so the row and the unit move in one PR",
+      "description": "the README's 'What runs' table, which is generated from the units by `scripts/docs-render.sh`. The generated row still has to move with a Quadlet tag bump; the same depName from both managers gives the same branch name, so a render after the bump keeps both in one PR",
       "matchStrings": [
         "`(?<depName>(?:docker\\.io|ghcr\\.io)/[^:`\\s]+):(?<currentValue>[^`\\s]+)`"
       ],

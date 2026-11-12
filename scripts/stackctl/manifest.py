@@ -6,9 +6,10 @@
 # declaration and no parallel lists. It replaced the five tables stack.conf used
 # to carry (the MCP prefixes, the proxy hosts, the onion services, the
 # status-page monitors and the *_HOST scalars), each of which had to be edited in
-# step with the others and with the table in AGENTS.md.
+# step with the others and with the table in AGENTS.md -- and the two Markdown
+# tables that repeated it are now generated from here.
 #
-# Two audiences read the TOML, and neither sees a second grammar:
+# Three audiences read the TOML, and none sees a second grammar:
 #
 #   * the Python reconciler (npm.py) -- these typed objects, directly;
 #   * the bash callers (deploy.sh, verify.sh, monitor.sh, deploy/install.sh,
@@ -16,6 +17,8 @@
 #     they always sourced from stack.conf (plus the probe table verify.sh and
 #     rotate.sh need, which has no stack.conf predecessor). scripts/lib.sh's
 #     load_manifest is a one-line addition per consumer.
+#   * stackctl docs -- the same objects again, rendered into the two Markdown
+#     tables AGENTS.md and README used to repeat by hand.
 #
 # The fields are validated here, once, as they are read: each table is checked
 # field by field and an error names the TOML table it came from. Nothing composes
@@ -60,6 +63,9 @@ _RESERVED_ENVS = frozenset({
 })
 # tor's HiddenServicePort target: a name or address and a numeric port.
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_.-]+:[0-9]+$")
+# An [mcp.*] upstream: the same, with an optional path (monero-wallet's
+# /json_rpc, searxng's /search).
+_UPSTREAM_RE = re.compile(r"^[A-Za-z0-9_.-]+:[0-9]+(/[^\s]*)?$")
 _MAX_PORT = 65535
 
 
@@ -121,11 +127,12 @@ class McpHost:
     $DATA_DIR/config/<container>/token.env; `probe_tool`/`probe_args` are the one
     read-only tool that proves the server reaches its upstream; `needs_nodes`
     skips the deep call under verify.sh --no-nodes; `spend_token_var` is empty
-    for everything but the two money servers.
+    for everything but the two money servers. `upstream` is the image's default
+    endpoint, stated once for AGENTS.md's generated interface table.
     """
 
     __slots__ = ("prefix", "container", "port", "token_var", "probe_tool",
-                 "probe_args", "needs_nodes", "spend_token_var")
+                 "probe_args", "needs_nodes", "spend_token_var", "upstream")
 
     def __init__(self, prefix: str, container: str, port: int):
         self.prefix = prefix
@@ -136,6 +143,7 @@ class McpHost:
         self.probe_args = "{}"
         self.needs_nodes = False
         self.spend_token_var = ""
+        self.upstream = ""
 
 
 class OnionService:
@@ -278,6 +286,12 @@ def _validate_probes(m: "Manifest") -> None:
             die(f"deploy/services.toml: {where} probe_args must be a JSON object")
         if e.spend_token_var and not _ENV_RE.fullmatch(e.spend_token_var):
             die(f"deploy/services.toml: {where} spend_token_var must be an env-var name")
+        if not e.upstream:
+            die(f"deploy/services.toml: {where} needs upstream "
+                f"(the image's default endpoint, for the generated interface table)")
+        if not _UPSTREAM_RE.fullmatch(e.upstream):
+            die(f"deploy/services.toml: {where} upstream '{e.upstream}' is not "
+                f"host:port[/path]")
 
 
 def _host(data: dict, key: str, hosts: Dict[str, Host], where: str) -> Host:
@@ -288,7 +302,7 @@ def _host(data: dict, key: str, hosts: Dict[str, Host], where: str) -> Host:
     return host
 
 
-def load(path: str) -> Manifest:
+def load(path: str, overrides: bool = True) -> Manifest:
     if tomllib is None:
         die("reading deploy/services.toml needs Python 3.11+ (tomllib); "
             "bootstrap.sh installs a newer python3")
@@ -323,7 +337,9 @@ def load(path: str) -> Manifest:
         envs[env] = key
         kuma_add_host = _bool(table, "kuma_add_host", where, True)
         # The operator override: a non-empty $<env> wins, like ${VAR:-default}.
-        domain = os.environ.get(env) or domain
+        # Generated docs pass overrides=False: a committed file must not carry
+        # the domain of whichever host happened to run the render.
+        domain = (os.environ.get(env) if overrides else None) or domain
         if not domain:
             die(f"deploy/services.toml: {where} resolves to an empty domain")
         if domain in domains:
@@ -363,7 +379,8 @@ def load(path: str) -> Manifest:
             die(f"deploy/services.toml: {where} and [mcp.{seen_ports[entry.port]}] "
                 f"both publish loopback port {entry.port}")
         seen_ports[entry.port] = key
-        for field in ("token_var", "probe_tool", "probe_args", "spend_token_var"):
+        for field in ("token_var", "probe_tool", "probe_args", "spend_token_var",
+                      "upstream"):
             if not isinstance(table.get(field, ""), str):
                 die(f"deploy/services.toml: {where} {field} must be a string")
         entry.token_var = table.get("token_var", "")
@@ -371,6 +388,7 @@ def load(path: str) -> Manifest:
         entry.probe_args = table.get("probe_args", "{}")
         entry.needs_nodes = _bool(table, "needs_nodes", where, False)
         entry.spend_token_var = table.get("spend_token_var", "")
+        entry.upstream = table.get("upstream", "")
         m.mcp.append(entry)
 
     # --- the proxy hosts -----------------------------------------------------
@@ -439,61 +457,24 @@ def load(path: str) -> Manifest:
 
 
 # --- the CI check -------------------------------------------------------------
-def check(path: str, agents_path: Optional[str] = None) -> int:
+def check(path: str) -> int:
     m = load(path)
     _validate_probes(m)
     print(f"manifest: {len(m.hosts)} host(s), {len(m.mcp)} mcp server(s), "
           f"{len(m.npm)} proxy host(s), {len(m.onion)} onion service(s)")
-    if agents_path:
-        _check_agents(m, agents_path)
     return 0
-
-
-def _check_agents(m: Manifest, agents_path: str) -> None:
-    # AGENTS.md's interface table is the contract with the app repos; it is
-    # maintained by hand, so this is the one drift a manifest edit can cause
-    # that nothing else would notice. A row is matched by the manifest's own
-    # facts (container name + loopback port in the same line), and the count
-    # of rows carrying an MCP port must equal the manifest's server count --
-    # so a server deleted here fails the check until the table follows.
-    try:
-        with open(agents_path, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
-        die(f"could not read {agents_path} for the manifest cross-check")
-    ports = {e.port for e in m.mcp}
-    rows = [l for l in lines
-            if l.startswith("| `") and any(f"127.0.0.1:{p}" in l for p in ports)]
-    if len(rows) != len(m.mcp):
-        die(f"{agents_path}: the interface table has {len(rows)} row(s) carrying an "
-            f"MCP loopback port, but the manifest declares {len(m.mcp)} server(s)")
-    for e in m.mcp:
-        row = next((l for l in rows if f"`{e.container}`" in l), None)
-        if row is None:
-            die(f"{agents_path}: no interface-table row for the container "
-                f"`{e.container}` (manifest entry {e.prefix})")
-        if f"127.0.0.1:{e.port}" not in row:
-            die(f"{agents_path}: the row for `{e.container}` does not carry its "
-                f"loopback publish 127.0.0.1:{e.port}")
-    print(f"agents table: {len(m.mcp)} mcp row(s) agree with the manifest")
 
 
 def main(argv: List[str]) -> int:
     # argv is what __main__'s dispatch passes after the command word:
     #   ["shell", "deploy/services.toml"]
-    #   ["check", "deploy/services.toml", "--agents", "AGENTS.md"]
+    #   ["check", "deploy/services.toml"]
     if len(argv) < 2 or argv[0] not in ("shell", "check"):
-        print("usage: python3 -m stackctl manifest {shell|check} <services.toml> "
-              "[--agents AGENTS.md]", file=sys.stderr)
+        print("usage: python3 -m stackctl manifest {shell|check} "
+              "<services.toml>", file=sys.stderr)
         return 2
-    mode, path, rest = argv[0], argv[1], argv[2:]
-    agents: Optional[str] = None
-    if "--agents" in rest:
-        i = rest.index("--agents")
-        if i + 1 >= len(rest):
-            die("--agents needs a path")
-        agents = rest[i + 1]
+    mode, path = argv[0], argv[1]
     if mode == "shell":
         sys.stdout.write(load(path).shell())
         return 0
-    return check(path, agents)
+    return check(path)
