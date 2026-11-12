@@ -359,19 +359,15 @@ configure_btcpay() {
 # ---------------------------------------------------------------------------
 # The four env files the backend/worker read; passed to the one-off migration
 # container. install.sh and configure_btcpay wrote them by the time we run.
-boltmesh_env_args() {
-    printf '%s\n' \
-        "--env-file" "$CONFIG_DIR/boltmesh/db.env" \
-        "--env-file" "$CONFIG_DIR/boltmesh/secrets.env" \
-        "--env-file" "$CONFIG_DIR/boltmesh/app.env" \
-        "--env-file" "$CONFIG_DIR/btcpay/backend.env"
-}
-
 run_boltmesh_migrations() {
     log "applying BoltMesh database migrations"
-    local -a envs=()
-    # shellcheck disable=SC2207
-    envs=($(boltmesh_env_args))
+    # Each pair is one argv: a data dir containing spaces must not be re-split.
+    local -a envs=(
+        --env-file "$CONFIG_DIR/boltmesh/db.env"
+        --env-file "$CONFIG_DIR/boltmesh/secrets.env"
+        --env-file "$CONFIG_DIR/boltmesh/app.env"
+        --env-file "$CONFIG_DIR/btcpay/backend.env"
+    )
     podman run --rm --network npm-network \
         "${envs[@]}" \
         localhost/boltmesh-backend:latest alembic upgrade head
