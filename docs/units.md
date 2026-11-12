@@ -14,9 +14,11 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `*.container.in`, `*.network`, and the plain `*.service`/`*.timer`), so a new
   service is a file there, never a change in an app repo. An env file's *shape* lives in `deploy/env/<app>/<file>.env.in`
   and is rendered by the same substitution list as the units (`render_to`).
-- **A re-render does not change a running container.** `install.sh` advances
-  `units.rendered`; only `deploy.sh` and `rotate.sh` advance `units.applied`,
-  and only after applying. A hand render is drift and `verify.sh` names it.
+- **A re-render does not change a running container.** `install.sh` stamps every
+  rendered unit with a digest of its own definition; the container that starts
+  from it carries that stamp as an OCI label, so `deploy.sh` restarts exactly the
+  units whose definition moved and `verify.sh` names the rest. A hand render is
+  drift.
 - **`HealthOnFailure=kill`, never `restart`** -- podman's own restart leaves the
   unit active, so `NRestarts` never moves and the monitor cannot see the flap.
 - **`HealthCmd` proves the process, not the data path.** A probe that is red
@@ -63,69 +65,70 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   that can mint runes.
 
 - **A re-render alone does not change a running container** (systemd keeps the
-  old one), so the host persists the answer to "which definition are the
-  containers running?": `install.sh` writes `$DATA_DIR/audit/units.rendered` on
-  every render, and `deploy.sh`/`scripts/rotate.sh` write
-  `$DATA_DIR/audit/units.applied` only after applying it. `deploy.sh` compares
-  the live digests against `units.applied` (`scripts/lib.sh`'s `unit_digest` /
-  `unit_digest_changed`, shared with `install.sh` and `verify.sh` so render and
-  compare cannot drift apart) and restarts exactly the units whose definition
-  changed — never ones that are inactive, since those are started later in
-  order. The digest pass records the changed set once (`CHANGED_UNITS`, and
-  `CHANGED_ACTIVE_UNITS` for the ones that were running), and the app tier and
+  old one), so each rendered unit carries the answer to "which definition is
+  running?" itself. `install.sh` appends
+  `Label=org.stack.unit-digest=<sha>`: a digest of the unit's own declarative
+  content plus the config it reads once at start (torrc, the CrowdSec tree,
+  `vector.toml`, vmalert's rules) — `scripts/lib.sh`'s
+  `unit_definition_digest`. The stamp line is excluded from the digest, so a
+  stamp can never change what it is a digest of, and `render_unit` carries the
+  installed one forward so a re-render that changes nothing does not look like a
+  change to the `.bak` logic. Quadlet turns the label into a container label and
+  podman never rewrites one on a container it did not create, so the running side
+  is an observation (`unit_digest_applied`, one `podman ps`) and the disk side a
+  digest (`unit_digest`). There is no baseline file and no writer to get wrong: an
+  interrupted deploy, a `--only` branch that warns, or a rotation that re-rendered
+  everything leave the old stamp in place, and that *is* the drift signal.
+
+  `deploy.sh` restarts exactly the units whose two digests differ
+  (`unit_digest_changed`) — never ones that are inactive, since those are started
+  later in order. The digest pass records the changed set once (`CHANGED_UNITS`,
+  and `CHANGED_ACTIVE_UNITS` for the ones that were running), and the app tier and
   the explorers are in `DEFER_UNITS`: their own phase restarts them after its
   build, so a unit that is both changed and rebuilt is restarted once, not twice
   (once on the old bits, once on the new). `restart_applied` is the phase-side
   gate: it restarts only when `unit_was_changed` or the container's image id
   differs from the tag's, and starts an unchanged stopped unit instead. This is
   what makes **a hand `deploy/install.sh` visible drift instead of a swallowed
-  signal**: it advances `units.rendered`, `verify.sh` fails naming the units
-  (and the monitor pages through it), and the next deploy restarts them. Do not
-  go back to digesting the files either side of the installer: that compares the
-  render with itself. `units.applied` advances per unit: a tier that warns does
-  not abort the deploy, but a changed unit no phase restarted keeps its own line
-  where it is (`unit_digest_hold`), so `verify.sh` keeps naming it and the next
-  run repeats it rather than hiding it — without holding back the units this run
-  did apply, which would restart all of them a second time. The first deploy on a
-  host without a baseline adopts the render on disk once, with a warning (drift
-  older than that run is unknowable).
-  `nginx-proxy-manager` is only flagged by the restart pass: its restart is
-  deferred to `sync_npm_network`, after the proxy hosts are rewritten
-  (`deploy.sh` says why the order is load-bearing), and `units_commit` keeps its
-  baseline line behind while that flag is still set — a `--only` branch that
-  never reached the rewrite must not claim NPM applied. `--only
-  nginx-proxy-manager` is the exception: its branch restarts the unit directly
-  (no branch rewrites the hosts) and settles the flag itself, so only a change
-  that also moves the network mode still needs `--only npm-hosts`. Every `--only`
-  branch goes through `sync_units` and commits at the end; `agent-skills` runs no
-  installer and therefore commits nothing. Two ordering facts inside
-  `sync_units`: **`ensure_netcheck` is its last step, not part of the `--only`
-  prologue**, because `install.sh` rebuilds the `netcheck` image in
-  `install_units` and a refresh before that compared the container with the old
-  image and did nothing (the new client reached the containers one deploy
-  later); and an app branch sets `DEFER_UNITS` so `restart_changed_units` leaves
-  that unit alone — `deploy_app` restarts it after the build, and restarting it
-  twice is two outages for one edit. `deploy.sh` does not wait for health at
-  all: it restarts what changed and returns, and `./verify.sh` (or the monitor's
-  sweep) is the verdict. The work that needs a service to be answering -- the
-  CLN runes, the wallets, the BTCPay databases/bootstrap and the BoltMesh
-  migrations -- is the second step, `./configure.sh`, which owns every bounded
-  wait (`wait_healthy`, `wait_cmd`). It also restarts `lightning-mcp` when the
-  rune file changed: the server reads `LIGHTNING_RUNE` from its
-  `EnvironmentFile=` at start, so a rune minted after it started is otherwise
-  invisible (a fresh host deploys the server before any rune exists).
+  signal**: `verify.sh` fails naming the units (and the monitor pages through it),
+  and the next deploy restarts them. Do not go back to digesting the files either
+  side of the installer: that compares the render with itself. A container created
+  before the stamps existed carries no label; it is reported as `unstamped`, not
+  adopted, so the first deploy after this change recreates it — once.
 
-- **`scripts/rotate.sh` is the third writer of `units.applied`.** A rotation
-  re-renders through `install.sh` (only `bitcoin-rpc` and `tor-control` bake a
-  secret into a unit's `Exec=` or `Environment=`), restarts its dependents and
-  then advances the baseline — otherwise the next deploy would bounce the units
-  it just restarted. Because `install.sh` re-renders *every* unit, `complete()`
-  commits only when the changed definitions are ones the rotation restarted or
-  proved already current; anything else stays unapplied for the next deploy,
-  with a warning. That is why the units baking the RPC credential live in one
-  list, `BITCOIN_RPC_UNITS`: it drives the restarts, and `apply_bitcoin_rpc`
-  refuses to run when a unit in `deploy/` embeds the placeholder without being
-  in it (`nbxplorer` was re-rendered and never restarted until it joined).
+  `nginx-proxy-manager` is only flagged by the restart pass: its restart is
+  deferred to `sync_npm_network`, after the proxy hosts are rewritten (`deploy.sh`
+  says why the order is load-bearing). `--only nginx-proxy-manager` is the
+  exception: its branch restarts the unit directly (no branch rewrites the hosts),
+  so only a change that also moves the network mode still needs `--only
+  npm-hosts`. Every `--only` branch goes through `sync_units`; `agent-skills` runs
+  no installer and so touches no unit. Two ordering facts inside `sync_units`:
+  **`ensure_netcheck` is its last step, not part of the `--only` prologue**,
+  because `install.sh` rebuilds the `netcheck` image in `install_units` and a
+  refresh before that compared the container with the old image and did nothing
+  (the new client reached the containers one deploy later); and an app branch sets
+  `DEFER_UNITS` so `restart_changed_units` leaves that unit alone — `deploy_app`
+  restarts it after the build, and restarting it twice is two outages for one
+  edit. `deploy.sh` does not wait for health at all: it restarts what changed and
+  returns, and `./verify.sh` (or the monitor's sweep) is the verdict. The work
+  that needs a service to be answering -- the CLN runes, the wallets, the BTCPay
+  databases/bootstrap and the BoltMesh migrations -- is the second step,
+  `./configure.sh`, which owns every bounded wait (`wait_healthy`, `wait_cmd`). It
+  also restarts `lightning-mcp` when the rune file changed: the server reads
+  `LIGHTNING_RUNE` from its `EnvironmentFile=` at start, so a rune minted after it
+  started is otherwise invisible (a fresh host deploys the server before any rune
+  exists).
+
+- **`scripts/rotate.sh` records nothing.** A rotation re-renders through
+  `install.sh` (only `bitcoin-rpc` and `tor-control` bake a secret into a unit's
+  `Exec=` or `Environment=`) and restarts its dependents; those restarts recreate
+  the containers, and their new stamps are the record. A definition the re-render
+  moved but the rotation did not restart keeps its old stamp, so the next deploy
+  applies it and `verify.sh` names it meanwhile. The units baking the RPC
+  credential live in one list, `BITCOIN_RPC_UNITS`: it drives the restarts, and
+  `apply_bitcoin_rpc` refuses to run when a unit in `deploy/` embeds the
+  placeholder without being in it (`nbxplorer` was re-rendered and never restarted
+  until it joined).
 
 - **`<unit>.bak` is the *previous* render, and only when the render changes
   something.** It used to be written only if it did not already exist, so it

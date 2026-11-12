@@ -165,35 +165,37 @@ done
 # ---------------------------------------------------------------------------
 head2 "Unit definitions"
 # A running container keeps the definition it started with, so a rendered unit
-# never applied is invisible to every health check. install.sh records what it
-# rendered ($DATA_DIR/audit/units.rendered); deploy.sh and scripts/rotate.sh
-# record what they applied (units.applied). Comparing the live digests against
-# that applied set catches a hand render, a hand edit and an interrupted deploy.
-# It is a FAIL, not a warning: the monitor carries only verify's FAIL lines.
-unit_lines() { # digest-set stem -> that unit's manifest lines
-    printf '%s\n' "$1" | awk -v u="$2" '$2 ~ ("^" u "\\.") { print }' | sort
-}
-unit_applied=$(unit_applied_read)
+# never applied is invisible to every health check. The answer travels with the
+# container: install.sh stamps each rendered .container with a digest of its own
+# definition as an OCI label, and podman never rewrites a label on a container it
+# did not create. Drift is "the stamp differs from the file on disk" -- a hand
+# render, a hand edit, an interrupted deploy and a rotation that never restarted
+# its dependents all land here, and it is a FAIL because the monitor carries only
+# verify's FAIL lines. A container with no stamp at all is unknowable rather than
+# stale (it predates the stamps), so it warns and the next deploy recreates it.
 unit_current=$(unit_digest)
-if [ -z "$unit_applied" ]; then
-    warn "no applied-unit baseline ($DATA_DIR/audit/units.applied); ./deploy.sh establishes it"
-elif [ -z "$unit_current" ]; then
+unit_running=$(unit_digest_applied)
+if [ -z "$unit_current" ]; then
     warn "no rendered unit files found (is the stack installed?); ./deploy.sh renders them"
+elif [ -z "$unit_running" ]; then
+    warn "no running containers to compare unit definitions against (is the stack up?)"
 else
-    unit_changed=$(unit_digest_changed "$unit_applied" "$unit_current")
+    unit_changed=$(unit_digest_changed "$unit_running" "$unit_current")
+    unit_unstamped=""
+    for unit in $unit_changed; do
+        # A container created before the stamps existed is unknowable, not stale:
+        # a warning, not a FAIL. The next deploy recreates it, and every container
+        # after that is stamped.
+        if printf '%s\n' "$unit_running" | grep -qxF "$UNIT_UNSTAMPED  $unit.container"; then
+            unit_unstamped="$unit_unstamped $unit"
+        else
+            bad "$unit: running an older definition than the one on disk; run ./deploy.sh (or ./deploy.sh --only $unit)"
+        fi
+    done
     if [ -z "$unit_changed" ]; then
-        pass "every rendered unit matches the definition last applied"
-    else
-        unit_rendered=$(cat "$DATA_DIR/audit/units.rendered" 2>/dev/null || true)
-        for unit in $unit_changed; do
-            if [ -n "$unit_rendered" ] \
-                && [ "$(unit_lines "$unit_rendered" "$unit")" = "$(unit_lines "$unit_current" "$unit")" ]; then
-                how="rendered by install.sh and never applied"
-            else
-                how="edited after install.sh rendered it"
-            fi
-            bad "$unit: $how; run ./deploy.sh (or ./deploy.sh --only $unit)"
-        done
+        pass "every running container was created from the definition on disk"
+    elif [ -n "$unit_unstamped" ]; then
+        warn "started before the unit generation stamps existed, so their definition is unknowable:$unit_unstamped (the next ./deploy.sh recreates them)"
     fi
 fi
 

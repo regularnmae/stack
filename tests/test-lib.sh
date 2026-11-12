@@ -230,9 +230,9 @@ PRUNE=0
 NPM_API=http://example.invalid:81
 LEAK=unset|unset|unset" "$got" 'stackctl_wrapper passes paths, flags and overrides only'
 
-# write_atomic is the primitive behind prom_write, status_write and
-# unit_digest_write: stdin -> a hidden temp beside the target, the mode, then a
-# rename. The rename is the point -- a reader sees the old file or the new one.
+# write_atomic is the primitive behind prom_write and status_write: stdin -> a
+# hidden temp beside the target, the mode, then a rename. The rename is the
+# point -- a reader sees the old file or the new one.
 printf 'hello\n' | write_atomic "$TMP_DIR/atomic.txt" 600
 assert_eq hello "$(cat "$TMP_DIR/atomic.txt")" 'write_atomic writes stdin'
 assert_eq 600 "$(stat -c %a "$TMP_DIR/atomic.txt")" 'write_atomic sets the mode'
@@ -272,34 +272,51 @@ assert_eq '/d&|y|/d&|y/config|/r&|x|14' \
     'render_root_template escapes sed metacharacters'
 
 mkdir -p "$TMP_DIR/quadlet" "$TMP_DIR/data"
-printf 'one\n' > "$TMP_DIR/quadlet/a.container"
-printf 'two\n' > "$TMP_DIR/quadlet/b.container"
+printf '[Container]\nImage=one\n\n[Service]\nRestart=always\n\n[Install]\nWantedBy=default.target\n' \
+    > "$TMP_DIR/quadlet/a.container"
+printf '[Container]\nImage=two\n' > "$TMP_DIR/quadlet/b.container"
+printf '[Container]\nContainerName=stack-backup\n' > "$TMP_DIR/quadlet/c.container"
 export QUADLET_DIR="$TMP_DIR/quadlet" DATA_DIR="$TMP_DIR/data"
 before=$(unit_digest)
-printf 'changed\n' > "$TMP_DIR/quadlet/b.container"
+printf '[Container]\nImage=changed\n' > "$TMP_DIR/quadlet/b.container"
 assert_eq b "$(unit_digest_changed "$before" "$(unit_digest)")" 'unit digest identifies changed unit'
 
-# The baseline advance when one unit is not applied: the rest of the render is
-# recorded, and the unapplied unit keeps its applied line -- so verify.sh still
-# names it and the next deploy repeats only that one.
-assert_eq '111 a.container
-222 b.container' \
-    "$(unit_digest_hold '111 a.container
-999 b.container' '111 a.container
-222 b.container' ' b ')" \
-    'unit_digest_hold keeps the applied line for a held unit'
-assert_eq '111 a.container
-999 b.container' \
-    "$(unit_digest_hold '111 a.container
-999 b.container' '111 a.container
-222 b.container' ' ')" \
-    'unit_digest_hold records everything when nothing is held'
-# A held unit with no applied line cannot be carried forward: failing lets
-# units_commit withhold the file rather than drop a unit the new render has.
-if unit_digest_hold '111 a.container' '222 b.container' ' a ' >/dev/null; then
-    printf 'FAIL: unit_digest_hold accepted a held unit with no applied line\n' >&2
-    exit 1
-fi
+# The generation stamp is how a running container reports the definition it was
+# created from: install.sh writes it, podman reads it back, and it is never part
+# of the digest it carries -- a re-stamp must not look like a changed unit.
+unstamped=$(unit_digest)
+unit_stamp_generations "$QUADLET_DIR"
+assert_eq "$unstamped" "$(unit_digest)" 'stamping a unit does not change its digest'
+assert_eq 600 "$(stat -c %a "$TMP_DIR/quadlet/a.container")" \
+    'a stamped unit keeps mode 600'
+# Quadlet reads a key in the wrong section as absent, and [Install] is the last
+# section of most units -- a stamp appended at EOF would never reach a container.
+assert_eq '[Container]' \
+    "$(awk -v p="$UNIT_STAMP_LINE" '/^\[/ { s = $0 } index($0, p) == 1 { print s }' \
+        "$TMP_DIR/quadlet/a.container")" \
+    'the stamp lands inside [Container]'
+cp "$TMP_DIR/quadlet/a.container" "$TMP_DIR/a.snapshot"
+unit_stamp_generations "$QUADLET_DIR"
+assert_eq "$(cat "$TMP_DIR/a.snapshot")" "$(cat "$TMP_DIR/quadlet/a.container")" \
+    're-stamping an unchanged unit is a no-op'
+assert_eq b "$(unit_digest_changed "$before" "$(unit_digest)")" \
+    'a stamp alone is not a changed unit'
+
+# The applied side is the label on the running container, not a file. A container
+# created before the stamps existed has none: it is recorded as unstamped so the
+# next deploy recreates it instead of adopting a definition nobody can identify.
+mkdir -p "$TMP_DIR/bin"
+stamp_a=$(unit_stamp_value "$TMP_DIR/quadlet/a.container")
+cat > "$TMP_DIR/bin/podman" <<EOF
+#!/bin/sh
+printf 'a $stamp_a\n'
+printf 'stack-backup \n'
+EOF
+chmod +x "$TMP_DIR/bin/podman"
+assert_eq "$stamp_a  a.container
+unstamped  c.container" \
+    "$(PATH="$TMP_DIR/bin:$PATH" unit_digest_applied)" \
+    'unit_digest_applied reads the stamp and calls an unstamped container drift'
 
 # The space-delimited unit sets deploy.sh passes around: an exact stem, never a
 # substring (tor must not match tor-control), and the empty set matches nothing.

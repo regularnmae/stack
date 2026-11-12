@@ -442,77 +442,139 @@ electrum_tip() { # port [tls] -> height, empty on failure
     printf '%s' "$reply" | jq -r '.result.height // empty' 2>/dev/null || true
 }
 
-# --- rendered-unit digests -------------------------------------------------
+# --- unit generation stamps -------------------------------------------------
 # A running container keeps the definition it started with: re-rendering a unit
-# changes nothing until that unit restarts. So the baseline is persisted rather
-# than compared either side of install.sh -- otherwise a hand install.sh (or
-# rotate.sh's re-render) rewrites the files and the next deploy compares them
-# with themselves.
+# changes nothing until that unit restarts, and `systemctl show -p ExecStart`
+# answers with the *new* file as soon as install.sh's daemon-reload has run --
+# systemd keeps no copy of what the live process was started with. So the applied
+# definition is read back from the container instead: install.sh stamps every
+# rendered .container with a digest of its own definition as an OCI label, and
+# podman never rewrites a label on a container it did not create. Drift is then
+# "the label differs from the digest of the file on disk" -- one observation, no
+# baseline file, and no writer that can claim an apply which did not happen.
 #
-#   $DATA_DIR/audit/units.rendered   what install.sh just wrote (every render)
-#   $DATA_DIR/audit/units.applied    the render the containers were started from
+# The digest excludes the stamp line itself: the stamp is the answer, not an
+# input, so it must not be able to change what it is a digest of.
 #
-# install.sh owns the first; deploy.sh and rotate.sh advance the second only
-# after applying it, and live digests are compared against `applied`, never the
-# render. The format is sha256sum's, with tor.unit/crowdsec.unit/vector.unit for
-# the three config trees that are read only at start. Mode 600 like the rest of
-# audit/: several rendered units embed a secret.
-#
-# Here because install.sh, deploy.sh, verify.sh and rotate.sh must agree byte for
-# byte: two implementations would report permanent drift.
-unit_digest() {
-    local q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
-    [ -d "$q" ] || return 0
-    ( cd "$q" && sha256sum -- *.container 2>/dev/null ) || true
-    # torrc is not a unit, but a running tor keeps the config it started with,
-    # and the onion services are rendered into it. Hashing it under the stem
-    # "tor" makes the restart pass bounce tor when a service was retargeted.
-    if [ -s "$DATA_DIR/tor/torrc" ]; then
-        sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 " tor.unit" }'
-    fi
-    # The crowdsec config is read only at start, so a changed parser, scenario or
-    # whitelist would otherwise wait for the next reboot. One digest over the
-    # rendered tree, under the stem "crowdsec".
-    if [ -d "$DATA_DIR/config/ids/crowdsec" ]; then
-        find "$DATA_DIR/config/ids/crowdsec" -type f -print0 2>/dev/null \
-            | sort -z | xargs -0 -r sha256sum 2>/dev/null \
-            | sha256sum | awk '{ print $1 " crowdsec.unit" }'
-    fi
-    # Vector reads its rendered config only at start (there is no reload), so a
-    # changed transform restarts exactly that unit -- the same contract.
-    if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
-        sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 " vector.unit" }'
-    fi
-    # The vmalert rules are read only at start too, and they carry
-    # MONITOR_ALERT_FOR: editing the hold-down in monitor.env has to reach a
-    # running vmalert, or the file says one thing and the process does another.
-    if [ -s "$DATA_DIR/config/monitoring/vmalert/stack.yml" ]; then
-        sha256sum -- "$DATA_DIR/config/monitoring/vmalert/stack.yml" \
-            | awk '{ print $1 " vmalert.unit" }'
-    fi
+# Here because install.sh, deploy.sh and verify.sh must agree byte for byte: two
+# implementations would report permanent drift.
+UNIT_STAMP_LABEL="org.stack.unit-digest"
+UNIT_STAMP_LINE="Label=$UNIT_STAMP_LABEL="
+# What the applied side records for a running container that carries no stamp:
+# a container created before the stamps existed. Never equal to a digest, so the
+# next deploy recreates it rather than adopting a definition nobody can identify.
+UNIT_UNSTAMPED="unstamped"
+
+# The start-only config a unit owns, keyed by stem. A container reads these once
+# at start, so a change has to reach its definition digest or the restart pass
+# never sees it. Folded into the owning container's digest rather than given a
+# stem of its own: a label lives on a container, and "torrc changed" means
+# "tor was started from an older definition".
+unit_config_digest() { # stem -> digest, empty when the unit owns no such config
+    case "$1" in
+        tor)
+            # The onion services are rendered into torrc, so a retargeted service
+            # reaches a running tor only through a restart.
+            if [ -s "$DATA_DIR/tor/torrc" ]; then
+                sha256sum -- "$DATA_DIR/tor/torrc" | awk '{ print $1 }'
+            fi ;;
+        crowdsec)
+            if [ -d "$DATA_DIR/config/ids/crowdsec" ]; then
+                find "$DATA_DIR/config/ids/crowdsec" -type f -print0 2>/dev/null \
+                    | sort -z | xargs -0 -r sha256sum 2>/dev/null \
+                    | sha256sum | awk '{ print $1 }'
+            fi ;;
+        vector)
+            # Vector reads its rendered config only at start (there is no reload).
+            if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
+                sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 }'
+            fi ;;
+        vmalert)
+            # The rules carry MONITOR_ALERT_FOR: editing the hold-down in
+            # monitor.env has to reach a running vmalert, or the file says one
+            # thing and the process does another.
+            if [ -s "$DATA_DIR/config/monitoring/vmalert/stack.yml" ]; then
+                sha256sum -- "$DATA_DIR/config/monitoring/vmalert/stack.yml" \
+                    | awk '{ print $1 }'
+            fi ;;
+    esac
 }
 
-# Map a running container name to the systemd unit that owns it. Usually the same
-# string, but a unit may set ContainerName to something else (backup.container is
+# The stamp line's value in a rendered unit, empty when it carries none. Fixed
+# prefix, not a regex: the label contains dots.
+unit_stamp_value() { # rendered .container -> stamp
+    awk -v p="$UNIT_STAMP_LINE" 'index($0, p) == 1 { print substr($0, length(p) + 1); exit }' \
+        "$1" 2>/dev/null || true
+}
+
+# The unit's content with its stamp line set, on stdout. The line goes at the end
+# of the [Container] section: Quadlet reads a key in the wrong section as absent,
+# and a stamp appended at EOF lands in [Install] (the last section of most units).
+unit_stamped() { # rendered .container stamp -> content on stdout
+    awk -v p="$UNIT_STAMP_LINE" -v ins="$UNIT_STAMP_LINE$2" '
+        BEGIN { done = 0; seen = 0; in_container = 0 }
+        /^\[/ {
+            if (in_container && !done) { print ins; done = 1 }
+            if ($0 == "[Container]") seen = 1
+            in_container = ($0 == "[Container]")
+        }
+        index($0, p) != 1 { print }
+        END {
+            if (done) exit
+            if (in_container) { print ins; exit }
+            if (!seen) print "[Container]"
+            print ins
+        }
+    ' "$1"
+}
+
+# Everything the container will be created from, except the stamp: the rendered
+# unit file plus the config it reads once at start.
+unit_definition_digest() { # rendered .container -> sha256
+    local f="$1" stem
+    stem=${f##*/}
+    stem=${stem%.container}
+    {
+        awk -v p="$UNIT_STAMP_LINE" 'index($0, p) != 1' "$f" 2>/dev/null || true
+        unit_config_digest "$stem"
+    } | sha256sum | awk '{ print $1 }'
+}
+
+# The definition each rendered unit currently asks for, in sha256sum's format.
+unit_digest() {
+    local q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
+    local f
+    [ -d "$q" ] || return 0
+    for f in "$q"/*.container; do
+        [ -f "$f" ] || continue
+        printf '%s  %s\n' "$(unit_definition_digest "$f")" "${f##*/}"
+    done
+}
+
+# container-name <TAB> unit stem, one per rendered unit. Usually the same string,
+# but a unit may set ContainerName to something else (backup.container is
 # stack-backup under backup.service), and `systemctl show stack-backup.service`
-# answers 0 just like a real unit -- so assuming name == unit records restarts
-# for a unit that does not exist. Falls back to the name when no rendered unit
-# claims it.
-unit_for_container() { # container-name -> unit stem
-    local name="$1" q f stem cname
-    q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
+# answers 0 just like a real unit -- so assuming name == unit records restarts for
+# a unit that does not exist.
+unit_container_map() {
+    local q="${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}"
+    local f stem cname
+    [ -d "$q" ] || return 0
     for f in "$q"/*.container; do
         [ -f "$f" ] || continue
         stem=${f##*/}
         stem=${stem%.container}
         cname=$(sed -n 's/^ContainerName=//p' "$f" 2>/dev/null | head -n1)
-        [ -n "$cname" ] || cname="$stem"
-        if [ "$cname" = "$name" ]; then
-            printf '%s' "$stem"
-            return 0
-        fi
+        printf '%s\t%s\n' "${cname:-$stem}" "$stem"
     done
-    printf '%s' "$name"
+}
+
+# A container name to the unit stem that owns it, or the name itself when no
+# rendered unit claims it.
+unit_for_container() { # container-name -> unit stem
+    local stem
+    stem=$(unit_container_map | awk -F'\t' -v n="$1" '$1 == n { print $2; exit }')
+    printf '%s' "${stem:-$1}"
 }
 
 # Is a unit in a space-delimited set of unit stems (" bitcoind tor ")? Kept in
@@ -535,66 +597,53 @@ unit_digest_changed() { # before-digest after-digest
         | sed 's/\.[^.]*$//' | sort -u
 }
 
-# Write a digest set to a manifest file, atomically and mode 600. Takes an
-# explicit set when the caller already holds one (deploy.sh records what was
-# applied, not whatever is on disk a moment later).
-unit_digest_write() { # file [digest-set]
-    local f="$1" d="${2:-}"
-    [ -n "$d" ] || d=$(unit_digest)
-    if [ -n "$d" ]; then
-        printf '%s\n' "$d" | write_atomic "$f" 600
-    else
-        write_atomic "$f" 600 </dev/null
-    fi
+# The definition each running container was created from, in unit_digest's
+# format. `podman ps` rather than one inspect per unit: one fork, and it lists
+# exactly the containers that are running -- a stopped unit has no definition to
+# be stale, and its next start reads the new file. A container with no stamp was
+# created before the stamps existed and is recorded as UNIT_UNSTAMPED, so the next
+# deploy recreates it instead of adopting a definition nobody can identify.
+unit_digest_applied() {
+    local name stamp stem
+    local -A owner=()
+    while IFS=$'\t' read -r name stem; do
+        if [ -n "$name" ]; then owner[$name]=$stem; fi
+    done < <(unit_container_map)
+    while read -r name stamp; do
+        if [ -z "$name" ]; then continue; fi
+        stem=${owner[$name]:-}
+        if [ -z "$stem" ]; then continue; fi
+        printf '%s  %s.container\n' "${stamp:-$UNIT_UNSTAMPED}" "$stem"
+    done < <(podman ps --format "{{.Names}} {{.Label \"$UNIT_STAMP_LABEL\"}}" 2>/dev/null || true)
 }
 
-# The set to record when some units are not applied yet: the new render with a
-# held unit's line replaced by its applied one, so the baseline still advances
-# for everything that was applied (one unapplied unit must not make the next
-# deploy restart all of them again) while verify.sh keeps naming the held one --
-# its live digest still differs. Fails (exit 3) when a held unit has no applied
-# line, because keeping a never-applied unit out of the baseline would hide it:
-# unit_digest_changed ignores names on one side only.
-unit_digest_hold() { # new-set applied-set held-stems -> the set to record
-    awk -v held="$3" '
-        BEGIN { n = split(held, h, " "); for (i = 1; i <= n; i++) hold[h[i]] = 1 }
-        NR == FNR { applied[$2] = $0; next }
-        {
-            stem = $2; sub(/\.[^.]*$/, "", stem)
-            if (stem in hold) {
-                if (!($2 in applied)) missing = 1
-                else print applied[$2]
-                next
-            }
-            print
-        }
-        END { exit (missing ? 3 : 0) }
-    ' <(printf '%s\n' "$2") <(printf '%s\n' "$1")
-}
-
-# The last applied digest set, empty when this host has no baseline yet (a fresh
-# host, or the first deploy after this file was introduced).
-unit_applied_read() {
-    local f="$DATA_DIR/audit/units.applied"
-    if [ -s "$f" ]; then
-        cat "$f"
-    fi
-}
-
-# The digest set the running containers were last started from. Before that file
-# exists (a fresh host, or the first deploy after it was introduced) the only
-# baseline is the render on disk, so adopt it once, loudly, rather than bouncing
-# every daemon. Drift older than that first run is invisible; the run that adopts
-# the baseline becomes it.
-units_baseline() {
-    local applied
-    applied=$(unit_applied_read)
-    if [ -n "$applied" ]; then
-        printf '%s\n' "$applied"
+# Write the stamp a rendered unit should carry, in place and mode 600 (several
+# rendered units embed a secret). No-op when it is already current, so a re-render
+# that changes nothing does not churn the file.
+unit_stamp_generation() { # rendered .container
+    local f="$1" want tmp
+    [ -f "$f" ] || return 0
+    want=$(unit_definition_digest "$f")
+    if [ "$(unit_stamp_value "$f")" = "$want" ]; then
         return 0
     fi
-    warn "no applied-unit baseline yet ($DATA_DIR/audit/units.applied); adopting the units on disk as deployed. Drift that predates this run is invisible -- this run becomes the baseline."
-    unit_digest
+    tmp=$(mktemp)
+    unit_stamped "$f" "$want" > "$tmp"
+    install -m 600 "$tmp" "$f"
+    rm -f "$tmp"
+}
+
+# Stamp every rendered unit. install.sh calls this last, after the config trees
+# unit_config_digest folds in have been written: a stamp computed before them
+# would describe a definition the host does not have.
+unit_stamp_generations() { # [quadlet-dir]
+    local q="${1:-${QUADLET_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd}}"
+    local f
+    [ -d "$q" ] || return 0
+    for f in "$q"/*.container; do
+        [ -f "$f" ] || continue
+        unit_stamp_generation "$f" || return 1
+    done
 }
 
 # --- locally-built images --------------------------------------------------

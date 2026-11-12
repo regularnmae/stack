@@ -162,35 +162,10 @@ jobs:
               || { echo "::error::deploy/monitoring/rules/stack.yml.in has no rule for severity $s"; exit 1; }
           done
           printf 'the vmalert rules cover every severity the sweep emits\n'
-      # The applied-unit baseline (scripts/lib.sh) is what makes a hand render
-      # visible drift instead of a swallowed restart signal. The helpers are pure
-      # file work, so the contract is testable without podman or a host: a
-      # round-trip, no drift on an unchanged tree, exactly the touched unit on a
-      # changed one, and the one-time adoption when no baseline exists.
-      - name: unit digest manifest
-        run: |
-          tmp=$(mktemp -d)
-          trap 'rm -rf "$tmp"' EXIT
-          mkdir -p "$tmp/q" "$tmp/d"
-          printf 'one\n' > "$tmp/q/a.container"
-          printf 'two\n' > "$tmp/q/b.container"
-          export QUADLET_DIR="$tmp/q" DATA_DIR="$tmp/d"
-          # shellcheck source=scripts/lib.sh
-          . scripts/lib.sh
-          before=$(unit_digest)
-          unit_digest_write "$DATA_DIR/audit/units.applied" "$before"
-          [ "$(unit_applied_read)" = "$before" ] \
-            || { echo "::error::manifest round-trip failed"; exit 1; }
-          [ -z "$(unit_digest_changed "$before" "$(unit_digest)")" ] \
-            || { echo "::error::an unchanged tree reported drift"; exit 1; }
-          printf 'changed\n' > "$tmp/q/b.container"
-          changed=$(unit_digest_changed "$before" "$(unit_digest)")
-          [ "$changed" = b ] \
-            || { echo "::error::expected unit b, got '$changed'"; exit 1; }
-          rm -f "$DATA_DIR/audit/units.applied"
-          [ "$(units_baseline 2>/dev/null)" = "$(unit_digest)" ] \
-            || { echo "::error::a missing baseline was not adopted"; exit 1; }
-          printf 'unit digest manifest ok\n'
+      # The unit generation stamps (scripts/lib.sh) are covered by
+      # tests/test-lib.sh, which the workflow runs: a stamp must not change the
+      # digest it carries, must land inside [Container], and an unstamped running
+      # container must read as drift rather than being adopted.
       - name: syntax check
         run: |
           mapfile -t files < <(git ls-files '*.sh')

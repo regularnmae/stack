@@ -226,20 +226,20 @@ existing secret, leaves the running daemons alone, and rebuilds the ten MCP
 servers and the BoltMesh app tier, but **restarts only what actually changed** —
 a unit whose rendered definition differs, or a container running an image older
 than the tag the build just produced. An unchanged image and unit means no
-outage, not a restart for its own sake. It also records the unit definitions it
-applied in `$DATA_DIR/audit/units.applied`, while `deploy/install.sh` records
-what it rendered in `units.rendered` — so running the installer by hand shows up
-as drift (`./verify.sh` fails naming the units) instead of being swallowed by the
-next deploy. The four images built here — the two explorers, `netcheck`
-and `tor` — are rebuilt when their Containerfile changed and left
-alone otherwise: the digest of that file is baked into the image as a label, so
-a merged base-image bump reaches the host on the next deploy instead of needing
-a hand rebuild (`--only` forces one anyway). `deploy.sh` does not run
-`verify.sh`, and it never waits for a container's health or for a chain to
-sync: verification is the separate `./verify.sh` (or the monitor's sweep), and
-the work that can only happen against a *running* stack is the second step,
-`./configure.sh` (Bitcoin wallet, CLN runes, BTCPay databases/plugin
-wallet/bootstrap, BoltMesh migrations). Common flags:
+outage, not a restart for its own sake. The answer to "which definition is this
+container running?" travels with the container: `deploy/install.sh` stamps each
+rendered unit with a digest of its own definition as an OCI label, so a
+definition that changed without a restart shows up as drift (`./verify.sh` fails
+naming the units) instead of being swallowed by the next deploy. The four images
+built here — the two explorers, `netcheck` and `tor` — are rebuilt when their
+Containerfile changed and left alone otherwise: the digest of that file is baked
+into the image as a label, so a merged base-image bump reaches the host on the
+next deploy instead of needing a hand rebuild (`--only` forces one anyway).
+`deploy.sh` does not run `verify.sh`, and it never waits for a container's health
+or for a chain to sync: verification is the separate `./verify.sh` (or the
+monitor's sweep), and the work that can only happen against a *running* stack is
+the second step, `./configure.sh` (Bitcoin wallet, CLN runes, BTCPay
+databases/plugin wallet/bootstrap, BoltMesh migrations). Common flags:
 
 ```sh
 ./deploy.sh --only bitcoin-node-mcp   # rebuild and restart one service
@@ -503,7 +503,7 @@ everything in `$DATA_DIR` that cannot be re-downloaded:
 - `tor/` — `torrc` and the onion services' keys (see [Tor onion services](#tor-onion-services))
 - `config/` — every token, rune and secret
 - `npm/` — nginx-proxy-manager's config and TLS material
-- `audit/` — the monitor's log, the spend baselines and the unit digests
+- `audit/` — the monitor's log and the spend baselines
 - `uptime-kuma/` — the status page's state (see [Status page](#status-page)), minus
   the live datadir
 - `postgres-dump/`, `npm-dump/`, `uptime-kuma-dump/` — the three live databases as
@@ -1690,9 +1690,9 @@ last deploy, and only rewritten when that deploy actually changed the file. (It
 is not a history: for anything older, check the unit template out of an older
 commit.) Restore the `.bak` beside its unit, `systemctl --user daemon-reload`,
 and restart that unit — a daemon-reload alone leaves the running container on
-the old definition. The restored file is not what the last deploy recorded as
-applied, so `./verify.sh` keeps naming that unit as drift until the checkout is
-rolled back too: check out the older stack commit and run
-`./deploy.sh --only <unit>`, which re-renders it and records the baseline. To
+the old definition. The restored file carries the stamp of the definition it
+holds, so the next start records it correctly; until that restart, `./verify.sh`
+keeps naming the unit as drift. Check out the older stack commit and run
+`./deploy.sh --only <unit>`, which re-renders it and restarts it. To
 roll back an application, check out an older commit in its repo and
 `./deploy.sh --only <app>`.

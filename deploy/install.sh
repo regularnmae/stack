@@ -15,11 +15,11 @@
 # overwritten, secret resolution order is secrets.env -> the installed unit ->
 # the daemon's own config -> generate, and the unit a render replaces is kept as
 # <unit>.bak (one generation: what the last deploy changed, which is what the
-# README's rollback section promises). Every run also records what it rendered
-# in $DATA_DIR/audit/units.rendered; deploy.sh compares that against the render
-# it last applied (units.applied) and restarts exactly the units that differ, so
-# running this script by hand is visible drift rather than a swallowed signal.
-# Nothing here prints a secret.
+# README's rollback section promises). Every rendered unit also carries a digest
+# of its own definition as an OCI label, so the container that starts from it
+# says which definition it is running and deploy.sh can restart exactly the units
+# whose definition moved -- running this script by hand is visible drift rather
+# than a swallowed signal. Nothing here prints a secret.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1411,9 +1411,21 @@ fi
 # 7. units: render every one (they all reference the data or config dir)
 # ---------------------------------------------------------------------------
 render_unit() {
-    local src="$1" target="$2" tmp
+    local src="$1" target="$2" tmp stamp=""
+    # Carry the generation stamp the installed unit already has. The stamp is a
+    # digest of everything *except* its own line, so it changes nothing the digest
+    # covers -- and it keeps render_unit_backedup's cmp honest: without it every
+    # re-render would differ from the previous file by the stamp alone and .bak
+    # would be rewritten on every run, destroying the rollback.
+    if [ "${target##*.}" = container ] && [ -f "$target" ]; then
+        stamp=$(unit_stamp_value "$target")
+    fi
     tmp="$(mktemp)"
     render_to "$src" "$tmp"
+    if [ -n "$stamp" ]; then
+        unit_stamped "$tmp" "$stamp" > "$tmp.stamped"
+        mv -f "$tmp.stamped" "$tmp"
+    fi
     [ -L "$target" ] && rm -f "$target"
     install -m 600 "$tmp" "$target"
     rm -f "$tmp"
@@ -1550,13 +1562,22 @@ sync_tree "$DEPLOY_DIR/crowdsec" "$CONFIG_DIR/ids/crowdsec"
 mkdir -p "$DATA_DIR/ids/crowdsec/etc" "$DATA_DIR/ids/crowdsec/data"
 log "rendered the crowdsec config into $CONFIG_DIR/ids/crowdsec"
 
-# What this render produced, for the one question a running container cannot
-# answer: which definition was it started from? deploy.sh compares the live files
-# against units.applied and restarts exactly the units that differ, so a hand run
-# of this script shows up as drift instead of consuming the signal. Written last,
-# after every render, because the digest covers all of them.
-unit_digest_write "$DATA_DIR/audit/units.rendered"
-log "recorded the rendered-unit digests in $DATA_DIR/audit/units.rendered"
+# Stamp every rendered unit with the digest of its own definition: the answer to
+# "which definition was this container started from?" travels with the container
+# as an OCI label, so nothing has to record an apply and no writer can claim one
+# that did not happen (scripts/lib.sh, docs/units.md). Last, after every render
+# and every config tree the digest folds in, and before the daemon-reload below --
+# the stamp only takes effect when the unit next starts, which is the point.
+unit_stamp_generations "$QUADLET_DIR" \
+    || die "could not stamp the rendered units in $QUADLET_DIR"
+log "stamped the rendered unit generations in $QUADLET_DIR"
+# The render/applied digest files are superseded by the stamps above: a host
+# upgraded from the previous scheme keeps them until this runs once, and nothing
+# reads them any more.
+if [ -e "$DATA_DIR/audit/units.rendered" ] || [ -e "$DATA_DIR/audit/units.applied" ]; then
+    rm -f "$DATA_DIR/audit/units.rendered" "$DATA_DIR/audit/units.applied"
+    log "removed the superseded unit-digest baseline from $DATA_DIR/audit"
+fi
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload

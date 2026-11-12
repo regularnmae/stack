@@ -113,7 +113,8 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   `deploy/services.toml` are the declaration (emitted to bash as the
   `ONION_*` arrays); `install.sh` rewrites only the marked region at the end of
   `torrc` so the hash and the `SocksPolicy` are never touched, and `deploy.sh`'s
-  `unit_digest` hashes `torrc` so a changed declaration restarts tor. The
+  `unit_digest` folds `torrc` into tor's generation stamp, so a changed
+  declaration restarts tor. The
   `.onion` address is key material, not config: it comes from
   `$DATA_DIR/tor/onion/<name>/` (mounted `/var/lib/tor/onion`, hence `tor/` in
   the backup set), so never "clean up" that directory and never seed the address

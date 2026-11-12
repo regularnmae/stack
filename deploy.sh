@@ -40,20 +40,14 @@ QUADLET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
 # Set by restart_changed_units when nginx-proxy-manager's unit changed.
 NPM_UNIT_CHANGED=0
 # The units this run restarted, space-delimited with a leading space (" bitcoind
-# tor "). units_commit compares it with the changed set so the baseline never
-# claims a restart that did not happen; refresh_image_unit skips a unit the
-# digest pass already restarted.
+# tor "). refresh_image_unit skips a unit the digest pass already restarted.
 APPLIED_UNITS=" "
-# Unit stems whose rendered definition differs from the applied baseline, and
-# the subset active when the digest pass ran. A changed unit is restarted by the
-# phase that owns it, after its build, never twice.
+# Unit stems whose rendered definition differs from the one their running
+# container was created from, and the subset active when the digest pass ran. A
+# changed unit is restarted by the phase that owns it, after its build, never
+# twice.
 CHANGED_UNITS=""
 CHANGED_ACTIVE_UNITS=""
-# The digest set last reconciled with the running containers, and whether
-# install.sh ran at all (the agent-skills branch runs no installer, so it must
-# not record a baseline it never applied).
-UNITS_SYNCED=0
-UNITS_APPLIED_DIGEST=""
 # shellcheck source=stack.conf
 . "$REPO_DIR/stack.conf"
 # shellcheck source=scripts/lib.sh
@@ -181,19 +175,16 @@ install_units() {
 
 # install.sh + the digest comparison, for every `--only` branch. A re-render is
 # not an application -- a running container keeps the definition it started with
-# (docs/units.md) -- so the baseline is the render last *applied*
-# ($DATA_DIR/audit/units.applied, see units_baseline), advanced at the end of
-# the branch by units_commit: a branch whose own restart fails must not record
-# success. Defined before the functions it calls on purpose: bash resolves those
-# at call time.
+# (docs/units.md) -- so the comparison is between the definition on disk and the
+# generation stamp the running container carries (scripts/lib.sh's
+# unit_digest / unit_digest_applied). Defined before the functions it calls on
+# purpose: bash resolves those at call time.
 sync_units() {
     local before after
-    before=$(units_baseline)
+    before=$(unit_digest_applied)
     install_units
     after=$(unit_digest)
     restart_changed_units "$before" "$after"
-    UNITS_APPLIED_DIGEST="$after"
-    UNITS_SYNCED=1
     # restart_changed_units only flags nginx-proxy-manager: its restart has to
     # follow the proxy-host rewrite (sync_npm_network says why). A --only branch
     # does not rewrite the hosts, so leave it to `--only npm-hosts` or a full
@@ -212,58 +203,10 @@ sync_units() {
     ensure_netcheck
 }
 
-# Record the render this run applied: at the end of a full deploy and of every
-# --only branch that ran install.sh, never on a dry run, and never after a
-# failure. A baseline that advances past a restart that did not happen is the
-# silent-stale-config bug this manifest exists to prevent -- so a changed unit
-# no phase restarted keeps its own line where it is (unit_digest_hold) instead of
-# holding back the whole file: withholding all of it makes the next run restart
-# every unit this one applied.
-units_commit() {
-    local now unit pending="" record
-    [ "$DRY_RUN" = 0 ] || return 0
-    [ "$UNITS_SYNCED" = 1 ] || return 0
-    # install.sh is also runnable by hand, so a render can land after the digest
-    # pass and change a definition without restart_changed_units seeing it.
-    # Catch it up before recording. Every phase has run by now, so a changed
-    # unit still unapplied has no owner left: clear DEFER_UNITS and restart it
-    # here.
-    now=$(unit_digest)
-    if [ "$now" != "$UNITS_APPLIED_DIGEST" ]; then
-        DEFER_UNITS=""
-        restart_changed_units "$UNITS_APPLIED_DIGEST" "$now"
-        UNITS_APPLIED_DIGEST="$now"
-    fi
-    # A branch that did not reach sync_npm_network leaves NPM's new unit
-    # unapplied on purpose (the next full deploy restarts it, after the rewrite).
-    if [ "${NPM_UNIT_CHANGED:-0}" = 1 ] && [ "${ONLY:-}" != npm-hosts ]; then
-        pending="$pending nginx-proxy-manager "
-    fi
-    # A changed unit that was active had to be restarted to apply its
-    # definition. If no phase did, its baseline line stays put.
-    for unit in $CHANGED_ACTIVE_UNITS; do
-        unit_applied "$unit" || pending="$pending$unit "
-    done
-    if [ -n "$pending" ]; then
-        if record=$(unit_digest_hold "$UNITS_APPLIED_DIGEST" \
-            "$(unit_applied_read)" "$pending"); then
-            UNITS_APPLIED_DIGEST="$record"
-            warn "not applied yet; their baseline lines stay put:$pending"
-        else
-            warn "not recording the applied-unit baseline: still unapplied:$pending"
-            return 0
-        fi
-    fi
-    unit_digest_write "$DATA_DIR/audit/units.applied" "$UNITS_APPLIED_DIGEST"
-    log "recorded the applied-unit baseline ($DATA_DIR/audit/units.applied)"
-}
-
 # ---------------------------------------------------------------------------
 # what changed, and what this run applied
 # ---------------------------------------------------------------------------
 # The digest pass records the changed set once; every later phase asks these.
-# mark_* are idempotent because one unit can be named by two rendered files
-# (tor.container and the torrc digest).
 unit_was_changed() { unit_in_set "$1" "$CHANGED_UNITS"; }
 unit_applied() { unit_in_set "$1" "$APPLIED_UNITS"; }
 mark_changed() { unit_was_changed "$1" || CHANGED_UNITS="$CHANGED_UNITS$1 "; }
@@ -283,9 +226,10 @@ image_is_running() { # container image
 }
 
 # Restart a unit only when this run changed it: its rendered definition differs
-# from the baseline, or it runs an image older than the tag now points at. A
-# rebuilt but unchanged image would otherwise take every app down for nothing.
-# An unchanged, stopped unit is started. Nothing here waits for health.
+# from the one its container was created from, or it runs an image older than the
+# tag now points at. A rebuilt but unchanged image would otherwise take every app
+# down for nothing. An unchanged, stopped unit is started. Nothing here waits for
+# health.
 restart_applied() { # unit image [force]
     local unit="$1" image="$2" force="${3:-0}"
     # An earlier phase (the digest pass) may have restarted it: one per run.
@@ -336,10 +280,15 @@ restart_changed_units() { # before-digest after-digest
         fi
         systemctl --user is-active --quiet "$unit.service" 2>/dev/null || continue
         mark_changed_active "$unit"
-        # A unit can be named by two rendered files (tor.container and the torrc
-        # digest above, which both mean tor): restart it once.
+        # One unit can be named twice (a phase and the digest pass): restart once.
         unit_applied "$unit" && continue
-        log "$unit.service changed; restarting it to pick up the new unit"
+        # An unstamped container is not "changed" -- its definition is unknown --
+        # and this is the deploy that gives it a stamp.
+        if printf '%s\n' "$before" | grep -qxF "$UNIT_UNSTAMPED  $unit.container"; then
+            log "$unit.service predates the unit generation stamps; recreating it"
+        else
+            log "$unit.service changed; restarting it to pick up the new unit"
+        fi
         if restart_unit "$unit"; then
             mark_applied "$unit"
         else
@@ -762,8 +711,7 @@ sync_npm_network() {
     log "restarting nginx-proxy-manager: $why"
     if restart_unit nginx-proxy-manager; then
         mark_applied nginx-proxy-manager
-        # The unit question is settled: units_commit may now record NPM's
-        # definition as applied.
+        # The unit question is settled: the container's new stamp is the record.
         NPM_UNIT_CHANGED=0
     else
         warn "nginx-proxy-manager did not restart; its new unit is not applied"
@@ -925,15 +873,14 @@ if [ -n "$ONLY" ]; then
             restart_unit "$ONLY"
             mark_applied "$ONLY"
         fi
-        # A direct restart settles NPM's unit question for units_commit, which
-        # otherwise keeps its baseline line behind. This branch did not rewrite
-        # the proxy hosts first, so a unit change that also changes the network
-        # mode still needs `--only npm-hosts` (sync_npm_network says why).
+        # A direct restart settles NPM's unit question: the container's new stamp
+        # is the record. This branch did not rewrite the proxy hosts first, so a
+        # unit change that also changes the network mode still needs
+        # `--only npm-hosts` (sync_npm_network says why).
         if [ "$ONLY" = nginx-proxy-manager ]; then
             NPM_UNIT_CHANGED=0
         fi
     fi
-    units_commit
     log "done (--only $ONLY)"
     exit 0
 fi
@@ -948,17 +895,15 @@ fetch_repos
 DEFER_UNITS=" "
 [ "$SKIP_APPS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${APP_REPOS[*]} boltmesh-backend boltmesh-worker boltmesh-frontend "
 [ "$SKIP_DAEMONS" = 1 ] || DEFER_UNITS="$DEFER_UNITS${EXPLORER_UNITS[*]} btcpay "
-units_before=$(units_baseline)
+units_before=$(unit_digest_applied)
 install_units
 units_after=$(unit_digest)
 restart_changed_units "$units_before" "$units_after"
-UNITS_APPLIED_DIGEST="$units_after"
-UNITS_SYNCED=1
 start_infra
 start_daemons
 # A BTCPay failure is a tier failure, not a deploy failure: the rest still
 # deploys and ./verify.sh names what is down. A bare call would let `set -e`
-# abort before units_commit and leave the baseline stale.
+# abort the remaining phases.
 start_btcpay || warn "BTCPay did not come up; continuing -- run ./verify.sh"
 [ "$SKIP_APPS" = 1 ] || deploy_apps
 [ "$SKIP_APPS" = 1 ] || deploy_boltmesh
@@ -975,10 +920,6 @@ else
 fi
 deploy_explorers
 note_firewall
-# Record the definitions this deploy applied: which unit files the containers
-# were started from, not whether the stack is healthy. A tier that warns must
-# not withhold the baseline -- every re-run would bounce units that are current.
-units_commit
 
 if [ "$DRY_RUN" = 1 ]; then
     log "dry run complete; nothing was changed"
