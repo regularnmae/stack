@@ -597,6 +597,13 @@ unit_digest_changed() { # before-digest after-digest
         | sed 's/\.[^.]*$//' | sort -u
 }
 
+# One unit's line from a digest set ("<sha>  <stem>.container"), empty when the
+# set has none. Compared against unit_digest_applied's output it answers "does
+# the running container already carry this definition?".
+unit_digest_line() { # digest-set stem -> line
+    printf '%s\n' "$1" | awk -v f="$2.container" '$2 == f { print; exit }'
+}
+
 # The definition each running container was created from, in unit_digest's
 # format. `podman ps` rather than one inspect per unit: one fork, and it lists
 # exactly the containers that are running -- a stopped unit has no definition to

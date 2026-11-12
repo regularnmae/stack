@@ -282,6 +282,18 @@ restart_changed_units() { # before-digest after-digest
         mark_changed_active "$unit"
         # One unit can be named twice (a phase and the digest pass): restart once.
         unit_applied "$unit" && continue
+        # A dependency's restart recreates its dependents (Requires= propagates
+        # the stop): bitcoind takes lightningd, nbxplorer and btcpay with it.
+        # Restarting one of those again lands seconds later, while the dependency
+        # is still warming up -- and a daemon whose shutdown talks to it
+        # (lightningd's bcli) then cannot finish and is killed at its StopTimeout.
+        # The container's own stamp says whether it already is the definition on
+        # disk.
+        if unit_digest_applied | grep -qxF "$(unit_digest_line "$after" "$unit")"; then
+            log "$unit.service was already recreated by a dependency's restart; not restarting it again"
+            mark_applied "$unit"
+            continue
+        fi
         # An unstamped container is not "changed" -- its definition is unknown --
         # and this is the deploy that gives it a stamp.
         if printf '%s\n' "$before" | grep -qxF "$UNIT_UNSTAMPED  $unit.container"; then

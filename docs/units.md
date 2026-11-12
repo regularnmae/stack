@@ -82,7 +82,12 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
   `deploy.sh` restarts exactly the units whose two digests differ
   (`unit_digest_changed`) — never ones that are inactive, since those are started
-  later in order. The digest pass records the changed set once (`CHANGED_UNITS`,
+  later in order, and never one whose container already carries the definition on
+  disk: `Requires=` propagates the stop, so restarting `bitcoind` recreates
+  `lightningd`, `nbxplorer` and `btcpay`, and a second restart seconds later
+  would land while the dependency is still warming up (a CLN stop then waits on
+  `bcli`'s bitcoind RPC and is SIGKILLed at its `StopTimeout`). The digest pass
+  records the changed set once (`CHANGED_UNITS`,
   and `CHANGED_ACTIVE_UNITS` for the ones that were running), and the app tier and
   the explorers are in `DEFER_UNITS`: their own phase restarts them after its
   build, so a unit that is both changed and rebuilt is restarted once, not twice
@@ -295,7 +300,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `btc-explorer` and `monero-node-mcp` were all SIGKILLed at 10 s during the
   11-03 event, when a host-wide stop saturates the same disk for every unit at
   once. The MCP servers lose nothing; the daemons are the ones that must be
-  allowed to finish.
+  allowed to finish. `lightningd` also has to outlast a bitcoind that is down or
+  still loading: `bcli`'s RPC call blocks CLN's shutdown, so its budget is 120 s
+  even though a stop with bitcoind up finishes instantly.
 
 - **Declared once, in `stack.conf`'s `STATEFUL_UNITS`, and checked by
   `healthcheck-lint.sh`'s HC010.** The lint requires each listed unit to carry

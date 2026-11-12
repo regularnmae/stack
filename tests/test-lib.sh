@@ -318,6 +318,23 @@ unstamped  c.container" \
     "$(PATH="$TMP_DIR/bin:$PATH" unit_digest_applied)" \
     'unit_digest_applied reads the stamp and calls an unstamped container drift'
 
+# A dependency's restart recreates its dependents (Requires= propagates the
+# stop), so the digest pass must not restart a unit whose container already
+# carries the definition on disk -- the second restart lands while the dependency
+# is still warming up.
+want=$(unit_digest_line "$(unit_digest)" a)
+assert_eq "$stamp_a  a.container" "$want" \
+    'unit_digest_line picks one unit out of a digest set'
+if ! PATH="$TMP_DIR/bin:$PATH" unit_digest_applied | grep -qxF "$want"; then
+    printf 'FAIL: a container already carrying the definition was not recognised\n' >&2
+    exit 1
+fi
+if PATH="$TMP_DIR/bin:$PATH" unit_digest_applied \
+    | grep -qxF "$(unit_digest_line "$(unit_digest)" c)"; then
+    printf 'FAIL: an unstamped container matched a definition it does not carry\n' >&2
+    exit 1
+fi
+
 # The space-delimited unit sets deploy.sh passes around: an exact stem, never a
 # substring (tor must not match tor-control), and the empty set matches nothing.
 if ! unit_in_set tor " bitcoind tor "; then

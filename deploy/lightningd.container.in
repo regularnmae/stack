@@ -30,9 +30,13 @@ Volume=@DATA_DIR@/cln:/root/.lightning:z
 Volume=@DATA_DIR@/bitcoin:/root/.bitcoin:z
 
 # Graceful stop, not podman's 10 s default: CLN commits its database and gives
-# the plugins a bounded time to exit on SIGTERM. TimeoutStopSec below stays 30
-# s above this (docs/units.md, "A durable unit is stopped, not killed").
-StopTimeout=60
+# the plugins a bounded time to exit on SIGTERM. The budget has to outlast a
+# bitcoind that is down or still loading: bcli's RPC call blocks CLN's shutdown,
+# and 60 s was not enough (podman SIGKILLs the container when the budget runs
+# out mid-stop).
+# TimeoutStopSec below stays 30 s above this (docs/units.md, "A durable unit is
+# stopped, not killed").
+StopTimeout=120
 
 # Exec arguments connecting to bitcoind and tor. NOTE: --proxy expects an IP
 # address (it does not accept a hostname) and --always-use-proxy=true
@@ -71,7 +75,7 @@ HealthOnFailure=kill
 [Service]
 Restart=always
 TimeoutStartSec=300
-TimeoutStopSec=90s
+TimeoutStopSec=150s
 
 [Install]
 WantedBy=default.target

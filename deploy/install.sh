@@ -1630,10 +1630,11 @@ BoltMesh is wired to BTCPay; fill in the OAuth / SMTP / GitHub values in
 The monitor runs every 5 minutes (monitor.timer) and writes its findings as
   metrics; vmalert (rules in $CONFIG_DIR/monitoring/vmalert/stack.yml) decides
   when one has held long enough and hands it to Alertmanager (loopback :9093).
-  Mail needs SMTP in
-  $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml, and the dead-man's
-  switch (MONITOR_PING_URL) is set in $CONFIG_DIR/monitoring/monitor.env.
-  Prove the delivery path with scripts/monitor.sh --test.
+  Mail goes out through Alertmanager once SMTP is filled in under
+  $CONFIG_DIR/monitoring/alertmanager/alertmanager.yml (seeded once with those
+  keys commented out, then yours to edit), and the dead-man's switch
+  (MONITOR_PING_URL) is set in $CONFIG_DIR/monitoring/monitor.env. Prove the
+  delivery path with scripts/monitor.sh --test.
 BoltMesh signups are mailed one per registration (registrations.timer, every
   minute): scripts/registrations.sh --dry-run shows what would be sent and
   --test proves the severity=info route. The existing accounts are seeded as
