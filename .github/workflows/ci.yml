@@ -225,3 +225,17 @@ jobs:
       # that lib.sh has not grown a copy back.
       - name: status writer tests
         run: tests/test-status.sh
+      # ... and one reader. A job that writes status_write directly skips the
+      # dry-run rule and the unrecorded-verdict rule; a sweep that reads
+      # result=fail itself re-decides the branch order that let the six jobs
+      # drift apart. Both belong to status.sh/lib.sh now.
+      - name: verdict protocol has one implementation
+        run: |
+          bad=$(grep -n 'status_write "\$' scripts/*.sh deploy/root/*.sh 2>/dev/null \
+                    | grep -v '^deploy/root/status.sh:' || true)
+          bad+=$(grep -n 'STATUS_RESULT" = fail' scripts/monitor.sh verify.sh 2>/dev/null || true)
+          if [ -n "$bad" ]; then
+              printf '%s\n' "$bad" >&2
+              echo 'call verdict_write / verdict_judge from deploy/root/status.sh and scripts/lib.sh instead' >&2
+              exit 1
+          fi

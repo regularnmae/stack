@@ -65,6 +65,48 @@ assert_eq ok "$(env_value "$root_f" result)" \
     'the shared file loads and writes with no lib.sh present'
 assert_eq 2 "$(env_value "$root_f" banned)" 'the root path passes its own fields'
 
+# --- the completed-verdict protocol ---------------------------------------
+# One writer for every job's verdict: the header, the dry-run rule and the
+# "exited without a verdict" rule. A job that skips a wrapper is how a broken
+# run keeps the previous result=ok in place and reads healthy.
+vdir="$TMP_DIR/audit"
+v="$vdir/job.status"
+
+verdict_init "$v" 'tests/test-status.sh' 'deploy/job.timer'
+verdict_write ok 'all good' 'alerts=1'
+assert_eq '# written by tests/test-status.sh (deploy/job.timer)' "$(head -n1 "$v")" \
+    'verdict_init composes the header from the writer and its scheduler'
+assert_eq ok "$(env_value "$v" result)" 'verdict_write records the verdict'
+assert_eq 1 "$(env_value "$v" alerts)" 'verdict_write passes the caller fields'
+
+# A run that dies before naming its verdict: the previous ok must not survive.
+verdict_init "$v" 'tests/test-status.sh' 'deploy/job.timer'
+verdict_unrecorded 'the drill exited without recording a verdict'
+assert_eq fail "$(env_value "$v" result)" \
+    'verdict_unrecorded records a failure for a run with no verdict'
+assert_eq 'the drill exited without recording a verdict' "$(env_value "$v" detail)" \
+    'verdict_unrecorded keeps the caller detail'
+
+# A recorded verdict is the run's own, and the trap that follows it is
+# idempotent: a signal trap exits through the EXIT trap as well.
+verdict_write ok 'fine'
+verdict_unrecorded
+verdict_unrecorded
+assert_eq ok "$(env_value "$v" result)" \
+    'verdict_unrecorded leaves a recorded verdict alone, twice'
+
+# A dry run is a read, down to the directory: bouncer.sh --dry-run may be run
+# against a down LAPI and must not page the monitor from a live verdict.
+d="$TMP_DIR/dry/audit/bouncer.status"
+DRY_RUN=1
+verdict_init "$d" 'tests/test-status.sh' 'deploy/job.timer'
+verdict_write fail 'LAPI unreachable' 2>/dev/null
+verdict_unrecorded 2>/dev/null
+DRY_RUN=0
+if [ -e "$d" ] || [ -d "$TMP_DIR/dry/audit" ]; then
+    fail 'a dry run created the status file or its directory'
+fi
+
 # --- one implementation, not two ------------------------------------------
 # declare -f is the function as this shell has it; a fresh shell that has only
 # the shared file shows what root would run. They must be the same text, which
@@ -73,7 +115,8 @@ cat > "$TMP_DIR/print-fn.sh" <<'EOF'
 . "$1"
 declare -f "$2"
 EOF
-for fn in env_value write_atomic status_write dur_ms; do
+for fn in env_value write_atomic status_write verdict_init verdict_write \
+          verdict_unrecorded dur_ms; do
     fresh=$(env -i PATH="$PATH" bash --noprofile --norc "$TMP_DIR/print-fn.sh" \
         "$SHARED" "$fn")
     [ "$(declare -f "$fn")" = "$fresh" ] \

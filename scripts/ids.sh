@@ -48,6 +48,10 @@ CURSOR_FILE="$AUDIT_DIR/ids.cursor"
 AUDIT_LOG="$AUDIT_DIR/ids.log"
 mkdir -p "$AUDIT_DIR"
 
+# The verdict file this run owns. verdict_init names the writer and the unit
+# that schedules it; deploy/root/status.sh owns the contract.
+verdict_init "$STATUS_FILE" scripts/ids.sh deploy/ids.timer
+
 # The bounded EVE window is staged here while it is counted. The trap covers a
 # failure between creating the chunk and removing it at the end of the block.
 CHUNK=""
@@ -242,8 +246,7 @@ esac
 result=ok
 [ -n "$problem" ] && result=fail
 
-status_write "$STATUS_FILE" \
-    "# written by scripts/ids.sh (deploy/ids.timer)" \
+verdict_write \
     "$result" "$problem" \
     "suricata=$SURICATA_STATE" "crowdsec=$CROWDSEC_STATE" \
     "alerts=$ALERTS" "decisions=$DECISIONS" "eve=$EVE_STATE"

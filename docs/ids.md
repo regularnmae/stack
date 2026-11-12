@@ -106,9 +106,12 @@ README's "Intrusion detection".
   is the only signal that detection is healthy while nothing enforces. That
   verdict is the *live* one: `bouncer.sh --dry-run` writes nothing at all,
   including the status file, so checking the rules against a down LAPI cannot
-  page (nor advance `ok_epoch`).
-  `scripts/ids.sh` rolls the engines up into `$DATA_DIR/audit/ids.status` (the
-  `backup-verify.status` pattern) rather than letting the monitor reach into a
+  page (nor advance `ok_epoch`). The rule lives in `verdict_write`
+  (`deploy/root/status.sh`), not in the bouncer, so every job's `--dry-run`
+  behaves the same.
+  `scripts/ids.sh` rolls the engines up into `$DATA_DIR/audit/ids.status` —
+  written through `verdict_write`, judged by `verdict_judge` (`scripts/lib.sh`)
+  like every other scheduled job — rather than letting the monitor reach into a
   rootful unit and a `podman exec`; a stale status is the failure signal. Its
   decision counter reads `cscli **decisions** list -o json`, which is
   **alert-shaped** -- an array of groups, each holding the decision(s) that alert

@@ -731,9 +731,8 @@ write_secret() { # path
     write_env_file "$1"
 }
 
-# Read one of those status files, in one place: monitor.sh and verify.sh judge the
-# oneshot jobs' verdicts the same way, and only the judgement (thresholds, wording,
-# units) differs per caller.
+# Read one of those status files: the primitive under verdict_judge, and what
+# verify.sh's lighter checks use when they want the result without a threshold.
 #
 # Sets STATUS_RESULT, STATUS_AGE_S and STATUS_DETAIL rather than printing a line:
 # a delimiter-separated line cannot carry the empty fields this read exists for
@@ -755,6 +754,93 @@ status_verdict() { # file -> STATUS_RESULT, STATUS_AGE_S, STATUS_DETAIL
         *) STATUS_AGE_S=$(( $(date +%s) - ok ))
            [ "$STATUS_AGE_S" -ge 0 ] || STATUS_AGE_S=0 ;;
     esac
+}
+
+# --- judging a verdict, for the sweep and verify.sh -------------------------
+# One scheduled job's file, judged the one way: no file yet, failed, stale,
+# skipped, ok. The job-specific parts are the path, how bad its failure is, how
+# old is too old, the noun in the message and what to look at -- everything else
+# is identical for every job and lives here, so the next scheduled job does not
+# cost a copied block whose branch order can drift from its neighbours'.
+#
+# An outcome of absent/fail/stale/skip prints one line; ok prints none, on
+# purpose: the ok line carries the job's own numbers ("IDS: 3 alert(s), 1
+# decision(s)"), which is the job's point rather than this function's.
+#
+# VERDICT_PAGE/VERDICT_WARN name the printers, so this file calls no script's
+# function by name -- monitor.sh points them at fail/soft. `severity` is `fail`
+# for a job whose failure is the host's problem and `soft` for one whose failure
+# is a missing notification.
+VERDICT_OUTCOME=""
+VERDICT_PAGE=fail
+VERDICT_WARN=soft
+
+# A number from an env file or a status field, or the caller's default when it
+# is unset or not numeric. Shared by monitor.sh (thresholds, counters) and
+# verify.sh (the counts it prints), so "missing reads as the default" is one rule.
+num_or() { # value default
+    case "${1:-}" in
+        ''|*[!0-9]*) printf '%s' "$2" ;;
+        *)           printf '%s' "$1" ;;
+    esac
+}
+
+# A duration in the unit the threshold is stated in, so a 5-minute job reads
+# "5 min" and a weekly one "192h" rather than 11520 minutes.
+verdict_span() { # seconds max-seconds -> "12h" / "5 min"
+    if [ "$2" -ge 3600 ] && [ $(( $2 % 3600 )) -eq 0 ]; then
+        printf '%s' "$(( $1 / 3600 ))h"
+    else
+        printf '%s' "$(( $1 / 60 )) min"
+    fi
+}
+
+_verdict_report() { # severity text
+    case "$1" in
+        fail) "$VERDICT_PAGE" "$2" ;;
+        *)    "$VERDICT_WARN" "$2" ;;
+    esac
+}
+
+#   verdict_judge "$IDS_STATUS_FILE" fail "$(verdict_age ids)" "IDS roll-up" \
+#       "see $AUDIT_LOG" "ids.timer stopped, or ids.sh cannot read the sensor"
+#
+# HINT is what to read about a failure (a log, the file itself); AGE-HINT is what
+# to check about the schedule, and defaults to HINT. They differ because a
+# failure and a stopped timer are different questions.
+verdict_judge() { # path severity max-age-s noun [hint] [age-hint]
+    local path="$1" sev="$2" max="$3" noun="$4" hint="${5:-}" agehint="${6:-${5:-}}"
+    VERDICT_OUTCOME=""
+    if [ ! -f "$path" ]; then
+        VERDICT_OUTCOME=absent
+        "$VERDICT_WARN" "no $noun yet (expected until its timer first runs)"
+        return 0
+    fi
+    status_verdict "$path"
+    if [ "$STATUS_RESULT" = fail ]; then
+        VERDICT_OUTCOME=fail
+        _verdict_report "$sev" \
+            "$noun failed: ${STATUS_DETAIL:-no detail}${hint:+; $hint}"
+    elif [ -z "$STATUS_AGE_S" ]; then
+        # A verdict with no ok_epoch: nothing has ever succeeded, so there is no
+        # age to judge. Same outcome as a missing file (absent), different text.
+        VERDICT_OUTCOME=absent
+        "$VERDICT_WARN" \
+            "$noun has no recorded success yet${STATUS_DETAIL:+ ($STATUS_DETAIL)}"
+    elif [ "$STATUS_AGE_S" -gt "$max" ]; then
+        VERDICT_OUTCOME=stale
+        _verdict_report "$sev" \
+            "no successful $noun for $(verdict_span "$STATUS_AGE_S" "$max") (threshold $(verdict_span "$max" "$max"), last result ${STATUS_RESULT:-?})${agehint:+; $agehint}"
+    elif [ "$STATUS_RESULT" = skip ]; then
+        # Skipped is not healthy and not a failure: the last SUCCESS is still
+        # carried in ok_epoch, so a run of skips fails the age check above.
+        VERDICT_OUTCOME=skip
+        "$VERDICT_WARN" \
+            "$noun skipped: ${STATUS_DETAIL:-no detail} (last success $(verdict_span "$STATUS_AGE_S" "$max") ago)"
+    else
+        # shellcheck disable=SC2034  # set for the caller to read after this returns
+        VERDICT_OUTCOME=ok
+    fi
 }
 
 # How old the newest restic snapshot is, and how many there are -- one read of

@@ -286,38 +286,21 @@ replay_detail=""
 replay_skip_detail=""
 replay_tables=""
 replay_skips=""
-# Set once this run records a verdict of its own; verify_cleanup's guard reads
-# it so an exit with no verdict (set -e, TimeoutStartSec) cannot leave the
-# previous `result=ok` in place and read healthy. Same discipline as
-# VERIFY_DB_WROTE for the monthly drill.
-VERIFY_WROTE=0
+# The two drills' cleanup functions are also their EXIT trap, and therefore
+# their died-without-a-verdict guard: verdict_unrecorded writes a failure only
+# when this run recorded none of its own, so an exit from `set -e` or the unit's
+# TimeoutStartSec cannot leave the previous `result=ok` in place and read
+# healthy. It is idempotent, so the signal traps' exit through EXIT is harmless.
 
 # The record scripts/monitor.sh alerts on (a failed oneshot unit is otherwise
-# just a line in `systemctl --user status`). status_write owns the format --
-# KEY=VALUE, atomic, ok_epoch carried forward on failure/skip -- and these two
-# wrappers are what keep each drill's verdict in its own file.
-write_verify_status() { # result detail [snapshot files bytes subset]
-    local result="$1" detail="$2" snap="${3:-}" files="${4:-}" bytes="${5:-}" subset="${6:-}"
-    status_write "$VERIFY_STATUS" \
-        "# written by scripts/backup.sh verify (deploy/backup-verify.timer)" \
-        "$result" "$detail" \
-        "snapshot=$snap" "files=$files" "bytes=$bytes" "subset=$subset"
-}
-
-# Every verdict the weekly drill records goes through this, so the cleanup guard
-# below knows one was written. It is the only path that sets the flag -- a
-# `write_verify_status` that bypassed it would fake an unrecorded exit.
+# just a line in `systemctl --user status`). verdict_write owns the format --
+# KEY=VALUE, atomic, ok_epoch carried forward on failure/skip -- and the path is
+# whatever verdict_init named, because this one script holds two jobs and the
+# subcommand that runs owns the file.
 verify_status() { # result detail [snapshot files bytes subset]
-    write_verify_status "$@"
-    VERIFY_WROTE=1
-}
-
-write_verify_db_status() { # result detail [snapshot tables]
-    local result="$1" detail="$2" snap="${3:-}" tables="${4:-}"
-    status_write "$VERIFY_DB_STATUS" \
-        "# written by scripts/backup.sh verify-db (deploy/backup-verify-db.timer)" \
-        "$result" "$detail" \
-        "snapshot=$snap" "tables=$tables"
+    local result="$1" detail="$2" snap="${3:-}" files="${4:-}" bytes="${5:-}" subset="${6:-}"
+    verdict_write "$result" "$detail" \
+        "snapshot=$snap" "files=$files" "bytes=$bytes" "subset=$subset"
 }
 
 # Resolve `latest` (or an id) to the short id the report names, plus its time,
@@ -347,13 +330,8 @@ verify_cleanup() {
     # trapped to reach this function too. A status file left at the previous
     # `result=ok` would make a broken weekly run read healthy, so an exit with no
     # verdict of our own records a failure.
-    if [ "${VERIFY_WROTE:-0}" != 1 ]; then
-        write_verify_status fail \
-            "the drill exited without recording a verdict; see journalctl --user -u backup-verify.service"
-        # A signal trap exits through the EXIT trap as well; the second call has
-        # nothing left to record.
-        VERIFY_WROTE=1
-    fi
+    verdict_unrecorded \
+        "the drill exited without recording a verdict; see journalctl --user -u backup-verify.service"
     case "${VERIFY_TARGET:-}" in
         ""|/) return 0 ;;
     esac
@@ -375,13 +353,8 @@ verify_db_cleanup() {
     if [ -n "${REPLAY_CONTAINER:-}" ]; then
         podman rm -f "$REPLAY_CONTAINER" >/dev/null 2>&1 || true
     fi
-    if [ "${VERIFY_DB_WROTE:-0}" != 1 ]; then
-        write_verify_db_status fail \
-            "the drill exited without recording a verdict; see journalctl --user -u backup-verify-db.service"
-        # A signal trap exits through the EXIT trap as well; the second call has
-        # nothing left to record.
-        VERIFY_DB_WROTE=1
-    fi
+    verdict_unrecorded \
+        "the drill exited without recording a verdict; see journalctl --user -u backup-verify-db.service"
     case "${VERIFY_DB_TARGET:-}" in
         ""|/) return 0 ;;
     esac
@@ -392,12 +365,11 @@ verify_db_cleanup() {
     remove_restore_target "$VERIFY_DB_TARGET"
 }
 
-# Every verdict the db drill records goes through this, so the cleanup guard
-# above knows one was written. It is the only path that sets the flag -- a
-# `write_verify_db_status` that bypassed it would fake an unrecorded exit.
+# The db drill's own record; verdict_write owns the format and the ok_epoch
+# carry-forward. Its path is set by verdict_init in run_verify_db.
 db_status() { # result detail [snapshot tables]
-    write_verify_db_status "$@"
-    VERIFY_DB_WROTE=1
+    local result="$1" detail="$2" snap="${3:-}" tables="${4:-}"
+    verdict_write "$result" "$detail" "snapshot=$snap" "tables=$tables"
 }
 
 # restic restores the numeric owners, so the wallet comes back as the image uid
@@ -723,6 +695,7 @@ if (verdict !== "ok") { console.error("quick_check: " + JSON.stringify(rows)); p
 run_verify_db() {
     local snap_id snap_time root avail need rlog rrc rres
     mkdir -p "$DATA_DIR/audit"
+    verdict_init "$VERIFY_DB_STATUS" "scripts/backup.sh verify-db" deploy/backup-verify-db.timer
     exec 9>"$VERIFY_LOCK"
     if command -v flock >/dev/null 2>&1 && ! flock -w 1800 9; then
         db_status skip "another backup/restore run holds $VERIFY_LOCK" "$snapshot"
@@ -825,6 +798,7 @@ case "$cmd" in
         ;;
     verify)
         mkdir -p "$DATA_DIR/audit"
+        verdict_init "$VERIFY_STATUS" "scripts/backup.sh verify" deploy/backup-verify.timer
         # The nightly job's restic lock and a hand run are the same resource. A
         # drill that cannot get the lock in half an hour is recorded as skipped
         # (with the last success carried forward) rather than as a broken backup.

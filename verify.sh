@@ -931,11 +931,11 @@ else
 fi
 
 if [ -f "$DATA_DIR/audit/ids.status" ]; then
-    ids_result=$(env_value "$DATA_DIR/audit/ids.status" result)
-    if [ "$ids_result" = ok ]; then
+    status_verdict "$DATA_DIR/audit/ids.status"
+    if [ "$STATUS_RESULT" = ok ]; then
         pass "IDS roll-up reports ok"
     else
-        bad "IDS roll-up reports ${ids_result:-unknown} ($DATA_DIR/audit/ids.status)"
+        bad "IDS roll-up reports ${STATUS_RESULT:-unknown} ($DATA_DIR/audit/ids.status)"
     fi
 else
     warn "no IDS status yet (deploy/ids.timer has not run)"
@@ -950,12 +950,12 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then    if systemctl is-activ
         bad "stack-bouncer.timer is not active (sudo systemctl status stack-bouncer.timer)"
     fi
     if [ -f "$DATA_DIR/audit/bouncer.status" ]; then
-        b_result=$(env_value "$DATA_DIR/audit/bouncer.status" result)
-        b_banned=$(env_value "$DATA_DIR/audit/bouncer.status" banned)
-        if [ "$b_result" = ok ]; then
-            pass "bouncer: ${b_banned:-0} address(es) in the nftables ban set"
+        status_verdict "$DATA_DIR/audit/bouncer.status"
+        b_banned=$(num_or "$(env_value "$DATA_DIR/audit/bouncer.status" banned)" 0)
+        if [ "$STATUS_RESULT" = ok ]; then
+            pass "bouncer: ${b_banned} address(es) in the nftables ban set"
         else
-            bad "bouncer last run failed: $(env_value "$DATA_DIR/audit/bouncer.status" detail)"
+            bad "bouncer last run failed: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/bouncer.status)"
         fi
     else
         warn "the bouncer has not written a status yet (systemctl start stack-bouncer)"
@@ -974,12 +974,12 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
         bad "stack-audit.timer is not active (sudo systemctl status stack-audit.timer)"
     fi
     if [ -f "$DATA_DIR/audit/auditd.status" ]; then
-        a_result=$(env_value "$DATA_DIR/audit/auditd.status" result)
-        a_fim=$(env_value "$DATA_DIR/audit/auditd.status" fim)
-        if [ "$a_result" = ok ]; then
-            pass "audit report ok (${a_fim:-0} persistence-dir change(s) since the last run)"
+        status_verdict "$DATA_DIR/audit/auditd.status"
+        a_fim=$(num_or "$(env_value "$DATA_DIR/audit/auditd.status" fim)" 0)
+        if [ "$STATUS_RESULT" = ok ]; then
+            pass "audit report ok (${a_fim} persistence-dir change(s) since the last run)"
         else
-            bad "audit report: $(env_value "$DATA_DIR/audit/auditd.status" detail)"
+            bad "audit report: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/auditd.status)"
         fi
     else
         warn "the audit report has not run yet (systemctl start stack-audit)"

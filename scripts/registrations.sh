@@ -72,6 +72,11 @@ STATE_FILE="$AUDIT_DIR/registrations.status"
 AUDIT_LOG="$AUDIT_DIR/registrations.log"
 mkdir -p "$AUDIT_DIR"
 
+# The verdict file this run owns. monitor.sh pages on its ok_epoch, which
+# registrations.timer cannot prove on its own (a unit can read "active" while
+# every run fails). deploy/root/status.sh owns the contract.
+verdict_init "$STATE_FILE" scripts/registrations.sh deploy/registrations.timer
+
 say() { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
 
 # The Alertmanager URL comes from the same file the monitor reads (the unit
@@ -127,8 +132,7 @@ PG_USER=$(env_value "$DB_ENV" POSTGRES_USER)
 if [ -z "$PG_DB" ] || [ -z "$PG_USER" ] || ! podman container exists postgres 2>/dev/null; then
     say "no BoltMesh app tier on this host ($DB_ENV, postgres container); nothing to watch"
     [ "$DRY_RUN" = 1 ] && exit 0
-    status_write "$STATE_FILE" \
-        "# written by scripts/registrations.sh (deploy/registrations.timer)" \
+    verdict_write \
         ok "skipped: no BoltMesh app tier on this host" \
         "skipped=1" "new=0"
     exit 0
@@ -185,8 +189,7 @@ if [ -z "$WM_TS" ]; then
         detail="could not read the users table (is postgres up? see: podman logs --tail 30 postgres)"
         say "FAIL $detail"
         [ "$DRY_RUN" = 1 ] && exit 1
-        status_write "$STATE_FILE" \
-            "# written by scripts/registrations.sh (deploy/registrations.timer)" \
+        verdict_write \
             fail "$detail" "new=0"
         printf '%s result=fail %s\n' "$(date -Is)" "$detail" >> "$AUDIT_LOG"
         exit 1
@@ -196,8 +199,7 @@ if [ -z "$WM_TS" ]; then
         printf 'would seed watermark_ts=%s watermark_id=%s\n' "$WM_TS" "$WM_ID"
         exit 0
     fi
-    status_write "$STATE_FILE" \
-        "# written by scripts/registrations.sh (deploy/registrations.timer)" \
+    verdict_write \
         ok "" "watermark_ts=$WM_TS" "watermark_id=$WM_ID" "new=0"
     exit 0
 fi
@@ -214,8 +216,7 @@ SQL
     detail="could not read the users table (is postgres up? see: podman logs --tail 30 postgres)"
     say "FAIL $detail"
     [ "$DRY_RUN" = 1 ] && exit 1
-    status_write "$STATE_FILE" \
-        "# written by scripts/registrations.sh (deploy/registrations.timer)" \
+    verdict_write \
         fail "$detail" "watermark_ts=$WM_TS" "watermark_id=$WM_ID" "new=0"
     printf '%s result=fail %s\n' "$(date -Is)" "$detail" >> "$AUDIT_LOG"
     exit 1
@@ -253,8 +254,7 @@ done <<< "$rows"
 if [ "$NEW" = 0 ]; then
     say "no new signups"
     [ "$DRY_RUN" = 1 ] && exit 0
-    status_write "$STATE_FILE" \
-        "# written by scripts/registrations.sh (deploy/registrations.timer)" \
+    verdict_write \
         ok "" "watermark_ts=$WM_TS" "watermark_id=$WM_ID" "new=0"
     exit 0
 fi
@@ -278,16 +278,14 @@ else
             --data-binary "$payload" "$AM_URL/api/v2/alerts" >/dev/null 2>&1; then
         detail="could not push $NEW signup alert(s) to Alertmanager at $AM_URL; retrying next run"
         say "FAIL $detail"
-        status_write "$STATE_FILE" \
-            "# written by scripts/registrations.sh (deploy/registrations.timer)" \
+        verdict_write \
             fail "$detail" "watermark_ts=$WM_TS" "watermark_id=$WM_ID" "new=0"
         printf '%s result=fail %s\n' "$(date -Is)" "$detail" >> "$AUDIT_LOG"
         exit 1
     fi
 fi
 
-status_write "$STATE_FILE" \
-    "# written by scripts/registrations.sh (deploy/registrations.timer)" \
+verdict_write \
     ok "" "watermark_ts=$LAST_TS" "watermark_id=$LAST_ID" "new=$NEW"
 printf '%s' "$log_lines" >> "$AUDIT_LOG"
 printf '%s result=ok new=%s watermark_ts=%s\n' "$(date -Is)" "$NEW" "$LAST_TS" >> "$AUDIT_LOG"

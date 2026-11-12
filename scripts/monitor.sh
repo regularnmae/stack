@@ -135,14 +135,6 @@ MONITOR_BOUNCER_MAX_AGE_MIN=$(monitor_var MONITOR_BOUNCER_MAX_AGE_MIN)
 MONITOR_AUDIT_MAX_AGE_MIN=$(monitor_var MONITOR_AUDIT_MAX_AGE_MIN)
 MONITOR_REGISTRATIONS_MAX_AGE_MIN=$(monitor_var MONITOR_REGISTRATIONS_MAX_AGE_MIN)
 
-# Defaults live here, not only in monitor.env, so an env file written before a
-# check existed still monitors.
-num_or() { # value default
-    case "${1:-}" in
-        ''|*[!0-9]*) printf '%s' "$2" ;;
-        *)           printf '%s' "$1" ;;
-    esac
-}
 # How far Fulcrum's index may sit behind bitcoind. A healthy one polls every 5s
 # and is 0-1 block behind, so this is a "stopped following" threshold: 12 blocks
 # is about two hours at 10 minutes a block.
@@ -157,20 +149,30 @@ THRESH_MEMPOOL_MB=$(num_or "${MONITOR_MEMPOOL_MB:-}" 250)
 # means a wedged-but-alive RPC surface serving a stale chain. While not
 # synchronized the grace covers it, like the other chain checks.
 THRESH_XMR_LAG=$(num_or "${MONITOR_XMR_LAG_BLOCKS:-}" 3)
-# The IDS roll-up runs every five minutes; 20 gives it four missed runs (or one
-# long deploy that restarted the engines) before the sweep calls it stale. This
-# is the check that notices a sensor that died quietly -- its unit can read
-# "active" while the engine inside has stopped turning.
-THRESH_IDS_AGE_M=$(num_or "${MONITOR_IDS_MAX_AGE_MIN:-}" 20)
-# The applier runs every minute; five missed runs is a stopped timer or a wedged
-# nft, and either one means decisions are being made but nothing is enforcing.
-THRESH_BOUNCER_AGE_M=$(num_or "${MONITOR_BOUNCER_MAX_AGE_MIN:-}" 5)
-# The audit report runs every five minutes; four missed runs is a stopped timer.
-THRESH_AUDIT_AGE_M=$(num_or "${MONITOR_AUDIT_MAX_AGE_MIN:-}" 20)
-# The signup watcher runs every minute. Thirty missed runs is a stopped timer or
-# a host that cannot reach postgres. A warning, not a failure: nothing about the
-# site is wrong, only the notification that somebody signed up.
-THRESH_REG_AGE_M=$(num_or "${MONITOR_REGISTRATIONS_MAX_AGE_MIN:-}" 30)
+
+# How old each scheduled job's verdict file may be, in seconds -- the whole of
+# the per-job input to verdict_judge (scripts/lib.sh), whose default and unit
+# sit together here rather than being split across a THRESH_ and a monitor_var
+# line. The job names are the ones verdict_judge's callers pass.
+#   ids: every five minutes, 20 gives four missed runs (or one long deploy that
+#   restarted the engines) before the sweep calls it stale -- the check that
+#   notices a sensor whose unit reads "active" while the engine inside stopped.
+#   bouncer: every minute; five missed runs is a stopped timer or a wedged nft,
+#   either of which means decisions are made and nothing is enforcing.
+#   registrations: every minute; thirty missed runs is a stopped timer or a host
+#   that cannot reach postgres.
+#   auditd: every five minutes; four missed runs is a stopped timer.
+verdict_age() { # job -> seconds
+    case "$1" in
+        backup-verify)    printf '%s' $(( $(num_or "$MONITOR_BACKUP_VERIFY_MAX_AGE_H" 192) * 3600 )) ;;
+        backup-verify-db) printf '%s' $(( $(num_or "$MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H" 1080) * 3600 )) ;;
+        ids)              printf '%s' $(( $(num_or "$MONITOR_IDS_MAX_AGE_MIN" 20) * 60 )) ;;
+        bouncer)          printf '%s' $(( $(num_or "$MONITOR_BOUNCER_MAX_AGE_MIN" 5) * 60 )) ;;
+        auditd)           printf '%s' $(( $(num_or "$MONITOR_AUDIT_MAX_AGE_MIN" 20) * 60 )) ;;
+        registrations)    printf '%s' $(( $(num_or "$MONITOR_REGISTRATIONS_MAX_AGE_MIN" 30) * 60 )) ;;
+        *)                die "verdict_age: unknown job $1" ;;
+    esac
+}
 
 PROBLEMS=()
 WARNS=()
@@ -446,8 +448,6 @@ head3 "host"
 THRESH_DISK=$(num_or "${MONITOR_DISK_FREE_PCT:-}" 10)
 THRESH_INODES=$(num_or "${MONITOR_INODES_FREE_PCT:-}" 5)
 THRESH_BACKUP_H=$(num_or "${MONITOR_BACKUP_MAX_AGE_H:-}" 36)
-THRESH_VERIFY_H=$(num_or "${MONITOR_BACKUP_VERIFY_MAX_AGE_H:-}" 192)
-THRESH_VERIFY_DB_H=$(num_or "${MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H:-}" 1080)
 THRESH_DUMP_H=$(num_or "${MONITOR_DUMP_MAX_AGE_H:-}" 36)
 THRESH_CERT_D=$(num_or "${MONITOR_CERT_MIN_DAYS:-}" 14)
 THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
@@ -637,31 +637,19 @@ esac
 # The restore drill (backup.sh verify, weekly): a repository that opens and lists
 # is not one that restores. Age is measured from the last SUCCESS, not the last
 # run -- a drill that skips (no disk space, an oversized set) must not look
-# healthy because the timer fired.
+# healthy because the timer fired. verdict_judge owns that judgement for every
+# job (scripts/lib.sh); only the file, the severity and the age are passed here.
 VERIFY_STATUS_FILE="$AUDIT_DIR/backup-verify.status"
-if [ ! -f "$VERIFY_STATUS_FILE" ]; then
-    soft "no backup restore drill yet (expected until backup-verify.timer runs)"
-else
-    status_verdict "$VERIFY_STATUS_FILE"
-    if [ "$STATUS_RESULT" = fail ]; then
-        fail "backup restore drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify}"
-        backup_verify_ok=0
-    elif [ -n "$STATUS_AGE_S" ]; then
-        backup_verify_age_s=$STATUS_AGE_S
-        vage_h=$(( backup_verify_age_s / 3600 ))
-        if [ "$vage_h" -gt "$THRESH_VERIFY_H" ]; then
-            fail "no successful backup restore drill for ${vage_h}h (threshold ${THRESH_VERIFY_H}h, last result ${STATUS_RESULT:-?})"
-            backup_verify_ok=0
-        elif [ "$STATUS_RESULT" = skip ]; then
-            soft "backup restore drill skipped: ${STATUS_DETAIL:-no detail} (last success ${vage_h}h ago)"
-            backup_verify_ok=1
-        else
-            ok "backup restore drill passed ${vage_h}h ago"
-            backup_verify_ok=1
-        fi
-    else
-        soft "backup restore drill has no recorded success yet (expected until the first run)"
-    fi
+verdict_judge "$VERIFY_STATUS_FILE" fail "$(verdict_age backup-verify)" \
+    "backup restore drill" "run scripts/backup.sh verify"
+backup_verify_age_s="${STATUS_AGE_S:-}"
+case "$VERDICT_OUTCOME" in
+    ok|skip)   backup_verify_ok=1 ;;
+    fail|stale) backup_verify_ok=0 ;;
+    *)         backup_verify_ok="" ;;
+esac
+if [ "$VERDICT_OUTCOME" = ok ]; then
+    ok "backup restore drill passed $(( STATUS_AGE_S / 3600 ))h ago"
 fi
 
 # The database drill (backup.sh verify-db, monthly): the weekly drill proves
@@ -671,29 +659,16 @@ fi
 # either drill mask the other's age. A skip carries ok_epoch forward, so a run of
 # skips fails on age instead of looking green.
 VERIFY_DB_STATUS_FILE="$AUDIT_DIR/backup-verify-db.status"
-if [ ! -f "$VERIFY_DB_STATUS_FILE" ]; then
-    soft "no backup database drill yet (expected until backup-verify-db.timer runs)"
-else
-    status_verdict "$VERIFY_DB_STATUS_FILE"
-    if [ "$STATUS_RESULT" = fail ]; then
-        fail "backup database drill failed: ${STATUS_DETAIL:-run scripts/backup.sh verify-db}"
-        backup_verify_db_ok=0
-    elif [ -n "$STATUS_AGE_S" ]; then
-        backup_verify_db_age_s=$STATUS_AGE_S
-        vdage_h=$(( backup_verify_db_age_s / 3600 ))
-        if [ "$vdage_h" -gt "$THRESH_VERIFY_DB_H" ]; then
-            fail "no successful backup database drill for ${vdage_h}h (threshold ${THRESH_VERIFY_DB_H}h, last result ${STATUS_RESULT:-?})"
-            backup_verify_db_ok=0
-        elif [ "$STATUS_RESULT" = skip ]; then
-            soft "backup database drill skipped: ${STATUS_DETAIL:-no detail} (last success ${vdage_h}h ago)"
-            backup_verify_db_ok=1
-        else
-            ok "backup database drill passed ${vdage_h}h ago"
-            backup_verify_db_ok=1
-        fi
-    else
-        soft "backup database drill has no recorded success yet (expected until the first run)"
-    fi
+verdict_judge "$VERIFY_DB_STATUS_FILE" fail "$(verdict_age backup-verify-db)" \
+    "backup database drill" "run scripts/backup.sh verify-db"
+backup_verify_db_age_s="${STATUS_AGE_S:-}"
+case "$VERDICT_OUTCOME" in
+    ok|skip)   backup_verify_db_ok=1 ;;
+    fail|stale) backup_verify_db_ok=0 ;;
+    *)         backup_verify_db_ok="" ;;
+esac
+if [ "$VERDICT_OUTCOME" = ok ]; then
+    ok "backup database drill passed $(( STATUS_AGE_S / 3600 ))h ago"
 fi
 
 # The schedules. Each job's *effect* is checked above (snapshot age, drill age,
@@ -922,17 +897,11 @@ fi
 # the only thing that mails a registration, so it must be noticed.
 # ---------------------------------------------------------------------------
 REG_STATUS_FILE="$AUDIT_DIR/registrations.status"
-if [ ! -f "$REG_STATUS_FILE" ]; then
-    soft "no signup watcher status yet (deploy/registrations.timer has not run)"
-else
-    status_verdict "$REG_STATUS_FILE"
-    if [ "$STATUS_RESULT" = fail ]; then
-        soft "the signup watcher is failing: ${STATUS_DETAIL:-see $AUDIT_DIR/registrations.log}"
-    elif [ -z "$STATUS_AGE_S" ]; then
-        soft "the signup watcher status has no ok_epoch yet"
-    elif [ "$(( STATUS_AGE_S / 60 ))" -gt "$THRESH_REG_AGE_M" ]; then
-        soft "the signup watcher has not run for $(( STATUS_AGE_S / 60 )) min (systemctl --user status registrations.timer)"
-    elif [ "$(env_value "$REG_STATUS_FILE" skipped)" = 1 ]; then
+verdict_judge "$REG_STATUS_FILE" soft "$(verdict_age registrations)" \
+    "signup watcher" "see $AUDIT_DIR/registrations.log" \
+    "systemctl --user status registrations.timer"
+if [ "$VERDICT_OUTCOME" = ok ]; then
+    if [ "$(env_value "$REG_STATUS_FILE" skipped)" = 1 ]; then
         ok "signups: watcher live, skipped (no BoltMesh app tier on this host)"
     else
         ok "signups: watcher live, $(env_value "$REG_STATUS_FILE" new) new in the last run"
@@ -1032,32 +1001,22 @@ IDS_STATUS_FILE="$AUDIT_DIR/ids.status"
 ids_alerts=0
 ids_decisions=0
 ids_up=0
-if [ ! -f "$IDS_STATUS_FILE" ]; then
-    soft "no IDS status yet (deploy/ids.timer has not run; sudo ./bootstrap.sh installs the sensor)"
-else
-    status_verdict "$IDS_STATUS_FILE"
-    ids_alerts=$(num_or "$(env_value "$IDS_STATUS_FILE" alerts)" 0)
-    ids_decisions=$(num_or "$(env_value "$IDS_STATUS_FILE" decisions)" 0)
-    isuri=$(env_value "$IDS_STATUS_FILE" suricata)
-    icrowd=$(env_value "$IDS_STATUS_FILE" crowdsec)
-    if [ "$STATUS_RESULT" = fail ]; then
-        fail "intrusion detection is degraded: ${STATUS_DETAIL:-see $AUDIT_LOG}"
-        ids_up=0
-    elif [ -z "$STATUS_AGE_S" ]; then
-        soft "IDS status has no ok_epoch yet"
-    else
-        ids_age_m=$(( STATUS_AGE_S / 60 ))
-        if [ "$ids_age_m" -gt "$THRESH_IDS_AGE_M" ]; then
-            fail "the IDS has not reported for ${ids_age_m} min (ids.timer stopped, or ids.sh cannot read the sensor)"
-        else
-            ids_up=1
-            ok "IDS: suricata=$isuri crowdsec=$icrowd, $ids_alerts alert(s), $ids_decisions decision(s)"
-        fi
-    fi
-    # A report, not a page: the count goes to VictoriaMetrics as
-    # stack_ids_alerts, and the rule holds a burst for 15 minutes. Deciding it
-    # here made the section fire and resolve around every spike.
-fi
+verdict_judge "$IDS_STATUS_FILE" fail "$(verdict_age ids)" "IDS roll-up" \
+    "see $AUDIT_LOG" "ids.timer stopped, or ids.sh cannot read the sensor"
+# The counters are read whichever way the verdict went: a stale roll-up's last
+# numbers are history, and reporting 0 would graph a dead sensor as a quiet one.
+ids_alerts=$(num_or "$(env_value "$IDS_STATUS_FILE" alerts)" 0)
+ids_decisions=$(num_or "$(env_value "$IDS_STATUS_FILE" decisions)" 0)
+case "$VERDICT_OUTCOME" in
+    ok)
+        ids_up=1
+        ok "IDS: suricata=$(env_value "$IDS_STATUS_FILE" suricata) crowdsec=$(env_value "$IDS_STATUS_FILE" crowdsec), $ids_alerts alert(s), $ids_decisions decision(s)" ;;
+    *)
+        ids_up=0 ;;
+esac
+# The alert count is a report, not a page: it goes to VictoriaMetrics as
+# stack_ids_alerts and the rule holds a burst for 15 minutes. Deciding it here
+# made the section fire and resolve around every spike.
 
 # The audit report: host-level changes no script in this repo makes (account
 # databases, sudoers, sshd, audit's own config), plus the hash diff over the
@@ -1066,35 +1025,23 @@ fi
 AUDIT_STATUS_FILE="$AUDIT_DIR/auditd.status"
 audit_fim=0
 if [ -f /etc/systemd/system/stack-audit.timer ]; then
-    if [ ! -f "$AUDIT_STATUS_FILE" ]; then
-        soft "no audit report yet (stack-audit.timer has not run)"
-    else
-        status_verdict "$AUDIT_STATUS_FILE"
-        audit_fim=$(num_or "$(env_value "$AUDIT_STATUS_FILE" fim)" 0)
-        if [ "$STATUS_RESULT" = fail ]; then
-            fail "host-level configuration changed: ${STATUS_DETAIL:-see $AUDIT_STATUS_FILE}"
-        elif [ -z "$STATUS_AGE_S" ]; then
-            soft "the audit report has no ok_epoch yet"
-        else
-            aage_m=$(( STATUS_AGE_S / 60 ))
-            if [ "$aage_m" -gt "$THRESH_AUDIT_AGE_M" ]; then
-                fail "the audit report has not run for ${aage_m} min (systemctl status stack-audit.timer)"
-            else
-                case "$(env_value "$AUDIT_STATUS_FILE" audit)" in
-                    inert)
-                        ok "audit: ${audit_fim} persistence-dir change(s); the kernel audit subsystem emits nothing on this host, so the hash diff is the live check" ;;
-                    unavailable)
-                        ok "audit: ${audit_fim} persistence-dir change(s) reported; no stack watches are loaded"
-                        soft "auditctl/augenrules are missing, so the stack's audit watches cannot load (sudo dnf install audit-rules && sudo ./bootstrap.sh)" ;;
-                    *)
-                        ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported" ;;
-                esac
-                # `aureport` failing means the window is re-read, not skipped, so
-                # this is a report: nothing was lost, but the counters are stale.
-                if [ "$(env_value "$AUDIT_STATUS_FILE" read)" = failed ]; then
-                    soft "the audit report could not read the audit log; it is re-examining the same window"
-                fi
-            fi
+    verdict_judge "$AUDIT_STATUS_FILE" fail "$(verdict_age auditd)" "audit report" \
+        "see $AUDIT_STATUS_FILE" "systemctl status stack-audit.timer"
+    audit_fim=$(num_or "$(env_value "$AUDIT_STATUS_FILE" fim)" 0)
+    if [ "$VERDICT_OUTCOME" = ok ]; then
+        case "$(env_value "$AUDIT_STATUS_FILE" audit)" in
+            inert)
+                ok "audit: ${audit_fim} persistence-dir change(s); the kernel audit subsystem emits nothing on this host, so the hash diff is the live check" ;;
+            unavailable)
+                ok "audit: ${audit_fim} persistence-dir change(s) reported; no stack watches are loaded"
+                soft "auditctl/augenrules are missing, so the stack's audit watches cannot load (sudo dnf install audit-rules && sudo ./bootstrap.sh)" ;;
+            *)
+                ok "audit: no host-level changes; ${audit_fim} persistence-dir change(s) reported" ;;
+        esac
+        # `aureport` failing means the window is re-read, not skipped, so
+        # this is a report: nothing was lost, but the counters are stale.
+        if [ "$(env_value "$AUDIT_STATUS_FILE" read)" = failed ]; then
+            soft "the audit report could not read the audit log; it is re-examining the same window"
         fi
     fi
 fi
@@ -1103,30 +1050,19 @@ fi
 # the table) -- the state where the host believes it is protected and is not.
 BOUNCER_STATUS_FILE="$AUDIT_DIR/bouncer.status"
 bouncer_bans=0
+bouncer_skipped=0
 if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
-    if [ ! -f "$BOUNCER_STATUS_FILE" ]; then
-        soft "no bouncer status yet (stack-bouncer.timer has not run)"
-    else
-        status_verdict "$BOUNCER_STATUS_FILE"
-        bouncer_bans=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" banned)" 0)
-        # Decisions enforcement declined because they name an address the operator
-        # holds or their own egress: worth a line, because "0 banned" next to a
-        # live decision reads like a broken applier.
-        bouncer_skipped=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" skipped)" 0)
-        if [ "$STATUS_RESULT" = fail ]; then
-            fail "the bouncer is not applying decisions: ${STATUS_DETAIL:-see $AUDIT_DIR/bouncer.status}"
-        elif [ -z "$STATUS_AGE_S" ]; then
-            soft "bouncer status has no ok_epoch yet"
-        else
-            bage_m=$(( STATUS_AGE_S / 60 ))
-            if [ "$bage_m" -gt "$THRESH_BOUNCER_AGE_M" ]; then
-                fail "the bouncer has not applied decisions for ${bage_m} min (systemctl status stack-bouncer.timer)"
-            else
-                ok "bouncer: ${bouncer_bans} address(es) banned"
-                if [ "${bouncer_skipped:-0}" -gt 0 ]; then
-                    soft "the bouncer declined ${bouncer_skipped} decision(s) naming an address this host is or uses (its own egress): something here is tripping a rule -- a stale token will do it"
-                fi
-            fi
+    verdict_judge "$BOUNCER_STATUS_FILE" fail "$(verdict_age bouncer)" "bouncer" \
+        "see $BOUNCER_STATUS_FILE" "systemctl status stack-bouncer.timer"
+    bouncer_bans=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" banned)" 0)
+    # Decisions enforcement declined because they name an address the operator
+    # holds or their own egress: worth a line, because "0 banned" next to a
+    # live decision reads like a broken applier.
+    bouncer_skipped=$(num_or "$(env_value "$BOUNCER_STATUS_FILE" skipped)" 0)
+    if [ "$VERDICT_OUTCOME" = ok ]; then
+        ok "bouncer: ${bouncer_bans} address(es) banned"
+        if [ "${bouncer_skipped:-0}" -gt 0 ]; then
+            soft "the bouncer declined ${bouncer_skipped} decision(s) naming an address this host is or uses (its own egress): something here is tripping a rule -- a stale token will do it"
         fi
     fi
 fi

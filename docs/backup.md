@@ -48,10 +48,11 @@ restore" and "Disaster recovery".
   success), so a drill that skips forever (over `BACKUP_VERIFY_MAX_MB`, or
   without 1.5× the restore size free) fails instead of looking healthy. The
   scratch tree is `trap`-removed on every exit path and must stay out of
-  `BACKUP_PATHS`; a trap on `EXIT`/`TERM`/`INT` records a failure when a run dies
-  without writing a verdict (`set -e`, the unit's `TimeoutStartSec`, a hand
-  Ctrl-C), so the previous `ok` cannot make a broken run look healthy (a
-  `SIGKILL` is the one signal it cannot catch, which the age check backstops);
+  `BACKUP_PATHS`; a trap on `EXIT`/`TERM`/`INT` calls `verdict_unrecorded`
+  (`deploy/root/status.sh`) when a run dies without writing a verdict (`set -e`,
+  the unit's `TimeoutStartSec`, a hand Ctrl-C), so the previous `ok` cannot make
+  a broken run look healthy (a `SIGKILL` is the one signal it cannot catch, which
+  the age check backstops);
   `--with-db` replays the two SQL dumps — the
   `pg_dumpall` into a throwaway postgres, `kuma.sql` into a throwaway MariaDB —
   and is manual on purpose, because the weekly run must not depend on pulling an
@@ -100,11 +101,16 @@ restore" and "Disaster recovery".
   `ok_epoch` must not mask the other's age. Two mechanics are load-bearing and
   easy to undo: the replay helpers return a code and a message instead of calling
   `die` (a `die` exits with the previous `result=ok` still in the file, i.e. a
-  failed drill reading healthy), and a trap on `EXIT`/`TERM`/`INT` records a
-  failure for any exit path that wrote no verdict, including the unit's
-  `TimeoutStartSec` kill.
-  `monitor.sh` reads the file against `MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H`
-  (1080 h). Do not fold this back into `backup-verify`: the weekly run staying
+  failed drill reading healthy), and a trap on `EXIT`/`TERM`/`INT` calls
+  `verdict_unrecorded` (`deploy/root/status.sh`) — one shared guard that writes
+  the failure only when the run recorded no verdict of its own, so the unit's
+  `TimeoutStartSec` kill cannot leave the previous `ok` behind. It installs no
+  trap itself: bash's `trap` replaces, so a helper owning `EXIT` would silently
+  drop the scratch-tree cleanup.
+  `monitor.sh` judges the file with `verdict_judge` (`scripts/lib.sh`) against
+  `MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H` (1080 h) — the same judgement every
+  scheduled job gets, so a change to the skip/skip-forever rules reaches this
+  drill too. Do not fold this back into `backup-verify`: the weekly run staying
   free of image pulls is the property the split buys.
 
 ## Restoring

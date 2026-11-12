@@ -49,9 +49,10 @@ assert_eq 3600  "$(dur_to_sec '999ms')" 'a sub-second decision becomes the 1h de
 assert_eq 86400 "$(dur_to_sec '48h')" 'dur_to_sec caps a long ban at 24h'
 assert_eq 86400 "$(dur_to_sec '86401s')" 'dur_to_sec caps a just-over-a-day ban'
 
-# --- write_status: a dry run must not replace the live verdict --------------
-# The guard is inside write_status so every failure path is covered (LAPI, JSON
-# shape, classifier, nft), not just the success path that exits before the real
+# --- write_status: the bouncer's fields, and the dry-run guard --------------
+# bouncer.sh delegates the write to verdict_write (deploy/root/status.sh), which
+# owns the dry-run rule because it has to cover every failure route (LAPI, JSON
+# shape, classifier, nft), not only the success path that exits before the real
 # write. A manual --dry-run against a down LAPI used to overwrite
 # audit/bouncer.status with result=fail and page the monitor.
 extract write_status "$BOUNCER" > "$TMP_DIR/write_status.sh"
@@ -62,17 +63,33 @@ STATUS="$TMP_DIR/bouncer.status"
 CALLS="$TMP_DIR/status-calls"
 : > "$CALLS"
 say() { :; }
-status_write() { printf '%s\n' "$1" >> "$CALLS"; }
+# The bouncer's own contribution is the field set it hands the shared writer.
+# shellcheck disable=SC2317  # called by the extracted write_status below
+verdict_write() { printf '%s\n' "$@" >> "$CALLS"; }
 # shellcheck source=/dev/null
 . "$TMP_DIR/write_status.sh"
 
-export DRY_RUN=1
 write_status fail "LAPI unreachable at 127.0.0.1:8080" ""
-[ -s "$CALLS" ] && { printf 'FAIL: --dry-run wrote the live status file\n' >&2; exit 1; }
-[ -e "$STATUS" ] && { printf 'FAIL: --dry-run created %s\n' "$STATUS" >&2; exit 1; }
+assert_eq $'fail\nLAPI unreachable at 127.0.0.1:8080\nbanned=\nskipped=0' \
+    "$(cat "$CALLS")" 'write_status passes the result, detail and its own counters'
 
-export DRY_RUN=0
+# The guard itself, through the real writer: a dry run must neither create the
+# file nor replace a live verdict.
+# shellcheck source=../deploy/root/status.sh
+. "$ROOT_DIR/deploy/root/status.sh"
+verdict_init "$STATUS" /etc/stack-ids/bouncer.sh stack-bouncer.timer
+DRY_RUN=1
+write_status fail "LAPI unreachable at 127.0.0.1:8080" "" 2>/dev/null
+[ -e "$STATUS" ] && { printf 'FAIL: --dry-run created %s\n' "$STATUS" >&2; exit 1; }
+printf 'result=ok\nok_epoch=1\n' > "$STATUS"
+DRY_RUN=1
+write_status fail "LAPI unreachable at 127.0.0.1:8080" "" 2>/dev/null
+assert_eq ok "$(env_value "$STATUS" result)" \
+    '--dry-run leaves the live verdict in place'
+
+DRY_RUN=0
 write_status ok "" 2 1
-assert_eq "$STATUS" "$(cat "$CALLS")" 'write_status writes the live verdict outside --dry-run'
+assert_eq ok "$(env_value "$STATUS" result)" 'a real run replaces the verdict'
+assert_eq 2 "$(env_value "$STATUS" banned)" 'a real run records the ban count'
 
 printf 'bouncer parser tests: ok\n'

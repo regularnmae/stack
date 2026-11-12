@@ -65,6 +65,9 @@ errlog=$(mktemp) || exit 1
 trap 'rm -f "$errlog"' EXIT
 
 STATUS="$DATA_DIR/audit/bouncer.status"
+# The verdict file this run owns; deploy/root/status.sh owns the contract. A dry
+# run writes nothing at all -- see verdict_write's guard.
+verdict_init "$STATUS" /etc/stack-ids/bouncer.sh stack-bouncer.timer
 # A dry run is a read, down to the directory: bouncer.status is the live verdict
 # the monitor pages on, and an operator checking the rules while the LAPI is down
 # must not replace it (nor create the audit dir on a host that has none yet).
@@ -128,18 +131,12 @@ dur_to_sec() {
 }
 
 write_status() { # result detail banned [skipped]
-    # The guard lives here, not at the single success path at the end: every
-    # failure path (LAPI, JSON shape, classifier, nft) calls this too, and writing
-    # the verdict from there would make a manual `--dry-run` against a down LAPI
-    # set result=fail and page the monitor, despite the header saying "write
-    # nothing".
-    if [ "$DRY_RUN" = 1 ]; then
-        say "dry-run: would have written $STATUS result=$1${2:+ ($2)}"
-        return 0
-    fi
-    status_write "$STATUS" \
-        "# written by /etc/stack-ids/bouncer.sh (stack-bouncer.timer)" \
-        "$1" "$2" "banned=$3" "skipped=${4:-0}"
+    # The dry-run guard is verdict_write's, not this wrapper's -- and it has to
+    # cover this path too: every failure route (LAPI, JSON shape, classifier,
+    # nft) calls this, so a manual `--dry-run` against a down LAPI would
+    # otherwise set result=fail and page the monitor, despite the header saying
+    # "write nothing".
+    verdict_write "$1" "$2" "banned=$3" "skipped=${4:-0}"
 }
 
 # ---------------------------------------------------------------------------

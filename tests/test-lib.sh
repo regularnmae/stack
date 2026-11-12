@@ -181,6 +181,83 @@ status_verdict "$TMP_DIR/does-not-exist.status"
 assert_eq '||' "$STATUS_RESULT|$STATUS_AGE_S|$STATUS_DETAIL" \
     'status_verdict clears all three for a missing file'
 
+# verdict_judge is the sweep's read side, shared with verify.sh: five outcomes,
+# and the only per-job inputs are the file, the severity, the age and the noun.
+VOUT=""
+vpage() { VOUT="page:$*"; }
+vwarn() { VOUT="warn:$*"; }
+VERDICT_PAGE=vpage
+VERDICT_WARN=vwarn
+jf="$TMP_DIR/judge.status"
+
+verdict_judge "$TMP_DIR/no-such.status" fail 3600 'backup restore drill'
+assert_eq absent "$VERDICT_OUTCOME" 'verdict_judge: no file is absent'
+assert_eq 'warn:no backup restore drill yet (expected until its timer first runs)' \
+    "$VOUT" 'verdict_judge: an absent file warns and never pages'
+
+VOUT=""
+printf 'result=fail\ndetail=it broke\nok_epoch=%s\n' "$(( now - 60 ))" > "$jf"
+verdict_judge "$jf" fail 3600 'backup restore drill' 'run it by hand'
+assert_eq fail "$VERDICT_OUTCOME" 'verdict_judge: result=fail is a failure'
+assert_eq 'page:backup restore drill failed: it broke; run it by hand' "$VOUT" \
+    'verdict_judge: a failure pages, with the detail and the hint'
+
+VOUT=""
+verdict_judge "$jf" soft 3600 'signup watcher'
+assert_eq 'warn:signup watcher failed: it broke' "$VOUT" \
+    'verdict_judge: severity=soft warns instead of paging'
+
+VOUT=""
+printf 'result=skip\ndetail=no disk space left\n' > "$jf"
+verdict_judge "$jf" fail 3600 'backup restore drill'
+assert_eq absent "$VERDICT_OUTCOME" \
+    'verdict_judge: a skip before the first success has no age to judge'
+assert_eq 'warn:backup restore drill has no recorded success yet (no disk space left)' \
+    "$VOUT" 'verdict_judge: no recorded success warns with the detail'
+
+VOUT=""
+printf 'result=ok\ndetail=\nok_epoch=%s\n' "$(( now - 7200 ))" > "$jf"
+verdict_judge "$jf" fail 3600 'backup restore drill'
+assert_eq stale "$VERDICT_OUTCOME" 'verdict_judge: an old success is stale'
+assert_eq 'page:no successful backup restore drill for 2h (threshold 1h, last result ok)' \
+    "$VOUT" 'verdict_judge: staleness names the age, the threshold and the last result'
+
+VOUT=""
+printf 'result=skip\ndetail=no disk space left\nok_epoch=%s\n' "$(( now - 60 ))" > "$jf"
+verdict_judge "$jf" fail 1200 'backup restore drill'
+assert_eq skip "$VERDICT_OUTCOME" 'verdict_judge: a fresh skip is its own outcome'
+assert_eq 'warn:backup restore drill skipped: no disk space left (last success 1 min ago)' \
+    "$VOUT" 'verdict_judge: a skip warns and keeps the last success visible'
+
+VOUT=""
+printf 'result=ok\ndetail=\nok_epoch=%s\n' "$(( now - 60 ))" > "$jf"
+verdict_judge "$jf" fail 3600 'backup restore drill'
+assert_eq ok "$VERDICT_OUTCOME" 'verdict_judge: a fresh success is ok'
+assert_eq '' "$VOUT" 'verdict_judge prints nothing on ok (the job owns its numbers)'
+
+# monitor.sh turns each job's MONITOR_* threshold into seconds, and that is the
+# only per-job line a verdict file needs there. A unit typo (h vs min) is a 60x
+# change in when the sweep pages, and the defaults are what an env file that
+# predates the key falls back to, so both are pinned here.
+sed -n '/^verdict_age()/,/^}/p' "$ROOT_DIR/scripts/monitor.sh" > "$TMP_DIR/verdict_age.sh"
+[ -s "$TMP_DIR/verdict_age.sh" ] \
+    || { printf 'FAIL: verdict_age not found in scripts/monitor.sh\n' >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$TMP_DIR/verdict_age.sh"
+# Exported because verdict_age reads them as the monitor's environment would;
+# empty is the "env file predates the key" case the defaults exist for.
+export MONITOR_BACKUP_VERIFY_MAX_AGE_H="" MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H=""
+export MONITOR_IDS_MAX_AGE_MIN="" MONITOR_BOUNCER_MAX_AGE_MIN=""
+export MONITOR_AUDIT_MAX_AGE_MIN="" MONITOR_REGISTRATIONS_MAX_AGE_MIN=""
+assert_eq 691200  "$(verdict_age backup-verify)"    'verdict_age: 192h for the weekly drill'
+assert_eq 3888000 "$(verdict_age backup-verify-db)" 'verdict_age: 1080h for the monthly drill'
+assert_eq 1200    "$(verdict_age ids)"              'verdict_age: IDS minutes become seconds'
+assert_eq 300     "$(verdict_age bouncer)"          'verdict_age: bouncer minutes become seconds'
+assert_eq 1200    "$(verdict_age auditd)"           'verdict_age: audit minutes become seconds'
+assert_eq 1800    "$(verdict_age registrations)"    'verdict_age: registrations minutes become seconds'
+export MONITOR_BACKUP_VERIFY_MAX_AGE_H=200
+assert_eq 720000  "$(verdict_age backup-verify)"    'verdict_age: an override wins over the default'
+
 # restic_snapshot_summary: one read of `backup.sh list --json` for the monitor
 # and the rotator. A fake repository keeps this offline.
 mkdir -p "$TMP_DIR/repo/scripts"

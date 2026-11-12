@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The one status-file writer and Go-duration parser both privilege tiers use.
+# The one status-file writer, verdict protocol and Go-duration parser both
+# privilege tiers use.
 #
 # Installed to /etc/stack-ids/status.sh by `deploy/install.sh --root`. Sourced,
 # never executed:
@@ -18,7 +19,14 @@
 #   * written atomically, so a sweep never reads half a line;
 #   * ok_epoch is the last SUCCESS and is carried through a failure or skip, so
 #     a job that skips forever (no disk space, no bouncer key, a dead LAPI)
-#     cannot look healthy just because its timer fired.
+#     cannot look healthy just because its timer fired;
+#   * a run that exits without writing a verdict records a failure, because a
+#     file left at the previous result=ok reads healthy (verdict_unrecorded).
+#
+# Two layers, one file. A job writes with verdict_init/verdict_write (status_write
+# is the primitive underneath); a sweep judges with verdict_judge in
+# scripts/lib.sh. The names here are the whole vocabulary both sides share, so
+# "what does an unrecorded run say" is answered once instead of once per job.
 #
 # A status write is best-effort: the job already did its work, and turning a full
 # disk into a failed unit would hide the job's own verdict. Callers warn; the
@@ -91,6 +99,56 @@ status_write() { # path header result detail [KEY=VALUE ...]
         _status_note "could not write $path"
     fi
     return 0
+}
+
+# --- the completed-verdict protocol ----------------------------------------
+# A scheduled job's verdict is a file, and the sweep's age check is the alarm.
+# These three make the two halves of that sentence identical for every job: the
+# header, the dry-run rule and the "exited without a verdict" rule stop being
+# re-decided per script.
+#
+# Callers own their EXIT/TERM/INT trap. This file must not install one: bash's
+# `trap` replaces, so a helper that took over EXIT would silently drop a job's
+# cleanup (scripts/backup.sh removes a multi-GB restore tree from one) and the
+# failure would be a full data disk, not a red sweep -- call verdict_unrecorded
+# from the trap instead.
+VERDICT_PATH=""
+VERDICT_WRITER=""
+VERDICT_SCHEDULER=""
+VERDICT_WROTE=0
+
+# Name the file this run owns and reset the wrote-flag:
+#   verdict_init "$STATUS" scripts/ids.sh deploy/ids.timer
+verdict_init() { # path writer scheduler
+    VERDICT_PATH="$1"
+    VERDICT_WRITER="$2"
+    VERDICT_SCHEDULER="$3"
+    VERDICT_WROTE=0
+}
+
+# The job's verdict. Same arguments as status_write, minus the path and header,
+# which verdict_init named.
+verdict_write() { # result detail [KEY=VALUE ...]
+    # A dry run is a read. bouncer.sh's --dry-run is checked against a live LAPI
+    # that may be down, and replacing the verdict from there would page the
+    # monitor about a host that is fine.
+    if [ "${DRY_RUN:-0}" = 1 ]; then
+        printf 'dry-run: would have written %s result=%s\n' "$VERDICT_PATH" "$1" >&2
+        return 0
+    fi
+    status_write "$VERDICT_PATH" \
+        "# written by $VERDICT_WRITER ($VERDICT_SCHEDULER)" "$@"
+    VERDICT_WROTE=1
+}
+
+# For a job's own EXIT trap: record a failure when the run reached no verdict of
+# its own (set -e, the unit's TimeoutStartSec, a hand Ctrl-C). Idempotent -- a
+# signal trap exits through the EXIT trap too, and the second call has nothing
+# left to record.
+verdict_unrecorded() { # [detail]
+    [ "${VERDICT_WROTE:-0}" = 1 ] && return 0
+    [ "${DRY_RUN:-0}" = 1 ] && return 0
+    verdict_write fail "${1:-the job exited without recording a verdict}"
 }
 
 # "1m30s" / "500ms" / "1h2m3.5s" -> MILLIseconds. Podman and CrowdSec's LAPI

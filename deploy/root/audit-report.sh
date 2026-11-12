@@ -30,6 +30,8 @@ fi
 
 STATUS="$DATA_DIR/audit/auditd.status"
 CURSOR="$DATA_DIR/audit/auditd.cursor"
+# The verdict file this run owns; deploy/root/status.sh owns the contract.
+verdict_init "$STATUS" /etc/stack-ids/audit-report.sh stack-audit.timer
 # What ausearch/aureport read. Its absence is the ordinary state on a host whose
 # kernel audit subsystem is inert (see the verdict at the end of this file): there
 # is nothing recorded, so there is no window to lose.
@@ -219,8 +221,7 @@ elif [ "$rules_expected" -gt 0 ]; then
     audit_state=unavailable
 fi
 
-status_write "$STATUS" \
-    "# written by /etc/stack-ids/audit-report.sh (stack-audit.timer)" \
+verdict_write \
     "$result" "$detail" \
     "hard=$hard" "data=$data" "fim=$fim_changes" \
     "watches=$rules_loaded/$rules_expected" \
