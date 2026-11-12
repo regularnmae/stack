@@ -10,7 +10,8 @@
 # in a marked block (`<!-- BEGIN GENERATED: ... -->`) and is rendered by
 # scripts/stackctl/docs.py, so changing a unit or an [mcp.*] entry is one render
 # instead of a hand edit; --check is the only thing that has to notice a stale
-# one.
+# one. The renderer also runs the manifest/unit port cross-check, so a tree whose
+# declaration disagrees with the units fails before it is rendered.
 #
 # The renderer reads the templates, not ~/.config/containers/systemd: this is a
 # question about a commit, not about a host.

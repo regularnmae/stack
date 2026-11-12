@@ -36,6 +36,8 @@ owns the render, the digest and the secret resolution.
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract
 ./scripts/docs-lint.sh              # every README/docs section reference resolves
 ./scripts/docs-render.sh --check    # generated README/AGENTS tables are current
+PYTHONPATH=scripts python3 -m stackctl manifest check deploy/services.toml
+                                    # manifest ports agree with the units' PublishPort=
 # markdown lint; the tag matches the CLI the CI action bundles -- bump both together
 podman run --rm -v "$PWD":/work:z -w /work docker.io/davidanson/markdownlint-cli2:v0.24.0
 # -P . : scripts/lib.sh's source= directives spell paths from the repo root, so

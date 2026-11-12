@@ -24,6 +24,11 @@
 # field by field and an error names the TOML table it came from. Nothing composes
 # a string and re-parses it, so there is no second format to keep in step.
 #
+# `check` goes one step further than `load`: it reads deploy/ and reconciles
+# every [mcp.*] port and [npm.*] forward with the unit that publishes it. A
+# manifest that forwards to a port no unit publishes, or to another live
+# service's port, is internally valid -- only the pair can prove it.
+#
 # Operator overrides keep the old contract: every [host.*] carries an `env`
 # name, and a non-empty $<env> in the process environment wins over the TOML's
 # `domain` -- exactly what stack.conf's ${VAR:-default} did, so
@@ -35,8 +40,9 @@ import os
 import re
 import shlex
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from . import units as units_mod
 from .ui import die
 
 try:
@@ -93,19 +99,24 @@ class KumaPage:
 class NpmHost:
     """One [npm.*] proxy host: the name NPM serves and where it forwards.
 
+    `container` is the unit whose loopback publish this vhost fronts; it is
+    empty only on an `mcp` host, whose targets are the [mcp.*] entries.
     `needs_nodes` marks a vhost whose upstream is in stack.conf's CHAIN_UNITS:
     on a host deployed with ./deploy.sh --skip-daemons nothing answers on that
     publish, and scripts/monitor.sh skips the name instead of failing a 502.
     """
 
-    __slots__ = ("domain", "scheme", "host", "port", "flags", "needs_nodes")
+    __slots__ = ("domain", "scheme", "host", "port", "flags", "container",
+                 "needs_nodes")
 
-    def __init__(self, domain: str, scheme: str, host: str, port: int, flags: str):
+    def __init__(self, domain: str, scheme: str, host: str, port: int,
+                 flags: str, container: str = ""):
         self.domain = domain
         self.scheme = scheme
         self.host = host
         self.port = port
         self.flags = flags  # the comma-separated string, as declared
+        self.container = container
         self.needs_nodes = False
 
     def has_flag(self, flag: str) -> bool:
@@ -405,6 +416,12 @@ def load(path: str, overrides: bool = True) -> Manifest:
         forward_host = _text(table, "forward_host", where)
         forward_port = _number(table.get("forward_port"), where, "forward_port",
                                1, _MAX_PORT)
+        container = ""
+        if "container" in table:
+            container = _text(table, "container", where)
+            if not _CONTAINER_RE.fullmatch(container):
+                die(f"deploy/services.toml: {where} container '{container}' is "
+                    f"not a container name")
         scheme = str(table.get("scheme", "http"))
         if scheme not in ("http", "https"):
             die(f"deploy/services.toml: {where} scheme '{scheme}' is neither "
@@ -414,7 +431,8 @@ def load(path: str, overrides: bool = True) -> Manifest:
                 isinstance(f, str) and _FLAG_RE.fullmatch(f) for f in flags):
             die(f"deploy/services.toml: {where} flags must be a list of names "
                 f"like force-ssl, http2, ws, block, mcp")
-        host = NpmHost(domain, scheme, forward_host, forward_port, ",".join(flags))
+        host = NpmHost(domain, scheme, forward_host, forward_port,
+                       ",".join(flags), container)
         host.needs_nodes = _bool(table, "needs_nodes", where, False)
         if host.domain in npm_domains:
             die(f"deploy/services.toml: {where} and [npm.{npm_domains[host.domain]}] "
@@ -456,25 +474,140 @@ def load(path: str, overrides: bool = True) -> Manifest:
     return m
 
 
+# --- the manifest/unit cross-check -------------------------------------------
+def _loopback_publishes(
+        units: Dict[str, units_mod.Unit]) -> Dict[str, List[Tuple[str, str]]]:
+    """host-side address -> [(unit name, container side)] for every publish."""
+    published: Dict[str, List[Tuple[str, str]]] = {}
+    for unit in units.values():
+        for host_side, container_side in unit.ports:
+            published.setdefault(host_side, []).append((unit.name, container_side))
+    return published
+
+
+def _ports_text(unit: units_mod.Unit) -> str:
+    return ", ".join(f"{host}:{container}" for host, container in unit.ports) \
+        or "no PublishPort"
+
+
+def cross_check(m: "Manifest", units: Dict[str, units_mod.Unit]) -> None:
+    """Reconcile the manifest's port claims with the units that publish them.
+
+    The manifest declares NPM's targets and each MCP server's loopback publish;
+    the unit declares the actual PublishPort=. Validating the manifest against
+    itself cannot see a target no unit publishes, or one another live service
+    owns, so `check` reads deploy/ and compares the pair here.
+    """
+    published = _loopback_publishes(units)
+
+    for entry in m.mcp:
+        where = f"[mcp.*] {entry.container}"
+        unit = units.get(entry.container)
+        if unit is None:
+            die(f"deploy/services.toml: {where} names container "
+                f"'{entry.container}', but no unit in deploy/ has that "
+                f"ContainerName")
+        if unit.network_host:
+            if unit.ports:
+                die(f"deploy/services.toml: {where} port {entry.port}: "
+                    f"{unit.path} is Network=host, so it must not publish a "
+                    f"port (found {_ports_text(unit)})")
+            mcp_host = unit.environment.get("MCP_HOST")
+            if mcp_host != "127.0.0.1":
+                die(f"deploy/services.toml: {where} port {entry.port}: "
+                    f"{unit.path} sets MCP_HOST={mcp_host or '<unset>'}; the "
+                    f"host-network exception must bind 127.0.0.1")
+            mcp_port = unit.environment.get("MCP_PORT")
+            if mcp_port != str(entry.port):
+                die(f"deploy/services.toml: {where} port {entry.port}: "
+                    f"{unit.path} sets MCP_PORT={mcp_port or '<unset>'} "
+                    f"(want {entry.port})")
+            continue
+        key = f"127.0.0.1:{entry.port}"
+        own = [container for host, container in unit.ports if host == key]
+        if own != ["8000"]:
+            die(f"deploy/services.toml: {where} port {entry.port}: "
+                f"{unit.path} must publish {key}:8000 "
+                f"(found {_ports_text(unit)})")
+        others = sorted({name for name, _ in published.get(key, [])
+                         if name != entry.container})
+        if others:
+            die(f"deploy/services.toml: {where} port {entry.port}: {key} is "
+                f"also published by {', '.join(others)}")
+
+    for host in m.npm:
+        where = f"[npm.*] {host.domain}"
+        if host.host != "127.0.0.1":
+            die(f"deploy/services.toml: {where} forward_host is "
+                f"'{host.host}'; NPM runs on the host network, so it must be "
+                f"127.0.0.1")
+        key = f"127.0.0.1:{host.port}"
+        matches = published.get(key, [])
+        if host.container:
+            unit = units.get(host.container)
+            if unit is None:
+                die(f"deploy/services.toml: {where} names container "
+                    f"'{host.container}', but no unit in deploy/ has that "
+                    f"ContainerName")
+            names = sorted({name for name, _ in matches})
+            if names == [host.container]:
+                continue
+            if not names:
+                die(f"deploy/services.toml: {where} names container "
+                    f"'{host.container}', but no unit publishes {key} "
+                    f"({unit.path} publishes {_ports_text(unit)})")
+            if host.container not in names:
+                die(f"deploy/services.toml: {where} names container "
+                    f"'{host.container}', but {key} is published by "
+                    f"{', '.join(names)}")
+            die(f"deploy/services.toml: {where} names container "
+                f"'{host.container}', but {key} is published by more than one "
+                f"unit: {', '.join(names)}")
+        if not host.has_flag("mcp"):
+            die(f"deploy/services.toml: {where} needs container = \"<unit>\" "
+                f"(the unit whose PublishPort= is {key}); only an mcp host may "
+                f"omit it")
+        if not matches:
+            die(f"deploy/services.toml: {where} forwards to {key}, but no unit "
+                f"publishes that loopback address")
+
+
 # --- the CI check -------------------------------------------------------------
-def check(path: str) -> int:
+def check(path: str, units_dir: Optional[str] = None) -> int:
     m = load(path)
     _validate_probes(m)
+    if units_dir is None:
+        units_dir = os.path.dirname(os.path.abspath(path))
+    units = units_mod.load_units(units_dir)
+    cross_check(m, units)
     print(f"manifest: {len(m.hosts)} host(s), {len(m.mcp)} mcp server(s), "
-          f"{len(m.npm)} proxy host(s), {len(m.onion)} onion service(s)")
+          f"{len(m.npm)} proxy host(s), {len(m.onion)} onion service(s); "
+          f"ports agree with {len(units)} unit(s)")
     return 0
 
 
 def main(argv: List[str]) -> int:
     # argv is what __main__'s dispatch passes after the command word:
     #   ["shell", "deploy/services.toml"]
-    #   ["check", "deploy/services.toml"]
+    #   ["check", "deploy/services.toml", "--units", "deploy"]
+    usage = ("usage: python3 -m stackctl manifest {shell|check} "
+             "<services.toml> [--units DIR]")
     if len(argv) < 2 or argv[0] not in ("shell", "check"):
-        print("usage: python3 -m stackctl manifest {shell|check} "
-              "<services.toml>", file=sys.stderr)
+        print(usage, file=sys.stderr)
         return 2
     mode, path = argv[0], argv[1]
+    rest = list(argv[2:])
     if mode == "shell":
+        if rest:
+            print(usage, file=sys.stderr)
+            return 2
         sys.stdout.write(load(path).shell())
         return 0
-    return check(path)
+    units_dir = None
+    while rest:
+        flag = rest.pop(0)
+        if flag != "--units" or not rest:
+            print(f"unknown or incomplete argument: {flag}", file=sys.stderr)
+            return 2
+        units_dir = rest.pop(0)
+    return check(path, units_dir)

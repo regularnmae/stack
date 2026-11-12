@@ -168,6 +168,13 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   still validates. BTCPay's admin UI is gated by its own login (2FA expected),
   and its API by the store-scoped key the backend carries; no daemon RPC has a
   public NPM host any more.
+- **The manifest's ports are reconciled with the units.** `manifest check`
+  requires every ordinary `[npm.*].container`'s loopback `PublishPort=` to
+  equal `forward_port`, and every `[mcp.*].port` to match its unit's publish
+  (or `MCP_HOST`/`MCP_PORT` for the host-network `crowdsec-mcp`). A vhost wired
+  to an unpublished port, or to another live service's port, fails the gate.
+  An `mcp` host omits `container`; its real targets are the `[mcp.*]` entries,
+  which are checked individually.
 - **`needs_nodes` marks a vhost whose upstream is in `CHAIN_UNITS`** (`btcpay`,
   both explorers). The name and its certificate exist on every host — the
   reconciler does not know what is running — so on one deployed with

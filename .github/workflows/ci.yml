@@ -189,13 +189,14 @@ jobs:
           printf 'deploy.sh has no health wait\n'
       # deploy/services.toml is the single declaration of the public surface
       # (hostnames, MCP prefixes and ports, proxy hosts, onion services); the
-      # first command validates the file itself. The two Markdown tables that
-      # repeat it -- README's "What runs" and AGENTS.md's interface tables -- are
-      # rendered from the declaration and the units, and the second command is
-      # the only gate left that has to notice a stale one.
+      # first command validates the file itself and reconciles its ports with
+      # the units' PublishPort=. The two Markdown tables that repeat it --
+      # README's "What runs" and AGENTS.md's interface tables -- are rendered
+      # from the declaration and the units, and the second command is the only
+      # gate left that has to notice a stale one.
       - name: service manifest and generated docs
         run: |
-          PYTHONPATH=scripts python3 -m stackctl manifest check deploy/services.toml
+          PYTHONPATH=scripts python3 -m stackctl manifest check deploy/services.toml --units deploy
           ./scripts/docs-render.sh --check
       # load_manifest runs this package on the bare interpreter (install.sh,
       # verify.sh, monitor.sh, CI itself), so every command in it must stay

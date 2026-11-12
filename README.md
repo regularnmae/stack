@@ -1308,8 +1308,9 @@ tier; `./deploy.sh --only npm-hosts` re-applies it after a change.
 ```toml
 [npm.frontend]
 host = "frontend"                 # a [host.*] key: boltmesh.net
+container = "boltmesh-frontend"   # the unit that owns the publish below
 forward_host = "127.0.0.1"        # always loopback; NPM is on the host network
-forward_port = 8106               # the boltmesh-frontend unit's PublishPort=
+forward_port = 8106               # must equal that unit's PublishPort=
 flags = ["ws", "block"]
 
 [npm.mcp_edge]
@@ -1319,9 +1320,13 @@ forward_port = 8100
 flags = ["mcp", "force-ssl", "http2"]
 ```
 
-`forward_host` is always `127.0.0.1` and `forward_port` is the unit's
+`container` names the unit whose loopback publish the vhost fronts.
+`forward_host` is always `127.0.0.1` and `forward_port` must equal that unit's
 `PublishPort=`: NPM runs on the host network and cannot resolve a container name,
-so it reaches the unit's loopback publish. `scheme` defaults to `http` (`https`
+so it reaches the unit's loopback publish. `manifest check` enforces the pair, so
+a vhost cannot point at a port no unit publishes or at another live service's
+port. An `mcp` host omits `container`; its targets are the `[mcp.*]` entries,
+which are checked against their own units. `scheme` defaults to `http` (`https`
 for an upstream that speaks TLS), and an `mcp` host's port must be one an
 `[mcp.*]` entry publishes. The flags are `force-ssl` (redirect `:80`
 to `:443`), `http2`, `ws` (websocket upgrade), `block` (common exploits) and `mcp`.

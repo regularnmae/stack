@@ -28,10 +28,12 @@ class Unit:
     `ports` holds the host side (what the docs publish) and the in-container
     port (what the app is told to listen on); `network_host` is what makes the
     publish unnecessary -- a host-network unit binds the host's own namespace.
+    `environment` holds literal Environment= entries, which is where a
+    host-network MCP server states the MCP_HOST/MCP_PORT it binds.
     """
 
     __slots__ = ("name", "image", "path", "ports", "network_host", "env_files",
-                 "health_cmd", "oneshot", "root")
+                 "environment", "health_cmd", "oneshot", "root")
 
     def __init__(self, name: str, path: str):
         self.name = name
@@ -40,6 +42,7 @@ class Unit:
         self.ports: List[tuple] = []      # [(host side, container side)]
         self.network_host = False
         self.env_files: List[str] = []
+        self.environment: Dict[str, str] = {}
         self.health_cmd = ""
         self.oneshot = False
         self.root = os.sep + "root" + os.sep in path
@@ -77,6 +80,10 @@ def load_units(units_dir: str = "deploy") -> Dict[str, Unit]:
             unit.network_host = True
         for spec in values.get("EnvironmentFile", []):
             unit.env_files.append(os.path.basename(spec))
+        for spec in values.get("Environment", []):
+            key, sep, value = spec.partition("=")
+            if sep:
+                unit.environment[key] = value
         if values.get("HealthCmd"):
             unit.health_cmd = values["HealthCmd"][0]
         if "oneshot" in values.get("Type", []):

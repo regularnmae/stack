@@ -14,6 +14,10 @@
 # the operator's, so a cell that is not a fact (why a port is an SSH tunnel,
 # what a worker's liveness file proves) belongs in that prose, not the table.
 #
+# `_facts` also runs manifest.cross_check: the tables are derived from both
+# sources, and a manifest whose ports disagree with the units is a broken tree
+# that rendering would only make look generated.
+#
 # One declaration is deliberately not derived from a block: `stack-bouncer` is
 # a root host script with no Quadlet unit, so it has no facts to read.
 from __future__ import annotations
@@ -184,6 +188,9 @@ def _facts(root: str, units_dir: str, manifest_path: str):
     # Operator overrides ($BOLTMESH_API_HOST and friends) must not reach a
     # committed file: a host that exports one would bake its staging name in.
     m = manifest_mod.load(os.path.join(root, manifest_path), overrides=False)
+    # A manifest whose ports disagree with the units is broken; rendering it
+    # would only make the contradiction look generated.
+    manifest_mod.cross_check(m, units)
     return units, m
 
 

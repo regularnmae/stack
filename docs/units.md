@@ -34,7 +34,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   AGENTS.md's interface tables are rendered from these templates by
   `scripts/docs-render.sh`, and its `--check` is the CI gate: changing an
   `Image=`, a `PublishPort=` or an `[mcp.*]` entry means a render, never a
-  table edit.
+  table edit. `manifest check` also reconciles the manifest's `[mcp.*].port`
+  and `[npm.*].forward_port` with the units' `PublishPort=`, so a changed
+  publish without the matching declaration fails CI.
 
 ## The render, and what the host is running
 

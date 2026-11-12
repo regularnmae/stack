@@ -458,6 +458,28 @@ class TestManifest(unittest.TestCase):
             f.write(text)
         return path
 
+    def unit(self, name, ports=(), extra=()):
+        body = ["[Container]", f"ContainerName={name}",
+                "Image=docker.io/x/y:1"]
+        body += [f"PublishPort={p}" for p in ports]
+        body += list(extra)
+        return self.write(f"{name}.container", "\n".join(body) + "\n")
+
+    def mcp_manifest(self, name, port=8100, container="one-mcp"):
+        return self.write(name, f"""
+[host.mcp]
+domain = "mcp.example.net"
+
+[mcp.one]
+prefix = "/one"
+container = "{container}"
+port = {port}
+upstream = "one:1"
+token_var = "ONE_MCP_TOKEN"
+probe_tool = "get_one"
+probe_args = '{{}}'
+""")
+
     def test_real_manifest(self):
         from stackctl import manifest
         m = manifest.load(MANIFEST)
@@ -472,6 +494,7 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(m.mcp[0].token_var, "SEARXNG_MCP_TOKEN")
         self.assertEqual(m.mcp[0].upstream, "searxng:8080/search")
         self.assertEqual(m.mcp[0].probe_tool, "get_time")
+        self.assertEqual(m.npm[0].container, "boltmesh-frontend")
         wallet = [x for x in m.mcp if x.container == "monero-wallet-mcp"][0]
         self.assertEqual(wallet.spend_token_var, "MONERO_MCP_SPEND_TOKEN")
         self.assertEqual(m.onion[2].name, "btc-explorer")   # HiddenServiceDir name
@@ -491,6 +514,17 @@ class TestManifest(unittest.TestCase):
         self.assertEqual([d for d, n in zip(domains, nodes) if n == "1"],
                          ["btcpay.boltmesh.net", "btc.boltmesh.net",
                           "xmr.boltmesh.net"])
+
+    def test_real_manifest_ports_agree_with_units(self):
+        from stackctl import manifest
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(manifest.check(MANIFEST), 0)
+
+    def test_check_accepts_units_override(self):
+        from stackctl import manifest
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(manifest.main([
+                "check", MANIFEST, "--units", os.path.join(ROOT, "deploy")]), 0)
 
     def test_env_override_keeps_the_stack_conf_contract(self):
         from stackctl import manifest
@@ -626,6 +660,16 @@ forward_host = "127.0.0.1"
 forward_port = 8100
 scheme = "ftp"
 """, "neither http nor https")
+
+        bad("bad-container.toml", """
+[host.a]
+domain = "a.example"
+[npm.x]
+host = "a"
+container = "Not A Unit"
+forward_host = "127.0.0.1"
+forward_port = 8100
+""", "not a container name")
 
         bad("bad-onion-target.toml", """
 [host.a]
@@ -765,6 +809,7 @@ flags = ["mcp"]
 
     def test_minimal_manifest_check(self):
         from stackctl import manifest
+        self.unit("one-mcp", ports=["127.0.0.1:8100:8000"])
         path = self.write("tiny.toml", """
 [host.mcp]
 domain = "mcp.example.net"
@@ -799,6 +844,124 @@ flags = ["mcp"]
         # ... and the needs_nodes column that goes with it, so the two arrays
         # cannot drift apart.
         self.assertIn("NPM_NEEDS_NODES=(0)", out)
+
+    def test_mcp_port_must_match_the_unit_publish(self):
+        from stackctl import manifest
+        self.unit("one-mcp", ports=["127.0.0.1:8101:8000"])
+        msg = die_msg(manifest.check, self.mcp_manifest("mcp-port.toml"))
+        self.assertIn("8100", msg)
+        self.assertIn("8101", msg)
+
+    def test_mcp_publish_must_map_to_port_8000(self):
+        from stackctl import manifest
+        self.unit("one-mcp", ports=["127.0.0.1:8100:9000"])
+        msg = die_msg(manifest.check,
+                      self.mcp_manifest("mcp-container-port.toml"))
+        self.assertIn("8000", msg)
+        self.assertIn("9000", msg)
+
+    def test_host_network_mcp_uses_unit_mcp_port(self):
+        from stackctl import manifest
+        self.unit("crowdsec-mcp", extra=[
+            "Network=host",
+            "Environment=MCP_HOST=127.0.0.1",
+            "Environment=MCP_PORT=8113",
+        ])
+        path = self.mcp_manifest("crowdsec.toml", port=8113,
+                                 container="crowdsec-mcp")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(manifest.check(path), 0)
+        # The unit is the only place the host-network bind is stated; the
+        # manifest's port must follow it.
+        self.unit("crowdsec-mcp", extra=[
+            "Network=host",
+            "Environment=MCP_HOST=127.0.0.1",
+            "Environment=MCP_PORT=8114",
+        ])
+        msg = die_msg(manifest.check, path)
+        self.assertIn("8113", msg)
+        self.assertIn("8114", msg)
+
+    def test_host_network_mcp_must_bind_loopback_and_not_publish(self):
+        from stackctl import manifest
+        path = self.mcp_manifest("crowdsec-host.toml", port=8113,
+                                 container="crowdsec-mcp")
+        self.unit("crowdsec-mcp", extra=[
+            "Network=host",
+            "Environment=MCP_HOST=0.0.0.0",
+            "Environment=MCP_PORT=8113",
+        ])
+        self.assertIn("MCP_HOST", die_msg(manifest.check, path))
+        self.unit("crowdsec-mcp", ports=["127.0.0.1:8113:8113"], extra=[
+            "Network=host",
+            "Environment=MCP_HOST=127.0.0.1",
+            "Environment=MCP_PORT=8113",
+        ])
+        self.assertIn("must not publish", die_msg(manifest.check, path))
+
+    def test_npm_forward_must_match_the_named_unit(self):
+        from stackctl import manifest
+        self.unit("frontend", ports=["127.0.0.1:8106:80"])
+        self.unit("backend", ports=["127.0.0.1:8105:8000"])
+        path = self.write("npm-wrong-unit.toml", """
+[host.a]
+domain = "a.example"
+
+[npm.x]
+host = "a"
+container = "frontend"
+forward_host = "127.0.0.1"
+forward_port = 8105
+""")
+        msg = die_msg(manifest.check, path)
+        self.assertIn("frontend", msg)
+        self.assertIn("backend", msg)
+
+    def test_npm_forward_needs_a_published_port(self):
+        from stackctl import manifest
+        self.unit("frontend", ports=["127.0.0.1:8106:80"])
+        path = self.write("npm-unpublished.toml", """
+[host.a]
+domain = "a.example"
+
+[npm.x]
+host = "a"
+container = "frontend"
+forward_host = "127.0.0.1"
+forward_port = 8199
+""")
+        msg = die_msg(manifest.check, path)
+        self.assertIn("8199", msg)
+        self.assertIn("no unit publishes", msg)
+
+    def test_npm_entry_needs_a_container(self):
+        from stackctl import manifest
+        self.unit("frontend", ports=["127.0.0.1:8106:80"])
+        path = self.write("npm-no-container.toml", """
+[host.a]
+domain = "a.example"
+
+[npm.x]
+host = "a"
+forward_host = "127.0.0.1"
+forward_port = 8106
+""")
+        self.assertIn("needs container", die_msg(manifest.check, path))
+
+    def test_npm_forward_host_must_be_loopback(self):
+        from stackctl import manifest
+        self.unit("frontend", ports=["127.0.0.1:8106:80"])
+        path = self.write("npm-forward-host.toml", """
+[host.a]
+domain = "a.example"
+
+[npm.x]
+host = "a"
+container = "frontend"
+forward_host = "frontend"
+forward_port = 8106
+""")
+        self.assertIn("127.0.0.1", die_msg(manifest.check, path))
 
 
 class TestDocs(unittest.TestCase):
@@ -899,6 +1062,14 @@ flags = ["mcp"]
         self.assertIn("| `suricata` ⚙️ |", text)
         self.assertIn("host network", text)
         self.assertIn("`stack-bouncer` ⚙️", text)     # the one host-script row
+
+    def test_a_port_disagreement_fails_docs_check(self):
+        self.unit("one-mcp", ports=["127.0.0.1:8101:8000"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(Fatal) as ctx:
+                self.docs("check")
+        self.assertIn("8100", ctx.exception.msg)
+        self.assertIn("8101", ctx.exception.msg)
 
     def test_an_mcp_entry_with_no_unit_dies(self):
         self.write("deploy/services.toml", """

@@ -16,9 +16,10 @@
 #     per MCP and onion column and the clearweb vhost list), via
 #     scripts/lib.sh's load_manifest, so deploy.sh, verify.sh, monitor.sh and
 #     deploy/install.sh keep reading the same names.
-#   * `python3 -m stackctl manifest check` (CI) validates the file itself;
-#     `python3 -m stackctl docs render|check` derives README's "What runs" and
-#     AGENTS.md's interface tables from it and the units.
+#   * `python3 -m stackctl manifest check` (CI) validates the file itself and
+#     reconciles its port claims with the units in deploy/; `python3 -m stackctl
+#     docs render|check` derives README's "What runs" and AGENTS.md's interface
+#     tables from it and the units.
 #
 # Operator overrides keep the old contract: every [host.*] carries an `env`
 # name, and a non-empty $<env> in the process environment wins over the
@@ -91,15 +92,18 @@ kuma_add_host = false
 # unit's loopback publish (PublishPort=127.0.0.1:<port>:8000 in deploy/),
 # which is where NPM forwards to: it runs on the host network and cannot
 # resolve a container name. 8000 is the port the servers listen on inside
-# the container, the app repos' MCP_PORT default.
+# the container, the app repos' MCP_PORT default. `manifest check` reads the
+# unit and requires that publish, so a port that only looks valid here fails
+# CI.
 #
-# crowdsec-mcp is the exception, and this file cannot show it from here: it
-# runs with Network=host (its upstream, the CrowdSec LAPI, is a loopback bind
-# a bridge container cannot reach), so `port` is the address the app itself
-# binds (MCP_HOST/MCP_PORT in deploy/crowdsec-mcp.container) rather than a
-# publish. For NPM the result is identical -- 127.0.0.1:<port> -- but
-# everything that probes the container goes through netcheck-host instead of
-# netcheck: scripts/lib.sh's MCP_HOST_NETNS is where that is declared.
+# crowdsec-mcp is the exception: it runs with Network=host (its upstream, the
+# CrowdSec LAPI, is a loopback bind a bridge container cannot reach), so
+# `port` is the address the app itself binds (MCP_HOST/MCP_PORT in
+# deploy/crowdsec-mcp.container) rather than a publish. `manifest check` reads
+# those Environment= lines too. For NPM the result is identical --
+# 127.0.0.1:<port> -- but everything that probes the container goes through
+# netcheck-host instead of netcheck: scripts/lib.sh's MCP_HOST_NETNS is where
+# that is declared.
 #
 # The probe fields are verify.sh's half of the same declaration: `token_var` is
 # the variable in $DATA_DIR/config/<container>/token.env, and `probe_tool` /
@@ -225,6 +229,10 @@ needs_nodes = true
 # declaration covers creation, update and TLS.
 #
 #   host          a [host.*] key whose domain this vhost serves
+#   container     the unit whose loopback publish this vhost fronts;
+#                 `manifest check` requires its PublishPort= to match
+#                 forward_port. Omitted on an `mcp` host, whose targets are the
+#                 [mcp.*] entries above.
 #   forward_host  where NPM proxies to. Always 127.0.0.1, never a container:
 #                 NPM runs on the host network (deploy/nginx-proxy-manager.
 #                 container -- that is what gives it clients' real addresses),
@@ -254,24 +262,28 @@ needs_nodes = true
 
 [npm.frontend]
 host = "frontend"
+container = "boltmesh-frontend"
 forward_host = "127.0.0.1"
 forward_port = 8106
 flags = ["ws", "block"]
 
 [npm.api]
 host = "api"
+container = "boltmesh-backend"
 forward_host = "127.0.0.1"
 forward_port = 8105
 flags = ["ws", "block"]
 
 [npm.search]
 host = "search"
+container = "searxng"
 forward_host = "127.0.0.1"
 forward_port = 8082
 flags = ["ws", "block"]
 
 [npm.btcpay]
 host = "btcpay"
+container = "btcpay"
 forward_host = "127.0.0.1"
 forward_port = 49392
 needs_nodes = true
@@ -279,6 +291,7 @@ flags = ["ws", "force-ssl", "block"]
 
 [npm.btc_explorer]
 host = "btc_explorer"
+container = "btc-explorer"
 forward_host = "127.0.0.1"
 forward_port = 8108
 needs_nodes = true
@@ -286,6 +299,7 @@ flags = ["force-ssl", "block"]
 
 [npm.xmr_explorer]
 host = "xmr_explorer"
+container = "xmr-explorer"
 forward_host = "127.0.0.1"
 forward_port = 8109
 needs_nodes = true
@@ -293,6 +307,7 @@ flags = ["force-ssl", "block"]
 
 [npm.status]
 host = "status"
+container = "uptime-kuma"
 forward_host = "127.0.0.1"
 forward_port = 8107
 flags = ["ws", "block"]
