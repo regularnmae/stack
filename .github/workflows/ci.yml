@@ -28,12 +28,14 @@ jobs:
       # `git ls-remote https://github.com/actions/checkout refs/tags/v7`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # -P SCRIPTDIR makes the `# shellcheck source=…` directives resolve
-      # relative to each script, and -S info gates on every finding. The file
-      # list is enumerated from git rather than written out: a hardcoded list
-      # silently skipped four scripts (deploy/btcpay/monero-notify.sh,
-      # deploy/root/{audit-report.sh,suricata/start.sh}, scripts/btcpay-wallet.sh)
-      # and both scripts/logs.sh and scripts/metrics.sh were missing from one
-      # step or the other.
+      # relative to each script, and -S info gates on every finding. The second
+      # -P is the repo root: lib.sh's directives spell paths from there, because
+      # a nested directive resolves against the checked script's directory, not
+      # the including file's. The file list is enumerated from git rather than
+      # written out: a hardcoded list silently skipped four scripts
+      # (deploy/btcpay/monero-notify.sh, deploy/root/{audit-report.sh,suricata/start.sh},
+      # scripts/btcpay-wallet.sh) and both scripts/logs.sh and scripts/metrics.sh
+      # were missing from one step or the other.
       - name: shellcheck
         run: |
           curl -fsSL -o /tmp/shellcheck.tar.xz \
@@ -42,7 +44,7 @@ jobs:
           "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" --version
           mapfile -t files < <(git ls-files '*.sh')
           printf 'shellcheck: %d scripts\n' "${#files[@]}"
-          "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x -P SCRIPTDIR -S info \
+          "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x -P SCRIPTDIR -P . -S info \
             "${files[@]}"
       # The healthcheck contract (docs/units.md): explicit keys, a bounded
       # probe, systemd owning the restart. Reads deploy/ templates, so it needs
@@ -162,7 +164,7 @@ jobs:
               || { echo "::error::deploy/monitoring/rules/stack.yml.in has no rule for severity $s"; exit 1; }
           done
           printf 'the vmalert rules cover every severity the sweep emits\n'
-      # The unit generation stamps (scripts/lib.sh) are covered by
+      # The unit generation stamps (scripts/lib/units.sh) are covered by
       # tests/test-lib.sh, which the workflow runs: a stamp must not change the
       # digest it carries, must land inside [Container], and an unstamped running
       # container must read as drift rather than being adopted.
@@ -228,7 +230,7 @@ jobs:
       # ... and one reader. A job that writes status_write directly skips the
       # dry-run rule and the unrecorded-verdict rule; a sweep that reads
       # result=fail itself re-decides the branch order that let the six jobs
-      # drift apart. Both belong to status.sh/lib.sh now.
+      # drift apart. Both belong to status.sh and scripts/lib/jobs.sh now.
       - name: verdict protocol has one implementation
         run: |
           bad=$(grep -n 'status_write "\$' scripts/*.sh deploy/root/*.sh 2>/dev/null \
@@ -236,6 +238,6 @@ jobs:
           bad+=$(grep -n 'STATUS_RESULT" = fail' scripts/monitor.sh verify.sh 2>/dev/null || true)
           if [ -n "$bad" ]; then
               printf '%s\n' "$bad" >&2
-              echo 'call verdict_write / verdict_judge from deploy/root/status.sh and scripts/lib.sh instead' >&2
+              echo 'call verdict_write from deploy/root/status.sh and verdict_judge from scripts/lib/jobs.sh instead' >&2
               exit 1
           fi

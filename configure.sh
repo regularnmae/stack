@@ -152,7 +152,8 @@ write_if_changed() { # path
         return 1
     fi
     # write_env_file is the one atomic, mode-600 writer the stack uses for
-    # secret-carrying env files (scripts/lib.sh's write_atomic underneath).
+    # secret-carrying env files (scripts/lib/datadir.sh, over
+    # deploy/root/status.sh's write_atomic).
     if ! write_env_file "$path" < "$tmp"; then
         warn "could not write $path"
         rm -f "$tmp"

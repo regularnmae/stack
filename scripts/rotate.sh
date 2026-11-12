@@ -613,9 +613,9 @@ mint_rune() { # restriction-json -> "rune unique_id"
         printf 'dryrun 0'
         return 0
     fi
-    # The mint -> checkrune -> retry loop is lib.sh's cln_mint_rune, shared with
-    # install.sh so the installer and the rotator cannot disagree about what makes
-    # a rune usable.
+    # The mint -> checkrune -> retry loop is scripts/lib/daemons.sh's
+    # cln_mint_rune, shared with install.sh so the installer and the rotator
+    # cannot disagree about what makes a rune usable.
     cln_mint_rune "$1"
 }
 
@@ -634,10 +634,10 @@ verify_runes() {
 
 # Revocation is a SET reconciliation, not a remembered id: every live rune whose
 # method set is exactly one of stack.conf's must be the pair node.env carries, and
-# anything else is a leftover (this run's predecessor, or an older crash). lib.sh
-# owns the comparison -- monitor.sh checks the same invariant -- and it is
-# restricted to exact method-set matches so a rune minted for something else is
-# never touched.
+# anything else is a leftover (this run's predecessor, or an older crash).
+# scripts/lib/daemons.sh owns the comparison -- monitor.sh checks the same
+# invariant -- and it is restricted to exact method-set matches so a rune minted
+# for something else is never touched.
 prune_orphan_runes() {
     local node_env="$CONFIG_DIR/lightning-mcp/node.env" keep_read keep_spend orphans id
 
@@ -1060,8 +1060,8 @@ apply_restic() {
 }
 
 # The newest restic snapshot's age in hours (empty when it cannot be read).
-# status_verdict's sibling in scripts/lib.sh owns the read, so the rotator and
-# scripts/monitor.sh cannot disagree about how old the last backup is.
+# restic_snapshot_summary in scripts/lib/jobs.sh owns the read, so the rotator
+# and scripts/monitor.sh cannot disagree about how old the last backup is.
 backup_age_h() {
     local summary epoch
     summary=$(restic_snapshot_summary) || return 1

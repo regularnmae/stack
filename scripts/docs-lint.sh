@@ -18,8 +18,8 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# usage_header is the one reader of a leading block; lib.sh only defines, so
-# --help opens no config.
+# usage_header is the one reader of a leading block; scripts/lib/core.sh only
+# defines, so --help opens no config.
 # shellcheck source=lib.sh
 . "$REPO_DIR/scripts/lib.sh"
 

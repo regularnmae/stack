@@ -69,7 +69,7 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   running?" itself. `install.sh` appends
   `Label=org.stack.unit-digest=<sha>`: a digest of the unit's own declarative
   content plus the config it reads once at start (torrc, the CrowdSec tree,
-  `vector.toml`, vmalert's rules) — `scripts/lib.sh`'s
+  `vector.toml`, vmalert's rules) — `scripts/lib/units.sh`'s
   `unit_definition_digest`. The stamp line is excluded from the digest, so a
   stamp can never change what it is a digest of, and `render_unit` carries the
   installed one forward so a re-render that changes nothing does not look like a
@@ -253,7 +253,7 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   mattered because `scripts/monitor.sh` carries only `verify.sh`'s FAIL lines
   and its exit code: an unhealthy container was invisible to alerting while
   every sweep said the stack was fine. The states are now classified once, by
-  `container_health_state` in `scripts/lib.sh` (tested in
+  `container_health_state` in `scripts/lib/probes.sh` (tested in
   `tests/test-lib.sh`), and `verify.sh` fails on `unhealthy`, naming the remedy.
   `starting` stays a warning deliberately: podman promotes a probe that never
   succeeds to `unhealthy` after `HealthStartPeriod` x `HealthRetries`, so the
@@ -367,7 +367,7 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 - **A merged Containerfile digest bump reaches the host on the next
   `./deploy.sh`:** each locally-built image is labelled with the sha256 of the
   Containerfile that built it, and `deploy_explorers`/`ensure_local_image`
-  rebuild when the label differs (`scripts/lib.sh`'s `image_is_current`; no
+  rebuild when the label differs (`scripts/lib/units.sh`'s `image_is_current`; no
   label counts as stale). `podman image exists` alone would keep the old bits
   forever, and `verify.sh`'s "Local images" section runs the same comparison. A
   failed rebuild is fatal only when the image is *missing* — a stale one warns

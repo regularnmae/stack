@@ -505,4 +505,14 @@ assert_eq 'one two' "$(prom_label_value "$(printf 'one\ntwo')")" 'a newline beco
 assert_eq 'a b'     "$(prom_label_value "$(printf 'a\tb')")"     'a tab becomes a separator'
 assert_eq 'plain'   "$(prom_label_value plain)"                  'plain text is untouched'
 
+# lib.sh is the entry point, not the implementation: a file under scripts/lib/
+# that nothing sources is a set of functions that silently do not exist, and the
+# symptom is a caller's "command not found" on the host, not here.
+assert_eq "$ROOT_DIR/scripts" "$STACK_SCRIPTS_DIR" 'STACK_SCRIPTS_DIR is the scripts/ dir'
+for f in "$ROOT_DIR"/scripts/lib/*.sh; do
+    grep -qxF ". \"\$STACK_SCRIPTS_DIR/lib/${f##*/}\"" "$ROOT_DIR/scripts/lib.sh" \
+        || { printf 'FAIL: scripts/lib/%s is not sourced by scripts/lib.sh\n' \
+                "${f##*/}" >&2; exit 1; }
+done
+
 printf 'shared shell helper tests: ok\n'

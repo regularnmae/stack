@@ -67,7 +67,7 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   validates the field before it looks at the type — leave the default). Fulcrum
   is declared against the **publish**, not the container, so a lost publish
   turns it red; whether the index behind it is current is `verify.sh --deep` /
-  `monitor.sh` (`scripts/lib.sh`'s `electrum_tip`).
+  `monitor.sh` (`scripts/lib/electrum.sh`'s `electrum_tip`).
 
 ## Rate limiting is per ingress
 

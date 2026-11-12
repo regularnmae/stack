@@ -19,7 +19,7 @@
 #
 # Run it on the host: it reads containers with podman and reaches each MCP server
 # on npm-network as <container>:8000 through the long-lived `netcheck` container
-# (scripts/lib.sh says why not a throwaway `podman run` per probe), except
+# (scripts/lib/probes.sh says why not a throwaway `podman run` per probe), except
 # nginx-proxy-manager, which owns the host network and is read on 127.0.0.1.
 #
 # Read-only against the stack: it starts nothing, writes nothing in $DATA_DIR and
@@ -142,8 +142,8 @@ head2 "Local images"
 # These are built here, not pulled, so a healthy container says nothing about
 # whether its image still matches its Containerfile -- a merged base-image bump
 # changes only that file. deploy.sh and install.sh rebuild on the label mismatch
-# (scripts/lib.sh's image_is_current); a stale image is a warning, because the
-# service is running the last good bits.
+# (scripts/lib/units.sh's image_is_current); a stale image is a warning, because
+# the service is running the last good bits.
 local_images=(
     "btc-explorer|$BTC_EXPLORER_IMAGE|btc-explorer"
     "xmr-explorer|$XMR_EXPLORER_IMAGE|xmr-explorer"
@@ -246,9 +246,9 @@ head2 "MCP endpoints"
 # needs a chain are declared in deploy/services.toml ([mcp.*]) and emitted by the
 # manifest as index-aligned arrays, so a server added there is probed here with no
 # second table to keep in step. The token file is the container's own token.env;
-# scripts/lib.sh decides where it is reached (mcp_base / mcp_curl) -- by name on
-# npm-network, except crowdsec-mcp (host network, 127.0.0.1:8113). MCP_PORTS[$i] is
-# the loopback publish NPM fronts; the spend column is rotate.sh's, unused here.
+# scripts/lib/mcp.sh decides where it is reached (mcp_base / mcp_curl) -- by name
+# on npm-network, except crowdsec-mcp (host network, 127.0.0.1:8113). MCP_PORTS[$i]
+# is the loopback publish NPM fronts; the spend column is rotate.sh's, unused here.
 if [ "${PROBE_TOKEN_VARS+x}" != x ] || [ "${#MCP_CONTAINERS[@]}" -eq 0 ]; then
     die "the manifest emitted no probe table (run ./deploy.sh)"
 fi
@@ -281,7 +281,7 @@ for i in "${!MCP_CONTAINERS[@]}"; do
     EP_VAR["$name"]="$var"
 
     # mcp_curl picks netcheck or netcheck-host and the base URL for this
-    # container (scripts/lib.sh).
+    # container (scripts/lib/mcp.sh).
     health=$(mcp_curl "$name" -s -o /dev/null -w '%{http_code}' -m 10 "$(mcp_base "$name")/health" 2>/dev/null || echo 000)
     if [ "$health" = "200" ]; then pass "$name /health 200"; else bad "$name /health -> $health"; fi
 
@@ -308,7 +308,7 @@ for i in "${!MCP_CONTAINERS[@]}"; do
             "$MCP_PROTOCOL_VERSION")
                 pass "$name speaks MCP $pv" ;;
             *)
-                warn "$name negotiated MCP $pv, but scripts/lib.sh sends $MCP_PROTOCOL_VERSION (bump it, and agent-skills' PROTOCOL_VERSION, together)" ;;
+                warn "$name negotiated MCP $pv, but scripts/lib/mcp.sh sends $MCP_PROTOCOL_VERSION (bump it, and agent-skills' PROTOCOL_VERSION, together)" ;;
         esac
     else
         bad "$name authenticated handshake failed"
@@ -401,7 +401,7 @@ head2 "Agent tooling"
 # shallow sweep stays offline.
 AGENT_BIN="${AGENT_MCP_BIN:-$HOME/.local/bin/agent-mcp}"
 AGENT_DIR="$BUILD_DIR/${AGENT_SKILLS_REPO:-agent-skills}"
-# agent-mcp's revision is hand-maintained in scripts/lib.sh too
+# agent-mcp's revision is hand-maintained in scripts/lib/mcp.sh too
 # (MCP_PROTOCOL_VERSION): two clients of the same servers must name the same one,
 # so a bump on one side only is drift. Read the constant, never import the module.
 if [ -r "$AGENT_DIR/lib/mcp_http.py" ]; then
@@ -411,7 +411,7 @@ if [ -r "$AGENT_DIR/lib/mcp_http.py" ]; then
     elif [ "$agent_proto" = "$MCP_PROTOCOL_VERSION" ]; then
         pass "agent-mcp and the host probes both speak MCP $agent_proto"
     else
-        warn "agent-mcp speaks MCP $agent_proto but scripts/lib.sh sends $MCP_PROTOCOL_VERSION (bump both)"
+        warn "agent-mcp speaks MCP $agent_proto but scripts/lib/mcp.sh sends $MCP_PROTOCOL_VERSION (bump both)"
     fi
 fi
 if [ ! -x "$AGENT_BIN" ]; then
@@ -601,7 +601,7 @@ head2 "Fulcrum (Electrum)"
 # nginx-proxy-manager can read it. Its healthcheck is the process table
 # (`grep -qx Fulcrum /proc/1/comm`), which a wedged index passes forever. The
 # probes dial the host's loopback publishes -- what a wallet on the LAN reaches
-# (see scripts/lib.sh, docs/chains.md).
+# (see scripts/lib/electrum.sh, docs/chains.md).
 if [ "$NO_NODES" = 1 ]; then
     warn "chain daemons skipped by request; not checking Fulcrum"
 else
@@ -841,8 +841,8 @@ fi
 
 # Render a deploy/root/ file the way install.sh does, so a drift check compares
 # what bootstrap would write, not the literal template. The substitution list is
-# scripts/lib.sh's render_root_template, which install.sh's root_render also calls
-# -- one list, so a new placeholder cannot make a correct file look drifted.
+# scripts/lib/core.sh's render_root_template, which install.sh's root_render also
+# calls -- one list, so a new placeholder cannot make a correct file look drifted.
 root_want() { # src
     render_root_template "$1" "$DATA_DIR"
 }

@@ -64,7 +64,7 @@ CALLS="$TMP_DIR/status-calls"
 : > "$CALLS"
 say() { :; }
 # The bouncer's own contribution is the field set it hands the shared writer.
-# shellcheck disable=SC2317  # called by the extracted write_status below
+# shellcheck disable=SC2317,SC2329  # called by the extracted write_status below
 verdict_write() { printf '%s\n' "$@" >> "$CALLS"; }
 # shellcheck source=/dev/null
 . "$TMP_DIR/write_status.sh"

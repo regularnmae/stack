@@ -110,7 +110,7 @@ README's "Intrusion detection".
   (`deploy/root/status.sh`), not in the bouncer, so every job's `--dry-run`
   behaves the same.
   `scripts/ids.sh` rolls the engines up into `$DATA_DIR/audit/ids.status` —
-  written through `verdict_write`, judged by `verdict_judge` (`scripts/lib.sh`)
+  written through `verdict_write`, judged by `verdict_judge` (`scripts/lib/jobs.sh`)
   like every other scheduled job — rather than letting the monitor reach into a
   rootful unit and a `podman exec`; a stale status is the failure signal. Its
   decision counter reads `cscli **decisions** list -o json`, which is

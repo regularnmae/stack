@@ -45,8 +45,9 @@ TARGET="$TEXTFILE_DIR/stack.prom"
 
 say() { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
 
-# The body, built in memory and written once at the end by prom_write (lib.sh),
-# which owns the 0755/0644 permissions node-exporter's uid needs.
+# The body, built in memory and written once at the end by prom_write
+# (scripts/lib/jobs.sh), which owns the 0755/0644 permissions node-exporter's uid
+# needs.
 BODY=""
 emit() { BODY+="$1 $2"$'\n'; }
 
@@ -261,9 +262,10 @@ fi
 # a bad podman release). The two fields are independent.
 # ---------------------------------------------------------------------------
 
-# podman prints cpu_time as a Go duration ("47m45.158824s"), and lib.sh's dur_ms
-# already parses those -- one parser, so a fraction cannot disagree with
-# wait_healthy. Its floor is a millisecond, which rate() tolerates. An unparsable
+# podman prints cpu_time as a Go duration ("47m45.158824s"), and dur_ms (in
+# deploy/root/status.sh, shared with the root tier) already parses those -- one
+# parser, so a fraction cannot disagree with wait_healthy. Its floor is a
+# millisecond, which rate() tolerates. An unparsable
 # field ("N/A") is rejected by dur_valid before it gets here: dur_ms answers 0 for
 # it too, and that is not the same thing.
 cpu_seconds() { awk -v ms="$(dur_ms "$1")" 'BEGIN { printf "%.3f", ms / 1000 }'; }

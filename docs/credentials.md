@@ -48,10 +48,10 @@ token on a command line.
   rewrites every copy of its credential or reconciles a declared end state
   against the authority that holds it. `runes` blacklists every live rune whose
   method set is *exactly* one of `stack.conf`'s except the pair in
-  `lightning-mcp/node.env` (`cln_orphan_runes` in `scripts/lib.sh`, shared with
-  `scripts/monitor.sh` so the pruner and the alarm agree) — a set comparison,
-  because a rune has no label and a remembered id missed five live leftovers,
-  two of them spend-capable, on this host. `restic` writes
+  `lightning-mcp/node.env` (`cln_orphan_runes` in `scripts/lib/daemons.sh`,
+  shared with `scripts/monitor.sh` so the pruner and the alarm agree) — a set
+  comparison, because a rune has no label and a remembered id missed five live
+  leftovers, two of them spend-capable, on this host. `restic` writes
   `RESTIC_PASSWORD_NEXT` into `backup.env` *before* `key add`, promotes it, then
   removes the superseded keys, so no crash leaves the repository openable only
   by a password nobody holds (and it refuses without a snapshot inside

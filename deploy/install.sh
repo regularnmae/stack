@@ -443,8 +443,9 @@ MONITOR_RESTART_MAX=$(resolve_monitor_timing MONITOR_RESTART_MAX 3)
 MONITOR_IO_UTIL_PCT=$(resolve_monitor_timing MONITOR_IO_UTIL_PCT 90)
 MONITOR_IDS_ALERT_WARN=$(resolve_monitor_timing MONITOR_IDS_ALERT_WARN 20)
 
-# write_secret is lib.sh's write_env_file (atomic, 0600); configure.sh writes the
-# BTCPay env files with the same one, so both halves agree on the mode.
+# write_secret is scripts/lib/datadir.sh's write_env_file (atomic, 0600);
+# configure.sh writes the BTCPay env files with the same one, so both halves
+# agree on the mode.
 
 # Echo 0 (true) when the file is missing and the caller should write it, so a
 # call site reads: if ensure_secret "$F" "token env"; then write_secret ...; fi
@@ -973,7 +974,8 @@ mkdir -p "$DATA_DIR/backup-cache" "$STACK_BACKUP_DIR"
 # None of these is pulled, so "is it built?" is the wrong question: a base-image
 # bump rewrites only that image's Containerfile (Renovate's dockerfile manager),
 # so leaving an existing image alone is how such a bump never reaches the host.
-# The Containerfile's hash is baked in as a label and compared here (lib.sh).
+# The Containerfile's hash is baked in as a label and compared here
+# (scripts/lib/units.sh).
 ensure_local_image() { # image build-context
     local image="$1" dir="$2"
     [ -f "$dir/Containerfile" ] || return 0
@@ -997,9 +999,10 @@ ensure_local_image() { # image build-context
         || die "could not build $image"
 }
 
-# netcheck: the curl client the host-side checks exec into. net_curl (lib.sh) runs
-# it in a long-lived container to read a service by name on npm-network, and
-# net_curl_host the same image on the host network for nginx-proxy-manager.
+# netcheck: the curl client the host-side checks exec into. net_curl
+# (scripts/lib/probes.sh) runs it in a long-lived container to read a service by
+# name on npm-network, and net_curl_host the same image on the host network for
+# nginx-proxy-manager.
 if command -v podman >/dev/null 2>&1; then
     ensure_local_image "$NETCHECK_IMAGE" "$REPO_DIR/netcheck"
 fi
@@ -1321,8 +1324,8 @@ mkdir -p "$DATA_DIR/audit"
 
 # The runes need a running lightningd. configure.sh re-runs this once the daemon
 # is up, so it is best-effort here and self-heals. The proof and the mint/retry
-# loop live in lib.sh (cln_rune_usable / cln_mint_rune) because rotate.sh mints
-# the same runes on a rotation.
+# loop live in scripts/lib/daemons.sh (cln_rune_usable / cln_mint_rune) because
+# rotate.sh mints the same runes on a rotation.
 
 read_rune=""
 spend_rune=""
@@ -1565,8 +1568,9 @@ log "rendered the crowdsec config into $CONFIG_DIR/ids/crowdsec"
 # Stamp every rendered unit with the digest of its own definition: the answer to
 # "which definition was this container started from?" travels with the container
 # as an OCI label, so nothing has to record an apply and no writer can claim one
-# that did not happen (scripts/lib.sh, docs/units.md). Last, after every render
-# and every config tree the digest folds in, and before the daemon-reload below --
+# that did not happen (scripts/lib/units.sh, docs/units.md). Last, after every
+# render and every config tree the digest folds in, and before the daemon-reload
+# below --
 # the stamp only takes effect when the unit next starts, which is the point.
 unit_stamp_generations "$QUADLET_DIR" \
     || die "could not stamp the rendered units in $QUADLET_DIR"

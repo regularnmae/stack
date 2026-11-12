@@ -34,8 +34,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
 # Where deploy/install.sh renders the units (docs/units.md). Read here to
 # compare a running container's network mode with its unit's (sync_npm_network);
-# unit digests come from scripts/lib.sh's unit_digest, which defaults to this
-# path.
+# unit digests come from scripts/lib/units.sh's unit_digest, which defaults to
+# this path.
 QUADLET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
 # Set by restart_changed_units when nginx-proxy-manager's unit changed.
 NPM_UNIT_CHANGED=0
@@ -123,9 +123,9 @@ preflight() {
     fi
 
     # deploy.sh never uses sudo: bootstrap.sh owns the privileged host setup,
-    # and a data dir we cannot prepare is an error from lib.sh, never an
-    # implicit prompt. resolve_data_dir only persists the answer (skipped on a
-    # dry run); creating and labelling the dirs is a real change.
+    # and a data dir we cannot prepare is an error from scripts/lib/datadir.sh,
+    # never an implicit prompt. resolve_data_dir only persists the answer
+    # (skipped on a dry run); creating and labelling the dirs is a real change.
     resolve_data_dir
     log "data directory: $DATA_DIR"
     if [ "$DRY_RUN" = 1 ]; then
@@ -176,7 +176,7 @@ install_units() {
 # install.sh + the digest comparison, for every `--only` branch. A re-render is
 # not an application -- a running container keeps the definition it started with
 # (docs/units.md) -- so the comparison is between the definition on disk and the
-# generation stamp the running container carries (scripts/lib.sh's
+# generation stamp the running container carries (scripts/lib/units.sh's
 # unit_digest / unit_digest_applied). Defined before the functions it calls on
 # purpose: bash resolves those at call time.
 sync_units() {
@@ -635,7 +635,7 @@ build_explorer() { # name [force]
     [ -f "$dir/Containerfile" ] || { warn "$name has no Containerfile"; return 1; }
     # "exists" is not enough: a digest bump changes only the Containerfile, so a
     # stale label means the old bits under the same local tag
-    # (scripts/lib.sh's image_is_current).
+    # (scripts/lib/units.sh's image_is_current).
     if [ "$force" = 0 ] && image_is_current "$image" "$dir/Containerfile"; then
         log "$image is current"
         return 0

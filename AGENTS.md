@@ -38,7 +38,10 @@ owns the render, the digest and the secret resolution.
 ./scripts/docs-render.sh --check    # generated README/AGENTS tables are current
 # markdown lint; the tag matches the CLI the CI action bundles -- bump both together
 podman run --rm -v "$PWD":/work:z -w /work docker.io/davidanson/markdownlint-cli2:v0.24.0
-shellcheck -x -P SCRIPTDIR -S info $(git ls-files '*.sh')  # CI pins v0.11.0
+# -P . : scripts/lib.sh's source= directives spell paths from the repo root, so
+# run this from the root (CI does); SCRIPTDIR alone resolves them from the
+# directory of whichever script is being checked.
+shellcheck -x -P SCRIPTDIR -P . -S info $(git ls-files '*.sh')  # CI pins v0.11.0
 ```
 
 `--only victoria-logs`, `vector`, `tor` and `crowdsec` have no case in the

@@ -107,7 +107,7 @@ restore" and "Disaster recovery".
   `TimeoutStartSec` kill cannot leave the previous `ok` behind. It installs no
   trap itself: bash's `trap` replaces, so a helper owning `EXIT` would silently
   drop the scratch-tree cleanup.
-  `monitor.sh` judges the file with `verdict_judge` (`scripts/lib.sh`) against
+  `monitor.sh` judges the file with `verdict_judge` (`scripts/lib/jobs.sh`) against
   `MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H` (1080 h) — the same judgement every
   scheduled job gets, so a change to the skip/skip-forever rules reaches this
   drill too. Do not fold this back into `backup-verify`: the weekly run staying

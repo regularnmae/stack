@@ -151,7 +151,7 @@ THRESH_MEMPOOL_MB=$(num_or "${MONITOR_MEMPOOL_MB:-}" 250)
 THRESH_XMR_LAG=$(num_or "${MONITOR_XMR_LAG_BLOCKS:-}" 3)
 
 # How old each scheduled job's verdict file may be, in seconds -- the whole of
-# the per-job input to verdict_judge (scripts/lib.sh), whose default and unit
+# the per-job input to verdict_judge (scripts/lib/jobs.sh), whose default and unit
 # sit together here rather than being split across a THRESH_ and a monitor_var
 # line. The job names are the ones verdict_judge's callers pass.
 #   ids: every five minutes, 20 gives four missed runs (or one long deploy that
@@ -534,7 +534,7 @@ fi
 # 1. The runes. Exactly the pair lightning-mcp/node.env carries may be live on the
 #    node; anything else this stack minted is a key that survived a run and is
 #    still valid, and one of those could also spend. The comparison (method sets
-#    against stack.conf, not remembered ids) is in lib.sh so rotate.sh's pruner
+#    against stack.conf, not remembered ids) is in scripts/lib/daemons.sh so
 #    and this check agree.
 if podman container exists lightningd 2>/dev/null; then
     keep_runes=(
@@ -638,7 +638,8 @@ esac
 # is not one that restores. Age is measured from the last SUCCESS, not the last
 # run -- a drill that skips (no disk space, an oversized set) must not look
 # healthy because the timer fired. verdict_judge owns that judgement for every
-# job (scripts/lib.sh); only the file, the severity and the age are passed here.
+# job (scripts/lib/jobs.sh); only the file, the severity and the age are passed
+# here.
 VERIFY_STATUS_FILE="$AUDIT_DIR/backup-verify.status"
 verdict_judge "$VERIFY_STATUS_FILE" fail "$(verdict_age backup-verify)" \
     "backup restore drill" "run scripts/backup.sh verify"

@@ -46,8 +46,8 @@ ask() { local p="$1" a; read -r -p "$p" a; printf '%s' "$a"; }
 # ---------------------------------------------------------------------------
 # Bitcoin
 # ---------------------------------------------------------------------------
-# bitcoind_cli (scripts/lib.sh) is the stack's one bitcoind client, and it pins
-# the datadir so a caller does not have to.
+# bitcoind_cli (scripts/lib/daemons.sh) is the stack's one bitcoind client, and
+# it pins the datadir so a caller does not have to.
 
 btc_wallet_loaded() {
     bitcoind_cli listwallets 2>/dev/null \

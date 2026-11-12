@@ -97,8 +97,9 @@ want python3      python3
 # (deploy/root/audit.rules). EL10 split them out of the `audit` package, so a
 # host with auditd running can still have no way to add a rule.
 want /usr/sbin/augenrules audit-rules
-# Nothing here runs semanage: lib.sh labels the data dir with chcon and, when
-# that is not enough, prints the semanage command for the operator (README's
+# Nothing here runs semanage: scripts/lib/datadir.sh labels the data dir with
+# chcon and, when that is not enough, prints the semanage command for the
+# operator (README's
 # "data dir on another disk"). Bootstrap installs it so that printed fix is
 # runnable.
 want semanage policycoreutils-python-utils

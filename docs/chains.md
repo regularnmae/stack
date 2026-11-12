@@ -97,11 +97,11 @@ its status is captured instead of letting `set -e` abort at the RPC.
   knob, and 2.1.4 exposes no fast-sync or history cap to shrink the work. Its
   `HealthCmd` is the process check on purpose: an index probe would paint a
   normal first run red.
-  The functional check is outside the unit — `scripts/lib.sh`'s `electrum_call`/
-  `electrum_call_tls`/`electrum_tip` (bash `/dev/tcp` and `openssl s_client`;
-  the host has no `nc`), used by `verify.sh --deep` and `scripts/monitor.sh`.
-  Ask it for `blockchain.headers.subscribe`, never just `server.version`: that
-  one is answered from memory and passes a wedged index.
+  The functional check is outside the unit — `scripts/lib/electrum.sh`'s
+  `electrum_call`/`electrum_call_tls`/`electrum_tip` (bash `/dev/tcp` and
+  `openssl s_client`; the host has no `nc`), used by `verify.sh --deep` and
+  `scripts/monitor.sh`. Ask it for `blockchain.headers.subscribe`, never just
+  `server.version`: that one is answered from memory and passes a wedged index.
 
 ## The two explorers
 

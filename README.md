@@ -117,7 +117,7 @@ loopback** only — the `127.0.0.1:…` entries above, i.e.
 the LAN, so NPM (which terminates TLS) plus each server's bearer token are still
 the one way in for a client. The host-side checks (`verify.sh`, the monitor) read
 the services by container name on `npm-network`, through `net_curl` in
-`scripts/lib.sh`, which execs into the long-lived **`netcheck`** container
+`scripts/lib/probes.sh`, which execs into the long-lived **`netcheck`** container
 (`netcheck/Containerfile`); `net_curl_host` uses **`netcheck-host`**, the same
 image on the host network, for NPM's own admin API on `127.0.0.1:81`. One path
 is deliberately the exception: the alert path reaches Alertmanager on
@@ -1631,8 +1631,9 @@ stack/
   docs/                   # the detail behind that index, one file per subsystem
                           #   (units, logs, ids, backup, proxy, alerting,
                           #   chains, credentials, btcpay, clients)
-  scripts/lib.sh          # data-dir resolution + SELinux labelling + the
-                          #   net_curl / mcp_* helpers every check goes through
+  scripts/lib.sh          # the one entry point: sources lib/ in a fixed order
+  scripts/lib/            #   one concern per file -- core, datadir, probes,
+                          #   daemons, electrum, units, jobs, mcp, manifest
   scripts/wallets.sh      # the Bitcoin Core wallet (create/restore/load)
   scripts/btcpay-wallet.sh # import BTCPay's view-only Monero wallet
   scripts/backup.sh       # restic backup / restore / inspect the repository
