@@ -157,7 +157,7 @@ fetch_repo() { # url dir label
 }
 
 fetch_repos() { # [repo...]  (default: every APP_REPOS entry)
-    mkdir -p "$BUILD_DIR"
+    run mkdir -p "$BUILD_DIR"
     local repos=("$@") r
     [ "${#repos[@]}" -gt 0 ] || repos=("${APP_REPOS[@]}")
     for r in "${repos[@]}"; do
@@ -548,7 +548,7 @@ deploy_apps() {
 # at build time) that deploy_app does not pass. The private boltmesh-labs repos
 # are fetched over SSH (GITHUB_SSH_HOST); same repo:dir pairs as stack.conf.
 fetch_boltmesh() { # every BOLTMESH_REPOS entry ("repo:dir" pairs)
-    mkdir -p "$BUILD_DIR"
+    run mkdir -p "$BUILD_DIR"
     local pair repo dir
     for pair in "${BOLTMESH_REPOS[@]}"; do
         repo="${pair%%:*}"            # GitHub repo name
@@ -747,6 +747,7 @@ sync_npm_network() {
 agent_skills_dir() { printf '%s/%s' "$BUILD_DIR" "$AGENT_SKILLS_REPO"; }
 
 fetch_agent_skills() {
+    run mkdir -p "$BUILD_DIR"
     fetch_repo "https://github.com/$GITHUB_ORG/$AGENT_SKILLS_REPO.git" \
         "$(agent_skills_dir)" "$AGENT_SKILLS_REPO"
 }

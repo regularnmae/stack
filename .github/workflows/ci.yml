@@ -187,6 +187,12 @@ jobs:
             exit 1
           fi
           printf 'deploy.sh has no health wait\n'
+      # The other half of that contract: a dry run prints the plan and writes
+      # nothing, including the build dir the fetch wrappers used to create
+      # outside run(). tests/test-deploy.sh runs the real script with every
+      # writable root redirected under a temp dir.
+      - name: deploy.sh --dry-run changes nothing
+        run: tests/test-deploy.sh
       # deploy/services.toml is the single declaration of the public surface
       # (hostnames, MCP prefixes and ports, proxy hosts, onion services); the
       # first command validates the file itself and reconciles its ports with
