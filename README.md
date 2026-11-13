@@ -55,7 +55,7 @@ deployment problem.
 | `vector` | `docker.io/timberio/vector:0.61.0-debian` | — |
 | `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.53.0` | `127.0.0.1:9428` |
 | `victoria-logs-mcp` | `localhost/victoria-logs-mcp:latest` | `127.0.0.1:8111` |
-| `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` |
+| `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.156.0` | `127.0.0.1:8428` |
 | `victoriametrics-mcp` | `localhost/victoriametrics-mcp:latest` | `127.0.0.1:8112` |
 | `vmalert` | `docker.io/victoriametrics/vmalert:v1.155.0` | `127.0.0.1:8880` |
 | `xmr-explorer` | `localhost/xmr-explorer:local` | `127.0.0.1:8109` |
