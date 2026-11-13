@@ -148,7 +148,7 @@ for f in "${unit_files[@]}"; do
 
     # --- the restart policy is systemd's ------------------------------------
     # Above the branches below, which `continue`: a healthless unit (victoria-logs,
-    # the netchecks) is long-lived all the same, and podman's `restart` is not an
+    # netcheck) is long-lived all the same, and podman's `restart` is not an
     # answer here (HC008).
     if [ "$oneshot" != "oneshot" ]; then
         restart=$(kv "$f" Restart)

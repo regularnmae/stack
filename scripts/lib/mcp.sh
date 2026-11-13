@@ -15,7 +15,8 @@ MCP_SID_MARKER='__mcp_session_id__'
 # runs with Network=host, because its upstream (the CrowdSec LAPI) is a loopback
 # bind a bridge cannot reach -- pasta's host.containers.internal lands on the
 # LAN address, not loopback. Such a unit binds the host's loopback itself instead
-# of publishing, so it is reached as 127.0.0.1:<port> through netcheck-host.
+# of publishing, so it is reached as 127.0.0.1:<port> through host_curl
+# (scripts/lib/probes.sh).
 # Declared once so every caller names the container and gets the transport right.
 MCP_HOST_NETNS=("crowdsec-mcp:8113")
 
@@ -24,7 +25,7 @@ _mcp_transport() { # container
     local entry
     for entry in "${MCP_HOST_NETNS[@]}"; do
         if [ "${entry%%:*}" = "$1" ]; then
-            printf 'net_curl_host 127.0.0.1:%s' "${entry##*:}"
+            printf 'host_curl 127.0.0.1:%s' "${entry##*:}"
             return 0
         fi
     done

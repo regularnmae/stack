@@ -381,17 +381,16 @@ ensure_network() {
     fi
 }
 
-# The `--only` branches run their checks through the two curl clients and never
-# reach start_infra. Called at the end of sync_units, after install.sh had its
-# chance to rebuild the image, so `--only monitor` on a freshly booted host
-# finds them up.
+# The `--only` branches run their container-name checks through the curl client
+# and never reach start_infra. Called at the end of sync_units, after install.sh
+# had its chance to rebuild the image, so `--only monitor` on a freshly booted
+# host finds it up.
 ensure_netcheck() {
     [ "$DRY_RUN" = 1 ] && return 0
     # A rebuilt image would otherwise never reach the running container (start
     # is a no-op on an active unit); the same refresh start_infra does.
     refresh_image_unit netcheck "$NETCHECK_IMAGE"
-    refresh_image_unit netcheck-host "$NETCHECK_IMAGE"
-    systemctl --user start netcheck.service netcheck-host.service 2>/dev/null || true
+    systemctl --user start netcheck.service 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -399,14 +398,12 @@ ensure_netcheck() {
 # ---------------------------------------------------------------------------
 start_infra() {
     ensure_network
-    # The curl clients every host-side check execs into: first, because the
+    # The curl client the bridge-network checks exec into: first, because the
     # checks that read a service by name (verify.sh, the MCP handshakes) go
-    # through them, and refreshed because install.sh rebuilds the image in place
+    # through it, and refreshed because install.sh rebuilds the image in place
     # -- `start` on an already-active unit would keep the old bits.
     refresh_image_unit netcheck "$NETCHECK_IMAGE"
     start_unit netcheck
-    refresh_image_unit netcheck-host "$NETCHECK_IMAGE"
-    start_unit netcheck-host
     # Monitoring first: it depends on nothing, and starting it before the daemons
     # captures the whole initial sync in the metrics history.
     start_unit node-exporter

@@ -42,7 +42,6 @@ deployment problem.
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.4` | — |
 | `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.21` | — |
 | `netcheck` | `localhost/netcheck:local` | — |
-| `netcheck-host` | `localhost/netcheck:local` | host network |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | host network |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network |
 | `postgres` | `docker.io/library/postgres:18-alpine` | — |
@@ -118,12 +117,13 @@ the LAN, so NPM (which terminates TLS) plus each server's bearer token are still
 the one way in for a client. The host-side checks (`verify.sh`, the monitor) read
 the services by container name on `npm-network`, through `net_curl` in
 `scripts/lib/probes.sh`, which execs into the long-lived **`netcheck`** container
-(`netcheck/Containerfile`); `net_curl_host` uses **`netcheck-host`**, the same
-image on the host network, for NPM's own admin API on `127.0.0.1:81`. One path
-is deliberately the exception: the alert path reaches Alertmanager on
-`127.0.0.1:9093` (and vmalert on `:8880`), and its dead-man's-switch heartbeat
-goes out to the internet with the **host's own curl** (`bootstrap.sh` installs
-it), because a container cannot be what reports a broken container runtime. The proxy
+(`netcheck/Containerfile`). Host-network surfaces -- NPM's `:80/:443/:81` and
+`crowdsec-mcp`'s `127.0.0.1:8113` -- are read with the **host's own curl**
+(`host_curl` in the same file), because they are addressed on host loopback,
+which a bridge container cannot reach; `bootstrap.sh` installs it, and it is
+the alert path's client too (`127.0.0.1:9093`/`:8880`, and the dead-man's-switch
+heartbeat), because a container cannot be what reports a broken container
+runtime. The proxy
 hosts are declared in `deploy/services.toml`
 and reconciled from this repo by `scripts/npm-hosts.sh` — see
 [Proxy hosts](#proxy-hosts). The hosts
@@ -1364,7 +1364,7 @@ the upstream `/mcp`, so `/mcp` never appears in a client's URL:
 The prefixes are the `[mcp.*]` tables, each carrying `prefix`, `container` and
 `port` (the container name also names the `token.env` that is the prefix's
 credential). `crowdsec-mcp` is the exception: it runs on the host network, binds
-`127.0.0.1:8113` itself, and host-side probes go through `netcheck-host`. The host's
+`127.0.0.1:8113` itself, and host-side probes reach it with the host's curl. The host's
 nginx config turns buffering off and sets a long read timeout, because Streamable
 HTTP answers with `text/event-stream` and a buffered SSE body just hangs the client.
 

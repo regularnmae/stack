@@ -1,21 +1,21 @@
 # shellcheck shell=bash
-# Reaching a service and deciding whether it is up: the netcheck containers
-# every host-side check speaks through, and the health/wait contract in
-# docs/units.md.
+# Reaching a service and deciding whether it is up: the netcheck container the
+# bridge-network checks speak through, the host's own curl for loopback binds,
+# and the health/wait contract in docs/units.md.
 
-# The image the host-side checks speak through: a curl client (see
+# The image the bridge-network checks speak through: a curl client (see
 # netcheck/Containerfile), built by deploy/install.sh. A container, not the
 # host's curl, because a probe resolves a service by its npm-network container
 # name, and several app images carry no curl. The checks exec into a long-lived
 # container rather than starting one per probe: each `podman run` added a veth
 # pair and a cgroup scope, which the kernel logs per step (docs/logs.md).
 #
-# Two containers because podman refuses host + bridge on one ("cannot set
-# multiple networks without bridge network mode"), and nginx-proxy-manager's
-# admin API is a 127.0.0.1 bind only a host-netns client can reach.
+# Host-network surfaces (nginx-proxy-manager's :80/:443/:81, crowdsec-mcp's
+# 127.0.0.1:8113) are read by host_curl below: the checks address them on host
+# loopback, which a bridge container cannot reach, and the host already carries
+# curl for the alert path.
 NETCHECK_IMAGE="${NETCHECK_IMAGE:-localhost/netcheck:local}"
 NETCHECK_CONTAINER="${NETCHECK_CONTAINER:-netcheck}"
-NETCHECK_HOST_CONTAINER="${NETCHECK_HOST_CONTAINER:-netcheck-host}"
 
 # Fail before podman does, so a host that never ran install.sh (or whose client
 # is stopped) reads as one clear error rather than a stack trace.
@@ -38,14 +38,20 @@ net_curl() {
     podman --events-backend=none exec -i "$NETCHECK_CONTAINER" curl "$@"
 }
 
-# The same from the host's own namespace, for the one service that is not on
-# npm-network: nginx-proxy-manager binds :80/:443/:81 itself (docs/proxy.md), so
-# its admin API is 127.0.0.1:81 and a vhost it fronts is reached by looping back
-# to this host:
-#   net_curl_host -s -o /dev/null -w '%{http_code}' http://127.0.0.1:81/
-net_curl_host() {
-    netcheck_ready "$NETCHECK_HOST_CONTAINER" || return 127
-    podman --events-backend=none exec -i "$NETCHECK_HOST_CONTAINER" curl "$@"
+# The same from the host's own namespace, for services that are not on
+# npm-network: nginx-proxy-manager binds :80/:443/:81 itself (docs/proxy.md) and
+# is read on 127.0.0.1, so its admin API is 127.0.0.1:81 and a vhost it fronts
+# is reached by looping back to this host; crowdsec-mcp binds 127.0.0.1:8113 for
+# the same reason.
+#   host_curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:81/
+# -q and --noproxy keep a ~/.curlrc or *_proxy in the operator's environment out
+# of a probe, so a host-local check answers the same way every time.
+host_curl() {
+    command -v curl >/dev/null 2>&1 || {
+        printf 'ERROR: host curl is missing; install curl (bootstrap.sh does) -- the alert path needs it too\n' >&2
+        return 127
+    }
+    command curl -q --noproxy '*' "$@"
 }
 
 # The container's healthcheck state from `podman ps`'s Status column. A failing

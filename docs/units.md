@@ -156,7 +156,7 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `HealthRetries`, `HealthTimeout`). Units that cannot are declared once, with a
   reason, in `stack.conf`'s `HEALTHLESS_UNITS` (`victoria-logs` is distroless --
   podman runs a string health command through the container's `/bin/sh` -- and
-  the two netcheck clients only sleep), which `verify.sh` reads instead of
+  `netcheck` only sleeps), which `verify.sh` reads instead of
   keeping its own copy. `scripts/healthcheck-lint.sh` is the gate: interval 30 s
   (HTTP) or 60 s (daemons), retries 3 or 5 with a reason, timeout explicit and
   5-20 s, an HTTP probe fails on non-2xx with the body discarded and bounded,
@@ -391,30 +391,31 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
 ## The host-side probes
 
-- **The host-side probes exec into two long-lived `netcheck` containers; they do
-  not `podman run` per probe.** `net_curl`/`net_curl_host` run
-  `podman --events-backend=none exec` against `netcheck` (npm-network) and
-  `netcheck-host` (host network). A throwaway container per probe creates a veth
-  pair and a cgroup scope each time, and `verify.sh` makes dozens per sweep --
-  the veth churn alone dominates the journal, which then pays for it twice once
-  the log store indexes it. Two containers, not one, because a container cannot
-  carry both host and bridge networks ("cannot set multiple networks without
-  bridge network mode") and NPM's admin API is a `127.0.0.1` bind that only a
-  host-netns client can reach. `--events-backend=none` keeps the exec session
-  (`exec`/`exec_died`) out of the journal too, as belt to the drop-in's braces:
-  the mechanism itself is `events_logger` in `deploy/podman/99-stack.conf`,
-  installed under `~/.config/containers/containers.conf.d/`, because a flag at
-  the call site cannot reach podman's own healthcheck units. `netcheck_ready`
-  fails with the one-line fix when either is stopped; `deploy.sh` starts them
-  first in `start_infra`, after `refresh_image_unit` (a plain `start` on an
-  active unit keeps the old bits), and `ensure_netcheck` covers every `--only`
-  branch (the monitor's verify sweep and npm-hosts both probe). One-shot
-  `podman run`s elsewhere keep `--log-driver=none`: the driver only controls
-  persistence, so their stdout still reaches the caller's command substitution
-  while the journal stays clean. `wait_healthy` treats a container with no
-  healthcheck as "up" -- `victoria-logs` is distroless and the netcheck pair
-  only sleeps, so neither can define one; their functional checks are the LogsQL
-  query and the probes themselves.
+- **The bridge-network probes exec into one long-lived `netcheck` container;
+  they do not `podman run` per probe.** `net_curl` runs
+  `podman --events-backend=none exec` against `netcheck` (npm-network). A
+  throwaway container per probe creates a veth pair and a cgroup scope each time,
+  and `verify.sh` makes dozens per sweep -- the veth churn alone dominates the
+  journal, which then pays for it twice once the log store indexes it.
+  Host-network surfaces are read by the host's own curl (`host_curl` in
+  `scripts/lib/probes.sh`): nginx-proxy-manager's `:80/:443/:81` and
+  `crowdsec-mcp`'s `127.0.0.1:8113` are addressed on host loopback, which a
+  bridge container cannot reach, and the host must carry curl anyway for the
+  alert path (`docs/alerting.md`), so no second client container.
+  `--events-backend=none` keeps the exec session (`exec`/`exec_died`) out of
+  the journal too, as belt to the drop-in's braces: the mechanism itself is
+  `events_logger` in `deploy/podman/99-stack.conf`, installed under
+  `~/.config/containers/containers.conf.d/`, because a flag at the call site
+  cannot reach podman's own healthcheck units. `netcheck_ready` fails with the
+  one-line fix when it is stopped; `deploy.sh` starts it first in `start_infra`,
+  after `refresh_image_unit` (a plain `start` on an active unit keeps the old
+  bits), and `ensure_netcheck` covers every `--only` branch (the monitor's verify
+  sweep and npm-hosts both probe). One-shot `podman run`s elsewhere keep
+  `--log-driver=none`: the driver only controls persistence, so their stdout
+  still reaches the caller's command substitution while the journal stays clean.
+  `wait_healthy` treats a container with no healthcheck as "up" --
+  `victoria-logs` is distroless and `netcheck` only sleeps, so neither can define
+  one; their functional checks are the LogsQL query and the probes themselves.
 
 ## The knobs in stack.conf
 

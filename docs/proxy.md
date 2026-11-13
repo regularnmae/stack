@@ -139,8 +139,11 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   which is what the manifest's `[npm.*]`/`[mcp.*]` entries point at, and only 80/443/81 plus
   Fulcrum's raw ports stay LAN-reachable. Host-side checks still read
   `container:8000` on `npm-network` through `net_curl` (exec'd into the
-  long-lived `netcheck` container; `netcheck-host` is the same image on the host
-  network for NPM's own admin API on `127.0.0.1:81`). The units set `HealthCmd=`/`HealthInterval=`, so podman
+  long-lived `netcheck` container); NPM's host-network binds (`:80/:443` for the
+  proxy path, `:81` for the admin API, read on `127.0.0.1`) and
+  `crowdsec-mcp`'s `127.0.0.1:8113` are reached from the host's own namespace --
+  `verify.sh` with the host's curl, the reconcilers with urllib -- because a
+  bridge container cannot reach host loopback. The units set `HealthCmd=`/`HealthInterval=`, so podman
   really does report `(healthy)`: `./verify.sh` reads the state, and
   `./configure.sh` waits on the few containers a section needs through
   `wait_healthy`; the MCP probe is an authenticated `initialize`, strictly

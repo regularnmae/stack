@@ -1,16 +1,16 @@
 # Quadlet unit for the long-lived curl client on npm-network.
 #
 # Every host-side check that reads a service by name goes through net_curl
-# (scripts/lib.sh), because the app images vary and several carry no curl. It
+# (scripts/lib/probes.sh), because the app images vary and several carry no curl. It
 # execs into this container rather than running a throwaway `podman run` per
 # probe: exec output goes to the caller, not the journal, so a probe adds no
 # log line at all and creates no veth pair or cgroup scope per sweep
 # (docs/units.md, "The host-side probes").
 #
-# A second container (netcheck-host) runs the same image on the host network:
-# podman refuses host + bridge on one container, and nginx-proxy-manager binds
-# 127.0.0.1 where only a host-netns client can reach it. Both are sleepers --
-# the image has no entrypoint, so Exec= is the whole command.
+# The image has no entrypoint, so Exec= is the whole command: the process only
+# keeps the container's network namespace alive for `podman exec`, and the probe
+# is the caller. Host-network surfaces are read by the host's own curl
+# (scripts/lib/probes.sh).
 [Unit]
 Description=netcheck (long-lived curl client on npm-network)
 After=network-online.target npm-network-network.service

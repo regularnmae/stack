@@ -102,8 +102,8 @@ kuma_add_host = false
 # deploy/crowdsec-mcp.container) rather than a publish. `manifest check` reads
 # those Environment= lines too. For NPM the result is identical --
 # 127.0.0.1:<port> -- but everything that probes the container goes through
-# netcheck-host instead of netcheck: scripts/lib.sh's MCP_HOST_NETNS is where
-# that is declared.
+# host_curl instead of the bridge-network netcheck client: scripts/lib/mcp.sh's
+# MCP_HOST_NETNS is where that is declared.
 #
 # The probe fields are verify.sh's half of the same declaration: `token_var` is
 # the variable in $DATA_DIR/config/<container>/token.env, and `probe_tool` /

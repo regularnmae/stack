@@ -1,12 +1,11 @@
 # The one HTTP client: urllib behind a small JSON-shaped API.
 #
-# Replaces the two curl dialects the bash reconcilers needed -- net_curl_host
-# (curl inside the netcheck-host container, because the host was not guaranteed
-# a curl) and the curl-config-on-stdin dance (`-K -`), which existed only to
-# keep a bearer token or a password out of an argv that `ps` can read. A Python
-# process holds credentials in its own memory, so neither mechanism survives
-# here; what MUST survive is the rule itself, and it is why nothing in this
-# package ever shells out with a secret in argv.
+# Replaces the two curl dialects the bash reconcilers used -- a curl running in
+# a container transport and the curl-config-on-stdin dance (`-K -`), which
+# existed only to keep a bearer token or a password out of an argv that `ps` can
+# read. A Python process holds credentials in its own memory, so neither
+# mechanism survives here; what MUST survive is the rule itself, and it is why
+# nothing in this package ever shells out with a secret in argv.
 #
 # Both reconcilers talk to a loopback surface (nginx-proxy-manager binds :81 on
 # the host network, uptime-kuma publishes 127.0.0.1:8107), so the host's own

@@ -110,6 +110,13 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverIn
 assert_eq "" "$(mcp_protocol '{"jsonrpc":"2.0","id":1,"error":{"code":-1}}')" \
     'mcp_protocol prints nothing for an error envelope'
 
+# The transport follows the network mode: crowdsec-mcp binds the host's
+# loopback, every other server is a peer on npm-network.
+assert_eq 'host_curl 127.0.0.1:8113' "$(_mcp_transport crowdsec-mcp)" \
+    'host-network MCP is reached with host curl'
+assert_eq 'net_curl searxng-mcp:8000' "$(_mcp_transport searxng-mcp)" \
+    'bridge-network MCP is reached through netcheck'
+
 # ... and the requests that follow name it. Stub mcp_curl and record its argv,
 # one per line: a header whose quoting broke would appear as two lines.
 mcp_curl() { # container curl-args...

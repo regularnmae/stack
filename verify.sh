@@ -20,7 +20,8 @@
 # Run it on the host: it reads containers with podman and reaches each MCP server
 # on npm-network as <container>:8000 through the long-lived `netcheck` container
 # (scripts/lib/probes.sh says why not a throwaway `podman run` per probe), except
-# nginx-proxy-manager, which owns the host network and is read on 127.0.0.1.
+# nginx-proxy-manager and crowdsec-mcp, which are read on 127.0.0.1 with the
+# host's own curl.
 #
 # Read-only against the stack: it starts nothing, writes nothing in $DATA_DIR and
 # changes no unit. It resolves the data dir to find the tokens, and a
@@ -85,8 +86,8 @@ if [ "$NO_NODES" = 1 ]; then
     warn "daemon tier skipped by request; not checking ${CHAIN_UNITS[*]:-}"
 fi
 # Units that cannot define a health command are declared once in stack.conf's
-# HEALTHLESS_UNITS (victoria-logs is distroless; the netcheck clients just sleep
-# until something execs into them). scripts/healthcheck-lint.sh keeps that
+# HEALTHLESS_UNITS (victoria-logs is distroless; netcheck just sleeps until
+# something execs into it). scripts/healthcheck-lint.sh keeps that
 # declaration and the units in agreement; here it only decides what an "Up but
 # unprobed" container means.
 healthless=" "
@@ -280,7 +281,7 @@ for i in "${!MCP_CONTAINERS[@]}"; do
     EP_ENV["$name"]="$envfile"
     EP_VAR["$name"]="$var"
 
-    # mcp_curl picks netcheck or netcheck-host and the base URL for this
+    # mcp_curl picks netcheck or host_curl and the base URL for this
     # container (scripts/lib/mcp.sh).
     health=$(mcp_curl "$name" -s -o /dev/null -w '%{http_code}' -m 10 "$(mcp_base "$name")/health" 2>/dev/null || echo 000)
     if [ "$health" = "200" ]; then pass "$name /health 200"; else bad "$name /health -> $health"; fi
@@ -355,7 +356,7 @@ else
         # public DNS exists. NPM binds :80/:443 on the host, hence 127.0.0.1.
         url="http://$MCP_HOST$prefix"
         connect="$MCP_HOST:80:127.0.0.1:80"
-        code=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
+        code=$(host_curl -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
             -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
         [ -n "$code" ] || code=000
         # Force-SSL makes the :80 vhost redirect; follow it to the :443 one.
@@ -363,7 +364,7 @@ else
             301|308)
                 url="https://$MCP_HOST$prefix"
                 connect="$MCP_HOST:443:127.0.0.1:443"
-                code=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
+                code=$(host_curl -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$connect" \
                     -X POST "$url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
                 [ -n "$code" ] || code=000 ;;
         esac
@@ -379,7 +380,7 @@ else
         token=$(env_value "${EP_ENV[$name]:-}" "${EP_VAR[$name]:-}")
         if [ -z "$token" ]; then bad "$name has no token; cannot handshake through NPM"; continue; fi
         resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
-            | net_curl_host -s -m 15 -K - --connect-to "$connect" \
+            | host_curl -s -m 15 -K - --connect-to "$connect" \
                 -H 'Content-Type: application/json' \
                 -H 'Accept: application/json, text/event-stream' \
                 -X POST "$url" -d "$MCP_INIT_BODY" 2>/dev/null || true)
@@ -672,14 +673,14 @@ if [ "$kuma_code" = "200" ]; then pass "uptime-kuma / 200 (after redirects)"; el
 if [ "${UPTIME_KUMA_HOST+x}" = x ] && [ -n "$UPTIME_KUMA_HOST" ]; then
     kurl="http://$UPTIME_KUMA_HOST/"
     kconnect="$UPTIME_KUMA_HOST:80:127.0.0.1:80"
-    kcode=$(net_curl_host -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$kconnect" "$kurl" 2>/dev/null || true)
+    kcode=$(host_curl -s -o /dev/null -w '%{http_code}' -m 10 --connect-to "$kconnect" "$kurl" 2>/dev/null || true)
     [ -n "$kcode" ] || kcode=000
     case "$kcode" in
         301|308)
             kurl="https://$UPTIME_KUMA_HOST/"
             kconnect="$UPTIME_KUMA_HOST:443:127.0.0.1:443" ;;
     esac
-    kcode=$(net_curl_host -s -L -o /dev/null -w '%{http_code}' -m 20 --connect-to "$kconnect" "$kurl" 2>/dev/null || true)
+    kcode=$(host_curl -s -L -o /dev/null -w '%{http_code}' -m 20 --connect-to "$kconnect" "$kurl" 2>/dev/null || true)
     [ -n "$kcode" ] || kcode=000
     case "$kcode" in
         200) pass "$UPTIME_KUMA_HOST serves the status page through nginx-proxy-manager" ;;

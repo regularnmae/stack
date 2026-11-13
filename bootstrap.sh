@@ -77,13 +77,13 @@ want logrotate    logrotate
 want git          git
 # jq parses the nginx-proxy-manager admin API responses in scripts/npm-hosts.sh
 # and builds the monitor's alert payload. (net_curl exists so a host-side check
-# can address a container by name and reach NPM's 127.0.0.1 admin bind, not
-# because the host has no curl.)
+# can address a container by name on npm-network; loopback binds use this host's
+# own curl below.)
 want jq           jq
-# curl is the monitor's alert path and must be the host's own: monitor.sh pushes
-# to Alertmanager on 127.0.0.1:9093 and pings the dead-man's-switch. A container
-# cannot report a broken container runtime, so without it every alert is lost
-# with nothing able to say so.
+# curl is the monitor's alert path and the loopback probe client, and must be
+# the host's own: monitor.sh pushes to Alertmanager on 127.0.0.1:9093 and pings
+# the dead-man's-switch. A container cannot report a broken container runtime,
+# so without it every alert is lost with nothing able to say so.
 want curl         curl
 # openssl reads certificate expiry for the monitor, runs the Electrum TLS probe
 # in verify.sh --deep, and generates the stack's secrets (rand_hex).
