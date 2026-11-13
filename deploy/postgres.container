@@ -10,7 +10,10 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=postgres
-Image=docker.io/library/postgres:18-alpine
+# Exact minor tag: Postgres minor releases are ordinary security updates and
+# Renovate tracks them. A major bump (18 -> 19) is an operator migration and is
+# blocked in renovate.json; it is not a PR.
+Image=docker.io/library/postgres:18.7-alpine
 Network=npm-network.network
 
 # Only the backend/worker reach it, as postgres:5432 on npm-network, so it

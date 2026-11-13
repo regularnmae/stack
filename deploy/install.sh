@@ -879,10 +879,15 @@ if [ ! -s "$DATA_DIR/bitcoin/bitcoin.conf" ]; then
     write_secret "$DATA_DIR/bitcoin/bitcoin.conf" <<EOF
 # bitcoind configuration, seeded once by deploy/install.sh and handed to the
 # image's uid. It carries the RPC credentials the MCP server and lightningd
-# use. Edit it through the container:
-#   podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf
+# use. Edit it through the container (the image ships no editor), or rotate the
+# two RPC keys with scripts/rotate.sh bitcoin-rpc.
 server=1
 daemon=0
+
+# Nothing in the stack uses a bitcoind wallet: NBXplorer and BTCPay use chain
+# RPC, and CLN's bcli calls getblockchaininfo/gettxout/sendrawtransaction. This
+# also keeps Core from trying to load an old wallet after a major upgrade.
+disablewallet=1
 
 # Full (archival) node: keep and validate the whole chain. txindex is on so
 # btc-explorer resolves any historical txid; on a node that already has the

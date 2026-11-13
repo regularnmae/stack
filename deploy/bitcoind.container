@@ -7,8 +7,20 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=bitcoind
-Image=docker.io/lncm/bitcoind:v28.0
+# The official Bitcoin Core image, not lncm/bitcoind: the lncm tags stopped at
+# v28.0 in January 2025, and v28 is out of support. This image is built from the
+# signed release binaries and publishes every maintained major and minor.
+Image=docker.io/bitcoin/bitcoin:32.1
 Network=npm-network.network
+
+# The image's default user is uid 101; keep the datadir's existing owner
+# instead (container uid 1000 = host subuid 525287), so the upgrade never walks
+# the chain with a recursive chown. Entrypoint=bitcoind bypasses the image's
+# gosu/chown entrypoint; Exec= below is then bitcoind's own argv.
+User=1000:1000
+Entrypoint=bitcoind
+# bitcoin-cli in scripts/lib/daemons.sh reads the config and cookie from here.
+Environment=BITCOIN_DATA=/data/.bitcoin
 
 # No PublishPort on purpose: lightningd reaches it over the podman network and
 # bitcoind dials out for P2P, while publishing would bind 0.0.0.0 on every
@@ -17,10 +29,13 @@ Network=npm-network.network
 #PublishPort=8333:8333
 #PublishPort=8332:8332
 
-# LNCM image uses /data internally. The :z bind mount is owned by the image uid
-# (525287 on the host): edit bitcoin.conf through "podman exec bitcoind", and
-# never chown -R, which locks bitcoind out of its own chainstate.
+# The :z bind mount stays owned by container uid 1000 (host subuid 525287):
+# edit bitcoin.conf through "podman exec bitcoind", and never chown -R, which
+# locks bitcoind out of its own chainstate.
 Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
+# -printtoconsole is what keeps bitcoind's log in journald/vector; the image's
+# entrypoint used to add it. Everything else is bitcoin.conf.
+Exec=-datadir=/data/.bitcoin -printtoconsole
 
 # Graceful stop, not podman's 10 s default: a SIGKILL mid-flush turns the next
 # start into a verify or a reindex. TimeoutStopSec below must stay at least 30
@@ -28,14 +43,14 @@ Volume=@DATA_DIR@/bitcoin:/data/.bitcoin:z
 # first otherwise (docs/units.md, "A durable unit is stopped, not killed").
 StopTimeout=120
 
-# The lncm image ships no HEALTHCHECK, so without this podman reports "Up (no
-# health status)" and verify.sh can only warn. A TCP connect, not an RPC call:
-# an RPC probe enqueues work in bitcoind's queue and is starved by legitimate
-# load (Fulcrum's index, the explorers, nbxplorer), and HealthOnFailure=kill
-# turns that into a restart loop. "Alive but not answering RPC" is monitor.sh's
-# job; busybox nc is in the image and rpcallowip still applies to loopback
+# The image ships no HEALTHCHECK and no nc, so without this podman reports "Up
+# (no health status)" and verify.sh can only warn. A TCP connect through bash's
+# /dev/tcp, not an RPC call: an RPC probe enqueues work in bitcoind's queue and
+# is starved by legitimate load (Fulcrum's index, the explorers, nbxplorer),
+# and HealthOnFailure=kill turns that into a restart loop. "Alive but not
+# answering RPC" is monitor.sh's job; rpcallowip still applies to loopback
 # (docs/units.md, "Healthchecks follow a contract").
-HealthCmd=nc -z 127.0.0.1 8332
+HealthCmd=/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/8332'
 HealthInterval=60s
 HealthTimeout=15s
 # The listener only binds after the block-index verify, which outlasts the 2m

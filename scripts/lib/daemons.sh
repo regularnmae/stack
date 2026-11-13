@@ -118,8 +118,8 @@ bitcoind_conf_password() {
 # ONLY the transport; each caller keeps its own error handling (a monitor read
 # wants the empty answer, a rotation wants the failure).
 bitcoind_cli() { # bitcoin-cli args...
-    # -datadir is redundant (the lncm image runs with HOME=/data, so the default
-    # ~/.bitcoin IS /data/.bitcoin) but pins the answer against an image change.
+    # bitcoin/bitcoin's BITCOIN_DATA is /data/.bitcoin (deploy/bitcoind.container);
+    # the explicit -datadir also pins the answer against an image change.
     podman exec bitcoind bitcoin-cli -datadir=/data/.bitcoin "$@"
 }
 
