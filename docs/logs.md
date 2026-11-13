@@ -14,7 +14,13 @@ event-logger setting. The operator narrative is README's "Logs and history".
   by podman's own rule; follow with `journalctl -f CONTAINER_NAME=<name>`.
 - **`Storage=persistent` takes effect on a flush, not a restart.**
 - **`current_boot_only=false` is unsupported on systemd 250-257**; it is pinned
-  `true`.
+  `true`, so a queued tail is carried across a reboot by the sink's disk buffer,
+  not by the journal.
+- **The disk buffer is the queue; acknowledgements let it hold the cursor.** With
+  `acknowledgements` and a disk buffer, a source batch is acknowledged once the
+  buffer has written it, not when VictoriaLogs accepts it. The cursor may
+  therefore advance during a store outage -- the batch is recoverable from the
+  buffer. See "Durability" below.
 - **An unrecognised NPM log line must be kept, never dropped** (`npm_raw`) --
   silent loss is the failure that source exists to prevent.
 
@@ -38,6 +44,51 @@ event-logger setting. The operator narrative is README's "Logs and history".
   itself stays loopback-only and out of the `[npm.*]` tables, because its own
   API has no authentication — publishing that would add a second,
   unauthenticated door to the same history the MCP token already gates.
+  The sink's disk buffer acknowledges a batch once it has written it, so the
+  source cursor may advance during a store outage; "Durability" below is why the
+  buffer and the acknowledgements are both load-bearing.
+
+## Durability
+
+- **The disk buffer is the queue; acknowledgements let it own the cursor.**
+  Vector's sources checkpoint as they read. The sink sets
+  `acknowledgements.enabled = true`, which propagates upstream, and the disk
+  buffer resolves each batch's finalizer once the record is written to disk --
+  not when VictoriaLogs returns 2xx. The cursor may therefore advance while the
+  store is down: the batch is in the buffer, and the buffer is what replays it.
+  Without acknowledgements the cursor advances independently of the buffer write,
+  so a crash in that gap loses a batch; without the disk buffer the finalizer
+  would not resolve until delivery, and the journal would be the outage queue.
+  Delivery stays at-least-once, so a replay after a crash can duplicate a batch
+  rather than dropping one.
+- **The sink queue is on disk, and it has a floor.**
+  `[sinks.victoria_logs.buffer]` is Vector's disk v2 buffer (`type = "disk"`,
+  `when_full = "block"`), not the 500-event memory default. The minimum is
+  268435488 bytes (~256 MiB), because disk v2 requires two 128 MiB data files
+  plus the ledger; "small" is not a choice this buffer offers. It lives under
+  `data_dir`, the unit's `/var/lib/vector` (`$DATA_DIR/logs/vector`), which
+  `install.sh` creates and `BACKUP_PATHS` excludes. `when_full = "block"` is the
+  part that turns a full queue into backpressure rather than loss.
+- **The journal and the buffer cover different failures, and both are bounded.**
+  A store outage accumulates in the 256 MiB queue as Vector reads ahead; when the
+  queue fills, `block` stops the source and the journal (2 GiB / 7 days) holds
+  the rest. The buffer carries the queued tail across a **reboot**, because
+  `current_boot_only = true` (required on systemd 250-257) makes Vector skip the
+  previous boot; entries that never reached the buffer before the reboot are the
+  bounded gap. An outage longer than the two caps stops the source at the oldest
+  retained entry, and the store's own `LOGS_RETENTION` / `LOGS_MAX_BYTES` still
+  apply when the backlog is finally accepted.
+- **A disk stall is not fixed by a buffer on the same disk.** The store and the
+  buffer both live under `$DATA_DIR` (`/data` here), while the journal is on
+  `/`; filling or stalling `/data` takes both the store and its queue with it,
+  leaving journald as the fallback. VictoriaLogs can also lose what is still in
+  its in-memory buffer on an unclean crash; that is below Vector and no sink
+  setting changes it. A graceful stop flushes.
+- **`retry_max_duration_secs` is a backoff cap, not a retry budget.**
+  `retry_attempts` defaults to effectively infinite, so the sink retries forever;
+  the option is the maximum wait *between* attempts. It is 30s so a store that
+  comes back after an outage is noticed promptly—86400 made the Fibonacci
+  backoff sleep most of a day before the next attempt.
 
 ## podman's own event log is a config value
 

@@ -6,8 +6,9 @@
 #
 #   sources.journal     reads the host journal. current_boot_only=true is
 #                       REQUIRED on systemd 250-257 (the source refuses to start
-#                       with false there); data_dir keeps a cursor per batch so a
-#                       restart resumes rather than replaying.
+#                       with false there); data_dir keeps a cursor that advances
+#                       only once the batch is durable in the sink's disk buffer,
+#                       so a restart replays it rather than losing it.
 #   sources.suricata    the sensor's eve.json -- alerts, DNS/TLS/HTTP context --
 #                       which is a file, not stdout, so journald never sees it.
 #                       Parsed per line and labelled unit=suricata.service.
@@ -35,10 +36,13 @@
 #                       searchable. Only host/unit/container become *streams*:
 #                       CONTAINER_ID would create a new stream per container
 #                       start, and `priority` as a stream would multiply every
-#                       service by eight.
+#                       service by eight. Its disk buffer resolves the source's
+#                       acknowledgement once the batch is written, so a restart
+#                       replays it; see docs/logs.md, "Durability".
 #
-# Nothing here is operator-tuned: retention and the disk cap are stack.conf
-# (LOGS_RETENTION/LOGS_MAX_BYTES), and the URL is the unit name on npm-network.
+# Nothing else here is operator-tuned: retention and the store's disk cap are
+# stack.conf (LOGS_RETENTION/LOGS_MAX_BYTES), and the URL is the unit name on
+# npm-network. The sink buffer's 256 MiB is Vector's floor, not a knob.
 
 data_dir = "/var/lib/vector"
 
@@ -337,7 +341,26 @@ framing.method = "newline_delimited"
 # VictoriaLogs' push endpoint is a POST-only writer; the sink's own health probe
 # (a GET on the same URI) would 405 and mark Vector unhealthy forever.
 healthcheck.enabled = false
-# A restart of the store must not lose the buffered batch: keep retrying for a
-# day, then let the journal be the fallback (it is persistent and bounded).
-request.retry_max_duration_secs = 86400
+# This caps the wait between retries, not the retry window: retries are
+# unbounded. Keep it short so a store that returns after an outage is picked up
+# promptly instead of being slept through. See docs/logs.md, "Durability".
+request.retry_max_duration_secs = 30
 request.timeout_secs = 30
+
+# Acknowledgements close the gap between reading a source and the batch being
+# durable in the disk buffer below: the buffer resolves the finalizer when it
+# writes the record. Without them the journald/file cursor advances on read, so
+# a crash between the read and the buffer write loses a batch. See
+# docs/logs.md, "Durability".
+[sinks.victoria_logs.acknowledgements]
+enabled = true
+
+# The sink queue is on disk, and the buffer acknowledges the source once a record
+# is written, so a Vector restart or host reboot replays it. The 268435488-byte
+# floor is Vector's disk v2 minimum (two 128 MiB data files plus the ledger), not
+# a tunable size; data_dir is the unit's /var/lib/vector, which install.sh creates
+# and BACKUP_PATHS deliberately excludes.
+[sinks.victoria_logs.buffer]
+type = "disk"
+max_size = 268435488
+when_full = "block"

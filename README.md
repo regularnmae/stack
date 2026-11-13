@@ -410,8 +410,8 @@ invent a second data dir:
   digests
 - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
   (both regenerable, both excluded from backups)
-- `logs/` — the log store (`vl/`) and `vector`'s checkpoint; journald history,
-  regenerable and excluded from backups
+- `logs/` — the log store (`vl/`), `vector`'s checkpoint and its sink buffer;
+  journald history, regenerable and excluded from backups
 - `backup-cache/` — restic's cache (regenerable)
 - `backup-verify/` — the restore drill's scratch target; a copy of the backup
   set, wiped before and after every drill (regenerable, excluded from backups)
@@ -1034,8 +1034,9 @@ journald is the source: podman's log driver writes every container's stdout ther
 and the host scripts log there too. What was missing was search across services
 and any history at all, so `bootstrap.sh` makes journald persistent and bounded
 (`/var/log/journal`, 2 GB, 7 days), `vector` ships it to `victoria-logs`
-continuously (one cursor per batch, so a restart resumes), and the store keeps 14
-days (`LOGS_RETENTION`) or 10 GiB (`LOGS_MAX_BYTES`).
+continuously (a cursor that advances only once the batch is in the sink's disk
+queue, so a store outage or shipper restart replays rather than leaving a hole),
+and the store keeps 14 days (`LOGS_RETENTION`) or 10 GiB (`LOGS_MAX_BYTES`).
 
 Two things never reach journald and are read as files: Suricata's `eve.json` and
 **nginx-proxy-manager's access and error logs** — the second is what answers a

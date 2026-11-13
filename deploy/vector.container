@@ -46,10 +46,10 @@ Volume=/var/log/journal:/var/log/journal:ro
 # container uses the image's machine-id, finds no /var/log/journal/<id> and
 # reports "No journal files were found".
 Volume=/etc/machine-id:/etc/machine-id:ro
-# The shipper's config (rendered from deploy/logs/vector.toml) and its
-# checkpoint directory. The config is a directory mount because a single-file
-# bind keeps the inode it opened, so a re-rendered file would never reach the
-# running process.
+# The shipper's config (rendered from deploy/logs/vector.toml), its checkpoint
+# directory and the sink's disk buffer. The config is a directory mount because
+# a single-file bind keeps the inode it opened, so a re-rendered file would never
+# reach the running process.
 Volume=@CONFIG_DIR@/logs/vector:/etc/vector:ro
 Volume=@DATA_DIR@/logs/vector:/var/lib/vector:z
 # Suricata's eve.json, read-only. The PARENT is mounted, not ids/suricata: the
