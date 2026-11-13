@@ -1,0 +1,15 @@
+# stack-smart: read disk SMART health into the monitor's verdict file.
+#
+# A root oneshot because opening a block device for SMART needs privileges the
+# stack user does not have. It reads and reports; it changes nothing.
+#
+# The probe writes $DATA_DIR/audit/smart.status; that file, not this unit's exit
+# code, is what monitor.sh pages on (deploy/root/status.sh owns the contract).
+[Unit]
+Description=Read disk SMART health for the monitor (stack-smart)
+
+[Service]
+Type=oneshot
+ExecStart=/etc/stack-ids/smart.sh
+# One ioctl per disk; a hung smartctl must not pile runs up behind the timer.
+TimeoutStartSec=60

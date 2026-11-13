@@ -405,8 +405,9 @@ invent a second data dir:
 - `bin/` — the two scripts `install.sh` stages for the containers that run them
   (`monerod`'s block-notify helper, the BTCPay bootstrap); rewritten on every
   deploy, so edit the copy in the repo, not this one
-- `audit/` — the monitor's log, the spend tripwire baselines and the
-  rendered/applied unit digests
+- `audit/` — the monitor's log, the scheduled jobs' verdicts (IDS, audit,
+  bouncer, SMART), the spend tripwire baselines and the rendered/applied unit
+  digests
 - `monitoring/` — the metrics store (`vm/`) and node-exporter's textfile
   (both regenerable, both excluded from backups)
 - `logs/` — the log store (`vl/`) and `vector`'s checkpoint; journald history,
@@ -902,11 +903,12 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
   Read-only: it starts nothing and rewrites no config. It runs `verify.sh` for the
   container/MCP base checks and adds the ones nothing else does: chain freshness
   (bitcoind, Fulcrum's Electrum tip against bitcoind's height, `monerod`, the
-  wallet's lag), CLN peers and offline channels, host space and inodes, backup and
-  dump age, certificate expiry, the schedules themselves, the metrics and log
-  pipelines going quiet, journald persistence and podman's event backend, live
-  runes the stack does not reference, bitcoind's RPC password against
-  `secrets.env`, every clearweb vhost through nginx-proxy-manager (including
+  wallet's lag), CLN peers and offline channels, host space and inodes, SMART
+  disk health from the root probe, backup and dump age, certificate expiry, the
+  schedules themselves, the metrics and log pipelines going quiet, journald
+  persistence and podman's event backend, live runes the stack does not
+  reference, bitcoind's RPC password against `secrets.env`, every clearweb vhost
+  through nginx-proxy-manager (including
   the declared force-SSL redirect and its HSTS header) — then the spend
   tripwire. It also writes the numbers behind the three checks whose fact is a
   rate — unit restarts over an hour, disk saturation and Suricata bursts over 15
@@ -979,6 +981,21 @@ rules by `install.sh`, so changing any of them needs `./deploy.sh` (it re-render
 and restarts `vmalert`). With no heartbeat the sweep still runs and records to
 `$DATA_DIR/audit/audit.log`.
 
+### Disk health
+
+`smartmontools` is not left to `smartd`. `stack-smart.timer` (root, hourly) runs
+`smartctl -H -A -l error` against every disk `smartctl --scan` finds and writes
+`$DATA_DIR/audit/smart.status`: overall health, reallocated and pending sectors,
+SCSI grown-defect and uncorrected-error totals, NVMe media errors, temperature
+and model. The sweep reads that file like any other verdict, fails on a failing
+disk or any reallocated/pending (grown-defect/uncorrected) count, and warns above
+`MONITOR_SMART_TEMP_MAX` (60 °C). `-n standby,0` keeps an idle disk
+asleep. The counters and temperature are also in `monitor.prom` as
+`stack_smart_*`; `sudo systemctl start stack-smart` refreshes the file on demand.
+If a bridge auto-detects the wrong interface, pin it in
+`/etc/stack-ids/smart.env` (`SMART_DEVICES="/dev/sda:sat"`); the probe otherwise
+tries the scanned type plus SAT/ATA and keeps the first answer with attributes.
+
 ### Metrics and history
 
 Alerting tells you *that* something is wrong; these answer *when it started, how
@@ -990,7 +1007,7 @@ bad it got and whether it is improving*.
 | `vmalert` | the rules: one alert per failing sweep section, the `for:` hold-down, and the stale-sweep check (`127.0.0.1:8880`) |
 | `node-exporter` | the host: disk, inodes, I/O saturation, memory, load, NIC, temperatures — plus the **textfile collector**, which is how the stack's own numbers get in |
 | `scripts/metrics.sh` (every minute) | `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, peers and mempool, Fulcrum's Electrum reachability and lag, CLN peers/offline channels, `monerod`'s RPC reachability and lag, the wallet's lag, restart counters, per-container CPU/memory/pids/network |
-| `scripts/monitor.sh` (every five) | `monitor.prom` beside it: the failing sections (`stack_monitor_section` + detail), backup age and count, verify failures, spend trips, sweep timestamp |
+| `scripts/monitor.sh` (every five) | `monitor.prom` beside it: the failing sections (`stack_monitor_section` + detail), backup age and count, verify failures, spend trips, SMART reallocated/pending sectors and temperatures (`stack_smart_*`), sweep timestamp |
 
 **Read it over an SSH tunnel, by design:**
 
@@ -1082,12 +1099,14 @@ while the request itself exists only in NPM's access log:
 | `suricata` | packets on `enp8s0` and `lo` | **rootful** (AF_PACKET needs `CAP_NET_RAW` in the init namespace) | `sudo ./bootstrap.sh` |
 | `crowdsec` | NPM's access logs + Suricata's alert feed → decisions | rootless | `./deploy.sh` |
 
-That rootful unit is the one exception to "everything runs rootless", and it is
-why `bootstrap.sh` is a **two-pass** install: the sensor's config references the
-data dir, which does not exist until `./deploy.sh` has run. The first bootstrap
-prints a notice; re-running it installs the sensor and restarts it. The rendered
-unit lives in `/etc/containers/systemd/`, its config in `/etc/stack-ids/`, and
-`./verify.sh` compares every root-tier file against `deploy/root/`.
+That rootful container is the one exception to "everything runs rootless"; the
+same root tier also runs the host jobs that need root (audit, bouncer, SMART).
+It is why `bootstrap.sh` is a **two-pass** install: the sensor's config
+references the data dir, which does not exist until `./deploy.sh` has run. The
+first bootstrap prints a notice; re-running it installs the sensor and restarts
+it. The rendered unit lives in `/etc/containers/systemd/`, its config in
+`/etc/stack-ids/`, and `./verify.sh` compares every root-tier file against
+`deploy/root/`.
 
 ### What each can and cannot see
 
@@ -1675,8 +1694,9 @@ stack/
                           #   db-dump, btcpay-plugin
     npm-network.network
     crowdsec.container    # rootless: NPM access log -> decisions (local only)
-    root/                 # the ONE rootful tier: suricata.container + its config,
-                          #   rendered by install.sh --root (bootstrap.sh only)
+    root/                 # the root tier: suricata.container + its config and
+                          #   the audit/bouncer/smart host jobs, rendered by
+                          #   install.sh --root (bootstrap.sh only)
     crowdsec/             # this repo's parser, scenarios, whitelists, acquisition;
                           #   rendered into $CONFIG_DIR/ids/crowdsec
     logs/vector.toml      # the shipper's config (journald -> victoria-logs),

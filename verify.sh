@@ -222,6 +222,11 @@ for t in git python3; do
         warn "$t is missing: the repo fetch or agent-mcp needs it (./bootstrap.sh installs it)"
     fi
 done
+if command -v smartctl >/dev/null 2>&1; then
+    pass "smartctl is installed"
+else
+    warn "smartctl is missing: the disk-health probe cannot read SMART (sudo ./bootstrap.sh installs smartmontools)"
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -850,8 +855,9 @@ root_want() { # src
 
 # Everything install.sh --root renders from deploy/root/, as source:target[:opt].
 # Content only, bootstrap owns the modes. Deliberately absent: the 0600 env files it
-# writes from heredocs (audit.env, bouncer.env), and /etc/audit/rules.d/60-stack.rules,
-# which an unprivileged sweep cannot read (the audit section reads the verdict).
+# writes from heredocs (audit.env, bouncer.env, smart.env), and
+# /etc/audit/rules.d/60-stack.rules, which an unprivileged sweep cannot read (the
+# audit section reads the verdict).
 # `opt` marks a target legitimately absent until a bouncer key exists in
 # secrets.env: skip it silently, the bouncer block reports itself.
 ROOT_FILES=(
@@ -866,6 +872,9 @@ ROOT_FILES=(
     "deploy/root/status.sh:/etc/stack-ids/status.sh"
     "deploy/root/stack-audit.service:/etc/systemd/system/stack-audit.service"
     "deploy/root/stack-audit.timer:/etc/systemd/system/stack-audit.timer"
+    "deploy/root/smart.sh:/etc/stack-ids/smart.sh"
+    "deploy/root/stack-smart.service:/etc/systemd/system/stack-smart.service"
+    "deploy/root/stack-smart.timer:/etc/systemd/system/stack-smart.timer"
     "deploy/root/bouncer.sh:/etc/stack-ids/bouncer.sh:opt"
     "deploy/root/ipguard.py:/etc/stack-ids/ipguard.py:opt"
     "deploy/root/stack-bouncer.service:/etc/systemd/system/stack-bouncer.service:opt"
@@ -928,7 +937,7 @@ if [ -f /etc/containers/systemd/suricata.container ]; then
         warn "$root_faults rendered root-tier file(s) are stale -- the root tier is not what is in git"
     fi
 else
-    warn "the root tier is not installed (run: sudo ./bootstrap.sh) -- no network IDS"
+    warn "the root tier is not installed (run: sudo ./bootstrap.sh) -- no network IDS or disk-health probe"
 fi
 
 if [ -f "$DATA_DIR/audit/ids.status" ]; then
@@ -990,6 +999,47 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
     # the signal; `sudo auditctl -l | grep stack_` is the manual check.
 else
     warn "the audit tier is not installed (sudo ./bootstrap.sh)"
+fi
+
+# Disk health: smartctl needs root, so stack-smart.timer writes
+# audit/smart.status and the sweep reads it. The status is the signal; a disk
+# with a FAILED health verdict is already the probe's result.
+if [ -f /etc/systemd/system/stack-smart.timer ]; then
+    if systemctl is-active --quiet stack-smart.timer 2>/dev/null; then
+        pass "stack-smart.timer is active (disk SMART health, hourly)"
+    else
+        bad "stack-smart.timer is not active (sudo systemctl status stack-smart.timer)"
+    fi
+    if [ -f "$DATA_DIR/audit/smart.status" ]; then
+        status_verdict "$DATA_DIR/audit/smart.status"
+        s_disks=$(num_or "$(env_value "$DATA_DIR/audit/smart.status" disks)" 0)
+        case "$STATUS_RESULT" in
+            ok)
+                s_summary=""
+                i=0
+                while [ "$i" -lt "$s_disks" ]; do
+                    s_name=$(env_value "$DATA_DIR/audit/smart.status" "disk${i}_name")
+                    s_state=$(env_value "$DATA_DIR/audit/smart.status" "disk${i}_state")
+                    s_health=$(env_value "$DATA_DIR/audit/smart.status" "disk${i}_health")
+                    s_temp=$(env_value "$DATA_DIR/audit/smart.status" "disk${i}_temp")
+                    case "$s_state" in
+                        standby)     s_summary="${s_summary:+$s_summary, }${s_name:-disk$i} standby" ;;
+                        unsupported) s_summary="${s_summary:+$s_summary, }${s_name:-disk$i} unsupported" ;;
+                        *)           s_summary="${s_summary:+$s_summary, }${s_name:-disk$i} ${s_health:-?}${s_temp:+ ${s_temp}C}" ;;
+                    esac
+                    i=$((i + 1))
+                done
+                pass "SMART report ok (${s_disks} disk(s)${s_summary:+: $s_summary})" ;;
+            skip)
+                warn "SMART report skipped: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/smart.status)" ;;
+            *)
+                bad "SMART report: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/smart.status)" ;;
+        esac
+    else
+        warn "the SMART probe has not run yet (sudo systemctl start stack-smart)"
+    fi
+else
+    warn "the SMART monitor is not installed (sudo ./bootstrap.sh) -- disk health is unchecked"
 fi
 
 # ---------------------------------------------------------------------------

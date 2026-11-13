@@ -1,0 +1,16 @@
+# The schedule for stack-smart.
+#
+# A SYSTEM timer (root), like stack-audit: smartctl opens the disks directly.
+# Hourly is enough for attributes that move over days, and each probe is one
+# ioctl per disk; -n standby,0 keeps an idle disk asleep.
+[Unit]
+Description=Run stack-smart every hour
+
+[Timer]
+OnBootSec=180s
+OnUnitActiveSec=1h
+AccuracySec=1min
+Unit=stack-smart.service
+
+[Install]
+WantedBy=timers.target

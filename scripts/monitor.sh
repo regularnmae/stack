@@ -134,6 +134,15 @@ MONITOR_IDS_MAX_AGE_MIN=$(monitor_var MONITOR_IDS_MAX_AGE_MIN)
 MONITOR_BOUNCER_MAX_AGE_MIN=$(monitor_var MONITOR_BOUNCER_MAX_AGE_MIN)
 MONITOR_AUDIT_MAX_AGE_MIN=$(monitor_var MONITOR_AUDIT_MAX_AGE_MIN)
 MONITOR_REGISTRATIONS_MAX_AGE_MIN=$(monitor_var MONITOR_REGISTRATIONS_MAX_AGE_MIN)
+MONITOR_SMART_MAX_AGE_H=$(monitor_var MONITOR_SMART_MAX_AGE_H)
+# The SMART attributes are facts in the root probe's file; these are the policy
+# thresholds the sweep applies. Reallocated and pending sectors fail by default
+# because any growth is a drive retiring/unstable area; raise the realloc limit
+# only for a disk with a known historical count. Temperature warns earlier than
+# the hwmon check: a rotational disk is rated near 60C, not 85C.
+MONITOR_SMART_REALLOC_MAX=$(monitor_var MONITOR_SMART_REALLOC_MAX)
+MONITOR_SMART_PENDING_MAX=$(monitor_var MONITOR_SMART_PENDING_MAX)
+MONITOR_SMART_TEMP_MAX=$(monitor_var MONITOR_SMART_TEMP_MAX)
 
 # How far Fulcrum's index may sit behind bitcoind. A healthy one polls every 5s
 # and is 0-1 block behind, so this is a "stopped following" threshold: 12 blocks
@@ -162,6 +171,8 @@ THRESH_XMR_LAG=$(num_or "${MONITOR_XMR_LAG_BLOCKS:-}" 3)
 #   registrations: every minute; thirty missed runs is a stopped timer or a host
 #   that cannot reach postgres.
 #   auditd: every five minutes; four missed runs is a stopped timer.
+#   smart: every hour; six missed runs is a stopped timer or a root probe that
+#   cannot open the disks.
 verdict_age() { # job -> seconds
     case "$1" in
         backup-verify)    printf '%s' $(( $(num_or "$MONITOR_BACKUP_VERIFY_MAX_AGE_H" 192) * 3600 )) ;;
@@ -170,6 +181,7 @@ verdict_age() { # job -> seconds
         bouncer)          printf '%s' $(( $(num_or "$MONITOR_BOUNCER_MAX_AGE_MIN" 5) * 60 )) ;;
         auditd)           printf '%s' $(( $(num_or "$MONITOR_AUDIT_MAX_AGE_MIN" 20) * 60 )) ;;
         registrations)    printf '%s' $(( $(num_or "$MONITOR_REGISTRATIONS_MAX_AGE_MIN" 30) * 60 )) ;;
+        smart)            printf '%s' $(( $(num_or "$MONITOR_SMART_MAX_AGE_H" 6) * 3600 )) ;;
         *)                die "verdict_age: unknown job $1" ;;
     esac
 }
@@ -462,6 +474,13 @@ THRESH_NET_DROP=$(num_or "${MONITOR_NET_DROP:-}" 100)
 # and a climbing trend shows in the graphs node-exporter already exports.
 MONITOR_TEMP_MAX=$(monitor_var MONITOR_TEMP_MAX)
 THRESH_TEMP_C=$(num_or "${MONITOR_TEMP_MAX:-}" 85)
+# SMART policy: the root probe records the counters; these decide when they are
+# worth a page or a warning. The temperature threshold is separate from
+# THRESH_TEMP_C because a rotational disk is rated near 60C, long before the
+# hwmon sensor's 85C.
+THRESH_SMART_REALLOC=$(num_or "${MONITOR_SMART_REALLOC_MAX:-}" 0)
+THRESH_SMART_PENDING=$(num_or "${MONITOR_SMART_PENDING_MAX:-}" 0)
+THRESH_SMART_TEMP=$(num_or "${MONITOR_SMART_TEMP_MAX:-}" 60)
 
 # df -P's Use% is rounded *up*, so 100-Use% is a floor: erring towards alarming.
 #   free_pct PATH            # per cent of the filesystem still free
@@ -525,6 +544,140 @@ if [ -n "${dev:-}" ] && [ -r "/sys/block/$dev/stat" ]; then
     ok "$dev (holding $DATA_DIR) ${util}% busy over 3s"
 else
     soft "could not identify the block device holding $DATA_DIR"
+fi
+
+# Disk health: SMART needs root to open the block device, so a root oneshot
+# (stack-smart.timer) writes the verdict and the per-disk facts; this sweep
+# never calls sudo or smartctl. The file is judged only when the timer is
+# installed, like the audit and bouncer jobs, so a host that has not re-run
+# bootstrap does not warn every five minutes.
+SMART_STATUS_FILE="$AUDIT_DIR/smart.status"
+smart_up=0
+smart_disks=0
+SMART_PROM=()
+if [ -f /etc/systemd/system/stack-smart.timer ]; then
+    verdict_judge "$SMART_STATUS_FILE" fail "$(verdict_age smart)" "SMART report" \
+        "see $SMART_STATUS_FILE" "systemctl status stack-smart.timer"
+    smart_disks=$(num_or "$(env_value "$SMART_STATUS_FILE" disks)" 0)
+    [ "$VERDICT_OUTCOME" = ok ] && smart_up=1
+
+    i=0
+    while [ "$i" -lt "$smart_disks" ]; do
+        dev=$(env_value "$SMART_STATUS_FILE" "disk${i}_dev")
+        name=$(env_value "$SMART_STATUS_FILE" "disk${i}_name")
+        protocol=$(env_value "$SMART_STATUS_FILE" "disk${i}_protocol")
+        state=$(env_value "$SMART_STATUS_FILE" "disk${i}_state")
+        health=$(env_value "$SMART_STATUS_FILE" "disk${i}_health")
+        model=$(env_value "$SMART_STATUS_FILE" "disk${i}_model")
+        realloc=$(env_value "$SMART_STATUS_FILE" "disk${i}_realloc")
+        pending=$(env_value "$SMART_STATUS_FILE" "disk${i}_pending")
+        uncorrected=$(env_value "$SMART_STATUS_FILE" "disk${i}_uncorrected")
+        temp=$(env_value "$SMART_STATUS_FILE" "disk${i}_temp")
+        media=$(env_value "$SMART_STATUS_FILE" "disk${i}_media_errors")
+        [ -n "$name" ] || name=${dev##*/}
+        label=${name:-disk$i}
+
+        case "$state" in
+            standby)
+                [ "$VERDICT_OUTCOME" = ok ] \
+                    && ok "$label is in standby; SMART not read (not woken)" ;;
+            error)
+                # verdict_judge already reports the probe's fail; this is the
+                # per-disk identity in the same section.
+                ;;
+            unsupported)
+                # A RAID virtual disk (the controller's /dev/sdX) normally
+                # reports no SMART; the physical members are the disks that
+                # do, and they are separate entries in this file. Warn only
+                # when there is no other disk to report on.
+                if [ "$smart_disks" -gt 1 ]; then
+                    ok "SMART $label is unsupported (virtual/RAID disk?); other disks report"
+                else
+                    soft "SMART $label reports no usable health or attributes (bridge/controller limitation)"
+                fi ;;
+            *)
+                bad_disk=0
+                if [ "$health" != PASSED ]; then
+                    fail "SMART $label health ${health:-unknown}"
+                    bad_disk=1
+                fi
+
+                case "$protocol" in
+                    NVMe)
+                        # media_errors is the NVMe equivalent of an unstable
+                        # sector: any is a failure, not a threshold to tune.
+                        case "$media" in
+                            ''|*[!0-9]*) ;;
+                            *) if [ "$media" -gt 0 ]; then
+                                   fail "SMART $label has $media media error(s)"
+                                   bad_disk=1
+                               fi ;;
+                        esac ;;
+                    *)
+                        if [ -z "$realloc" ] && [ -z "$pending" ]; then
+                            soft "SMART $label exposes no reallocated/pending-sector counts (health and temperature only)"
+                            bad_disk=1
+                        else
+                            case "$pending" in
+                                ''|*[!0-9]*) ;;
+                                *) if [ "$pending" -gt "$THRESH_SMART_PENDING" ]; then
+                                       fail "SMART $label has $pending pending sector(s) (threshold $THRESH_SMART_PENDING)"
+                                       bad_disk=1
+                                   fi ;;
+                            esac
+                            case "$realloc" in
+                                ''|*[!0-9]*) ;;
+                                *) if [ "$realloc" -gt "$THRESH_SMART_REALLOC" ]; then
+                                       fail "SMART $label has $realloc reallocated sector(s) (threshold $THRESH_SMART_REALLOC)"
+                                       bad_disk=1
+                                   fi ;;
+                            esac
+                        fi ;;
+                esac
+
+                # SCSI/SAS: the error counter log's uncorrected total is the
+                # "the medium failed and the drive could not fix it" signal.
+                case "$uncorrected" in
+                    ''|*[!0-9]*) ;;
+                    *) if [ "$uncorrected" -gt 0 ]; then
+                           fail "SMART $label has $uncorrected uncorrected error(s)"
+                           bad_disk=1
+                       fi ;;
+                esac
+
+                case "$temp" in
+                    ''|0|*[!0-9]*) soft "SMART $label reports no temperature"
+                                   bad_disk=1 ;;
+                    *) if [ "$temp" -gt "$THRESH_SMART_TEMP" ]; then
+                           soft "SMART $label is ${temp}C (threshold ${THRESH_SMART_TEMP}C)"
+                           bad_disk=1
+                       fi ;;
+                esac
+
+                case "$health" in
+                    PASSED) health_n=1 ;;
+                    FAILED) health_n=0 ;;
+                    *)      health_n="" ;;
+                esac
+                labels="device=\"$(prom_label_value "$label")\""
+                [ -n "$model" ] && labels="$labels,model=\"$(prom_label_value "$model")\""
+                [ -n "$health_n" ] && SMART_PROM+=("stack_smart_healthy{$labels} $health_n")
+                case "$realloc" in ''|*[!0-9]*) ;; *) SMART_PROM+=("stack_smart_reallocated_sectors{$labels} $realloc") ;; esac
+                case "$pending" in ''|*[!0-9]*) ;; *) SMART_PROM+=("stack_smart_pending_sectors{$labels} $pending") ;; esac
+                case "$uncorrected" in ''|*[!0-9]*) ;; *) SMART_PROM+=("stack_smart_uncorrected_errors{$labels} $uncorrected") ;; esac
+                case "$temp" in ''|*[!0-9]*) ;; *) SMART_PROM+=("stack_smart_temperature_celsius{$labels} $temp") ;; esac
+                case "$media" in ''|*[!0-9]*) ;; *) SMART_PROM+=("stack_smart_media_errors{$labels} $media") ;; esac
+
+                if [ "$bad_disk" = 0 ] && [ "$VERDICT_OUTCOME" = ok ]; then
+                    case "$protocol" in
+                        NVMe) ok "$label${model:+ ($model)}: $health, ${temp:-?}C, ${media:-?} media error(s)" ;;
+                        SCSI) ok "$label${model:+ ($model)}: $health, ${realloc:-?} grown defect(s), ${pending:+$pending pending, }${uncorrected:+$uncorrected uncorrected, }${temp:-?}C" ;;
+                        *)    ok "$label${model:+ ($model)}: $health, ${realloc:-?} reallocated, ${pending:-?} pending, ${temp:-?}C" ;;
+                    esac
+                fi ;;
+        esac
+        i=$((i + 1))
+    done
 fi
 
 # A rotation is reconciled, not journaled (rotate.sh): the dangerous residue is
@@ -1312,6 +1465,11 @@ prom_ok=1
     printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
     printf 'stack_bouncer_bans %s\n' "${bouncer_bans:-0}"
     printf 'stack_bouncer_skipped %s\n' "${bouncer_skipped:-0}"
+    printf 'stack_smart_up %s\n' "${smart_up:-0}"
+    printf 'stack_smart_disks %s\n' "${smart_disks:-0}"
+    for line in ${SMART_PROM[@]+"${SMART_PROM[@]}"}; do
+        printf '%s\n' "$line"
+    done
     printf 'stack_audit_fim_changes %s\n' "${audit_fim:-0}"
     printf 'stack_logs_ok %s\n' "${logs_ok:-0}"
     [ "$MONITOR_ALERTMANAGER_URL" = off ] || sections_prom

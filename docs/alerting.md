@@ -59,7 +59,7 @@ not faults").
   and `monitor.sh` read five keys no file mentioned. `ci.yml` therefore fails
   when `monitor.sh` resolves a `MONITOR_*` key the example does not declare —
   that check is the only thing keeping a new threshold discoverable. It carries
-  the host checks (disk space, inodes,
+  the host checks (disk space, inodes, SMART disk health,
   backup age, certificate expiry, NIC errors/drops, the
   hottest sensor, a stale metrics textfile, the exporter that serves it, the
   backup/drill/dump/metrics and registrations **schedules**, journald's persistence, podman's event backend,
@@ -78,6 +78,20 @@ not faults").
   publish, never DNS: `--connect-to` deliberately bypasses it. A declared
   `force-ssl` host must answer `:80` with `301`/`308` and carry HSTS on the
   HTTPS response; a plaintext `200` is a fault, not a healthy vhost.
+
+- **SMART is a root-written verdict, not a `smartctl` call in the sweep.** Opening
+  a block device needs root, so `stack-smart.timer` runs
+  `/etc/stack-ids/smart.sh` hourly and writes `$DATA_DIR/audit/smart.status`. The
+  sweep judges that file with `verdict_judge` (age
+  `MONITOR_SMART_MAX_AGE_H`) and reads its `disk0_*` fields for reallocated and
+  pending sectors, SCSI grown-defect/uncorrected counts, NVMe media errors and
+  temperature. The probe records the facts; the policy is
+  `MONITOR_SMART_REALLOC_MAX`, `MONITOR_SMART_PENDING_MAX`
+  and `MONITOR_SMART_TEMP_MAX` in `monitor.env`, so tuning needs no root
+  reinstall. A standby disk is `state=standby` and is not woken (`-n
+  standby,0`); a bridge that exposes no attribute table is a warning, not a
+  failure -- while a block device that cannot be opened is the probe's own
+  `result=fail`.
 
 - **`verify.sh` is the on-demand diagnostic; the monitor is the only periodic
   producer.** The schedules, the metrics textfile, the log pipeline and

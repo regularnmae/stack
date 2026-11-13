@@ -228,6 +228,11 @@ jobs:
       # space immediately outside it must ban.
       - name: bouncer address guard tests
         run: python3 tests/test-ipguard.py
+      # deploy/root/smart.sh writes the per-disk fields the monitor reads. The
+      # probe needs root and a disk; the jq extraction is pinned here against
+      # ATA and NVMe fixtures.
+      - name: SMART parser tests
+        run: tests/test-smart.sh
       # The status file scripts/monitor.sh reads has one writer,
       # deploy/root/status.sh: root sources it as /etc/stack-ids/status.sh,
       # scripts/lib.sh sources it from the checkout. This pins the contract and
@@ -236,8 +241,8 @@ jobs:
         run: tests/test-status.sh
       # ... and one reader. A job that writes status_write directly skips the
       # dry-run rule and the unrecorded-verdict rule; a sweep that reads
-      # result=fail itself re-decides the branch order that let the six jobs
-      # drift apart. Both belong to status.sh and scripts/lib/jobs.sh now.
+      # result=fail itself re-decides the branch order that let the jobs drift
+      # apart. Both belong to status.sh and scripts/lib/jobs.sh now.
       - name: verdict protocol has one implementation
         run: |
           bad=$(grep -n 'status_write "\$' scripts/*.sh deploy/root/*.sh 2>/dev/null \

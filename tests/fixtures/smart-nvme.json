@@ -1,0 +1,11 @@
+{
+  "smartctl": {"exit_status": 0},
+  "device": {"protocol": "NVMe"},
+  "model_name": "KINGSTON SNVS250G",
+  "serial_number": "50026B7784CEBF67",
+  "smart_status": {"passed": true},
+  "nvme_smart_health_information_log": {
+    "temperature": 37,
+    "media_errors": 0
+  }
+}

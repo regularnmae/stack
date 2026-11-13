@@ -349,11 +349,16 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   carrying the one-time commands, not a prompt. Bootstrap's one other use is the
   **root tier** (`deploy/install.sh --root`): the Suricata sensor cannot be
   rootless because AF_PACKET needs `CAP_NET_RAW` in the init user namespace.
+  The same tier owns the root host jobs that cannot do their work as the stack
+  user: `stack-audit` reads the root-only audit log, `stack-bouncer` writes
+  nftables, and `stack-smart` opens the block devices for SMART. Each writes a
+  verdict file under `$DATA_DIR/audit`, and the unprivileged monitor judges it
+  -- there is no `sudo` in `monitor.sh` or `verify.sh`.
   That is why bootstrap is a **two-pass** install -- the sensor's unit and config
   reference `@DATA_DIR@`, so the first run (before any data dir exists) only
   prints a notice and the rerun after the first `./deploy.sh` installs it.
   Everything it installs is root-owned: the unit in `/etc/containers/systemd/`,
-  the config in `/etc/stack-ids/`, the logrotate rule and the bouncer/audit
+  the config in `/etc/stack-ids/`, the logrotate rule and the audit/bouncer/smart
   units in `/etc/systemd/system/`. That unit is mode 0644 rather than the user
   units' 0600: `verify.sh` diffs it against `deploy/root/` to catch drift and it
   carries no secret -- the secret-bearing templates are the *user* units. **Nothing

@@ -1,0 +1,17 @@
+{
+  "smartctl": {"exit_status": 0},
+  "device": {"protocol": "SCSI"},
+  "scsi_model_name": "SEAGATE ST3000NM0023",
+  "scsi_product": "ST3000NM0023",
+  "serial_number": "Z1ZANRSP0000R632XNBF",
+  "rotation_rate": 7200,
+  "smart_status": {"passed": true},
+  "temperature": {"current": 37, "drive_trip": 60},
+  "scsi_grown_defect_list": 5,
+  "scsi_pending_defects": {"count": 2},
+  "scsi_error_counter_log": {
+    "read": {"total_uncorrected_errors": 1},
+    "write": {"total_uncorrected_errors": 2},
+    "verify": {"total_uncorrected_errors": 0}
+  }
+}

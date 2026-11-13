@@ -69,10 +69,11 @@ unset _kuma_host
 # ---------------------------------------------------------------------------
 # the root tier
 # ---------------------------------------------------------------------------
-# `--root` installs deploy/root/, the ONE privileged unit in this repo: the
-# Suricata sensor, which needs CAP_NET_RAW in the init user namespace and so
-# cannot be a rootless Quadlet (deploy/root/suricata.container). bootstrap.sh is
-# its only caller, under sudo; the user-side install never runs in this mode.
+# `--root` installs deploy/root/, the privileged tier: the Suricata sensor
+# (CAP_NET_RAW in the init user namespace, so it cannot be a rootless Quadlet)
+# and the root host jobs that cannot do their work as the stack user (audit,
+# bouncer, SMART). bootstrap.sh is its only caller, under sudo; the user-side
+# install never runs in this mode.
 #
 # The split is deliberate: $DATA_DIR stays user-owned (the sensor writes its logs
 # into $DATA_DIR/ids, which the host user reads), while everything a rootful
@@ -130,13 +131,13 @@ root_render() { # src dest mode [data-dir]
 }
 
 install_root_tier() {
-    local data="$1" f bkey benv aenv n_rules bouncer_installed=0
+    local data="$1" f bkey benv aenv senv smart_devices n_rules bouncer_installed=0
     [ "$(id -u)" = 0 ] || die "install.sh --root must run as root (bootstrap.sh calls it with sudo)"
     [ -n "$data" ] || die "install.sh --root needs --data-dir (bootstrap.sh passes the resolved data dir)"
     [ -d "$data" ] || die "$data does not exist; run ./deploy.sh once first, or pass the right --data-dir"
     [ -f "$DEPLOY_DIR/root/suricata.container" ] || die "missing $DEPLOY_DIR/root/suricata.container"
 
-    log "installing the root tier (Suricata) for data dir $data"
+    log "installing the root tier (Suricata + disk health) for data dir $data"
 
     # Root's podman config, so the sensor's own healthchecks stop writing a
     # `health_status` event every 30s. They are podman children of the *system*
@@ -217,6 +218,16 @@ install_root_tier() {
     # The daemon runs with an empty rules.d. The rules are rendered (they carry
     # @DATA_DIR@ for the data-dir watches) and loaded with augenrules; the report
     # unit turns the root-only log into a status file the monitor can read.
+    #
+    # audit/ is shared: root writes the verdict files, the stack user writes
+    # audit.log and the spend baselines. If this root phase creates it (a host
+    # where the user-side install has not run yet), hand it back -- a root-owned
+    # 0755 directory would leave the monitor unable to write its own log.
+    install -d -m 755 "$data/audit"
+    if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+        chown "$SUDO_UID:$SUDO_GID" "$data/audit" \
+            || warn "could not hand $data/audit back to uid $SUDO_UID"
+    fi
     install -d -m 750 /etc/audit/rules.d
     root_render "$DEPLOY_DIR/root/audit.rules" /etc/audit/rules.d/60-stack.rules 640 "$data"
     aenv=$(mktemp)
@@ -269,6 +280,41 @@ install_root_tier() {
         fi
     else
         warn "no stack audit rules are loaded; run: sudo /usr/sbin/augenrules --load"
+    fi
+
+    # ------------------------------------------------------------------
+    # stack-smart: per-disk SMART health -> the monitor
+    # ------------------------------------------------------------------
+    # smartctl opens the block device directly, which the rootless stack user
+    # cannot do; the probe writes the same kind of verdict file as the audit
+    # report and the bouncer, and the unprivileged monitor judges it. The env
+    # file is root-owned because it carries the device list root reads -- never
+    # $DATA_DIR/config, which the stack user can edit.
+    # SMART_DEVICES is the one operator knob here; keep it across a re-render
+    # while DATA_DIR follows the data dir the deploy actually resolved.
+    smart_devices=""
+    [ -f "$ROOT_CONFIG_DIR/smart.env" ] \
+        && smart_devices=$(env_value "$ROOT_CONFIG_DIR/smart.env" SMART_DEVICES)
+    # env_value returns the literal line, quotes included. Strip the pair this
+    # file writes (single) or an operator may have typed (double) before
+    # re-quoting it for the shell.
+    smart_devices=$(printf '%s' "$smart_devices" | sed -e 's/^["'\'']//' -e 's/["'\'']$//')
+    senv=$(mktemp)
+    {
+        printf '# Written by deploy/install.sh --root. DATA_DIR is machine-owned;\n'
+        printf '# SMART_DEVICES below is preserved across a re-render.\n'
+        printf 'DATA_DIR=%s\n' "$data"
+        printf '# Empty = every device smartctl --scan reports. Pin a bridge that\n'
+        printf '# auto-detects wrong: SMART_DEVICES="/dev/sda:sat /dev/nvme0:nvme"\n'
+        printf "SMART_DEVICES='%s'\n" "$smart_devices"
+    } > "$senv"
+    install -m 600 "$senv" "$ROOT_CONFIG_DIR/smart.env"
+    rm -f "$senv"
+    root_render "$DEPLOY_DIR/root/smart.sh" "$ROOT_CONFIG_DIR/smart.sh" 755 "$data"
+    root_render "$DEPLOY_DIR/root/stack-smart.service" /etc/systemd/system/stack-smart.service 644 "$data"
+    root_render "$DEPLOY_DIR/root/stack-smart.timer" /etc/systemd/system/stack-smart.timer 644 "$data"
+    if ! command -v smartctl >/dev/null 2>&1; then
+        warn "smartctl is missing (sudo dnf install -y smartmontools); the SMART probe will record skip until it is installed"
     fi
 
     # ------------------------------------------------------------------
@@ -345,7 +391,14 @@ install_root_tier() {
     else
         warn "could not enable stack-audit.timer"
     fi
-    log "root tier installed; run ./verify.sh to check the sensor"
+    if systemctl enable --now stack-smart.timer >/dev/null 2>&1; then
+        log "stack-smart.timer enabled (disk SMART health -> monitor hourly)"
+        systemctl start stack-smart.service >/dev/null 2>&1 \
+            || warn "stack-smart's first run failed; see: systemctl status stack-smart"
+    else
+        warn "could not enable stack-smart.timer"
+    fi
+    log "root tier installed; run ./verify.sh to check the sensor and disks"
 }
 
 ROOT_TIER=0
@@ -355,7 +408,7 @@ while [ $# -gt 0 ]; do
         --root)     ROOT_TIER=1 ;;
         --data-dir) ROOT_DATA_DIR="${2:?--data-dir needs a path}"; shift ;;
         -h|--help)  usage_header "$0"
-                    printf '  --root            install the rootful IDS tier (bootstrap.sh only)\n'
+                    printf '  --root            install the root tier: IDS + host jobs (bootstrap.sh only)\n'
                     printf '  --data-dir <path> with --root: the existing data dir to point it at\n'
                     exit 0 ;;
         *)          die "unknown argument: $1 (try --help)" ;;

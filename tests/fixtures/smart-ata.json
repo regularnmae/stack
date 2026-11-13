@@ -1,0 +1,16 @@
+{
+  "smartctl": {"exit_status": 0},
+  "device": {"protocol": "ATA"},
+  "model_name": "SMC2108",
+  "serial_number": "003437712bd60200ff0060ba0f800403",
+  "rotation_rate": 7200,
+  "smart_status": {"passed": true},
+  "temperature": {"current": 34},
+  "ata_smart_attributes": {
+    "table": [
+      {"id": 5, "name": "Reallocated_Sector_Ct", "raw": {"value": 8}},
+      {"id": 194, "name": "Temperature_Celsius", "raw": {"value": 34}},
+      {"id": 197, "name": "Current_Pending_Sector", "raw": {"value": 2}}
+    ]
+  }
+}

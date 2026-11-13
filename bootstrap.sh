@@ -97,6 +97,10 @@ want python3      python3
 # (deploy/root/audit.rules). EL10 split them out of the `audit` package, so a
 # host with auditd running can still have no way to add a rule.
 want /usr/sbin/augenrules audit-rules
+# smartctl reads disk SMART health for stack-smart.timer (deploy/root/smart.sh).
+# It opens the block device directly, so the probe runs as root and writes a
+# verdict the unprivileged monitor reads.
+want smartctl smartmontools
 # Nothing here runs semanage: scripts/lib/datadir.sh labels the data dir with
 # chcon and, when that is not enough, prints the semanage command for the
 # operator (README's
@@ -263,12 +267,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. the root tier: the intrusion-detection sensor
+# 10. the root tier: the intrusion-detection sensor and disk health
 # ---------------------------------------------------------------------------
-# One unit in this repo runs as root: Suricata, because AF_PACKET capture needs
-# CAP_NET_RAW in the init user namespace (suricata.container owns the long
-# version). Everything else stays rootless, and this is the only place that writes
-# outside the user's home.
+# Suricata is the one rootful container: AF_PACKET capture needs CAP_NET_RAW in
+# the init user namespace (suricata.container owns the long version). The same
+# tier also installs the root host jobs that cannot do their work as the stack
+# user -- the audit report, the bouncer, and the SMART probe (smartctl opens the
+# block device). Everything else stays rootless, and this is the only place that
+# writes outside the user's home.
 #
 # A *second* pass on purpose: the sensor's config references the data dir, which
 # does not exist until deploy.sh has run, so the first bootstrap skips this with a
@@ -286,11 +292,11 @@ if [ -z "$IDS_DATA_DIR" ]; then
 fi
 
 if [ ! -x "$REPO_DIR/deploy/install.sh" ]; then
-    log "no stack checkout yet; re-run bootstrap.sh after the first deploy.sh to install the IDS sensor"
+    log "no stack checkout yet; re-run bootstrap.sh after the first deploy.sh to install the root tier (IDS + disk health)"
 elif [ -z "$IDS_DATA_DIR" ] || [ ! -d "$IDS_DATA_DIR" ]; then
-    log "no data dir yet; re-run bootstrap.sh after the first deploy.sh to install the IDS sensor"
+    log "no data dir yet; re-run bootstrap.sh after the first deploy.sh to install the root tier (IDS + disk health)"
 else
-    log "installing the root tier (Suricata IDS) with data dir $IDS_DATA_DIR"
+    log "installing the root tier (Suricata IDS + disk health) with data dir $IDS_DATA_DIR"
     sudo "$REPO_DIR/deploy/install.sh" --root --data-dir "$IDS_DATA_DIR" \
         || warn "could not install the root tier; run: sudo $REPO_DIR/deploy/install.sh --root --data-dir $IDS_DATA_DIR"
 fi
