@@ -28,7 +28,7 @@ deployment problem.
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — |
 | `btc-explorer` | `localhost/btc-explorer:local` | `127.0.0.1:8108` |
-| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` |
+| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.7` | `127.0.0.1:49392` |
 | `btcpay-mcp` | `localhost/btcpay-mcp:latest` | `127.0.0.1:8114` |
 | `crowdsec` | `docker.io/crowdsecurity/crowdsec:v1.8.2` | host network |
 | `crowdsec-mcp` | `localhost/crowdsec-mcp:latest` | host network |
@@ -40,7 +40,7 @@ deployment problem.
 | `monero-wallet-btcpay` | `docker.io/btcpayserver/monero:0.18.5.4` | — |
 | `monero-wallet-mcp` 🔑 | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` |
 | `monerod` | `ghcr.io/sethforprivacy/simple-monerod:v0.18.5.4` | — |
-| `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.21` | — |
+| `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.23` | — |
 | `netcheck` | `localhost/netcheck:local` | — |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | host network |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network |

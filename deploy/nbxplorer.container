@@ -13,7 +13,7 @@ Requires=npm-network-network.service postgres.service bitcoind.service
 
 [Container]
 ContainerName=nbxplorer
-Image=docker.io/nicolasdorier/nbxplorer:2.6.21
+Image=docker.io/nicolasdorier/nbxplorer:2.6.23
 Network=npm-network.network
 
 Environment=NBXPLORER_NETWORK=mainnet
