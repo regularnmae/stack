@@ -14,7 +14,7 @@ Wants=btcpay-plugin.service
 
 [Container]
 ContainerName=btcpay
-Image=docker.io/btcpayserver/btcpayserver:2.4.5
+Image=docker.io/btcpayserver/btcpayserver:2.4.7
 Network=npm-network.network
 
 # Off the LAN, with nothing opened for it in the firewall: nginx-proxy-manager
