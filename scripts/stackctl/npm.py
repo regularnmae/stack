@@ -26,6 +26,9 @@
 #     zone GLOBAL (every .onion visitor is the host's own address), and the MCP
 #     edge gets limit_conn only -- a request rate there either does nothing or
 #     cuts healthy SSE clients; the bearer token is the real control.
+#   * HSTS rides with force-ssl and is NPM's own hsts_enabled field, not an
+#     add_header in advanced_config: NPM's location / defines its own
+#     add_header, which would suppress a server-scope one (build_payload).
 #   * --prune is the only destructive mode.
 from __future__ import annotations
 
@@ -138,13 +141,22 @@ def build_payload(domain: str, scheme: str, host: str, port: str, cert_id: int,
     def has(flag: str) -> bool:
         return f",{flag}," in f",{flags},"
 
+    # HSTS is NPM's own field, not a server-scope add_header in advanced_config:
+    # NPM's location / includes conf.d/include/proxy.conf, which sets
+    # add_header X-Served-By, and nginx does not inherit a server-level
+    # add_header into a location that defines one. NPM includes _hsts.conf at
+    # both scopes and suppresses it unless a certificate is attached and
+    # ssl_forced is true; `flags` here is already the effective set.
+    force_ssl = has("force-ssl")
     return {
         "domain_names": [domain],
         "forward_scheme": scheme,
         "forward_host": host,
         "forward_port": int(port),
         "certificate_id": cert_id,
-        "ssl_forced": has("force-ssl"),
+        "ssl_forced": force_ssl,
+        "hsts_enabled": force_ssl,
+        "hsts_subdomains": False,
         "http2_support": has("http2"),
         "block_exploits": has("block"),
         "caching_enabled": False,

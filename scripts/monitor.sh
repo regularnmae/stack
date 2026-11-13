@@ -928,6 +928,17 @@ fi
 # endpoints 401. A declared host missing from NPM is indistinguishable from that
 # default vhost's 404 here; verify.sh's per-surface probes name it.
 #
+# The manifest also says which vhosts declare force-ssl (NPM_FORCE_SSL,
+# index-aligned). A 200 from one of those on :80 is not "up": NPM is serving
+# plaintext because it has no certificate or the host was never reconciled. The
+# redirect is NPM's own, so it is asserted before MONITOR_SKIP_NODES -- a
+# skipped upstream cannot make a plaintext vhost safe. A vhost without force-ssl
+# may answer 200 (no certificate issued yet) and is then checked on :80.
+#
+# The https probe carries the certificate check and, for a force-ssl host that
+# is not skipped, the HSTS header NPM emits with hsts_enabled (per host, never
+# advanced_config: see docs/proxy.md).
+#
 # A 502 is also what a host deployed with --skip-daemons gets from every vhost
 # whose upstream is in CHAIN_UNITS: the declaration marks those needs_nodes, so
 # the same MONITOR_SKIP_NODES that drops the chain section reports them as
@@ -941,19 +952,43 @@ if [ -z "${NPM_DOMAINS+x}" ] || [ "${#NPM_DOMAINS[@]}" -eq 0 ]; then
 else
     for i in "${!NPM_DOMAINS[@]}"; do
         vhost="${NPM_DOMAINS[$i]}"
-        if [ "$MONITOR_SKIP_NODES" = 1 ] && [ "${NPM_NEEDS_NODES[$i]:-0}" = 1 ]; then
-            ok "$vhost skipped by request (its upstream is in the daemon tier)"
-            continue
-        fi
-        # http first: an HTTP-only vhost (no certificate issued yet) must not
-        # read as down. A force-ssl host answers 301/308, and the https probe
-        # then carries the certificate check.
+        force_ssl="${NPM_FORCE_SSL[$i]:-0}"
+        https_headers=""
+        # http first: a declared force-ssl vhost must redirect here; anything
+        # else is plaintext. A vhost without it may answer on :80 until a
+        # certificate exists.
         pcode=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 \
             --connect-to "$vhost:80:127.0.0.1:80" "http://$vhost/" 2>/dev/null) || pcode=000
+        if [ "$force_ssl" = 1 ]; then
+            case "$pcode" in
+                301|308) ;;
+                000|5??)
+                    public_bad=$((public_bad + 1))
+                    fail "$vhost does not answer through nginx-proxy-manager ($pcode): certificate, proxy host or loopback publish"
+                    continue ;;
+                *)
+                    public_bad=$((public_bad + 1))
+                    fail "$vhost serves plaintext HTTP ($pcode): force-ssl is declared but nginx-proxy-manager is not redirecting to https (no certificate, or scripts/npm-hosts.sh has not run)"
+                    continue ;;
+            esac
+        fi
+        if [ "$MONITOR_SKIP_NODES" = 1 ] && [ "${NPM_NEEDS_NODES[$i]:-0}" = 1 ]; then
+            ok "$vhost skipped by request (its upstream is in the daemon tier; force-ssl redirect checked)"
+            continue
+        fi
         case "$pcode" in
             301|302|307|308)
-                pcode=$(curl -sS -o /dev/null -w '%{http_code}' -m 15 \
-                    --connect-to "$vhost:443:127.0.0.1:443" "https://$vhost/" 2>/dev/null) || pcode=000
+                # Capture the https response headers in the same request: HSTS
+                # is a header-level fact, and -D - costs no second connection.
+                https_out=$(curl -sS -o /dev/null -D - -w '\n%{http_code}' -m 15 \
+                    --connect-to "$vhost:443:127.0.0.1:443" "https://$vhost/" 2>/dev/null) \
+                    || https_out=""
+                if [ -n "$https_out" ]; then
+                    pcode=${https_out##*$'\n'}
+                    https_headers=${https_out%$'\n'*}
+                else
+                    pcode=000
+                fi
                 ;;
         esac
         case "$pcode" in
@@ -961,7 +996,17 @@ else
                 public_bad=$((public_bad + 1))
                 fail "$vhost does not answer through nginx-proxy-manager ($pcode): certificate, proxy host or loopback publish"
                 ;;
-            *) ok "$vhost answers through nginx-proxy-manager ($pcode)" ;;
+            *)
+                if [ "$force_ssl" = 1 ] \
+                    && ! printf '%s' "$https_headers" | grep -qi '^strict-transport-security:.*max-age='; then
+                    public_bad=$((public_bad + 1))
+                    fail "$vhost answers HTTPS ($pcode) without the HSTS header: force-ssl is declared, so NPM's hsts_enabled should be set (run scripts/npm-hosts.sh)"
+                elif [ "$force_ssl" = 1 ]; then
+                    ok "$vhost redirects to HTTPS and sends HSTS ($pcode)"
+                else
+                    ok "$vhost answers through nginx-proxy-manager ($pcode)"
+                fi
+                ;;
         esac
     done
 fi

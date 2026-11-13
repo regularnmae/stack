@@ -119,7 +119,8 @@ class TestNpmPayloads(unittest.TestCase):
             json.dumps(payload),
             '{"domain_names": ["d.example.net"], "forward_scheme": "http", '
             '"forward_host": "127.0.0.1", "forward_port": 8107, '
-            '"certificate_id": 6, "ssl_forced": true, "http2_support": false, '
+            '"certificate_id": 6, "ssl_forced": true, "hsts_enabled": true, '
+            '"hsts_subdomains": false, "http2_support": false, '
             '"block_exploits": true, "caching_enabled": false, '
             '"allow_websocket_upgrade": true, "access_list_id": 0, '
             '"enabled": true, "advanced_config": '
@@ -364,6 +365,8 @@ class TestNpmReconcile(unittest.TestCase):
         created = [r for r in self.server.requests if r[0] == "POST" and r[1] == "/api/nginx/proxy-hosts"]
         self.assertEqual(created[0][2]["certificate_id"], 6)
         self.assertTrue(created[0][2]["ssl_forced"])
+        self.assertTrue(created[0][2]["hsts_enabled"])
+        self.assertFalse(created[0][2]["hsts_subdomains"])
 
         self.server.requests.clear()
         rc, out, _ = self.reconcile()
@@ -382,6 +385,7 @@ class TestNpmReconcile(unittest.TestCase):
         created = [r for r in self.server.requests if r[0] == "POST" and r[1] == "/api/nginx/proxy-hosts"]
         self.assertEqual(created[0][2]["certificate_id"], 0)
         self.assertFalse(created[0][2]["ssl_forced"])
+        self.assertFalse(created[0][2]["hsts_enabled"])
 
     def test_mcp_host_locations_and_limits(self):
         self.facts(["m.example.net|127.0.0.1:8100|mcp,force-ssl,http2"],
@@ -404,6 +408,7 @@ class TestNpmReconcile(unittest.TestCase):
         self.assertEqual(rc, 0)
         body = [r for r in self.server.requests if r[0] == "POST" and r[1] == "/api/nginx/proxy-hosts"][0][2]
         self.assertEqual(body["certificate_id"], 0)
+        self.assertFalse(body["hsts_enabled"])
         self.assertIn("limit_req zone=stack_onion burst=120 nodelay;", body["advanced_config"])
         self.assertNotIn("stack_ip", body["advanced_config"])
         certs = [r for r in self.server.requests if "certificates" in r[1]]
@@ -510,10 +515,15 @@ probe_args = '{{}}'
         out = m.shell()
         domains = out.split("NPM_DOMAINS=(")[1].split(")", 1)[0].split()
         nodes = out.split("NPM_NEEDS_NODES=(")[1].split(")", 1)[0].split()
+        force = out.split("NPM_FORCE_SSL=(")[1].split(")", 1)[0].split()
         self.assertEqual(len(nodes), len(domains))
+        self.assertEqual(len(force), len(domains))
         self.assertEqual([d for d, n in zip(domains, nodes) if n == "1"],
                          ["btcpay.boltmesh.net", "btc.boltmesh.net",
                           "xmr.boltmesh.net"])
+        # Every clearweb vhost is force-SSL (and therefore HSTS); only the
+        # onion wildcard, absent from NPM_DOMAINS, is plain HTTP.
+        self.assertEqual([d for d, f in zip(domains, force) if f == "1"], domains)
 
     def test_real_manifest_ports_agree_with_units(self):
         from stackctl import manifest
@@ -553,7 +563,8 @@ probe_args = '{{}}'
             '"${ONION_PATHS[2]}" "${ONION_CODES[2]}" '
             '"$BOLTMESH_FRONTEND_HOST" "${#PROBE_TOKEN_VARS[@]}" '
             '"${PROBE_TOKEN_VARS[0]}" "${PROBE_ARGS[0]}" '
-            '"${PROBE_NEEDS_NODES[1]}" "${PROBE_SPEND_VARS[3]}"'
+            '"${PROBE_NEEDS_NODES[1]}" "${PROBE_SPEND_VARS[3]}" '
+            '"${#NPM_FORCE_SSL[@]}" "${NPM_FORCE_SSL[0]}"'
         )
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              check=True).stdout.splitlines()
@@ -576,6 +587,8 @@ probe_args = '{{}}'
         self.assertEqual(out[16], '{"tz":"UTC"}')
         self.assertEqual(out[17], "1")
         self.assertEqual(out[18], "MONERO_MCP_SPEND_TOKEN")
+        self.assertEqual(out[19], "8")       # one per clearweb [npm.*] host
+        self.assertEqual(out[20], "1")       # frontend declares force-ssl
 
     def test_validation_errors(self):
         from stackctl import manifest
@@ -844,6 +857,8 @@ flags = ["mcp"]
         # ... and the needs_nodes column that goes with it, so the two arrays
         # cannot drift apart.
         self.assertIn("NPM_NEEDS_NODES=(0)", out)
+        # This host declares no force-ssl, so the redirect assertion stays off.
+        self.assertIn("NPM_FORCE_SSL=(0)", out)
 
     def test_mcp_port_must_match_the_unit_publish(self):
         from stackctl import manifest

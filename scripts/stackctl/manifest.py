@@ -63,7 +63,8 @@ _RESERVED_ENVS = frozenset({
     "PROBE_TOKEN_VARS", "PROBE_TOOLS", "PROBE_ARGS",
     "PROBE_NEEDS_NODES", "PROBE_SPEND_VARS",
     "ONION_NAMES", "ONION_TARGETS", "ONION_MIRRORS", "ONION_PATHS", "ONION_CODES",
-    "NPM_DOMAINS", "NPM_NEEDS_NODES", "KUMA_ADD_HOST_HOSTS", "KUMA_STATUS_SLUG",
+    "NPM_DOMAINS", "NPM_NEEDS_NODES", "NPM_FORCE_SSL",
+    "KUMA_ADD_HOST_HOSTS", "KUMA_STATUS_SLUG",
     "PATH", "IFS", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME",
     "ENV", "BASH_ENV", "PS1", "PS4", "CDPATH", "GLOBIGNORE", "SHELLOPTS",
 })
@@ -216,12 +217,17 @@ class Manifest:
         # entry per [npm.*] host, so a new public name is monitored the moment
         # it is declared. NPM_NEEDS_NODES is index-aligned with it: the sweep
         # cannot tell a dead upstream from one that --skip-daemons never
-        # started, so the declaration says which.
+        # started, so the declaration says which. NPM_FORCE_SSL is aligned too:
+        # monitor.sh requires a declared force-ssl host to answer :80 with a
+        # redirect, because a plaintext 200 is a fault, not a healthy vhost.
         public = [h for h in self.npm if not h.domain.endswith(".onion")]
         if public:
             lines.append(_array("NPM_DOMAINS", [h.domain for h in public]))
             lines.append(_array("NPM_NEEDS_NODES",
                                 ["1" if h.needs_nodes else "0" for h in public]))
+            lines.append(_array("NPM_FORCE_SSL",
+                                ["1" if h.has_flag("force-ssl") else "0"
+                                 for h in public]))
         # The vhosts uptime-kuma's own UI-authored monitors may resolve on the
         # host (install.sh renders --add-host=<domain>:host-gateway per entry):
         # every host whose [host.*] did not opt out.

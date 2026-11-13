@@ -245,7 +245,8 @@ needs_nodes = true
 #                 reading the 502 as a fault
 #   scheme        http (the default) or https, for an upstream that speaks TLS
 #                 if one is ever added
-#   flags    force-ssl  redirect :80 to :443 (needs a certificate)
+#   flags    force-ssl  redirect :80 to :443 (needs a certificate) and enable
+#                       NPM's native HSTS on the HTTPS vhost
 #            http2      negotiate HTTP/2
 #            ws         allow websocket upgrade
 #            block      block common exploits
@@ -253,6 +254,11 @@ needs_nodes = true
 #                       location per [mcp.*] entry above, each rewritten onto
 #                       that container's /mcp, plus the streaming settings an
 #                       SSE transport needs
+#
+# Every clearweb host carries force-ssl. NPM suppresses the redirect and HSTS
+# while a host has no certificate, and scripts/npm-hosts.sh re-applies both on
+# the next run; scripts/monitor.sh treats a plaintext 200 as a fault, not "up".
+# The wildcard *.onion host is the only exception (tor already encrypts it).
 #
 # clnrest serves CLN's own API to lightning-mcp only and is not an NPM host,
 # so it is gated by its rune rather than an MCP token. The Monero wallet RPC
@@ -265,21 +271,21 @@ host = "frontend"
 container = "boltmesh-frontend"
 forward_host = "127.0.0.1"
 forward_port = 8106
-flags = ["ws", "block"]
+flags = ["ws", "force-ssl", "block"]
 
 [npm.api]
 host = "api"
 container = "boltmesh-backend"
 forward_host = "127.0.0.1"
 forward_port = 8105
-flags = ["ws", "block"]
+flags = ["ws", "force-ssl", "block"]
 
 [npm.search]
 host = "search"
 container = "searxng"
 forward_host = "127.0.0.1"
 forward_port = 8082
-flags = ["ws", "block"]
+flags = ["ws", "force-ssl", "block"]
 
 [npm.btcpay]
 host = "btcpay"
@@ -310,7 +316,7 @@ host = "status"
 container = "uptime-kuma"
 forward_host = "127.0.0.1"
 forward_port = 8107
-flags = ["ws", "block"]
+flags = ["ws", "force-ssl", "block"]
 
 [npm.mcp_edge]
 # The MCP one's forward is only the default (root) target, which is not part

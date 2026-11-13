@@ -8,8 +8,9 @@
 #
 # The declaration is deploy/services.toml (the [npm.*] tables: one entry per
 # vhost, `host` referencing a [host.*] domain, `forward` naming the unit's
-# loopback publish, `flags` selecting force-ssl/http2/ws/block/mcp). This
-# wrapper owns only the CLI and the data dir; the reconciler itself is Python
+# loopback publish, `flags` selecting force-ssl/http2/ws/block/mcp; force-ssl
+# also enables NPM's native HSTS). This wrapper owns only the CLI and the data
+# dir; the reconciler itself is Python
 # (scripts/stackctl/npm.py, run as `python3 -m stackctl npm-hosts`), which
 # loads the manifest directly and talks to NPM's admin API with urllib:
 # nginx-proxy-manager runs on the host network and its own nginx owns :81 in

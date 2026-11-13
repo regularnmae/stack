@@ -50,7 +50,7 @@ deployment problem.
 | `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — |
 | `suricata` ⚙️ | `docker.io/jasonish/suricata:8.0.8` | host network |
 | `tor` | `localhost/tor:local` | — |
-| `uptime-kuma` | `docker.io/louislam/uptime-kuma:2` | `127.0.0.1:8107` |
+| `uptime-kuma` | `docker.io/louislam/uptime-kuma:2.5.11` | `127.0.0.1:8107` |
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — |
 | `vector` | `docker.io/timberio/vector:0.61.0-debian` | — |
 | `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.53.0` | `127.0.0.1:9428` |
@@ -905,7 +905,8 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
   dump age, certificate expiry, the schedules themselves, the metrics and log
   pipelines going quiet, journald persistence and podman's event backend, live
   runes the stack does not reference, bitcoind's RPC password against
-  `secrets.env`, the public vhosts through nginx-proxy-manager — then the spend
+  `secrets.env`, every clearweb vhost through nginx-proxy-manager (including
+  the declared force-SSL redirect and its HSTS header) — then the spend
   tripwire. It also writes the numbers behind the three checks whose fact is a
   rate — unit restarts over an hour, disk saturation and Suricata bursts over 15
   minutes — and those rules, not the sweep, decide when they are worth a warning.
@@ -1257,6 +1258,10 @@ rest, including the one case neither half sees.
 replaces it: the monitor is the host-side, alert-only sweep, while the page watches
 the same public surface for visitors.
 
+`status.boltmesh.net` is a force-SSL vhost with HSTS, so the dashboard login is
+never posted over plaintext. The image is pinned to `2.5.11`, the first release
+with the admin RCE fix.
+
 **The page is UI-authored, not declared.** Its monitors, the page and its layout are
 created in kuma's own UI (the setup wizard's account); nothing reconciles them, and
 nothing host-side holds a kuma credential. The monitors are therefore data: they
@@ -1311,7 +1316,7 @@ host = "frontend"                 # a [host.*] key: boltmesh.net
 container = "boltmesh-frontend"   # the unit that owns the publish below
 forward_host = "127.0.0.1"        # always loopback; NPM is on the host network
 forward_port = 8106               # must equal that unit's PublishPort=
-flags = ["ws", "block"]
+flags = ["ws", "force-ssl", "block"]
 
 [npm.mcp_edge]
 host = "mcp"
@@ -1329,7 +1334,15 @@ port. An `mcp` host omits `container`; its targets are the `[mcp.*]` entries,
 which are checked against their own units. `scheme` defaults to `http` (`https`
 for an upstream that speaks TLS), and an `mcp` host's port must be one an
 `[mcp.*]` entry publishes. The flags are `force-ssl` (redirect `:80`
-to `:443`), `http2`, `ws` (websocket upgrade), `block` (common exploits) and `mcp`.
+to `:443` and enable NPM's native HSTS), `http2`, `ws` (websocket upgrade),
+`block` (common exploits) and `mcp`. Every clearweb vhost carries `force-ssl`;
+the wildcard `.onion` is the only exception, because tor already encrypts it.
+The reconciler sets NPM's `hsts_enabled` with the effective `force-ssl` flag, so
+an HTTPS response carries `Strict-Transport-Security` per host. HSTS is
+deliberately not an `add_header` in `advanced_config`: NPM's `location /` defines its
+own, and a server-scope header would not be inherited by proxied responses.
+Without a certificate the reconciler drops `force-ssl` and NPM suppresses HSTS;
+`monitor.sh` reports the resulting plaintext `200` as a fault rather than "up".
 `--dry-run` prints the API payloads without changing anything; `--prune`
 additionally **deletes** hosts and certificates the manifest does not declare — the
 only destructive mode.

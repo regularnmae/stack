@@ -75,7 +75,9 @@ not faults").
   the manifest, so a new `[npm.*]` host is covered the moment it is declared)
   — the continuous public-surface check the UI-owned status page no longer
   provides. A `000` or `5xx` there means certificate, proxy host or loopback
-  publish, never DNS: `--connect-to` deliberately bypasses it.
+  publish, never DNS: `--connect-to` deliberately bypasses it. A declared
+  `force-ssl` host must answer `:80` with `301`/`308` and carry HSTS on the
+  HTTPS response; a plaintext `200` is a fault, not a healthy vhost.
 
 - **`verify.sh` is the on-demand diagnostic; the monitor is the only periodic
   producer.** The schedules, the metrics textfile, the log pipeline and

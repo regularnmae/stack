@@ -19,6 +19,11 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
 - **Never seed the `.onion` address anywhere**; it is key material in
   `$DATA_DIR/tor/onion/`.
 - **The wildcard `*.onion` host gets no certificate and no `force-ssl`.**
+- **Every clearweb vhost forces HTTPS and sends HSTS.** `force-ssl` is declared
+  on every `[npm.*]` host except the wildcard; NPM's native `hsts_enabled` rides
+  with it and emits `Strict-Transport-Security` at server and location scope.
+  Without a certificate the reconciler drops `force-ssl` and NPM suppresses
+  HSTS, and `scripts/monitor.sh` pages on the plaintext `200`.
 - **The subnet is pinned** (`10.89.0.0/24`) and the four onion-backed containers
   pin `.241`-`.244`, because tor validates a target at startup.
 
@@ -37,16 +42,18 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   of truth, so the venv, the freeze and the CI step bought nothing.
   `[kuma.page] slug` stays in `deploy/services.toml` only so `verify.sh` can
   tell "not published yet" from "broken". Note v2 answers `/` with a **302 to
-  `/dashboard`**, so a probe must follow redirects.
+  `/dashboard`**, so a probe must follow redirects. The dashboard login is
+  internet-facing, so `[npm.status]` is a force-SSL/HSTS vhost and the image is
+  pinned to `2.5.11`, the first release with the admin RCE fix.
 
 - **The repo still owns the host side of kuma's checks.** `deploy/install.sh`
   renders `--add-host=<vhost>:host-gateway` into the unit for every `[host.*]`
   with `kuma_add_host = true` (all but the status host and MCP, which are the
   WAN canary), so UI-authored monitors resolve their vhosts on the host instead
   of hairpinning through the router as the WAN address. And `scripts/monitor.sh`
-  probes every clearweb vhost through NPM on loopback (`NPM_DOMAINS`, from the
-  manifest), which is the continuous public-surface check the status page used
-  to be the only one for.
+  probes every clearweb vhost through NPM on loopback (`NPM_DOMAINS` and the
+  aligned `NPM_FORCE_SSL`, from the manifest), which is the continuous
+  public-surface check the status page used to be the only one for.
 
 - **The monitors to create in the UI, once** (this is the knowledge the deleted
   declaration carried; keep it in step with the public hosts):
@@ -170,7 +177,10 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   force-SSL redirect) with `--connect-to` onto `127.0.0.1`, so the certificate
   still validates. BTCPay's admin UI is gated by its own login (2FA expected),
   and its API by the store-scoped key the backend carries; no daemon RPC has a
-  public NPM host any more.
+  public NPM host any more. The reconciler sets NPM's native `hsts_enabled` from
+  the effective `force-ssl` flag. HSTS must not be an `advanced_config`
+  `add_header`: NPM's `location /` include defines its own header, so a
+  server-scope `add_header` is not inherited by the proxied response.
 - **The manifest's ports are reconciled with the units.** `manifest check`
   requires every ordinary `[npm.*].container`'s loopback `PublishPort=` to
   equal `forward_port`, and every `[mcp.*].port` to match its unit's publish

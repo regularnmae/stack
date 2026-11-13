@@ -13,7 +13,7 @@
       "groupName": "container base images"
     },
     {
-      "description": "the plain Quadlet units are read by Renovate's own quadlet manager. They stay tag-pinned rather than digest-pinned: kuma's `2` and searxng's date tags move on their own, so a digest pin would open a PR on every upstream rebuild and turn the reviewable version bump into noise (docker:pinDigests still applies to the Containerfiles, where the base image is built once)",
+      "description": "the plain Quadlet units are read by Renovate's own quadlet manager. They stay tag-pinned rather than digest-pinned: searxng's date tags move on their own, so a digest pin would open a PR on every upstream rebuild and turn the reviewable version bump into noise (docker:pinDigests still applies to the Containerfiles, where the base image is built once)",
       "matchManagers": [
         "quadlet"
       ],
