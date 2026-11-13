@@ -16,7 +16,7 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=vmalert
-Image=docker.io/victoriametrics/vmalert:v1.155.0
+Image=docker.io/victoriametrics/vmalert:v1.156.0
 Network=npm-network.network
 
 PublishPort=127.0.0.1:8880:8880
