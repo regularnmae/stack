@@ -34,6 +34,7 @@ owns the render, the digest and the secret resolution.
 ./scripts/rotate.sh --list          # --list/--status/--dry-run; one target per run
 # the CI gates, each runnable on its own
 ./scripts/healthcheck-lint.sh       # every unit against the healthcheck contract
+./scripts/image-lint.sh             # every pulled image names a concrete version
 ./scripts/docs-lint.sh              # every README/docs section reference resolves
 ./scripts/docs-render.sh --check    # generated README/AGENTS tables are current
 PYTHONPATH=scripts python3 -m stackctl manifest check deploy/services.toml
@@ -122,7 +123,7 @@ Not MCP servers, so absent from the table above; same contract with `boltmesh-la
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `backend.env` | `boltmesh-backend:8000` | `127.0.0.1:8105` | `curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:8000/health` |
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | — | `boltmesh-frontend:80` | `127.0.0.1:8106` | `wget -q -T 4 -t 1 -O /dev/null http://127.0.0.1/` |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | `db.env`, `secrets.env`, `app.env`, `backend.env` | — | — | `find /tmp/arq-worker-liveness -mmin -3 -print -quit \| grep -q .` |
-| `postgres` | `docker.io/library/postgres:18-alpine` | `db.env` | — | — | `pg_isready -h 127.0.0.1 -U vpnuser -d vpndb` |
+| `postgres` | `docker.io/library/postgres:18.7-alpine` | `db.env` | — | — | `pg_isready -h 127.0.0.1 -U vpnuser -d vpndb` |
 
 <!-- END GENERATED -->
 

@@ -51,6 +51,11 @@ jobs:
       # no host.
       - name: healthcheck contract
         run: ./scripts/healthcheck-lint.sh
+      # Podman only pulls a *missing* image, so a major-only tag never
+      # refreshes. This rejects latest/major-only tags and checks the pairs
+      # that must move together (postgres/dump, VM/vmalert, monerod/wallet).
+      - name: every pulled image names a concrete version
+        run: ./scripts/image-lint.sh
       # AGENTS.md is the index and docs/ is the detail. The split's one failure
       # mode is silent: rename a doc, or delete one, and the index points at
       # nothing while every other check still passes. So each doc must be named
@@ -218,6 +223,8 @@ jobs:
         run: python3 tests/test_stackctl.py
       - name: shared shell helper tests
         run: tests/test-lib.sh
+      - name: image tag lint tests
+        run: tests/test-image-lint.sh
       # deploy/root/bouncer.sh shares the parser (status.sh, installed beside it)
       # but not the rounding: this pins the nft timeout clamp and the --dry-run
       # guard that must not replace the live verdict.
