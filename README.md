@@ -35,7 +35,7 @@ deployment problem.
 | `fulcrum` | `docker.io/cculianu/fulcrum:v2.1.4` | `50001`, `50002` |
 | `fulcrum-mcp` | `localhost/fulcrum-mcp:latest` | `127.0.0.1:8110` |
 | `lightning-mcp` 🔑 | `localhost/lightning-mcp:latest` | `127.0.0.1:8104` |
-| `lightningd` | `docker.io/elementsproject/lightningd:v26.06.9` | — |
+| `lightningd` | `docker.io/elementsproject/lightningd:v26.06.10` | — |
 | `monero-node-mcp` | `localhost/monero-node-mcp:latest` | `127.0.0.1:8102` |
 | `monero-wallet-btcpay` | `docker.io/btcpayserver/monero:0.18.5.4` | — |
 | `monero-wallet-mcp` 🔑 | `localhost/monero-wallet-mcp:latest` | `127.0.0.1:8103` |

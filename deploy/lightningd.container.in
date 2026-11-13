@@ -12,7 +12,7 @@ Requires=bitcoind.service tor.service
 
 [Container]
 ContainerName=lightningd
-Image=docker.io/elementsproject/lightningd:v26.06.9
+Image=docker.io/elementsproject/lightningd:v26.06.10
 Network=npm-network.network
 
 # Lightning P2P is deliberately NOT published: 9735 on 0.0.0.0 would advertise
