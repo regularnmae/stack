@@ -2,7 +2,7 @@
 # derivation scheme and reports payments to BTCPay; it is not optional and is
 # exposed to nothing but BTCPay.
 #
-# It needs BOTH bitcoind endpoints, RPC (wallet and raw tx) and P2P (blocks),
+# It needs BOTH bitcoind endpoints, RPC (raw tx and UTXO) and P2P (blocks),
 # which is why install.sh seeds listen=1 in bitcoin.conf: NBXplorer follows
 # blocks over P2P, and no host port is published, so this stays inside the
 # podman subnet.

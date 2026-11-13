@@ -31,7 +31,7 @@ Volume=@DATA_DIR@/bitcoin:/root/.bitcoin:z
 
 # Graceful stop, not podman's 10 s default: CLN commits its database and gives
 # the plugins a bounded time to exit on SIGTERM. The budget has to outlast a
-# bitcoind that is down or still loading: bcli's RPC call blocks CLN's shutdown,
+# bitcoind that is down or still starting: bcli's RPC call blocks CLN's shutdown,
 # and 60 s was not enough (podman SIGKILLs the container when the budget runs
 # out mid-stop).
 # TimeoutStopSec below stays 30 s above this (docs/units.md, "A durable unit is
@@ -57,8 +57,8 @@ Exec=--network=bitcoin \
      --bind-addr=0.0.0.0:9735
 
 # The image's entrypoint.sh stays alive as PID 1 after lightningd dies (bcli
-# timing out while bitcoind opened its wallet), so the unit read "active" with
-# the daemon and clnrest gone. The healthcheck makes that visible and
+# timing out while bitcoind was not answering yet), so the unit read "active"
+# with the daemon and clnrest gone. The healthcheck makes that visible and
 # HealthOnFailure=kill makes it terminal, so Restart=always below recreates it
 # -- podman's man page says the same: inside a unit prefer kill/stop and let
 # systemd's restart policy act.

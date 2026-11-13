@@ -20,7 +20,7 @@ owns the render, the digest and the secret resolution.
 ```sh
 ./bootstrap.sh                      # bare host -> podman, linger, sysctl, firewall, dirs
 ./deploy.sh                         # fetch, build, start/restart (never waits); --dry-run plans
-./configure.sh                      # second step: waits, then runes/wallet/BTCPay/BoltMesh
+./configure.sh                      # second step: waits, then runes/BTCPay/BoltMesh
 ./deploy/install.sh                 # units + secrets + data dirs only
 ./verify.sh                         # container health, MCP handshakes, onion fetches
 ./deploy.sh --only <name>           # one service; backup, db-dump, backup-verify, npm-hosts

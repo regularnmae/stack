@@ -238,7 +238,7 @@ next deploy instead of needing a hand rebuild (`--only` forces one anyway).
 `deploy.sh` does not run `verify.sh`, and it never waits for a container's health
 or for a chain to sync: verification is the separate `./verify.sh` (or the
 monitor's sweep), and the work that can only happen against a *running* stack is
-the second step, `./configure.sh` (Bitcoin wallet, CLN runes, BTCPay
+the second step, `./configure.sh` (CLN runes, BTCPay
 databases/plugin wallet/bootstrap, BoltMesh migrations). Common flags:
 
 ```sh
@@ -259,10 +259,9 @@ databases/plugin wallet/bootstrap, BoltMesh migrations). Common flags:
 ./deploy.sh --skip-agent-skills       # leave the operator's harnesses untouched
 ./deploy.sh --dry-run                 # print the plan, change nothing
 ./configure.sh                        # wait for each service, then do the post-start work
-./configure.sh --only runes           # one section (wallet|runes|btcpay|boltmesh|agents)
-./configure.sh --skip-daemons         # no daemon-dependent work (wallet/runes/BTCPay/handshake)
+./configure.sh --only runes           # one section (runes|btcpay|boltmesh|agents)
+./configure.sh --skip-daemons         # no daemon-dependent work (runes/BTCPay/handshake)
 ./configure.sh --skip-apps            # no BoltMesh migrations
-./configure.sh --no-wallets           # skip the interactive wallet prompts
 ./configure.sh --dry-run              # print the plan, change nothing
 ./verify.sh                           # container health, MCP handshakes, onion fetches
 ./scripts/monitor.sh                  # the scheduled health + spend sweep, by hand
@@ -281,16 +280,19 @@ wallet connections once its own index has caught up (watch `podman logs fulcrum`
 See [Full nodes and disk](#full-nodes-and-disk) for the disk budget.
 `deploy.sh` starts the containers and does **not** wait for sync or health. Run
 `./configure.sh` after it (and again once the chains are current): it waits for
-the daemons, then mints the CLN runes, imports the wallets and bootstraps BTCPay.
+the daemons, then mints the CLN runes, imports BTCPay's view-only Monero wallet
+and bootstraps BTCPay.
 
 ### Wallets
 
-A bare host has a Bitcoin Core wallet, created by `scripts/wallets.sh`
-(prompted by `./configure.sh` when a TTY is present; skipped without one).
+bitcoind runs **wallet-less**: the stack creates no Bitcoin Core wallet, and
+nothing in it needs one. Use the Electrum section below if you want a Bitcoin
+wallet on the LAN.
 
-The BTCPay Monero wallet is different and is never generated on the payment
-server: `scripts/btcpay-wallet.sh` imports a **view-only** wallet into the
-dedicated plugin wallet-rpc from `$DATA_DIR/config/btcpay/xmr-wallet.env`:
+The only wallet the stack imports is BTCPay's Monero wallet, and it is never
+generated on the payment server: `scripts/btcpay-wallet.sh` imports a
+**view-only** wallet into the dedicated plugin wallet-rpc from
+`$DATA_DIR/config/btcpay/xmr-wallet.env`:
 
 ```sh
 XMR_WALLET_ADDRESS=<primary address>
@@ -477,7 +479,7 @@ every token:
    cd ~/build/stack
    ./bootstrap.sh
    ./deploy.sh                 # answer the data-dir prompt with /data/stack
-   ./configure.sh              # runes, wallets, BTCPay state, migrations
+   ./configure.sh              # runes, BTCPay state, migrations
    ./verify.sh --deep
    ```
 
@@ -785,7 +787,6 @@ What rotation cannot fix:
 | `fulcrum/` | no | re-index from block 0: weeks on this disk (see [Full nodes and disk](#full-nodes-and-disk)) |
 | `searxng/`, `monitoring/` | no | recreated; the metrics history is gone |
 | `postgres/` | no | a new cluster, then the dump is replayed into it |
-| the bitcoind wallet | no | a new empty descriptor wallet (export a `.dat` if you keep funds there) |
 
 Rough order of magnitude on a rotational disk: bitcoind validation days to weeks,
 monerod a few days, Fulcrum's index weeks. All three run at once, and none blocks
@@ -1652,7 +1653,6 @@ stack/
   scripts/lib.sh          # the one entry point: sources lib/ in a fixed order
   scripts/lib/            #   one concern per file -- core, datadir, probes,
                           #   daemons, electrum, units, jobs, mcp, manifest
-  scripts/wallets.sh      # the Bitcoin Core wallet (create/restore/load)
   scripts/btcpay-wallet.sh # import BTCPay's view-only Monero wallet
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)

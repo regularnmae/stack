@@ -109,8 +109,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
   `deploy.sh` does not wait for health at all: it restarts what changed and
   returns, and `./verify.sh` (or the monitor's sweep) is the verdict. The work
-  that needs a service answering -- the CLN runes, the wallets, the BTCPay
-  databases/bootstrap and the BoltMesh migrations -- is `./configure.sh`, which
+  that needs a service answering -- the CLN runes, BTCPay's wallet, databases
+  and bootstrap, and the BoltMesh migrations -- is `./configure.sh`, which
   owns every bounded wait (`wait_healthy`, `wait_cmd`). It also restarts
   `lightning-mcp` when the rune file changed: the server reads `LIGHTNING_RUNE`
   from its `EnvironmentFile=` at start, so a rune minted after it started is

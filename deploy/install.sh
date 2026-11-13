@@ -1632,7 +1632,7 @@ Done. Everything the stack owns lives under:
     $DATA_DIR/audit/backup-verify-db.status)
 
 Next:  ./deploy.sh         # build images, start/restart everything
-       ./configure.sh      # wait, then mint runes / wallets / BTCPay state / migrations
+       ./configure.sh      # wait, then mint runes / BTCPay state / migrations
 The two explorers are built by ./deploy.sh from btc-explorer/ and xmr-explorer/
   (not pulled): BTC RPC Explorer (Node) and MoneroBlock (Go, RPC-only). Both are
   small local builds. They are served at https://$BTC_EXPLORER_HOST and

@@ -20,8 +20,8 @@
 # This script deploys; it does not verify. It never waits for a container's
 # health or for a daemon to sync: `./verify.sh` (and monitor.timer) own the
 # health verdict. Work that can only happen against a running service -- the
-# Bitcoin wallet, the CLN runes, the BTCPay databases/plugin wallet/bootstrap
-# and the BoltMesh migrations -- is the second step, `./configure.sh`:
+# CLN runes, the BTCPay databases/plugin wallet/bootstrap and the BoltMesh
+# migrations -- is the second step, `./configure.sh`:
 #
 #   ./deploy.sh && ./configure.sh
 #
@@ -449,8 +449,8 @@ start_daemons() {
     if [ "$SKIP_DAEMONS" = 1 ]; then log "skipping the chain daemons (--skip-daemons)"; return 0; fi
 
     # The lightningd image's entrypoint stays alive as PID 1 after the daemon
-    # dies (its bcli plugin backed into a bitcoind still loading its wallet), so
-    # the unit reads "active" and Restart=always never fires. The unit's
+    # dies (its bcli plugin backed into a bitcoind that was not answering yet),
+    # so the unit reads "active" and Restart=always never fires. The unit's
     # HealthOnFailure=kill ends that container; this check is the fallback for
     # one created before that line existed, since an active unit reporting
     # unhealthy is exactly that zombie.
@@ -1048,11 +1048,10 @@ first sync downloads and validates the whole Bitcoin and Monero chains).
 deploy.sh does not wait for health and does not do the work that needs a
 running service. Next, once the daemons answer:
 
-  ./configure.sh   # Bitcoin wallet, CLN runes, BTCPay databases/plugin
-                   # wallet/bootstrap and the BoltMesh migrations. It waits
-                   # (bounded) for each service, warns and moves on when one is
-                   # not up, and finishes anything the chain sync delayed on a
-                   # later run.
+  ./configure.sh   # CLN runes, BTCPay databases/plugin wallet/bootstrap and
+                   # the BoltMesh migrations. It waits (bounded) for each
+                   # service, warns and moves on when one is not up, and
+                   # finishes anything the chain sync delayed on a later run.
   ./verify.sh      # container health, MCP handshakes, onion fetches
 EOF
 fi

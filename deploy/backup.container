@@ -20,7 +20,7 @@
 [Unit]
 Description=Encrypted backup of the stack's irreplaceable state (restic)
 # Wants=, not Requires=: the dumps are best-effort, and a database outage must
-# never stop the restic run that protects the CLN identity and the wallet --
+# never stop the restic run that protects the CLN identity and BTCPay's state --
 # the previous dump is still worth copying, and monitor.sh fails on a dump that
 # stops being refreshed.
 Wants=postgres-dump.service db-dump.service

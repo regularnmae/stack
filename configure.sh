@@ -3,7 +3,6 @@
 #
 #   ./deploy.sh            # units, images, start/restart -- it never waits
 #   ./configure.sh         # the work that needs the services answering:
-#                          #   wallet    the Bitcoin Core wallet
 #                          #   runes     the CLN read/spend runes
 #                          #   btcpay    DB/role, plugin wallet, bootstrap, envs
 #                          #   boltmesh  the BoltMesh database migrations
@@ -16,10 +15,9 @@
 #
 #   ./configure.sh                    # all of the above, in that order
 #   ./configure.sh --only runes       # one section
-#   ./configure.sh --skip-daemons     # no daemon-dependent work (wallet/runes/
-#                                     # BTCPay/handshake)
+#   ./configure.sh --skip-daemons     # no daemon-dependent work (runes/BTCPay/
+#                                     # handshake)
 #   ./configure.sh --skip-apps        # no BoltMesh migrations
-#   ./configure.sh --no-wallets       # do not prompt for the Bitcoin wallet
 #   ./configure.sh --dry-run          # print the plan; change nothing
 set -euo pipefail
 
@@ -28,17 +26,11 @@ DRY_RUN=0
 ONLY=""
 SKIP_APPS=0
 SKIP_DAEMONS=0
-DO_WALLETS=1
 
 # A give-up bound, not a promise: wait_healthy raises it to the unit's own
 # StartPeriod + Interval when that is larger.
 APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-60}"
 BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
-# lightningd's bcli plugin starts with RPC while bitcoind is still loading its
-# wallet, and dies on the first timeout ("The Bitcoin backend died"). Require
-# wallet-level RPC before anything depends on it; the chain RPC alone answers
-# long before that (getblockchaininfo is served mid-init).
-BITCOIND_WALLET_WAIT="${BITCOIND_WALLET_WAIT:-120}"
 LIGHTNINGD_WAIT="${LIGHTNINGD_WAIT:-900}"
 MONERO_WALLET_WAIT="${MONERO_WALLET_WAIT:-300}"
 POSTGRES_WAIT="${POSTGRES_WAIT:-180}"
@@ -57,8 +49,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --only)         ONLY="${2:?--only needs a section}"; shift ;;
         --skip-apps)    SKIP_APPS=1 ;;
-        --skip-daemons) SKIP_DAEMONS=1; DO_WALLETS=0 ;;
-        --no-wallets)   DO_WALLETS=0 ;;
+        --skip-daemons) SKIP_DAEMONS=1 ;;
         --dry-run)      DRY_RUN=1 ;;
         -h|--help)      usage; exit 0 ;;
         *)              die "unknown argument: $1 (try --help)" ;;
@@ -72,15 +63,12 @@ done
 if [ -n "$ONLY" ]; then
     if [ "$SKIP_DAEMONS" = 1 ]; then
         case "$ONLY" in
-            wallet|runes|btcpay|agents)
+            runes|btcpay|agents)
                 die "--only $ONLY needs the chain daemons; drop --skip-daemons" ;;
         esac
     fi
     if [ "$SKIP_APPS" = 1 ] && [ "$ONLY" = boltmesh ]; then
         die "--only boltmesh conflicts with --skip-apps"
-    fi
-    if [ "$DO_WALLETS" = 0 ] && [ "$ONLY" = wallet ]; then
-        die "--only wallet conflicts with --no-wallets"
     fi
 fi
 
@@ -123,15 +111,6 @@ bitcoind_syncing() {
         | jq -e '.initialblockdownload == true' >/dev/null 2>&1
 }
 
-# Wallet-level RPC answers *and* a wallet is loaded -- what lightningd's bcli
-# needs. Never `getwalletinfo` on its own: with two wallets loaded a node answers
-# -19 ("Wallet file not specified"), which says nothing about readiness.
-# listwallets answers either way, and `[]` (nothing loaded) correctly reads as
-# "not ready".
-bitcoind_wallet_ready() {
-    bitcoind_cli listwallets 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1
-}
-
 restart_if_active() { # unit
     systemctl --user is-active --quiet "$1.service" 2>/dev/null || return 0
     log "restarting $1 to pick up its new env"
@@ -172,18 +151,6 @@ file_digest() { # path
 }
 
 # ---------------------------------------------------------------------------
-# wallet: the Bitcoin Core wallet (lightningd's bcli and the operator's tools)
-# ---------------------------------------------------------------------------
-configure_wallet() {
-    log "configuring the Bitcoin Core wallet"
-    if ! wait_cmd "bitcoind RPC" "$BITCOIND_WAIT" bitcoind_cli getblockchaininfo; then
-        warn "bitcoind RPC is not up; skipping the wallet (re-run ./configure.sh once it is)"
-        return 0
-    fi
-    "$REPO_DIR/scripts/wallets.sh" || warn "Bitcoin wallet setup did not complete"
-}
-
-# ---------------------------------------------------------------------------
 # runes: install.sh mints them once lightningd answers
 # ---------------------------------------------------------------------------
 configure_runes() {
@@ -201,12 +168,9 @@ configure_runes() {
         warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./configure.sh run"
         return 0
     fi
-    if ! wait_cmd "bitcoind wallet RPC" "$BITCOIND_WALLET_WAIT" bitcoind_wallet_ready; then
-        warn "bitcoind wallet RPC not up; not waiting on lightningd"
-        warn "the CLN runes (and lightning-mcp's tools) come alive on a later ./configure.sh run"
-        dump_tail bitcoind 20
-        return 0
-    fi
+    # The chain RPC check above is the readiness gate: bcli calls chain RPC
+    # (getblockchaininfo, gettxout, sendrawtransaction), never wallet RPC, and
+    # this stack runs bitcoind wallet-less.
     if ! wait_cmd "lightningd RPC" "$LIGHTNINGD_WAIT" lightning_cli getinfo; then
         warn "lightningd RPC not up; runes are created on a later ./configure.sh run"
         dump_tail lightningd 40
@@ -423,7 +387,6 @@ preflight() {
 
 run_all() {
     if [ "$SKIP_DAEMONS" = 0 ]; then
-        [ "$DO_WALLETS" = 0 ] || configure_wallet
         configure_runes
         configure_btcpay
     fi
@@ -436,8 +399,7 @@ preflight
 # The per-section plan, for --dry-run. The dispatch below runs the real thing.
 plan_section() {
     case "$1" in
-        wallet)   printf '  wallet    scripts/wallets.sh (bitcoind RPC)\n' ;;
-        runes)    printf '  runes     deploy/install.sh (bitcoind wallet RPC + lightningd RPC)\n' ;;
+        runes)    printf '  runes     deploy/install.sh (bitcoind RPC + lightningd RPC)\n' ;;
         btcpay)   printf '  btcpay    role/databases, plugin wallet, bootstrap, backend/btcpay-mcp envs\n' ;;
         boltmesh) printf '  boltmesh  alembic upgrade head (postgres)\n' ;;
         agents)   printf '  agents    agent-mcp bitcoin-node get_blockchain_info (via %s)\n' "${MCP_HOST:-NPM}" ;;
@@ -448,10 +410,9 @@ plan_section() {
 if [ "$DRY_RUN" = 1 ]; then
     log "dry run: would wait for each service, then run:"
     if [ -n "$ONLY" ]; then
-        plan_section "$ONLY" || die "unknown --only: $ONLY (wallet|runes|btcpay|boltmesh|agents)"
+        plan_section "$ONLY" || die "unknown --only: $ONLY (runes|btcpay|boltmesh|agents)"
     else
         if [ "$SKIP_DAEMONS" = 0 ]; then
-            [ "$DO_WALLETS" = 0 ] || plan_section wallet
             plan_section runes
             plan_section btcpay
         fi
@@ -462,13 +423,12 @@ if [ "$DRY_RUN" = 1 ]; then
 fi
 
 case "$ONLY" in
-    wallet)   configure_wallet ;;
     runes)    configure_runes ;;
     btcpay)   configure_btcpay ;;
     boltmesh) configure_boltmesh ;;
     agents)   configure_agents ;;
     "")       run_all ;;
-    *)        die "unknown --only: $ONLY (wallet|runes|btcpay|boltmesh|agents)" ;;
+    *)        die "unknown --only: $ONLY (runes|btcpay|boltmesh|agents)" ;;
 esac
 
 log "done (configure${ONLY:+ --only $ONLY}); health is ./verify.sh's verdict"

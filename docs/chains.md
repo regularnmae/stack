@@ -15,50 +15,28 @@ daemon unit, `fulcrum`, or an explorer.
 - **`lightningd` can die with its container still "Up"**, which is why its unit
   carries `HealthOnFailure=kill`.
 - **The explorers add no index**; they read bitcoind (plus Fulcrum) or monerod.
-- **A wallet restore is `restorewallet` with `backup_file`, `load_on_startup=true`
-  and no RPC timeout** (`-rpcclienttimeout=0`).
+- **bitcoind runs wallet-less**: no Bitcoin Core wallet is created, and nothing
+  in the stack needs one. CLN's on-chain wallet is its own `hsm_secret`/database;
+  BTCPay's XMR wallet is the view-only plugin wallet.
 
 ## lightningd dies with its container left Up
 
 - **lightningd dies with its container left "Up":** bcli can time out while
-  bitcoind is still loading its wallet, the entrypoint then keeps PID 1 alive,
-  the unit reads "active" and `Restart=always` never fires -- which is how
-  lightning-mcp answers 502 while the unit looks fine. The unit therefore
-  carries `HealthOnFailure=kill` (podman's own advice: inside a unit prefer
-  kill/stop so systemd's restart policy is the one that acts), so the failing
-  healthcheck ends the container and `Restart=always` recreates it. `deploy.sh`
-  still restarts a still-active but `unhealthy` lightningd, as the fallback for
-  a container older than that unit line; it does not wait. `./configure.sh`
-  waits for wallet-level RPC before waiting on lightningd (and dumps the log on
-  a timeout) before minting the runes, then restarts `lightning-mcp` when the
-  rune file changed. That wait is
-  `bitcoind_wallet_ready` (`listwallets` non-empty), **never a bare
-  `getwalletinfo`**: a node with two wallets loaded -- a legacy datadir-root
-  `mainnet` plus an unnamed `""` -- answers `-19` "Wallet file not specified",
-  which says nothing about readiness, so that wait burned its full 120 s on every
-  configure run and then skipped the lightningd wait. The same class of trap in
-  `scripts/wallets.sh`: `loadwallet` answering `-35` means the wallet is already
-  loaded, i.e. success, and reporting it as failure is how a healthy node came
-  to look unconfigured (a transient `podman exec` miss is why the first check
-  can disagree with the second, so each load attempt re-proves it with
-  `listwallets`). Not on
-  `monero-wallet-btcpay`: its healthcheck is red for as long as the wallet
-  refreshes, so killing it would restart the refresh from scratch.
-
-## Restoring the Bitcoin wallet
-
-`scripts/wallets.sh` restores a `.dat` backup by copying it into the container and
-calling `restorewallet`. Three things about that call are traps:
-
-- The named parameter is `backup_file`; `wallet_backup_file` does not exist and
-  answers `-8 Unknown named parameter`.
-- `load_on_startup=true` is what writes the name into `settings.json`. Without it
-  the restore succeeds and the wallet is absent at the next bitcoind restart.
-- `restorewallet` rescans, and this node has no `blockfilterindex`, so the call can
-  outlast `bitcoin-cli`'s 900 s default: pass `-rpcclienttimeout=0`.
-
-The temp copy inside the datadir is removed whether the call succeeds or fails, so
-its status is captured instead of letting `set -e` abort at the RPC.
+  bitcoind is still starting, the entrypoint then keeps PID 1 alive, the unit
+  reads "active" and `Restart=always` never fires -- which is how lightning-mcp
+  answers 502 while the unit looks fine. The unit therefore carries
+  `HealthOnFailure=kill` (podman's own advice: inside a unit prefer kill/stop so
+  systemd's restart policy is the one that acts), so the failing healthcheck
+  ends the container and `Restart=always` recreates it. `deploy.sh` still
+  restarts a still-active but `unhealthy` lightningd, as the fallback for a
+  container older than that unit line; it does not wait. `./configure.sh` waits
+  for chain RPC and for initial block download to finish, then waits on
+  lightningd and mints the runes, and restarts `lightning-mcp` when the rune
+  file changed. That is the right gate: bcli calls chain RPC
+  (`getblockchaininfo`, `gettxout`, `sendrawtransaction`), never wallet RPC, and
+  this stack runs bitcoind wallet-less. Not on `monero-wallet-btcpay`: its
+  healthcheck is red for as long as the wallet refreshes, so killing it would
+  restart the refresh from scratch.
 
 ## CLN peers and channels
 
