@@ -21,7 +21,7 @@ deployment problem.
 
 | Unit | Image | Published on the host |
 | --- | --- | --- |
-| `alertmanager` | `docker.io/prom/alertmanager:v0.34.2` | `127.0.0.1:9093` |
+| `alertmanager` | `docker.io/prom/alertmanager:v0.35.0` | `127.0.0.1:9093` |
 | `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` |
 | `bitcoind` | `docker.io/bitcoin/bitcoin:32.1` | — |
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` |

@@ -28,7 +28,7 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=alertmanager
-Image=docker.io/prom/alertmanager:v0.34.2
+Image=docker.io/prom/alertmanager:v0.35.0
 Network=npm-network.network
 
 # Loopback only: the API accepts alert pushes from vmalert and the signup
