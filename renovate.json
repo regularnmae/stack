@@ -5,12 +5,37 @@
     "docker:pinDigests",
     "helpers:pinGitHubActionDigests"
   ],
+  "dependencyDashboard": true,
+  "osvVulnerabilityAlerts": true,
   "packageRules": [
     {
       "matchManagers": [
         "dockerfile"
       ],
       "groupName": "container base images"
+    },
+    {
+      "description": "the VictoriaMetrics components are released together; one group keeps VM, vmalert and VictoriaLogs on the same reviewable train",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/victoriametrics/victoria-metrics",
+        "docker.io/victoriametrics/vmalert",
+        "docker.io/victoriametrics/victoria-logs"
+      ],
+      "groupName": "victoriametrics stack"
+    },
+    {
+      "description": "BTCPay and NBXplorer are coupled: a BTCPay release expects the NBXplorer of the same train, and they land in one deploy",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/btcpayserver/btcpayserver",
+        "docker.io/nicolasdorier/nbxplorer"
+      ],
+      "groupName": "btcpay stack"
     },
     {
       "description": "the plain Quadlet units are read by Renovate's own quadlet manager. They stay tag-pinned rather than digest-pinned: searxng's date tags move on their own, so a digest pin would open a PR on every upstream rebuild and turn the reviewable version bump into noise (docker:pinDigests still applies to the Containerfiles, where the base image is built once)",
@@ -40,14 +65,29 @@
       "enabled": false
     },
     {
-      "description": "hand-pinned on purpose: the Postgres cluster is upgraded by the operator, not by a PR (renovate.json's own rule, documented in docs/units.md)",
+      "description": "the Postgres *major* version is an operator migration (initdb/pg_upgrade), never a PR; minor and patch releases are ordinary security updates and must be proposed (docs/units.md)",
       "matchDatasources": [
         "docker"
       ],
       "matchPackageNames": [
         "docker.io/library/postgres"
       ],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "enabled": false
+    },
+    {
+      "description": "a Postgres minor or patch update still needs a dump and a reindex; merging changes nothing until the operator deploys it",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/postgres"
+      ],
+      "prBodyNotes": [
+        "Take a fresh `pg_dumpall` before deploying, run `reindexdb` on `vpndb`, `btcpay` and `nbxplorer` after it starts, and run `./deploy.sh --only backup-verify-db` to prove the dump replays. See the PostgreSQL release notes."
+      ]
     },
     {
       "description": "the backup tool updates like no other unit: backup.container is a oneshot on a nightly timer, so a changed tag IS a missing image and podman pulls it on the next run -- no ./deploy.sh --only backup, unlike every other pinned unit",
@@ -92,7 +132,7 @@
         "docker"
       ],
       "matchPackageNames": [
-        "docker.io/lncm/bitcoind",
+        "docker.io/bitcoin/bitcoin",
         "ghcr.io/sethforprivacy/simple-monerod",
         "docker.io/btcpayserver/monero",
         "docker.io/elementsproject/lightningd",
@@ -102,6 +142,20 @@
       "prBodyNotes": [
         "Merging this changes the tag only: the host keeps running the old image until `./deploy.sh --only <service>` pulls the new one, followed by `./verify.sh`.",
         "Consensus daemons: read the upstream release notes first. `lightningd` wallet migrations are forward-only, so run `./scripts/backup.sh backup` before deploying it; Monero upgrades are driven by a hardfork height and the daemon and wallet move as a pair."
+      ]
+    },
+    {
+      "description": "Bitcoin Core is wallet-less here; the upgrade still needs the old image and a config copy, and a downgrade across a major is not supported",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/bitcoin/bitcoin"
+      ],
+      "automerge": false,
+      "prBodyNotes": [
+        "No bitcoind wallet is used: NBXplorer, BTCPay and CLN's bcli are chain-RPC only. Keep `bitcoin.conf` and the old image; stop CLN/NBXplorer/BTCPay before the restart and start them after `getblockchaininfo` answers.",
+        "Never downgrade across a major release; fix forward and keep the pre-upgrade `bitcoin.conf`."
       ]
     },
     {

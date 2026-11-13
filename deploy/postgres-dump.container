@@ -14,7 +14,9 @@ Requires=npm-network-network.service postgres.service
 
 [Container]
 ContainerName=postgres-dump
-Image=docker.io/library/postgres:18-alpine
+# Keep this in step with deploy/postgres.container: pg_dumpall must be at least
+# the server's minor, and the image-lint gate enforces the pair.
+Image=docker.io/library/postgres:18.7-alpine
 Network=npm-network.network
 
 # libpq connection settings, in their own file and NOT in db.env: exporting

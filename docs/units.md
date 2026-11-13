@@ -272,11 +272,13 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
 ## Ownership and images
 
-- **Data-dir ownership:** `bitcoind` runs as the image uid (host 525287 =
-  in-container 1000) and does **not** re-own its bind mount, so `install.sh`
-  hands it the datadir entry and `bitcoin.conf` (top-level only, never a
-  recursive walk over the chain: bitcoind creates the block and LevelDB
-  subdirectories as that uid itself); `monerod` re-owns its own directory.
+- **Data-dir ownership:** `bitcoind` runs as container uid 1000 (host subuid
+  525287) through an explicit `User=`/`Entrypoint=` override, so the official
+  `bitcoin/bitcoin` image never re-owns the chain with its own chown/gosu
+  entrypoint. It does **not** re-own its bind mount, so `install.sh` hands it
+  the datadir entry and `bitcoin.conf` (top-level only, never a recursive walk
+  over the chain: bitcoind creates the block and LevelDB subdirectories as that
+  uid itself); `monerod` re-owns its own directory.
   `cln/`, `tor/`, `uptime-kuma/` and `fulcrum/` are written by container root
   (= the host user under rootless podman).
 
@@ -291,11 +293,15 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   carry `prBodyNotes` that merging changes nothing until
   `./deploy.sh --only <svc>`). The rendered "What runs" row is matched too, on
   the same `depName` and branch, so row and unit move in one PR and
-  `docs-render.sh --check` stays green. `postgres` (hand pinned) and
-  `localhost/*` are disabled. Units stay **tag**-pinned (`pinDigests` off): a
-  digest pin would turn a reviewable version bump into a PR per upstream
-  rebuild, and a regex manager can only *update* a digest, never add one. Every
-  managed tag must carry a version (`latest` buys nothing), and docker
+  `docs-render.sh --check` stays green. Postgres **major** bumps are disabled
+  (minors and patches are tracked) and `localhost/*` is disabled. Every pulled
+  tag must name a concrete version: `scripts/image-lint.sh` fails CI on
+  `latest`/`master`/`main` and major-only tags (`18-alpine`, `2`), and checks
+  the pairs that move together (postgres/dump, VictoriaMetrics/vmalert,
+  monerod/wallet). Units stay **tag**-pinned (`pinDigests` off): a digest pin
+  would turn a reviewable version bump into a PR per upstream rebuild, and a
+  regex manager can only *update* a digest, never add one. Every managed tag
+  must carry a version (`latest` buys nothing), and docker
   versioning wants the same suffix and component count, so `9-alpine` never
   becomes `9.1-alpine` and searxng's `<date>-<commit>` tags need
   `versioning: loose`. Digests belong in the Containerfiles; the helper images'

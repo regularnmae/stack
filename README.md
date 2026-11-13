@@ -23,7 +23,7 @@ deployment problem.
 | --- | --- | --- |
 | `alertmanager` | `docker.io/prom/alertmanager:v0.34.2` | `127.0.0.1:9093` |
 | `bitcoin-node-mcp` | `localhost/bitcoin-node-mcp:latest` | `127.0.0.1:8101` |
-| `bitcoind` | `docker.io/lncm/bitcoind:v28.0` | — |
+| `bitcoind` | `docker.io/bitcoin/bitcoin:32.1` | — |
 | `boltmesh-backend` | `localhost/boltmesh-backend:latest` | `127.0.0.1:8105` |
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — |
@@ -44,7 +44,7 @@ deployment problem.
 | `netcheck` | `localhost/netcheck:local` | — |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.16.0` | host network |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network |
-| `postgres` | `docker.io/library/postgres:18-alpine` | — |
+| `postgres` | `docker.io/library/postgres:18.7-alpine` | — |
 | `searxng` | `docker.io/searxng/searxng:2026.10.29-cff884f98` | `127.0.0.1:8082` |
 | `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` |
 | `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — |
@@ -78,15 +78,21 @@ the data disk. The two explorers read those services rather than keeping a
 chain of their own — see [Block explorers](#block-explorers).
 
 **Every pulled image is pinned to a tag, and Renovate watches the tags** —
-`postgres` is the one deliberate exception, hand-pinned and untracked. Merging
-one of those PRs changes nothing on the host: a unit keeps
+the Postgres **major** version is the one deliberate exception, hand-pinned
+because a cluster upgrade is an operator migration; minor and patch releases
+are tracked like every other image, and `scripts/image-lint.sh` refuses a
+major-only or `latest` tag. Merging one of those PRs changes nothing on the
+host: a unit keeps
 running its old image until it is restarted, and
 `./deploy.sh --only <service>` is what pulls the new tag (podman only pulls a
 *missing* image, so nothing upgrades on its own; the backup job, which runs on a
 timer rather than a restart, picks up a merged restic bump by itself). Back up
 before `lightningd` (CLN's wallet migrations are forward-only), move `monerod`
 and `btcpayserver/monero` together (an upgrade is driven by a hardfork height, and a
-wallet older than its daemon is unsupported), then run `./verify.sh`.
+wallet older than its daemon is unsupported), then run `./verify.sh`. A
+Postgres minor bump is an ordinary restart, but run `reindexdb` on `vpndb`,
+`btcpay` and `nbxplorer` afterwards and take a fresh `pg_dumpall` (the 18.7
+release notes require it).
 
 **Only `nginx-proxy-manager` is reachable from the LAN over HTTP.** It runs on
 the **host network** (`Network=host`), so its own nginx binds `80`/`443`/`81` in
@@ -204,7 +210,7 @@ git clone https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
 ./bootstrap.sh
 ./deploy.sh           # or: ./deploy.sh --bootstrap to do both in one step
-./configure.sh        # second step: runes, wallet, BTCPay state, migrations
+./configure.sh        # second step: runes, BTCPay state, migrations
 ```
 
 `bootstrap.sh` uses `sudo` for the privileged host setup (packages, linger, the
@@ -1610,9 +1616,10 @@ units are mode 600 and never enter git. The BTCPay wallet deliberately uses the
 `--rpc-login` is on the command line, and the plugin hardcodes empty credentials.
 
 `bitcoind` keeps its RPC credentials in its own `bitcoin.conf`, seeded once and
-handed to the image uid: `podman exec -it bitcoind vi /data/.bitcoin/bitcoin.conf`.
-`docs/credentials.md` has the invariants behind all of this and why spending stays
-off.
+handed to the image uid: edit it through the container (`podman exec -it
+bitcoind sh`, or `scripts/rotate.sh bitcoin-rpc`); the official image ships no
+editor. `docs/credentials.md` has the invariants behind all of this and why
+spending stays off.
 
 ### Rotating a credential
 
