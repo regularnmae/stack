@@ -13,7 +13,7 @@ Requires=npm-network-network.service
 
 [Container]
 ContainerName=victoria-logs
-Image=docker.io/victoriametrics/victoria-logs:v1.53.0
+Image=docker.io/victoriametrics/victoria-logs:v1.54.0
 Network=npm-network.network
 
 # Loopback only, like the metrics store and for the same reason: it has no
