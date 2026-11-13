@@ -28,7 +28,7 @@ deployment problem.
 | `boltmesh-frontend` | `localhost/boltmesh-frontend:latest` | `127.0.0.1:8106` |
 | `boltmesh-worker` | `localhost/boltmesh-backend:latest` | — |
 | `btc-explorer` | `localhost/btc-explorer:local` | `127.0.0.1:8108` |
-| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.5` | `127.0.0.1:49392` |
+| `btcpay` | `docker.io/btcpayserver/btcpayserver:2.4.7` | `127.0.0.1:49392` |
 | `btcpay-mcp` | `localhost/btcpay-mcp:latest` | `127.0.0.1:8114` |
 | `crowdsec` | `docker.io/crowdsecurity/crowdsec:v1.8.2` | host network |
 | `crowdsec-mcp` | `localhost/crowdsec-mcp:latest` | host network |
