@@ -218,6 +218,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# SSH auth failures from the journal
+# ---------------------------------------------------------------------------
+# sshd is deliberately not a CrowdSec acquisition: port 22 is not
+# internet-exposed, so every client is private/LAN -- refused at the bouncer by
+# ipguard.py, and this LAN's addresses are whitelisted in s02-enrich. The record
+# is also out of reach -- /var/log/secure is 0600 root, the rootless image has no
+# journalctl, and lastb reads /var/log/btmp (0660 root:utmp, empty here).
+#
+# The journal is the readable copy: bootstrap's tmpfiles ACL is what vector
+# reads through, and this user can read it too. -u sshd.service includes the
+# per-connection sshd-session children (measured), while the unit filter keeps
+# another program's "Failed password" out of the count.
+#
+# The window is wider than the five-minute timer so a delayed run still covers
+# the gap; ssh_fail is therefore "failed-auth lines in the last six minutes",
+# not a lifetime counter.
+SSH_FAILS=0
+SSH_STATE=na
+if systemctl is-active --quiet sshd 2>/dev/null; then
+    SSH_STATE=ok
+    if ! SSH_FAILS=$(journalctl -q --no-pager -o cat -u sshd.service \
+            --since "-6 minutes" 2>/dev/null \
+            | awk '/Failed password|Invalid user|maximum authentication attempts/ { n++ }
+                   END { print n+0 }'); then
+        SSH_STATE=unreadable
+        SSH_FAILS=0
+    fi
+fi
+say "sshd: $SSH_STATE, $SSH_FAILS failed auth line(s) in the last 6 min"
+
+# ---------------------------------------------------------------------------
 # the verdict
 # ---------------------------------------------------------------------------
 # A tier that is not installed is not a failure -- a fresh host that has not run
@@ -242,6 +273,12 @@ case "$EVE_STATE" in
     missing)    problem="${problem:+$problem; }suricata is active but $EVE is missing" ;;
     unreadable) problem="${problem:+$problem; }suricata is active but $EVE could not be read" ;;
 esac
+# A successful zero count and a failed read are different answers: an active
+# sshd whose journal cannot be read would otherwise report ssh_fail=0 forever.
+case "$SSH_STATE" in
+    ok|na) ;;
+    unreadable) problem="${problem:+$problem; }sshd is active but the journal could not be read" ;;
+esac
 
 result=ok
 [ -n "$problem" ] && result=fail
@@ -249,11 +286,12 @@ result=ok
 verdict_write \
     "$result" "$problem" \
     "suricata=$SURICATA_STATE" "crowdsec=$CROWDSEC_STATE" \
-    "alerts=$ALERTS" "decisions=$DECISIONS" "eve=$EVE_STATE"
+    "alerts=$ALERTS" "decisions=$DECISIONS" "eve=$EVE_STATE" \
+    "ssh=$SSH_STATE" "ssh_fail=$SSH_FAILS"
 
-printf '%s result=%s suricata=%s crowdsec=%s eve=%s alerts=%d decisions=%d%s\n' \
+printf '%s result=%s suricata=%s crowdsec=%s eve=%s alerts=%d decisions=%d ssh=%s ssh_fail=%d%s\n' \
     "$(date -Is)" "$result" "$SURICATA_STATE" "$CROWDSEC_STATE" "$EVE_STATE" "$ALERTS" "$DECISIONS" \
-    "${problem:+ -- $problem}" >> "$AUDIT_LOG"
+    "$SSH_STATE" "$SSH_FAILS" "${problem:+ -- $problem}" >> "$AUDIT_LOG"
 
 [ "$result" = ok ] || { printf 'ids: %s\n' "$problem" >&2; exit 1; }
 say "ok"

@@ -64,7 +64,7 @@ from line 2), and `# shellcheck source=`/`disable=` are directives.
 
 - `docs/units.md` — the runtime: render, digest, healthchecks, mounts.
 - `docs/logs.md` — journald is the source, `vector` the only shipper, `victoria-logs` the history.
-- `docs/ids.md` — Suricata sees packets, CrowdSec reads the logs, enforcement is ours.
+- `docs/ids.md` — Suricata sees packets, CrowdSec reads the logs, SSH is a journal check in `ids.sh`, enforcement is ours.
 - `docs/backup.md` — a oneshot job, a verdict file, dumps never files.
 - `docs/proxy.md` — the manifest is the public surface; NPM owns the host network.
 - `docs/alerting.md` — the monitor produces, vmalert decides, Alertmanager speaks; metrics are history.

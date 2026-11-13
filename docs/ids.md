@@ -50,7 +50,8 @@ README's "Intrusion detection".
 - **Intrusion detection is two engines and two privilege domains:**
   `suricata` (rootful, `deploy/root/`, enp8s0 + lo) sees packets and no TLS
   content; `crowdsec` (rootless) reads NPM's access log and Suricata's
-  alert-only feed, and nothing on the wire itself.
+  alert-only feed, and nothing on the wire itself. SSH is read from the journal
+  by `ids.sh`, not by CrowdSec (below).
   Neither is redundant: NPM terminates TLS, so the request exists only in its
   log, and the onion traffic exists only on the wire as ciphertext. Silencing
   either one loses a distinct half. `DISABLE_ONLINE_API=true` is deliberate
@@ -145,6 +146,26 @@ README's "Intrusion detection".
   Uptime-Kuma user agent must be -- that last one is the only probe the stock
   `crowdsecurity/whitelists` cannot answer for us, so it is what proves this file
   is loaded at all.
+
+## SSH is a roll-up check, not a third acquisition
+
+`sshd` is deliberately not a CrowdSec acquisition. Port 22 is not
+internet-exposed, so every client is private or LAN: the bouncer's `ipguard.py`
+refuses private and host-owned addresses, and the stack's LAN and host addresses
+are whitelisted in `s02-enrich` before a scenario runs. An acquisition would
+parse the lines and never ban them. The log is out of reach as well:
+`/var/log/secure` is `0600 root`, the rootless CrowdSec image has no
+`journalctl`, and `lastb` reads `/var/log/btmp` -- `0660 root:utmp` (permission
+denied to the operator) and empty on this EL10 host anyway.
+
+So `scripts/ids.sh` reads `journalctl -u sshd.service` -- the journal is what
+bootstrap's tmpfiles ACL makes readable to the login user, the same path
+`vector` reads -- and counts `Failed password`, `Invalid user` and
+`maximum authentication attempts exceeded` lines in the last six minutes. The
+status carries `ssh=ok|unreadable|na` and `ssh_fail=N`; an active sshd with an
+unreadable journal fails the roll-up, while a zero count after a successful read
+is just a quiet LAN. The count is in the monitor line and `stack_ids_ssh_fail`;
+`stack_ssh_bruteforce` warns when one roll-up crosses `MONITOR_SSH_FAIL_WARN`.
 
 ## What the sensor can attribute, and what it can ban
 

@@ -910,9 +910,10 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
   reference, bitcoind's RPC password against `secrets.env`, every clearweb vhost
   through nginx-proxy-manager (including
   the declared force-SSL redirect and its HSTS header) — then the spend
-  tripwire. It also writes the numbers behind the three checks whose fact is a
-  rate — unit restarts over an hour, disk saturation and Suricata bursts over 15
-  minutes — and those rules, not the sweep, decide when they are worth a warning.
+  tripwire. It also writes the numbers behind the four checks whose fact is a
+  rate — unit restarts over an hour, disk saturation, Suricata bursts and SSH
+  auth failures over 15 minutes — and those rules, not the sweep, decide when
+  they are worth a warning.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user** unit
   (Quadlet has no `.timer` type), like `backup.timer`.
 - `scripts/registrations.sh` — one alert per **BoltMesh signup**, every minute. It
@@ -1121,6 +1122,11 @@ it. The rendered unit lives in `/etc/containers/systemd/`, its config in
   public vhosts. It cannot attribute anything on the `.onion` vhosts: tor forwards
   to `host.containers.internal`, so NPM logs the host's own address for every
   onion visitor.
+- **SSH** is not a CrowdSec acquisition: port 22 is not internet-exposed, so
+  every client is private and enforcement is refused there anyway. `scripts/ids.sh`
+  counts failed `sshd` auth lines from the journal (bootstrap's ACL makes it
+  readable; `/var/log/secure` is root-only and `lastb`/`btmp` is unreadable and
+  empty) and reports `ssh=` and `ssh_fail=` in `ids.status`.
 
 **Detection then enforcement**: decisions reach nftables through `stack-bouncer`,
 never inline in the packet path, so a sensor crash cannot be an outage. It is also
@@ -1193,7 +1199,11 @@ ban/unban tool — it sees active decisions only.
 
 `ids.status` carries `eve=ok|missing|unreadable|na`: the alert count is a report
 only if the file was read, so a missing or unreadable `eve.json` fails the roll-up
-instead of leaving `alerts=0`. `ids.timer` runs at `*:2/5`, between the monitor's
+instead of leaving `alerts=0`. It also carries `ssh=ok|unreadable|na` and
+`ssh_fail=N`, the failed sshd auth lines in the last six minutes: an active sshd
+whose journal cannot be read fails the roll-up, and the count is history
+(`stack_ids_ssh_fail`); `stack_ssh_bruteforce` warns when one roll-up crosses
+`MONITOR_SSH_FAIL_WARN`. `ids.timer` runs at `*:2/5`, between the monitor's
 sweeps, and the monitor alerts on a stale or failed status. Counts are a *warning*,
 not a page; the rate is in VictoriaMetrics (`stack_ids_alerts`). eve.json is in the
 log store too (see [Logs and history](#logs-and-history)), so an alert reads next

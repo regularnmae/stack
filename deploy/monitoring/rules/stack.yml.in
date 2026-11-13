@@ -61,7 +61,7 @@ groups:
           summary: 'stack: {{ $labels.service }} is warning'
           description: '{{ with query (printf "stack_monitor_detail_info{service=%q}" $labels.service) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
 
-      # Three checks live here rather than in the sweep because their natural
+      # Four checks live here rather than in the sweep because their natural
       # shape is a rate, not a snapshot: monitor.sh writes the number, these
       # windows decide. Deciding them per sweep made the `host` and
       # `intrusion_detection` sections fire and resolve around every burst, since
@@ -93,6 +93,15 @@ groups:
         annotations:
           summary: 'stack: Suricata is reporting a burst'
           description: '{{ $value | humanize }} Suricata alert(s) in one report (threshold @MONITOR_IDS_ALERT_WARN@) within the last 15 minutes -- read @DATA_DIR@/ids/suricata/eve.json'
+
+      - alert: stack_ssh_bruteforce
+        expr: max_over_time(stack_ids_ssh_fail[15m]) > @MONITOR_SSH_FAIL_WARN@
+        keep_firing_for: @MONITOR_ALERT_HOLD_S@s
+        labels:
+          severity: warning
+        annotations:
+          summary: 'stack: SSH authentication is being brute-forced'
+          description: '{{ $value | humanize }} failed sshd auth line(s) in one IDS roll-up (six-minute window; threshold @MONITOR_SSH_FAIL_WARN@) within the last 15 minutes -- read journalctl -u sshd.service --since "-15 min"'
 
       # The producer's own liveness. A stopped monitor writes nothing, so its
       # last sample lives on in the store and `time() - value` keeps growing --

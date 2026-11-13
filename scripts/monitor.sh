@@ -14,9 +14,10 @@
 # script -- `for:` damps the onset and `keep_firing_for:` the reset, so there is
 # no explicit endsAt to remember and no lock to take.
 #
-# Three checks (unit restarts, disk saturation, Suricata bursts) are decided in
-# the rules over a window, not here: their fact is a rate, and a per-sweep
-# verdict on a rate is an event that fires and resolves around every burst.
+# Four checks (unit restarts, disk saturation, Suricata bursts, SSH auth
+# failures) are decided in the rules over a window, not here: their fact is a
+# rate, and a per-sweep verdict on a rate is an event that fires and resolves
+# around every burst.
 #
 # A failure fails the dead-man's-switch heartbeat: a host that is down cannot
 # report itself, and neither can one whose mail is not leaving, so the heartbeat
@@ -1199,6 +1200,7 @@ head3 "intrusion detection"
 IDS_STATUS_FILE="$AUDIT_DIR/ids.status"
 ids_alerts=0
 ids_decisions=0
+ids_ssh_fail=0
 ids_up=0
 verdict_judge "$IDS_STATUS_FILE" fail "$(verdict_age ids)" "IDS roll-up" \
     "see $AUDIT_LOG" "ids.timer stopped, or ids.sh cannot read the sensor"
@@ -1206,16 +1208,20 @@ verdict_judge "$IDS_STATUS_FILE" fail "$(verdict_age ids)" "IDS roll-up" \
 # numbers are history, and reporting 0 would graph a dead sensor as a quiet one.
 ids_alerts=$(num_or "$(env_value "$IDS_STATUS_FILE" alerts)" 0)
 ids_decisions=$(num_or "$(env_value "$IDS_STATUS_FILE" decisions)" 0)
+ids_ssh_fail=$(num_or "$(env_value "$IDS_STATUS_FILE" ssh_fail)" 0)
 case "$VERDICT_OUTCOME" in
     ok)
         ids_up=1
-        ok "IDS: suricata=$(env_value "$IDS_STATUS_FILE" suricata) crowdsec=$(env_value "$IDS_STATUS_FILE" crowdsec), $ids_alerts alert(s), $ids_decisions decision(s)" ;;
+        ok "IDS: suricata=$(env_value "$IDS_STATUS_FILE" suricata) crowdsec=$(env_value "$IDS_STATUS_FILE" crowdsec), $ids_alerts alert(s), $ids_decisions decision(s), $ids_ssh_fail SSH auth failure(s)" ;;
     *)
         ids_up=0 ;;
 esac
 # The alert count is a report, not a page: it goes to VictoriaMetrics as
 # stack_ids_alerts and the rule holds a burst for 15 minutes. Deciding it here
 # made the section fire and resolve around every spike.
+# SSH failures are the same kind of report, with their own burst rule
+# (stack_ssh_bruteforce) over the last-window count in stack_ids_ssh_fail; SSH
+# is LAN-only, so the threshold is deliberately a warning.
 
 # The audit report: host-level changes no script in this repo makes (account
 # databases, sudoers, sshd, audit's own config), plus the hash diff over the
@@ -1463,6 +1469,7 @@ prom_ok=1
     printf 'stack_ids_up %s\n' "${ids_up:-0}"
     printf 'stack_ids_alerts %s\n' "${ids_alerts:-0}"
     printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
+    printf 'stack_ids_ssh_fail %s\n' "${ids_ssh_fail:-0}"
     printf 'stack_bouncer_bans %s\n' "${bouncer_bans:-0}"
     printf 'stack_bouncer_skipped %s\n' "${bouncer_skipped:-0}"
     printf 'stack_smart_up %s\n' "${smart_up:-0}"

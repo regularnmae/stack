@@ -495,6 +495,7 @@ MONITOR_SWEEP_MAX_AGE_S=$(resolve_monitor_timing MONITOR_SWEEP_MAX_AGE_S 900)
 MONITOR_RESTART_MAX=$(resolve_monitor_timing MONITOR_RESTART_MAX 3)
 MONITOR_IO_UTIL_PCT=$(resolve_monitor_timing MONITOR_IO_UTIL_PCT 90)
 MONITOR_IDS_ALERT_WARN=$(resolve_monitor_timing MONITOR_IDS_ALERT_WARN 20)
+MONITOR_SSH_FAIL_WARN=$(resolve_monitor_timing MONITOR_SSH_FAIL_WARN 10)
 
 # write_secret is scripts/lib/datadir.sh's write_env_file (atomic, 0600);
 # configure.sh writes the BTCPay env files with the same one, so both halves
@@ -672,6 +673,7 @@ s|@MONITOR_SWEEP_MAX_AGE_S@|$(esc "$MONITOR_SWEEP_MAX_AGE_S")|g
 s|@MONITOR_RESTART_MAX@|$(esc "$MONITOR_RESTART_MAX")|g
 s|@MONITOR_IO_UTIL_PCT@|$(esc "$MONITOR_IO_UTIL_PCT")|g
 s|@MONITOR_IDS_ALERT_WARN@|$(esc "$MONITOR_IDS_ALERT_WARN")|g
+s|@MONITOR_SSH_FAIL_WARN@|$(esc "$MONITOR_SSH_FAIL_WARN")|g
 s|@LOGS_RETENTION@|$(esc "$LOGS_RETENTION")|g
 s|@LOGS_MAX_BYTES@|$(esc "$LOGS_MAX_BYTES")|g
 s|@MONERO_MCP_TOKEN@|$(esc "${MONERO_MCP_TOKEN:-}")|g

@@ -24,8 +24,8 @@ not faults").
   interval) is what ends a live alert.
 - **`send_resolved: false` by default** makes every recovery silent.
 - **A check whose fact is a rate is decided by a rule over a window**, not by the
-  sweep: unit restarts (`increase` over an hour), disk saturation and Suricata
-  bursts (`avg`/`max` over 15 minutes). The sweep writes the number. A per-sweep
+  sweep: unit restarts (`increase` over an hour), disk saturation, Suricata and
+  SSH bursts (`avg`/`max` over 15 minutes). The sweep writes the number. A per-sweep
   verdict on a rate is an event -- true for one sweep -- so the section fired and
   resolved around every burst.
 - **The flap damper is a pair: `for:` holds the onset and `keep_firing_for:`
@@ -122,9 +122,10 @@ not faults").
   `$DATA_DIR/config/monitoring/vmalert/stack.yml`) fire one alert per section
   after `for: MONITOR_ALERT_FOR`, hold it for `keep_firing_for:
   MONITOR_ALERT_HOLD_S` after the section clears, and pull the detail into the
-  annotation with vmalert's `query` template function. Three checks are not
+  annotation with vmalert's `query` template function. Four checks are not
   sections but rules of their own over a window -- `stack_unit_restarting`,
-  `stack_disk_saturated`, `stack_ids_noisy` -- because their fact is a rate.
+  `stack_disk_saturated`, `stack_ids_noisy`, `stack_ssh_bruteforce` -- because
+  their fact is a rate.
   Alertmanager owns grouping, inhibition, silences and delivery, and a recovery
   is vmalert's transition to inactive -- there is no `endsAt` for the producer to
   send and no producer state to keep. Five traps, all load-bearing:
