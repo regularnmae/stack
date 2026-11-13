@@ -56,7 +56,7 @@ TMP_ERR=$(mktemp) || { rm -f "$TMP_JSON"; verdict_write fail "could not create a
 # A killed run must not leave the previous result=ok in place. The timer's
 # TimeoutStartSec is the other half: a SIGKILL cannot run this, so the status
 # age check backstops it (deploy/root/status.sh).
-# shellcheck disable=SC2317  # invoked by the EXIT trap below
+# shellcheck disable=SC2317,SC2329  # invoked by the EXIT trap below
 cleanup() {
     rm -f "$TMP_JSON" "$TMP_ERR"
     verdict_unrecorded "the SMART probe exited without recording a verdict"
