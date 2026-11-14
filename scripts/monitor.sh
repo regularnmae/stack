@@ -2,7 +2,7 @@
 # Health monitor and spend tripwire for the stack.
 #
 #   scripts/monitor.sh              # run every check, log, heartbeat, alert
-#   scripts/monitor.sh --quiet      # no stdout (what deploy/monitor.service runs)
+#   scripts/monitor.sh --quiet      # no stdout; failures go to stderr (monitor.service)
 #   scripts/monitor.sh --no-verify  # skip the verify.sh base sweep
 #   scripts/monitor.sh --test       # send one real alert through Alertmanager
 #
@@ -505,18 +505,58 @@ free_pct() {
     fi
 }
 
-for target in "$DATA_DIR" /; do
+# Space and inodes are per filesystem, not per path: $STACK_BACKUP_DIR defaults
+# under $HOME, and /home is often a separate device. Read every path that can
+# brick a different part of the stack, but check each st_dev once so one full
+# disk is one finding, not one per path name.
+disk_seen=" "
+for target in / "$DATA_DIR" "$HOME" "$STACK_BACKUP_DIR"; do
+    if [ ! -d "$target" ]; then
+        soft "disk check skipped: $target does not exist"
+        continue
+    fi
+    if ! disk_key=$(stat -c %d -- "$target" 2>/dev/null); then
+        soft "disk check skipped: could not stat $target"
+        continue
+    fi
+    case "$disk_seen" in
+        *" $disk_key "*)
+            ok "$target is on a filesystem already checked"
+            continue ;;
+    esac
+    disk_seen="$disk_seen$disk_key "
+
     dfree=$(free_pct "$target" 2>/dev/null || true)
     ifree=$(free_pct --inodes "$target" 2>/dev/null || true)
-    if [ -n "$dfree" ] && [ "$dfree" -lt "$THRESH_DISK" ]; then
+    # df -P's Use% is rounded up, so free_pct can be negative on a full disk;
+    # a non-numeric answer is a failed read, not "0% free".
+    case "$dfree" in ''|*[!0-9-]*|-) dfree="" ;; esac
+    case "$ifree" in ''|*[!0-9-]*|-) ifree="" ;; esac
+    if [ -z "$dfree" ]; then
+        soft "could not read disk usage for $target"
+    elif [ "$dfree" -lt "$THRESH_DISK" ]; then
         fail "disk almost full: $target has ${dfree}% free (threshold ${THRESH_DISK}%)"
     else
-        ok "$target has ${dfree:-?}% disk free"
+        ok "$target has ${dfree}% disk free"
     fi
     if [ -n "$ifree" ] && [ "$ifree" -lt "$THRESH_INODES" ]; then
         fail "inodes almost exhausted on $target: ${ifree}% free (threshold ${THRESH_INODES}%)"
     fi
 done
+
+# A clock that stopped being disciplined breaks TLS validation and ACME, and
+# gives Lightning's gossip and invoices the wrong wall time. timedated reads the
+# kernel's STA_UNSYNC state, so this works with chrony or systemd-timesyncd.
+if command -v timedatectl >/dev/null 2>&1; then
+    ntp_sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null) || ntp_sync=""
+    case "$ntp_sync" in
+        yes) ok "clock is synchronized by NTP" ;;
+        no)  fail "clock is not synchronized by NTP: TLS/ACME and Lightning timestamps will drift (timedatectl status; chronyc tracking)" ;;
+        *)   soft "could not read NTPSynchronized from timedatectl; skipped the clock check" ;;
+    esac
+else
+    soft "timedatectl is unavailable; skipped the clock check"
+fi
 
 # Saturation, not space: a disk 100% busy at a few MB/s is why every chain crawls,
 # and it is invisible in df. io_ticks is field 10 of /sys/block/<dev>/stat -- note
@@ -1075,7 +1115,89 @@ if [ "$VERDICT_OUTCOME" = ok ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. the public surface -- every clearweb vhost through nginx-proxy-manager.
+# 4. failed systemd units -- the gaps the timers and verdict files do not cover
+# ---------------------------------------------------------------------------
+# A timer can be active while the oneshot it starts fails, and a failed job with
+# no status file (the distro's audit-rules.service is the example) is invisible
+# to every check above. Read both managers: the stack's units are user units,
+# while audit-rules and the distro's boot jobs are system units.
+#
+# `systemctl --failed` only sees the state a stop or reset-failed has already
+# cleared. An inactive oneshot keeps its last exit code, so the second read names
+# audit-rules after a stop: inactive now, ExecMainStatus=1, watches 9/9. Both are
+# warnings, not pages: augenrules exits 1 on "Rule exists" even with a correct
+# ruleset, and the checks that own each effect (audit watches, bouncer, backup
+# age, IDS) already decide the critical level. monitor.service is excluded from
+# the user list: a sweep that finds any other problem is itself failed until the
+# next start and must not report itself.
+head3 "systemd units"
+unit_faults=()
+unit_read_ok=1
+if command -v systemctl >/dev/null 2>&1; then
+    if failed_system=$(systemctl --failed --no-legend --plain --no-pager 2>/dev/null); then
+        failed_system=$(printf '%s\n' "$failed_system" | awk '{print $1}' | paste -sd' ' -)
+        [ -n "$failed_system" ] && unit_faults+=("system: $failed_system")
+    else
+        unit_read_ok=0
+        soft "could not read the system manager's failed units; skipped that half of the check"
+    fi
+    if failed_user=$(systemctl --user --failed --no-legend --plain --no-pager 2>/dev/null); then
+        failed_user=$(printf '%s\n' "$failed_user" \
+            | awk '$1 != "monitor.service" {print $1}' | paste -sd' ' -)
+        [ -n "$failed_user" ] && unit_faults+=("user: $failed_user")
+    else
+        unit_read_ok=0
+        soft "could not read the user manager's failed units; skipped that half of the check"
+    fi
+
+    # Inactive system oneshots: the last invocation's exit code survives a stop,
+    # unlike the failed state. Only services have ExecMainStatus; the user tier's
+    # jobs carry verdict files, so the history that matters here is the system
+    # manager's.
+    inactive_units=""
+    if inactive_units=$(systemctl list-units --all --type=service --state=inactive \
+        --no-legend --plain --no-pager 2>/dev/null); then
+        inactive_units=$(printf '%s\n' "$inactive_units" | awk '{print $1}')
+        if [ -n "$inactive_units" ]; then
+            mapfile -t inactive_oneshot_units <<< "$inactive_units"
+            if last_out=$(systemctl show "${inactive_oneshot_units[@]}" \
+                -p Id -p Type -p ExecMainStatus --no-pager 2>/dev/null); then
+                last_failed=$(printf '%s\n' "$last_out" \
+                    | awk 'BEGIN { RS=""; FS="\n" }
+                        {
+                            id=""; type=""; status=""
+                            for (i = 1; i <= NF; i++) {
+                                if ($i ~ /^Id=/) { id=$i; sub(/^Id=/, "", id) }
+                                else if ($i ~ /^Type=/) { type=$i; sub(/^Type=/, "", type) }
+                                else if ($i ~ /^ExecMainStatus=/) { status=$i; sub(/^ExecMainStatus=/, "", status) }
+                            }
+                            if (type == "oneshot" && status ~ /^[0-9]+$/ && status + 0 != 0)
+                                printf "%s (exit %s) ", id, status
+                        }' | sed 's/ $//')
+                [ -n "$last_failed" ] && unit_faults+=("inactive oneshot: $last_failed")
+            else
+                unit_read_ok=0
+                soft "could not read the last exit status of inactive services; skipped that half of the check"
+            fi
+        fi
+    else
+        unit_read_ok=0
+        soft "could not list inactive services; skipped the oneshot last-exit check"
+    fi
+else
+    unit_read_ok=0
+    soft "systemctl is unavailable; skipped the failed-unit check"
+fi
+if [ "${#unit_faults[@]}" -gt 0 ]; then
+    for unit_fault in "${unit_faults[@]}"; do
+        soft "failed unit(s): $unit_fault -- systemctl status/journalctl names the cause"
+    done
+elif [ "$unit_read_ok" = 1 ]; then
+    ok "no systemd unit failed or left a failed oneshot invocation"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. the public surface -- every clearweb vhost through nginx-proxy-manager.
 #
 # The status page's monitors are UI-owned now, so the sweep owns this check. The
 # probe connects to 127.0.0.1, not the public address: NPM terminates TLS and
@@ -1181,7 +1303,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. the spend tripwire
+# 6. the spend tripwire
 # ---------------------------------------------------------------------------
 head3 "spend tripwire"
 audit_out=$("$REPO_DIR/scripts/spend-audit.sh" 2>&1) || audit_rc=$?
@@ -1203,7 +1325,7 @@ if [ "$audit_trips" = 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. intrusion detection -- through ids.sh's status file, never directly
+# 7. intrusion detection -- through ids.sh's status file, never directly
 # ---------------------------------------------------------------------------
 head3 "intrusion detection"
 # The engines are not touched from here: Suricata is a rootful system unit whose
@@ -1288,7 +1410,7 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. the alert path itself
+# 8. the alert path itself
 # ---------------------------------------------------------------------------
 # Checked before the record so a broken path shows in the same sweep's exit code
 # and audit log. Four failures are distinguishable here and nowhere else: the
@@ -1396,7 +1518,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. the record, the heartbeat, the alert
+# 9. the record, the heartbeat, the alert
 # ---------------------------------------------------------------------------
 status=ok
 [ "${#PROBLEMS[@]}" -gt 0 ] && status=fail
@@ -1523,15 +1645,26 @@ fi
 } >> "$AUDIT_LOG"
 
 if [ "${#PROBLEMS[@]}" -gt 0 ]; then
-    say ""
-    say "${#PROBLEMS[@]} problem(s):"
-    printf '  - %s\n' "${PROBLEMS[@]}" | { [ "$QUIET" = 1 ] || cat; }
+    if [ "$QUIET" = 1 ]; then
+        # systemd journals only the exit status otherwise; the timer's journal
+        # must name the fault, not just "failed".
+        summary >&2
+    else
+        say ""
+        say "${#PROBLEMS[@]} problem(s):"
+        printf '  - %s\n' "${PROBLEMS[@]}"
+    fi
     exit 1
 fi
 
 if [ "$prom_ok" = 0 ]; then
-    say ""
-    say "no problems, but the facts could not be written (see above)"
+    if [ "$QUIET" = 1 ]; then
+        printf 'monitor: no check problems, but the facts could not be written to %s; no rule can fire\n' \
+            "$DATA_DIR/monitoring/textfile/monitor.prom" >&2
+    else
+        say ""
+        say "no problems, but the facts could not be written (see above)"
+    fi
     exit 1
 fi
 

@@ -909,8 +909,10 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
   Read-only: it starts nothing and rewrites no config. It runs `verify.sh` for the
   container/MCP base checks and adds the ones nothing else does: chain freshness
   (bitcoind, Fulcrum's Electrum tip against bitcoind's height, `monerod`, the
-  wallet's lag), CLN peers and offline channels, host space and inodes, SMART
-  disk health from the root probe, backup and dump age, certificate expiry, the
+  wallet's lag), CLN peers and offline channels, free space and inodes on every
+  filesystem behind `/`, the data dir, `$HOME` and the backup dir, NTP
+  synchronization, failed systemd units, SMART disk health from the root probe,
+  backup and dump age, certificate expiry, the
   schedules themselves, the metrics and log pipelines going quiet, journald
   persistence and podman's event backend, live runes the stack does not
   reference, bitcoind's RPC password against `secrets.env`, every clearweb vhost
@@ -925,7 +927,9 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
   lines — a check skipped by request, a service not yet set up — are expected
   absences and are not carried.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user** unit
-  (Quadlet has no `.timer` type), like `backup.timer`.
+  (Quadlet has no `.timer` type), like `backup.timer`. The timer runs it with
+  `--quiet`: a failing sweep writes its problem list to the journal, so
+  `journalctl -u monitor.service` names the reason; a hand run prints every check.
 - `scripts/registrations.sh` — one alert per **BoltMesh signup**, every minute. It
   reads the app's `users` table, keeps a `(created_at, id)` watermark so a failed
   push is retried, and seeds it on first run. An event, not a fault: it does not go

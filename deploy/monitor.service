@@ -22,8 +22,8 @@ Type=oneshot
 # flap hold-down and the sync grace. The leading '-' makes it optional -- with
 # the file absent the monitor still runs, journal only.
 EnvironmentFile=-@CONFIG_DIR@/monitoring/monitor.env
-# --quiet: the journal gets the summary lines, not the whole sweep; running
-# scripts/monitor.sh by hand prints everything.
+# --quiet: the journal gets only a failing sweep's problem list, not the whole
+# sweep; running scripts/monitor.sh by hand prints every check.
 ExecStart=@REPO_DIR@/scripts/monitor.sh --quiet
 # A hung curl must not pile runs up behind the timer's next tick.
 TimeoutStartSec=300

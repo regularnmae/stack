@@ -70,11 +70,14 @@ not faults").
   and `monitor.sh` read five keys no file mentioned. `ci.yml` therefore fails
   when `monitor.sh` resolves a `MONITOR_*` key the example does not declare —
   that check is the only thing keeping a new threshold discoverable. It carries
-  the host checks (disk space, inodes, SMART disk health,
-  backup age, certificate expiry, NIC errors/drops, the
-  hottest sensor, a stale metrics textfile, the exporter that serves it, the
-  backup/drill/dump/metrics and registrations **schedules**, journald's persistence, podman's event backend,
-  the syslog socket, the signup watcher's freshness), the alert path itself
+  the host checks (disk space and inodes on every filesystem behind `/`, the
+  data dir, `$HOME` and the backup dir, NTP synchronization, SMART disk health,
+  backup age, certificate expiry, NIC errors/drops, the hottest sensor, a stale
+  metrics textfile, the exporter that serves it, the backup/drill/dump/metrics
+  and registrations **schedules**, journald's persistence, podman's event
+  backend, the syslog socket, the signup watcher's freshness), the failed-unit
+  check (current failures in both managers and inactive oneshots whose last run
+  exited non-zero), the alert path itself
   (the store answers, vmalert answers and its rules loaded, Alertmanager answers
   and its config parses, a receiver is filled in, and nothing failed to deliver
   since the last sweep), and the
@@ -90,6 +93,27 @@ not faults").
   publish, never DNS: `--connect-to` deliberately bypasses it. A declared
   `force-ssl` host must answer `:80` with `301`/`308` and carry HSTS on the
   HTTPS response; a plaintext `200` is a fault, not a healthy vhost.
+
+- **Failed units are a warning, and the sweep reads two facts about them.**
+  `systemctl --failed` (system and user) names what is failed now. A oneshot that
+  is stopped after a failure keeps its `ExecMainStatus`, so the sweep also reads
+  the last exit of inactive system services and names a non-zero oneshot — this
+  is how `audit-rules.service` is caught after `systemctl stop`, when
+  `--failed` is already empty. Both are warnings, not pages: `augenrules` exits
+  1 on "Rule exists" with the nine watches loaded, and the checks that own each
+  effect (audit watches, bouncer, backup age, IDS) already decide the critical
+  level. `monitor.service` is excluded from the user list, because a failing
+  sweep must not report itself.
+
+- **The clock is a check, not an assumption.** `timedatectl show -p
+  NTPSynchronized` is a yes/no fact; `no` fails because certificate issuance and
+  Lightning's wall-clock checks depend on it. It works with chrony or
+  systemd-timesyncd.
+
+- **`--quiet` hides the per-check output, not the reason.** The timer runs the
+  sweep with `--quiet`; when it fails, the final problem list is written to
+  stderr, so `journalctl -u monitor.service` names the fault instead of only
+  "Failed". A hand run prints every check.
 
 - **SMART is a root-written verdict, not a `smartctl` call in the sweep.** Opening
   a block device needs root, so `stack-smart.timer` runs
