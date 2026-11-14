@@ -51,9 +51,12 @@ The operator narrative is README's "Proxy hosts", "Tor onion services" and
   with `kuma_add_host = true` (all but the status host and MCP, which are the
   WAN canary), so UI-authored monitors resolve their vhosts on the host instead
   of hairpinning through the router as the WAN address. And `scripts/monitor.sh`
-  probes every clearweb vhost through NPM on loopback (`NPM_DOMAINS` and the
-  aligned `NPM_FORCE_SSL`, from the manifest), which is the continuous
-  public-surface check the status page used to be the only one for.
+  probes every clearweb vhost through NPM on loopback (`NPM_DOMAINS`, and the
+  aligned `NPM_FORCE_SSL`/`NPM_PROBE_PATHS`, from the manifest), which is the
+  continuous public-surface check the status page used to be the only one for.
+  `[npm.xmr_explorer]` declares `/style.css` as its probe path: the explorer's
+  root blocks while monerod syncs, so probing `/` would page on a syncing node
+  (verify.sh already uses the static asset for the same reason).
 
 - **The monitors to create in the UI, once** (this is the knowledge the deleted
   declaration carried; keep it in step with the public hosts):

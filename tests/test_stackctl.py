@@ -516,8 +516,13 @@ probe_args = '{{}}'
         domains = out.split("NPM_DOMAINS=(")[1].split(")", 1)[0].split()
         nodes = out.split("NPM_NEEDS_NODES=(")[1].split(")", 1)[0].split()
         force = out.split("NPM_FORCE_SSL=(")[1].split(")", 1)[0].split()
+        paths = out.split("NPM_PROBE_PATHS=(")[1].split(")", 1)[0].split()
         self.assertEqual(len(nodes), len(domains))
         self.assertEqual(len(force), len(domains))
+        self.assertEqual(len(paths), len(domains))
+        self.assertEqual(dict(zip(domains, paths))["xmr.boltmesh.net"],
+                         "/style.css")
+        self.assertEqual([p for p in paths if p != "/"], ["/style.css"])
         self.assertEqual([d for d, n in zip(domains, nodes) if n == "1"],
                          ["btcpay.boltmesh.net", "btc.boltmesh.net",
                           "xmr.boltmesh.net"])
@@ -564,7 +569,8 @@ probe_args = '{{}}'
             '"$BOLTMESH_FRONTEND_HOST" "${#PROBE_TOKEN_VARS[@]}" '
             '"${PROBE_TOKEN_VARS[0]}" "${PROBE_ARGS[0]}" '
             '"${PROBE_NEEDS_NODES[1]}" "${PROBE_SPEND_VARS[3]}" '
-            '"${#NPM_FORCE_SSL[@]}" "${NPM_FORCE_SSL[0]}"'
+            '"${#NPM_FORCE_SSL[@]}" "${NPM_FORCE_SSL[0]}" '
+            '"${#NPM_PROBE_PATHS[@]}" "${NPM_PROBE_PATHS[0]}"'
         )
         out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                              check=True).stdout.splitlines()
@@ -589,6 +595,8 @@ probe_args = '{{}}'
         self.assertEqual(out[18], "MONERO_MCP_SPEND_TOKEN")
         self.assertEqual(out[19], "8")       # one per clearweb [npm.*] host
         self.assertEqual(out[20], "1")       # frontend declares force-ssl
+        self.assertEqual(out[21], "8")       # one probe path per clearweb host
+        self.assertEqual(out[22], "/")       # default for a normal app root
 
     def test_validation_errors(self):
         from stackctl import manifest
