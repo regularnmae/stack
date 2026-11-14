@@ -915,6 +915,11 @@ rpcallowip=10.89.0.0/24
 # NBXplorer (BTCPay) needs the P2P endpoint to follow blocks; no host port is
 # published, so this only accepts the podman subnet.
 listen=1
+
+# No automatic onion service: tor is a separate container at 10.89.0.240, and
+# this stack publishes no bitcoind P2P onion. Without this Core retries its
+# default torcontrol 127.0.0.1:9051 every few minutes and logs a warning.
+listenonion=0
 EOF
     log "seeded $DATA_DIR/bitcoin/bitcoin.conf"
 fi

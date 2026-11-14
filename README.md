@@ -73,7 +73,10 @@ the whole chain; `fulcrum` indexes that chain for Bitcoin wallets over the
 Electrum protocol. `btcpay` (with `nbxplorer`) is the settlement engine: it
 creates invoices, watches the store's addresses, and receives the Lightning and
 Monero rails. NBXplorer needs bitcoind's P2P port, which is why `bitcoin.conf`
-must run with `listen=1` (still unpublished). See [Full nodes and disk](#full-nodes-and-disk) before sizing
+must run with `listen=1` (still unpublished); `listenonion=0` stops Core from
+retrying its default `torcontrol` on a loopback where this stack has no Tor
+(the `tor` unit is a separate container and publishes no bitcoind P2P onion).
+See [Full nodes and disk](#full-nodes-and-disk) before sizing
 the data disk. The two explorers read those services rather than keeping a
 chain of their own — see [Block explorers](#block-explorers).
 
