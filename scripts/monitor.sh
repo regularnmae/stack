@@ -1093,6 +1093,9 @@ fi
 # is not skipped, the HSTS header NPM emits with hsts_enabled (per host, never
 # advanced_config: see docs/proxy.md).
 #
+# The path is NPM_PROBE_PATHS (index-aligned, default `/`): xmr-explorer's root
+# blocks while monerod syncs, so its declaration probes a static asset instead.
+#
 # A 502 is also what a host deployed with --skip-daemons gets from every vhost
 # whose upstream is in CHAIN_UNITS: the declaration marks those needs_nodes, so
 # the same MONITOR_SKIP_NODES that drops the chain section reports them as
@@ -1107,12 +1110,13 @@ else
     for i in "${!NPM_DOMAINS[@]}"; do
         vhost="${NPM_DOMAINS[$i]}"
         force_ssl="${NPM_FORCE_SSL[$i]:-0}"
+        probe_path="${NPM_PROBE_PATHS[$i]:-/}"
         https_headers=""
         # http first: a declared force-ssl vhost must redirect here; anything
         # else is plaintext. A vhost without it may answer on :80 until a
         # certificate exists.
         pcode=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 \
-            --connect-to "$vhost:80:127.0.0.1:80" "http://$vhost/" 2>/dev/null) || pcode=000
+            --connect-to "$vhost:80:127.0.0.1:80" "http://$vhost$probe_path" 2>/dev/null) || pcode=000
         if [ "$force_ssl" = 1 ]; then
             case "$pcode" in
                 301|308) ;;
@@ -1135,7 +1139,7 @@ else
                 # Capture the https response headers in the same request: HSTS
                 # is a header-level fact, and -D - costs no second connection.
                 https_out=$(curl -sS -o /dev/null -D - -w '\n%{http_code}' -m 15 \
-                    --connect-to "$vhost:443:127.0.0.1:443" "https://$vhost/" 2>/dev/null) \
+                    --connect-to "$vhost:443:127.0.0.1:443" "https://$vhost$probe_path" 2>/dev/null) \
                     || https_out=""
                 if [ -n "$https_out" ]; then
                     pcode=${https_out##*$'\n'}

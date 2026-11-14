@@ -63,7 +63,7 @@ _RESERVED_ENVS = frozenset({
     "PROBE_TOKEN_VARS", "PROBE_TOOLS", "PROBE_ARGS",
     "PROBE_NEEDS_NODES", "PROBE_SPEND_VARS",
     "ONION_NAMES", "ONION_TARGETS", "ONION_MIRRORS", "ONION_PATHS", "ONION_CODES",
-    "NPM_DOMAINS", "NPM_NEEDS_NODES", "NPM_FORCE_SSL",
+    "NPM_DOMAINS", "NPM_NEEDS_NODES", "NPM_FORCE_SSL", "NPM_PROBE_PATHS",
     "KUMA_ADD_HOST_HOSTS", "KUMA_STATUS_SLUG",
     "PATH", "IFS", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME",
     "ENV", "BASH_ENV", "PS1", "PS4", "CDPATH", "GLOBIGNORE", "SHELLOPTS",
@@ -108,10 +108,10 @@ class NpmHost:
     """
 
     __slots__ = ("domain", "scheme", "host", "port", "flags", "container",
-                 "needs_nodes")
+                 "needs_nodes", "probe_path")
 
     def __init__(self, domain: str, scheme: str, host: str, port: int,
-                 flags: str, container: str = ""):
+                 flags: str, container: str = "", probe_path: str = "/"):
         self.domain = domain
         self.scheme = scheme
         self.host = host
@@ -119,6 +119,9 @@ class NpmHost:
         self.flags = flags  # the comma-separated string, as declared
         self.container = container
         self.needs_nodes = False
+        # The path monitor.sh probes. `/` is the default; an app whose root
+        # blocks while its upstream syncs (xmr-explorer) declares a static one.
+        self.probe_path = probe_path
 
     def has_flag(self, flag: str) -> bool:
         # lib.sh's has_flag(): match on the comma-wrapped string, so "mcp"
@@ -220,6 +223,9 @@ class Manifest:
         # started, so the declaration says which. NPM_FORCE_SSL is aligned too:
         # monitor.sh requires a declared force-ssl host to answer :80 with a
         # redirect, because a plaintext 200 is a fault, not a healthy vhost.
+        # NPM_PROBE_PATHS is the path each sweep requests; it defaults to `/`
+        # and xmr-explorer overrides it with a static asset because its root
+        # blocks while monerod syncs.
         public = [h for h in self.npm if not h.domain.endswith(".onion")]
         if public:
             lines.append(_array("NPM_DOMAINS", [h.domain for h in public]))
@@ -228,6 +234,8 @@ class Manifest:
             lines.append(_array("NPM_FORCE_SSL",
                                 ["1" if h.has_flag("force-ssl") else "0"
                                  for h in public]))
+            lines.append(_array("NPM_PROBE_PATHS",
+                                [h.probe_path for h in public]))
         # The vhosts uptime-kuma's own UI-authored monitors may resolve on the
         # host (install.sh renders --add-host=<domain>:host-gateway per entry):
         # every host whose [host.*] did not opt out.
@@ -437,8 +445,12 @@ def load(path: str, overrides: bool = True) -> Manifest:
                 isinstance(f, str) and _FLAG_RE.fullmatch(f) for f in flags):
             die(f"deploy/services.toml: {where} flags must be a list of names "
                 f"like force-ssl, http2, ws, block, mcp")
+        probe_path = str(table.get("probe_path", "/"))
+        if not probe_path.startswith("/") or any(c.isspace() for c in probe_path):
+            die(f"deploy/services.toml: {where} probe_path '{probe_path}' must "
+                f"start with / and contain no whitespace")
         host = NpmHost(domain, scheme, forward_host, forward_port,
-                       ",".join(flags), container)
+                       ",".join(flags), container, probe_path)
         host.needs_nodes = _bool(table, "needs_nodes", where, False)
         if host.domain in npm_domains:
             die(f"deploy/services.toml: {where} and [npm.{npm_domains[host.domain]}] "

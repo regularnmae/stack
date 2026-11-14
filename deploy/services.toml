@@ -310,6 +310,9 @@ forward_host = "127.0.0.1"
 forward_port = 8109
 needs_nodes = true
 flags = ["force-ssl", "block"]
+# The explorer's / can block while monerod syncs; /style.css is the static
+# asset verify.sh already uses for the same reason.
+probe_path = "/style.css"
 
 [npm.status]
 host = "status"
