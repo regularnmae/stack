@@ -302,3 +302,14 @@ is just a quiet LAN. The count is in the monitor line and `stack_ids_ssh_fail`;
   `/var/log/audit/audit.log` is not a failed read — `aureport` exits 1 when there
   is no log at all, which is what an inert subsystem looks like, so that case
   still advances and the window stays bounded.
+
+- **The rules load after the data mount, not after `local-fs.target`.** The data
+  dir is mounted `nofail`, so systemd does not order `data.mount` before
+  `local-fs.target`; the distro's `audit-rules.service` waits only for the
+  target and can run first, at which point `augenrules` aborts on the first
+  `$DATA_DIR` watch with `ENOENT`, leaves the rest of the ruleset unloaded, and
+  `stack-audit` pages a false shortfall. `install.sh --root` installs a
+  `WantsMountsFor=$DATA_DIR` drop-in at
+  `/etc/systemd/system/audit-rules.service.d/10-stack-data.conf`. It uses
+  `WantsMountsFor`, not `RequiresMountsFor`, so a missing data disk does not
+  stop the host-level watches from loading.

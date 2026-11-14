@@ -230,6 +230,12 @@ install_root_tier() {
     fi
     install -d -m 750 /etc/audit/rules.d
     root_render "$DEPLOY_DIR/root/audit.rules" /etc/audit/rules.d/60-stack.rules 640 "$data"
+    # The data dir is a nofail mount, so the distro's audit-rules.service --
+    # which only waits for local-fs.target -- can run before data.mount and
+    # abort on the first @DATA_DIR@ watch. The drop-in orders it after the
+    # mount; docs/ids.md owns why WantsMountsFor, not RequiresMountsFor.
+    root_render "$DEPLOY_DIR/root/audit-rules-data.conf" \
+        /etc/systemd/system/audit-rules.service.d/10-stack-data.conf 644 "$data"
     aenv=$(mktemp)
     printf '# Written by deploy/install.sh --root; do not edit (deploy/root/ owns it).\nDATA_DIR=%s\n' "$data" > "$aenv"
     install -m 600 "$aenv" "$ROOT_CONFIG_DIR/audit.env"
