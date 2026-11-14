@@ -59,7 +59,8 @@ mcp_curl() { # container curl-args...
 # It is a request, not an agreement: the server may answer with an older
 # revision, and that answer is what every later request must name
 # (MCP_NEGOTIATED_VERSION). verify.sh compares the two and warns when a server
-# has moved, which is the only way a bump here is noticed.
+# has moved, and the monitor carries that warning -- the only way a bump here is
+# noticed without a hand run.
 MCP_PROTOCOL_VERSION='2025-06-18'
 MCP_INIT_BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"$MCP_PROTOCOL_VERSION\",\"capabilities\":{},\"clientInfo\":{\"name\":\"monitor\",\"version\":\"0\"}}}"
 

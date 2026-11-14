@@ -34,6 +34,17 @@ not faults").
 - **A notification is a state change, never a reminder** (`repeat_interval:
   8760h`). One mail when a section starts failing, one when it recovers, and
   nothing while it stays the same.
+- **`verify.sh`'s `warn` is the sweep's warning severity, and `skip` is not a
+  finding.** The monitor runs `verify.sh` as its base sweep and carries both
+  levels whether or not it exits non-zero -- a warning never fails its exit code,
+  so the exit code alone would hide it. Each `FAIL` line becomes a critical
+  finding and each `warn` line a warning, under the same `verify.sh` section.
+  `skip` is the level for an expected absence (a check skipped by request, a
+  service not yet set up, a job that has not run yet) and is deliberately not
+  carried, because a warning that is true on every sweep on a host that chose not
+  to run something is a permanent alert, and that is how an alert path stops
+  being read. A new check in `verify.sh` therefore has to pick its level: `warn`
+  reaches the alert path, `skip` does not.
 - **A failed delivery is read back on the next sweep**, because the alert path
   cannot report itself.
 - **The alert path is the host's own `curl`/`jq`, never `net_curl`.**
@@ -99,10 +110,12 @@ not faults").
   Alertmanager's config used to be checked in both places, so one fault arrived
   as two alerts with two holds and two recoveries. `verify.sh` no longer
   carries its Backups/Monitoring/Metrics/Alerting/Logs sections; its header says
-  which section owns each fact now. The rule that follows: a check belongs in the
-  sweep when it is a condition that clears and should page, and in `verify.sh`
-  when it is config drift worth naming to a human (a rendered unit that was never
-  applied, a hand-edited `servers.json`, the root tier's files).
+  which section owns each fact now. The placement rule follows: a condition the
+  monitor can read directly lives in `monitor.sh`; a check that needs the
+  installed stack (the render comparison, the per-prefix proxy probes, the root
+  tier's files) lives in `verify.sh`. Its findings are still in the sweep --
+  `FAIL` as critical, `warn` as warning (above) -- so moving a check there does
+  not make it human-only.
 
 - **The syslog socket is probed, not assumed:** sshd, PAM, sudo and cron all log
   through `/dev/log`, and a stale socket inode drops every one of those messages —

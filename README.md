@@ -361,7 +361,7 @@ Two read-only web explorers are served behind nginx-proxy-manager:
   (no ring/mixin or address-proof pages), but it is stateless and its image is
   a small Go build. Its healthcheck and status monitor use the static
   `/style.css`; the home page calls monerod's RPC, which can be slow enough to
-  time out while the node is in initial sync (`verify.sh` warns instead of
+  time out while the node is in initial sync (`verify.sh` skips instead of
   failing in that window).
 
 Both images are built locally from `btc-explorer/Containerfile` and
@@ -379,8 +379,8 @@ explorer is public; set `BTCEXP_BASIC_AUTH_PASSWORD` in
 `$DATA_DIR/config/btc-explorer/btc-explorer.env` and re-run
 `./deploy.sh --only btc-explorer` to put it behind basic auth (any username,
 that password). `verify.sh` asks each explorer for its chain height, which
-proves the path through to its daemon (the BTC check degrades to a warning when
-basic auth is on).
+proves the path through to its daemon (the BTC check skips when basic auth is
+on).
 
 ## Where the data lives
 
@@ -919,7 +919,11 @@ crash-loop, an offline channel, a stalled chain or a spend is otherwise silent.
   tripwire. It also writes the numbers behind the four checks whose fact is a
   rate — unit restarts over an hour, disk saturation, Suricata bursts and SSH
   auth failures over 15 minutes — and those rules, not the sweep, decide when
-  they are worth a warning.
+  they are worth a warning. `verify.sh`'s own non-fatal findings ride the same
+  path: its `warn` lines are carried as warning alerts (unit and protocol drift,
+  the WAN guard, kuma's host-gateway entries, the root tier), while its `skip`
+  lines — a check skipped by request, a service not yet set up — are expected
+  absences and are not carried.
 - `deploy/monitor.timer` + `deploy/monitor.service` — a plain systemd **user** unit
   (Quadlet has no `.timer` type), like `backup.timer`.
 - `scripts/registrations.sh` — one alert per **BoltMesh signup**, every minute. It
@@ -1224,8 +1228,9 @@ probes every monitor once a minute including a permanent 401 on the token-gated
 ones, and the podman network and the LAN are internal by definition.
 
 Read that file before tightening a scenario. `./verify.sh` replays a sample
-access-log line through `cscli explain` every sweep, because a change to NPM's
-`log_format` would otherwise disable detection silently. Every entry is a *plain
+access-log line through `cscli explain` every sweep (the monitor runs it and
+carries the warning), because a change to NPM's `log_format` would otherwise
+disable detection silently. Every entry is a *plain
 string match*, so it is written per octet — and an entry one octet too short is a
 silent widening, not a syntax error. A whitelisted event is dropped in
 `s02-enrich` before the scenarios, so it never becomes a decision and `cscli
@@ -1450,9 +1455,10 @@ It is not a service — no unit, no container, no port, nothing in the backup se
 credential either: `servers.json` expands `$AGENT_MCP_BASE_URL` and reads each
 server's token from `$DATA_DIR/config/<server>/token.env` on every call, so
 `rotate.sh` needs no second step and no copy can go stale. A host that changed
-`MCP_HOST` exports `AGENT_MCP_BASE_URL` to match; `./verify.sh` warns when the two
-disagree. The prefixes live in that registry rather than being derived from the
-manifest, so moving one means editing both — `./verify.sh` fails on the drift.
+`MCP_HOST` exports `AGENT_MCP_BASE_URL` to match; `./verify.sh` skips that check
+when the two disagree (the operator's call). The prefixes live in that registry
+rather than being derived from the manifest, so moving one means editing both —
+`./verify.sh` fails on the drift.
 
 ## Tor onion services
 

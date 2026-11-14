@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Reaching a service and deciding whether it is up: the netcheck container the
 # bridge-network checks speak through, the host's own curl for loopback binds,
-# and the health/wait contract in docs/units.md.
+# the health/wait contract in docs/units.md, and the levels verify.sh's output
+# carries into the monitor.
 
 # The image the bridge-network checks speak through: a curl client (see
 # netcheck/Containerfile), built by deploy/install.sh. A container, not the
@@ -67,6 +68,24 @@ container_health_state() { # status
         *'(healthy)'*)                         printf 'healthy' ;;
         'Up'*)                                 printf 'up' ;;
         *)                                     printf 'other' ;;
+    esac
+}
+
+# One line of verify.sh's output, after the caller strips the ANSI colour, as the
+# level the sweep carries. Anchored on the two-space indent verify.sh prints -- a
+# message that merely mentions FAIL is not a finding, and neither the summary nor
+# a path can look like one. `skip` is the expected-absence level (a check skipped
+# by request, a service not yet set up) and is deliberately not carried; `ok` and
+# anything else are not findings either. One of: fail | warn | skip | ok | other
+# (tested in tests/test-lib.sh). scripts/monitor.sh maps fail -> critical and
+# warn -> warning; docs/alerting.md owns the split.
+verify_line_level() { # line
+    case "$1" in
+        '  FAIL '*) printf 'fail' ;;
+        '  warn '*) printf 'warn' ;;
+        '  skip '*) printf 'skip' ;;
+        '  ok '*)   printf 'ok' ;;
+        *)          printf 'other' ;;
     esac
 }
 

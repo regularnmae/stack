@@ -99,8 +99,8 @@ README's "Intrusion detection".
   egress is tripping a rule", not a quiet host. The address is a declaration
   (`stack.conf`), never a DNS lookup, because a future CDN would turn a lookup
   into an exemption for one of its edges; `verify.sh` warns when it disagrees
-  with the source address NPM logs for the canary, which is how a WAN change is
-  noticed.
+  with the source address NPM logs for the canary, and the monitor carries that
+  warning, so a WAN change is noticed without a hand run.
   Failure directions are chosen: an unreachable LAPI leaves existing bans alone
   (never read "no decisions" as "unban all"), and a failed `nft -f` rolls back
   atomically. `scripts/monitor.sh` fails on a stale `audit/bouncer.status`, which
@@ -124,8 +124,9 @@ README's "Intrusion detection".
   Two more traps: NPM writes a **custom log_format**, not `combined`, so the
   stock nginx parser matches nothing --
   `deploy/crowdsec/parsers/s01-parse/stack-npm.yaml` owns both shapes and
-  `verify.sh` replays **both** of them through `cscli explain` on every sweep,
-  because a silent log-format change turns detection off. The second shape is the
+  `verify.sh` replays **both** of them through `cscli explain` on every sweep;
+  the monitor carries the warning when either stops parsing, because a silent
+  log-format change turns detection off. The second shape is the
   trap inside the format itself: NPM logs `$upstream_status` *before* `$status`,
   and the first is `-` whenever no upstream was contacted (the 301 onto https, a
   499 on a client abort). Requiring an INT there dropped 13% of this host's real

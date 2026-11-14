@@ -18,8 +18,8 @@ assert_eq 5 "$(dur_s 4.5s)" 'duration rounds up'
 # A failing probe is still "Up 5 minutes (unhealthy)", and an undecided one is
 # "Up 10 seconds (starting)" (podman 5.x) or "(health: starting)" (Docker and
 # some builds) -- both start with "Up", so the status must be classified by its
-# health suffix. verify.sh fails on `unhealthy` and the monitor carries only its
-# FAIL lines, so a regression here is a silent red.
+# health suffix. verify.sh fails on `unhealthy`; the monitor carries its FAIL and
+# warn lines, so a regression here is a silent red either way.
 assert_eq unhealthy "$(container_health_state 'Up 5 minutes (unhealthy)')" 'unhealthy probe'
 assert_eq starting  "$(container_health_state 'Up 10 seconds (health: starting)')" 'probe not yet decided (Docker-style)'
 assert_eq starting  "$(container_health_state 'Up 10 seconds (starting)')" 'probe not yet decided (podman 5.x)'
@@ -27,6 +27,16 @@ assert_eq healthy   "$(container_health_state 'Up 3 hours (healthy)')" 'healthy 
 assert_eq up        "$(container_health_state 'Up 2 hours')" 'no probe defined'
 assert_eq down      "$(container_health_state '')" 'not running'
 assert_eq other     "$(container_health_state 'Exited (1) 5 minutes ago')" 'exited'
+
+# The monitor carries verify.sh's FAIL and warn lines; skip is the expected-absence
+# level and must never become a finding (a restart's `starting` probe would
+# otherwise page). Anchored on the two-space prefix, so a message that merely
+# mentions FAIL is not one.
+assert_eq fail  "$(verify_line_level '  FAIL bitcoind is not running')" 'FAIL is carried as critical'
+assert_eq warn  "$(verify_line_level '  warn stack.conf has no STACK_WAN_IP')" 'warn is carried as warning'
+assert_eq skip  "$(verify_line_level '  skip daemon tier skipped by request')" 'skip is not carried'
+assert_eq ok    "$(verify_line_level '  ok   searxng-mcp /health 200')" 'ok is not a finding'
+assert_eq other "$(verify_line_level '68 check(s) failed; the FAIL was elsewhere')" 'an unanchored FAIL is not a finding'
 assert_eq '[["method^getinfo","method^listpeers"]]' \
     "$(rune_json getinfo listpeers)" 'rune restriction JSON'
 

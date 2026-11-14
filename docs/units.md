@@ -90,10 +90,12 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   both changed and rebuilt is restarted once, not twice. `restart_applied`
   restarts only when `unit_was_changed` or the container's image id differs from
   the tag's, and starts an unchanged stopped unit. **A hand `deploy/install.sh`
-  is therefore visible drift**: `verify.sh` names the units, the monitor pages,
-  and the next deploy restarts them. Do not go back to digesting the files either
-  side of the installer -- that compares the render with itself. A container from
-  before the stamps is reported `unstamped`, not adopted.
+  is therefore visible drift**: `verify.sh` names the units and the monitor pages
+  on the stamped ones; an unstamped container (one created before the stamps) is
+  a warning the monitor carries, and the next deploy recreates it. Do not go back
+  to digesting the files either side of the installer -- that compares the render
+  with itself. A container from before the stamps is reported `unstamped`, not
+  adopted.
 
   `nginx-proxy-manager` is only flagged by the restart pass: its restart is
   deferred to `sync_npm_network`, after the proxy hosts are rewritten
@@ -221,14 +223,15 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   the `Up`.** `podman ps` renders a failing probe as `Up 5 minutes (unhealthy)`
   and one that has not answered as `Up 10 seconds (starting)` (some builds
   `(health: starting)`); both begin with `Up`, so a prefix match called a red
-  container a warning, and `warn` never counts as a failure. The states are
-  classified once, by `container_health_state` in `scripts/lib/probes.sh`
-  (tested in `tests/test-lib.sh`), and `verify.sh` fails on `unhealthy`, naming
-  the remedy. `starting` stays a warning deliberately: podman promotes it to
-  `unhealthy` after `HealthStartPeriod` x `HealthRetries`, so it is bounded and
-  transient, whereas a FAIL would page on the tail of every ordinary restart (the
-  sweep runs every five minutes and `bitcoind`/`lightningd` carry a 5m start
-  period). Plain `Up` with no health status warns too, except for
+  container a warning. The states are classified once, by
+  `container_health_state` in `scripts/lib/probes.sh` (tested in
+  `tests/test-lib.sh`), and `verify.sh` fails on `unhealthy`, naming the remedy.
+  `starting` stays a *skip* deliberately: a warning is carried into the alert
+  path (`docs/alerting.md`), and podman promotes the state to `unhealthy` after
+  `HealthStartPeriod` x `HealthRetries`, so it is bounded and transient -- while a
+  carried warning would page on the tail of every ordinary restart (the sweep runs
+  every five minutes and `bitcoind`/`lightningd` carry a 5m start period). Plain
+  `Up` with no health status warns -- and that warning is carried -- except for
   `HEALTHLESS_UNITS`. Two units are expected red for long stretches --
   `monero-wallet-btcpay` during a rescan, `boltmesh-backend` on a database blip
   (HC008's exemptions) -- but both already fail their own functional checks.

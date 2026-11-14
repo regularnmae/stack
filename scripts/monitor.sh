@@ -239,28 +239,39 @@ fi
 # ---------------------------------------------------------------------------
 # 1. the base sweep: containers, MCP health, token gate, authenticated calls
 # ---------------------------------------------------------------------------
+# verify.sh has three finding levels and this is the only consumer that decides
+# which reach the alert path: FAIL -> critical, warn -> warning (the same
+# stack_monitor_section the sweep's own soft() lines use), skip -> not carried.
+# `skip` is verify's expected-absence level (a check skipped by request, a
+# service not yet set up), so a host that chose not to run something does not
+# warn every sweep. A warning does not fail verify's exit code, which is why the
+# carry runs whether or not the sweep looked clean; a non-zero exit with no FAIL
+# line means verify died before it could report.
 if [ "$DO_VERIFY" = 1 ]; then
     head3 "verify.sh"
     read -r -a verify_args <<< "$MONITOR_VERIFY_ARGS"
     verify_out=$("$REPO_DIR/verify.sh" ${verify_args[@]+"${verify_args[@]}"} 2>&1) || verify_rc=$?
-    if [ "${verify_rc:-0}" = 0 ]; then
-        ok "verify.sh: all checks passed"
-    else
-        # Carry the verifier's own FAIL lines into the alert body.
-        carried=0
-        vcount=0
-        while IFS= read -r line; do
-            case "$line" in
-                *FAIL*)
-                    fail "verify: ${line#*FAIL }"
-                    carried=1
-                    vcount=$((vcount + 1))
-                    ;;
-            esac
-        done <<< "$(printf '%s' "$verify_out" | sed 's/\x1b\[[0-9;]*m//g')"
-        [ "$carried" = 1 ] || fail "verify.sh reported problems"
-        verify_failures="$vcount"
+    carried=0
+    vcount=0
+    while IFS= read -r line; do
+        case "$(verify_line_level "$line")" in
+            fail)
+                fail "verify: ${line#"  FAIL "}"
+                carried=1
+                vcount=$((vcount + 1))
+                ;;
+            warn)
+                soft "verify: ${line#"  warn "}"
+                carried=1
+                ;;
+        esac
+    done <<< "$(printf '%s' "$verify_out" | sed 's/\x1b\[[0-9;]*m//g')"
+    if [ "${verify_rc:-0}" != 0 ] && [ "$vcount" = 0 ]; then
+        fail "verify.sh reported problems (exit ${verify_rc})"
+    elif [ "${verify_rc:-0}" = 0 ] && [ "$carried" = 0 ]; then
+        ok "verify.sh: no failures or warnings"
     fi
+    verify_failures="$vcount"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1506,6 +1517,9 @@ fi
     for p in ${PROBLEMS[@]+"${PROBLEMS[@]}"}; do
         printf '%s   FAIL %s\n' "$(date -Is)" "$p"
     done
+    for w in ${WARNS[@]+"${WARNS[@]}"}; do
+        printf '%s   warn %s\n' "$(date -Is)" "$w"
+    done
 } >> "$AUDIT_LOG"
 
 if [ "${#PROBLEMS[@]}" -gt 0 ]; then
@@ -1517,8 +1531,14 @@ fi
 
 if [ "$prom_ok" = 0 ]; then
     say ""
-    say "all checks passed, but the facts could not be written (see above)"
+    say "no problems, but the facts could not be written (see above)"
     exit 1
+fi
+
+if [ "${#WARNS[@]}" -gt 0 ]; then
+    say ""
+    say "${#WARNS[@]} warning(s); no problems"
+    exit 0
 fi
 
 say ""

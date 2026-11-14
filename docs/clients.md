@@ -33,6 +33,7 @@
   *prefixes* are hardcoded in `servers.json` (only the host comes from
   `$AGENT_MCP_BASE_URL`, defaulting to `mcp.boltmesh.net`, the default
   `MCP_HOST`; a host that changed `MCP_HOST` must export it, and `verify.sh`
-  warns when the two disagree), so `verify.sh` compares the resolved registry
-  with the declared MCP prefixes and fails on the drift. `agent-mcp` is python3 (stdlib only),
-  which `bootstrap.sh` now installs for it.
+  skips that one when the two disagree -- the operator's call), so `verify.sh`
+  compares the resolved registry with the declared MCP prefixes and fails on the
+  drift. `agent-mcp` is python3 (stdlib only), which `bootstrap.sh` now installs
+  for it.

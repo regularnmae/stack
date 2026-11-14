@@ -14,8 +14,8 @@
 # The scheduled jobs' own health is scripts/monitor.sh's, not this script's: a
 # second copy here would be a quieter answer to the same question. This is the
 # diagnostic -- the container and MCP surface, the chains, the proxy/onion paths,
-# and the config drift only a human run should act on. docs/units.md,
-# docs/proxy.md and docs/ids.md own the reasoning.
+# and the config drift. docs/units.md, docs/proxy.md and docs/ids.md own the
+# reasoning.
 #
 # Run it on the host: it reads containers with podman and reaches each MCP server
 # on npm-network as <container>:8000 through the long-lived `netcheck` container
@@ -26,7 +26,13 @@
 # Read-only against the stack: it starts nothing, writes nothing in $DATA_DIR and
 # changes no unit. It resolves the data dir to find the tokens, and a
 # non-interactive run with nothing recorded stops rather than inventing a path.
-# Exits non-zero if anything is wrong.
+#
+# Non-fatal findings have two levels, and monitor.sh treats them differently:
+# `warn` is drift the sweep carries as a warning (the stack_warning rule), while
+# `skip` is an expected absence -- a check skipped by request, a service not yet
+# set up, a job that has not run yet -- and is deliberately not carried. `FAIL`
+# is a fault and fails the exit code; neither `warn` nor `skip` does.
+# Exits non-zero if any check fails.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,10 +61,16 @@ load_manifest "$REPO_DIR"
 # The tokens live under the data dir, so resolving it is how we find them.
 resolve_data_dir
 
+# The output levels monitor.sh parses (scripts/lib/probes.sh's
+# verify_line_level): keep the two-space indent and the level words. FAIL is
+# critical and fails the exit code; warn is carried as warning severity; skip is
+# an expected absence and is human-only.
 fails=0
+warns=0
 pass() { printf '  \033[32mok\033[0m   %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fails=$((fails+1)); }
-warn() { printf '  \033[33mwarn\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33mwarn\033[0m %s\n' "$*"; warns=$((warns+1)); }
+skip() { printf '  \033[36mskip\033[0m %s\n' "$*"; }
 head2() { printf '\n%s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
@@ -83,7 +95,7 @@ unset _f _c
 [ "${#containers[@]}" -gt 0 ] \
     || die "no container units found under $REPO_DIR/deploy (is this the checkout?)"
 if [ "$NO_NODES" = 1 ]; then
-    warn "daemon tier skipped by request; not checking ${CHAIN_UNITS[*]:-}"
+    skip "daemon tier skipped by request; not checking ${CHAIN_UNITS[*]:-}"
 fi
 # Units that cannot define a health command are declared once in stack.conf's
 # HEALTHLESS_UNITS (victoria-logs is distroless; netcheck just sleeps until
@@ -95,11 +107,10 @@ for _u in "${HEALTHLESS_UNITS[@]:-}"; do
     healthless+="${_u%%|*} "
 done
 # One classifier for every container check in this file, because a failing probe
-# still reads "Up ... (unhealthy)" and a warning never increments fails -- so the
-# monitor, which carries only FAIL lines and the exit code, could not see it.
-# `starting` stays a warning on purpose: podman promotes a probe that never
-# succeeds to (unhealthy) after HealthStartPeriod x retries, so the state is
-# bounded and transient, while a FAIL there would page on every ordinary restart.
+# still reads "Up ... (unhealthy)" and is a FAIL. `starting` is a skip, not a
+# warning: podman promotes a probe that never succeeds to (unhealthy) after
+# HealthStartPeriod x retries, so the state is bounded and transient, while a
+# carried warning there would mail on the tail of every ordinary restart.
 check_container() { # container
     local c="$1" line
     line=$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null || true)
@@ -109,7 +120,7 @@ check_container() { # container
         unhealthy)
             bad "$c: $line -- its healthcheck is failing (podman inspect -f '{{json .State.Health}}' $c; podman logs --tail 50 $c)" ;;
         starting)
-            warn "$c: $line (the healthcheck has not answered yet)" ;;
+            skip "$c: $line (the healthcheck has not answered yet)" ;;
         down)
             bad "$c is not running" ;;
         up)
@@ -131,7 +142,7 @@ done
 # every service it fronts publishes on the host's loopback. See docs/proxy.md.
 npm_net=$(podman inspect nginx-proxy-manager --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)
 if [ -z "$npm_net" ]; then
-    warn "nginx-proxy-manager is not running; skipping the host-network check"
+    skip "nginx-proxy-manager is not running; skipping the host-network check"
 elif [ "$npm_net" = "host" ]; then
     pass "nginx-proxy-manager is on the host network (clients' real addresses)"
 else
@@ -143,8 +154,9 @@ head2 "Local images"
 # These are built here, not pulled, so a healthy container says nothing about
 # whether its image still matches its Containerfile -- a merged base-image bump
 # changes only that file. deploy.sh and install.sh rebuild on the label mismatch
-# (scripts/lib/units.sh's image_is_current); a stale image is a warning, because
-# the service is running the last good bits.
+# (scripts/lib/units.sh's image_is_current); a stale or missing image is a
+# warning the monitor carries, because the service runs the last good bits but
+# the next start needs what deploy.sh builds.
 local_images=(
     "btc-explorer|$BTC_EXPLORER_IMAGE|btc-explorer"
     "xmr-explorer|$XMR_EXPLORER_IMAGE|xmr-explorer"
@@ -171,22 +183,23 @@ head2 "Unit definitions"
 # definition as an OCI label, and podman never rewrites a label on a container it
 # did not create. Drift is "the stamp differs from the file on disk" -- a hand
 # render, a hand edit, an interrupted deploy and a rotation that never restarted
-# its dependents all land here, and it is a FAIL because the monitor carries only
-# verify's FAIL lines. A container with no stamp at all is unknowable rather than
-# stale (it predates the stamps), so it warns and the next deploy recreates it.
+# its dependents all land here, and it is a FAIL: a container on an older
+# definition is a fault, not drift to note. A container with no stamp at all is
+# unknowable rather than stale (it predates the stamps), so it is a warning the
+# monitor carries, and the next deploy recreates it.
 unit_current=$(unit_digest)
 unit_running=$(unit_digest_applied)
 if [ -z "$unit_current" ]; then
-    warn "no rendered unit files found (is the stack installed?); ./deploy.sh renders them"
+    skip "no rendered unit files found (is the stack installed?); ./deploy.sh renders them"
 elif [ -z "$unit_running" ]; then
-    warn "no running containers to compare unit definitions against (is the stack up?)"
+    skip "no running containers to compare unit definitions against (is the stack up?)"
 else
     unit_changed=$(unit_digest_changed "$unit_running" "$unit_current")
     unit_unstamped=""
     for unit in $unit_changed; do
         # A container created before the stamps existed is unknowable, not stale:
-        # a warning, not a FAIL. The next deploy recreates it, and every container
-        # after that is stamped.
+        # a warning the monitor carries, not a FAIL. The next deploy recreates it,
+        # and every container after that is stamped.
         if printf '%s\n' "$unit_running" | grep -qxF "$UNIT_UNSTAMPED  $unit.container"; then
             unit_unstamped="$unit_unstamped $unit"
         else
@@ -219,20 +232,20 @@ for t in git python3; do
     if command -v "$t" >/dev/null 2>&1; then
         pass "$t is installed"
     else
-        warn "$t is missing: the repo fetch or agent-mcp needs it (./bootstrap.sh installs it)"
+        skip "$t is missing: the repo fetch or agent-mcp needs it (./bootstrap.sh installs it)"
     fi
 done
 if command -v smartctl >/dev/null 2>&1; then
     pass "smartctl is installed"
 else
-    warn "smartctl is missing: the disk-health probe cannot read SMART (sudo ./bootstrap.sh installs smartmontools)"
+    skip "smartctl is missing: the disk-health probe cannot read SMART (sudo ./bootstrap.sh installs smartmontools)"
 fi
 
 
 # ---------------------------------------------------------------------------
 head2 "BTCPay settlement"
 if [ "$NO_NODES" = 1 ]; then
-    warn "chain daemons skipped by request; not checking BTCPay/NBXplorer"
+    skip "chain daemons skipped by request; not checking BTCPay/NBXplorer"
 else
     # btcpay, nbxplorer and monero-wallet-btcpay are already in the container
     # inventory above, so check_container owns their state; this section owns the
@@ -306,7 +319,7 @@ for i in "${!MCP_CONTAINERS[@]}"; do
         # The revision the server agreed to. A mismatch is not a failure -- a
         # server legitimately negotiates down -- but this client's pinned
         # MCP_PROTOCOL_VERSION is then not what the server speaks, and nothing
-        # else in the stack would notice.
+        # else in the stack would notice: the monitor carries the warning.
         pv=$(mcp_protocol "$MCP_INIT_RESPONSE")
         case "$pv" in
             '')
@@ -323,12 +336,12 @@ for i in "${!MCP_CONTAINERS[@]}"; do
     if [ "$DEEP" = 1 ]; then
         if [ "$name" = monero-wallet-mcp ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
             if grep -q '^XMR_WALLET_ADDRESS=.' "$CONFIG_DIR/btcpay/xmr-wallet.env" 2>/dev/null; then
-                warn "$name deep check skipped (view-only wallet not imported yet; monerod must reach its restore height)"
+                skip "$name deep check skipped (view-only wallet not imported yet; monerod must reach its restore height)"
             else
-                warn "$name deep check skipped (fill in config/btcpay/xmr-wallet.env to import the view-only wallet)"
+                skip "$name deep check skipped (fill in config/btcpay/xmr-wallet.env to import the view-only wallet)"
             fi
         elif [ "$NO_NODES" = 1 ] && [ "$needs_nodes" = 1 ]; then
-            warn "$name deep check skipped (needs a chain node)"
+            skip "$name deep check skipped (needs a chain node)"
         else
             # mcp_tool_call reuses the session mcp_initialize just opened.
             resp=$(mcp_tool_call "$name" "$token" "$tool" "$args" 30 || true)
@@ -349,10 +362,11 @@ head2 "MCP through nginx-proxy-manager"
 # (NPM owns the host network, so the upstream is that unit's loopback publish).
 # Read through NPM's own :80 with the real Host header, so this works before
 # public DNS and TLS exist. A configured host answers 401 without a token and a
-# serverInfo handshake with one; an unconfigured one does neither -- a warning,
-# not a failure, until it is set up.
+# serverInfo handshake with one; an unconfigured one does neither -- a warning
+# the monitor carries, because the public-surface check only sees the host's
+# root: a missing path prefix would otherwise be silent.
 if [ "${MCP_PREFIXES+x}" != x ] || [ "${#MCP_PREFIXES[@]}" -eq 0 ]; then
-    warn "no MCP prefixes are declared in deploy/services.toml; skipping the proxy checks"
+    skip "no MCP prefixes are declared in deploy/services.toml; skipping the proxy checks"
 else
     for i in "${!MCP_PREFIXES[@]}"; do
         prefix="${MCP_PREFIXES[$i]}"; name="${MCP_CONTAINERS[$i]}"
@@ -403,7 +417,7 @@ head2 "Agent tooling"
 # the same tokens, for harnesses that do not speak MCP (Codex, a plain shell, CI).
 # The registry reads $DATA_DIR/config/<server>/token.env on every call -- never a
 # copy -- so a rotated token needs no second edit. A host that only serves has
-# none of it: a warning, not a failure. The live call is --deep only, so the
+# none of it: a skip, not a failure. The live call is --deep only, so the
 # shallow sweep stays offline.
 AGENT_BIN="${AGENT_MCP_BIN:-$HOME/.local/bin/agent-mcp}"
 AGENT_DIR="$BUILD_DIR/${AGENT_SKILLS_REPO:-agent-skills}"
@@ -421,7 +435,7 @@ if [ -r "$AGENT_DIR/lib/mcp_http.py" ]; then
     fi
 fi
 if [ ! -x "$AGENT_BIN" ]; then
-    warn "agent-mcp is not installed (./deploy.sh --only agent-skills)"
+    skip "agent-mcp is not installed (./deploy.sh --only agent-skills)"
 else
     pass "agent-mcp is installed"
     # Enumerate the clone, never a copy of its list: a hand-written list goes
@@ -434,7 +448,7 @@ else
         done
     fi
     if [ "${#skills[@]}" -eq 0 ]; then
-        warn "cannot enumerate the skills ($AGENT_DIR/skills is missing); skipping the link check (./deploy.sh --only agent-skills re-clones them)"
+        skip "cannot enumerate the skills ($AGENT_DIR/skills is missing); skipping the link check (./deploy.sh --only agent-skills re-clones them)"
     else
         missing=()
         for harness in "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.claude"; do
@@ -454,8 +468,9 @@ else
     # prefix. A prefix that moved in the manifest and not here makes a skill call
     # a URL nginx-proxy-manager no longer serves, so compare the resolved registry
     # with the declaration through the CLI's own resolver -- never a second copy of
-    # the expansion rules. The host only warns: AGENT_MCP_BASE_URL pointing at
-    # another stack is the operator's call, a missing prefix is not.
+    # the expansion rules. The host skips that one: AGENT_MCP_BASE_URL pointing
+    # at another stack is the operator's call, while a missing prefix is the FAIL
+    # above.
     if [ -r "$AGENT_DIR/lib/config.py" ] && command -v python3 >/dev/null 2>&1 \
        && [ "${MCP_PREFIXES+x}" = x ] && [ "${#MCP_PREFIXES[@]}" -gt 0 ]; then
         agent_urls=()
@@ -485,10 +500,10 @@ else
             esac
         done
         if [ "${#elsewhere[@]}" -gt 0 ]; then
-            warn "the skills point at ${elsewhere[*]}, not https://$MCP_HOST (AGENT_MCP_BASE_URL in this shell?)"
+            skip "the skills point at ${elsewhere[*]}, not https://$MCP_HOST (AGENT_MCP_BASE_URL in this shell?)"
         fi
     else
-        warn "servers.json not compared with the declared prefixes (no $AGENT_DIR clone, no python3, or none declared)"
+        skip "servers.json not compared with the declared prefixes (no $AGENT_DIR clone, no python3, or none declared)"
     fi
 
     if [ "$DEEP" = 1 ] && [ "$NO_NODES" = 0 ]; then
@@ -498,7 +513,7 @@ else
             bad "agent-mcp could not call bitcoin-node: $(printf '%s' "$out" | head -1)"
         fi
     elif [ "$DEEP" = 1 ]; then
-        warn "agent-mcp deep call skipped (needs a chain node)"
+        skip "agent-mcp deep call skipped (needs a chain node)"
     fi
 fi
 
@@ -509,19 +524,20 @@ head2 "Onion services (tor)"
 # it is key material and not declared. The probe goes through tor's SOCKS port
 # from netcheck on npm-network (torrc's SocksPolicy allows nothing else) and lets
 # tor resolve the .onion itself (--socks5-hostname), as a client does. "No answer"
-# is a warning: a fresh service takes a minute to become reachable. The mcp entry
-# expects 401, which proves the onion -> NPM -> container path and the token gate,
-# since NPM cannot match an onion by name (see [npm.onion_wildcard]).
+# is a skip: a fresh service takes a minute to become reachable, and the address
+# file proves tor has published it. The mcp entry expects 401, which proves the
+# onion -> NPM -> container path and the token gate, since NPM cannot match an
+# onion by name (see [npm.onion_wildcard]).
 TOR_SOCKS="${TOR_SOCKS:-10.89.0.240:9050}"
 if [ "${ONION_NAMES+x}" != x ] || [ "${#ONION_NAMES[@]}" -eq 0 ]; then
-    warn "no onion services are declared in deploy/services.toml; skipping the onion checks"
+    skip "no onion services are declared in deploy/services.toml; skipping the onion checks"
 else
     for i in "${!ONION_NAMES[@]}"; do
         name="${ONION_NAMES[$i]}"; mirrors="${ONION_MIRRORS[$i]}"
         path="${ONION_PATHS[$i]}"; expect="${ONION_CODES[$i]}"
         addrfile="$DATA_DIR/tor/onion/$name/hostname"
         if [ ! -s "$addrfile" ]; then
-            warn "onion $name ($mirrors): tor has published no address yet ($addrfile)"
+            skip "onion $name ($mirrors): tor has published no address yet ($addrfile)"
             continue
         fi
         addr=$(tr -d '\r\n' < "$addrfile")
@@ -533,7 +549,7 @@ else
                 pass "$mirrors served at http://$addr$path ($code)" ;;
             *)
                 if [ "$code" = 000 ]; then
-                    warn "no answer for $mirrors at $addr (tor still publishing? give it a minute)"
+                    skip "no answer for $mirrors at $addr (tor still publishing? give it a minute)"
                 else
                     bad "$mirrors at $addr$path -> $code (expected $expect)"
                 fi ;;
@@ -561,17 +577,17 @@ head2 "Block explorers"
 # static page: BTC's /api/blocks/tip reads bitcoind, and MoneroBlock's / calls
 # get_info and get_block_headers_range against monerod.
 if [ "$NO_NODES" = 1 ]; then
-    warn "chain daemons skipped by request; not checking the explorers"
+    skip "chain daemons skipped by request; not checking the explorers"
 else
     # -w puts the status after the body, so a basic-auth-protected explorer
-    # (BTCEXP_BASIC_AUTH_PASSWORD) reads as a warning rather than a failure.
+    # (BTCEXP_BASIC_AUTH_PASSWORD) reads as a skip rather than a failure.
     btc_resp=$(net_curl -s -m 15 -w '\n%{http_code}' "http://btc-explorer:3002/api/blocks/tip" 2>/dev/null || true)
     btc_code="${btc_resp##*$'\n'}"
     btc_tip="${btc_resp%$'\n'*}"
     btc_h=$(printf '%s' "$btc_tip" | jq -r '.height // empty' 2>/dev/null || true)
     case "$btc_code" in
         401)
-            warn "btc-explorer is behind basic auth; chain-height check skipped" ;;
+            skip "btc-explorer is behind basic auth; chain-height check skipped" ;;
         *)
             if [ -n "$btc_h" ]; then
                 pass "btc-explorer sees bitcoind at height $btc_h"
@@ -589,14 +605,14 @@ else
     fi
 
     # The home page exercises monerod's restricted RPC, which is slow enough to
-    # time out during initial sync, so this is a warning -- monerod's own
+    # time out during initial sync, so this is a skip -- monerod's own
     # freshness is the monitor's check.
     xmr_home=$(net_curl -s -o /dev/null -w '%{http_code}' -m 30 "http://xmr-explorer:31312/" 2>/dev/null || true)
     [ -n "$xmr_home" ] || xmr_home=000
     if [ "$xmr_home" = "200" ]; then
         pass "xmr-explorer / 200 (MoneroBlock read monerod over RPC)"
     else
-        warn "xmr-explorer home page -> $xmr_home (monerod RPC busy during sync?)"
+        skip "xmr-explorer home page -> $xmr_home (monerod RPC busy during sync?)"
     fi
 fi
 
@@ -609,7 +625,7 @@ head2 "Fulcrum (Electrum)"
 # probes dial the host's loopback publishes -- what a wallet on the LAN reaches
 # (see scripts/lib/electrum.sh, docs/chains.md).
 if [ "$NO_NODES" = 1 ]; then
-    warn "chain daemons skipped by request; not checking Fulcrum"
+    skip "chain daemons skipped by request; not checking Fulcrum"
 else
     # One getblockchaininfo for the whole section: it decides whether a silent
     # 50001 is broken or just a first-run index that has not caught up.
@@ -633,7 +649,7 @@ else
         if printf '%s' "$reply" | jq -e '.result' >/dev/null 2>&1; then
             pass "fulcrum answers Electrum on $label: $(printf '%s' "$reply" | jq -r '.result | if type == "array" then .[0] else . end // empty' 2>/dev/null)"
         elif [ "$btc_ibd" = true ]; then
-            warn "fulcrum does not answer on $label yet (bitcoind is in initial block download)"
+            skip "fulcrum does not answer on $label yet (bitcoind is in initial block download)"
         else
             bad "fulcrum is not answering Electrum on $label: ${reply:-no reply}"
         fi
@@ -647,19 +663,21 @@ else
         tip=$(electrum_tip 50001)
         if [ -z "$tip" ]; then
             if [ "$btc_ibd" = true ]; then
-                warn "fulcrum reports no tip yet (indexing from scratch)"
+                skip "fulcrum reports no tip yet (indexing from scratch)"
             else
                 bad "fulcrum reports no tip on 50001"
             fi
         elif [ -n "$btc_blocks" ]; then
             lag=$((btc_blocks - tip))
             if [ "$lag" -gt 12 ]; then
-                warn "fulcrum index is $lag block(s) behind bitcoind (tip $tip, bitcoind $btc_blocks)"
+                # The monitor's chain check owns this page (same threshold); a
+                # second warning here would be the same fact twice.
+                skip "fulcrum index is $lag block(s) behind bitcoind (tip $tip, bitcoind $btc_blocks)"
             else
                 pass "fulcrum index at $tip (bitcoind $btc_blocks)"
             fi
         else
-            warn "fulcrum reports tip $tip but bitcoind's height is unreadable; lag not compared"
+            skip "fulcrum reports tip $tip but bitcoind's height is unreadable; lag not compared"
         fi
     fi
 fi
@@ -690,7 +708,7 @@ if [ "${UPTIME_KUMA_HOST+x}" = x ] && [ -n "$UPTIME_KUMA_HOST" ]; then
     case "$kcode" in
         200) pass "$UPTIME_KUMA_HOST serves the status page through nginx-proxy-manager" ;;
         000|404|502|503)
-            warn "$UPTIME_KUMA_HOST is not proxied yet ($kcode); run scripts/npm-hosts.sh" ;;
+            skip "$UPTIME_KUMA_HOST is not proxied yet ($kcode); run scripts/npm-hosts.sh" ;;
         *) bad "$UPTIME_KUMA_HOST -> $kcode (expected 200)" ;;
     esac
 fi
@@ -698,21 +716,23 @@ fi
 # A published status page answers its data endpoint without auth, so this runs by
 # container name and needs no token. A 404 means the page does not exist yet, not
 # that the monitor is broken: pages and their monitors are authored in kuma's UI
-# (docs/proxy.md), so this only names the missing publish.
+# (docs/proxy.md), so this is a skip, not a warning -- the monitor's own status
+# section reports a missing publish.
 if [ "${KUMA_STATUS_SLUG+x}" = x ] && [ -n "$KUMA_STATUS_SLUG" ]; then
     slug_code=$(net_curl -s -o /dev/null -w '%{http_code}' -m 10 \
         "http://uptime-kuma:3001/api/status-page/$KUMA_STATUS_SLUG" 2>/dev/null || echo 000)
     case "$slug_code" in
         200) pass "status page '$KUMA_STATUS_SLUG' is published" ;;
-        404) warn "status page '$KUMA_STATUS_SLUG' is not published yet (publish it in the Uptime-Kuma UI)" ;;
-        *)   warn "status page '$KUMA_STATUS_SLUG' -> $slug_code" ;;
+        404) skip "status page '$KUMA_STATUS_SLUG' is not published yet (publish it in the Uptime-Kuma UI)" ;;
+        *)   skip "status page '$KUMA_STATUS_SLUG' -> $slug_code" ;;
     esac
 fi
 
 # The monitors must resolve their vhosts to the host gateway, not the public name:
-# otherwise every check leaves the host and returns as the WAN address. A warning,
-# not a failure -- Uptime-Kuma is UI-configured, and a hand-added monitor may still
-# hairpin. Read /etc/hosts because it is exactly what podman wrote from --add-host.
+# otherwise every check leaves the host and returns as the WAN address. A warning
+# the monitor carries, not a failure: Uptime-Kuma is UI-configured, and a
+# hand-added monitor may still hairpin, but the add-host entry is ours to render.
+# Read /etc/hosts because it is exactly what podman wrote from --add-host.
 if podman container exists uptime-kuma 2>/dev/null; then
     kuma_host_ip=$(podman exec uptime-kuma awk -v h="$BOLTMESH_FRONTEND_HOST" \
         '$2 == h { print $1; exit }' /etc/hosts 2>/dev/null || true)
@@ -731,7 +751,8 @@ head2 "Intrusion detection"
 # Two tiers, and they fail differently: crowdsec is an ordinary rootless user unit,
 # so this sweep can talk to it; suricata is the repo's one ROOTFUL unit (AF_PACKET
 # needs CAP_NET_RAW in the init namespace), installed by `sudo ./bootstrap.sh`. A
-# host that never re-ran bootstrap has no sensor: a warning, not a failure.
+# host that never re-ran bootstrap has no sensor: a warning the monitor carries,
+# not a failure.
 if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container" ]; then
     # The parser is the detection chain's front door: two replayed lines through
     # cscli explain prove it still matches NPM's log format, which a format change
@@ -804,7 +825,7 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
         wl_line=${sample/203.0.113.9/"$wl_ip"}
         wl_line=${wl_line/verify\/1.0/"$wl_ua"}
         if ! explain=$(cscli explain --type npm --log "$wl_line" 2>/dev/null); then
-            warn "could not ask crowdsec to explain a whitelist probe ($wl_ip)"
+            skip "could not ask crowdsec to explain a whitelist probe ($wl_ip)"
             continue
         fi
         wl_hit=no
@@ -819,7 +840,7 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/crowdsec.container
         fi
     done
 else
-    warn "crowdsec unit is not installed (run deploy/install.sh)"
+    skip "crowdsec unit is not installed (run deploy/install.sh)"
 fi
 
 # stack-bouncer refuses to ENFORCE a ban on the host's own public address
@@ -829,7 +850,9 @@ fi
 # self-lockout. Compare it with the address NPM logs for the host's own monitoring,
 # identified by the Uptime-Kuma user agent (the agent clients share it but poll too
 # rarely). The status page's MCP_HOST monitor is the canary (docs/proxy.md); private
-# sources are filtered first, or the internal monitors would be the top entry.
+# sources are filtered first, or the internal monitors would be the top entry. A
+# mismatch is a warning the monitor carries: the guard would refuse to enforce a
+# ban on the wrong address, so a WAN change is noticed without a hand run.
 npm_logs="$DATA_DIR/npm/data/logs"
 wan_seen=$(grep -h 'Uptime-Kuma/' "$npm_logs"/*_access.log 2>/dev/null \
     | sed -n 's/.*\[Client \([^]]*\)\].*/\1/p' \
@@ -949,7 +972,7 @@ if [ -f "$DATA_DIR/audit/ids.status" ]; then
         bad "IDS roll-up reports ${STATUS_RESULT:-unknown} ($DATA_DIR/audit/ids.status)"
     fi
 else
-    warn "no IDS status yet (deploy/ids.timer has not run)"
+    skip "no IDS status yet (deploy/ids.timer has not run)"
 fi
 
 # The applier. Detection can be healthy while nothing enforces, which is the one
@@ -969,7 +992,7 @@ if [ -f /etc/systemd/system/stack-bouncer.timer ]; then    if systemctl is-activ
             bad "bouncer last run failed: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/bouncer.status)"
         fi
     else
-        warn "the bouncer has not written a status yet (systemctl start stack-bouncer)"
+        skip "the bouncer has not written a status yet (systemctl start stack-bouncer)"
     fi
 else
     warn "the bouncer is not installed (sudo ./bootstrap.sh) -- decisions are not enforced"
@@ -993,7 +1016,7 @@ if [ -f /etc/systemd/system/stack-audit.timer ]; then
             bad "audit report: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/auditd.status)"
         fi
     else
-        warn "the audit report has not run yet (systemctl start stack-audit)"
+        skip "the audit report has not run yet (systemctl start stack-audit)"
     fi
     # The ruleset cannot be checked from here: `auditctl -l` needs CAP_AUDIT_CONTROL,
     # so an unprivileged verify would always see zero rules. The status file above is
@@ -1032,12 +1055,12 @@ if [ -f /etc/systemd/system/stack-smart.timer ]; then
                 done
                 pass "SMART report ok (${s_disks} disk(s)${s_summary:+: $s_summary})" ;;
             skip)
-                warn "SMART report skipped: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/smart.status)" ;;
+                skip "SMART report skipped: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/smart.status)" ;;
             *)
                 bad "SMART report: ${STATUS_DETAIL:-no detail} ($DATA_DIR/audit/smart.status)" ;;
         esac
     else
-        warn "the SMART probe has not run yet (sudo systemctl start stack-smart)"
+        skip "the SMART probe has not run yet (sudo systemctl start stack-smart)"
     fi
 else
     warn "the SMART monitor is not installed (sudo ./bootstrap.sh) -- disk health is unchecked"
@@ -1046,8 +1069,14 @@ fi
 # ---------------------------------------------------------------------------
 head2 "Summary"
 if [ "$fails" = 0 ]; then
-    [ "$DEEP" = 1 ] || printf 'All shallow checks passed. Re-run with --deep once the chains are synced.\n'
-    [ "$DEEP" = 1 ] && printf 'All checks passed.\n'
+    if [ "$warns" -gt 0 ]; then
+        printf '%d warning(s); no checks failed.\n' "$warns"
+        printf 'The monitor carries each warning at warning severity (docs/alerting.md).\n'
+    elif [ "$DEEP" = 1 ]; then
+        printf 'All checks passed.\n'
+    else
+        printf 'All shallow checks passed. Re-run with --deep once the chains are synced.\n'
+    fi
     exit 0
 fi
 printf '%d check(s) failed.\n' "$fails"
