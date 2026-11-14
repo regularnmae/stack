@@ -44,6 +44,12 @@ README's "Intrusion detection".
 - **A crowdsec unit without `[Install]` never starts at boot** -- that rule and
   its evidence are in `units.md`, "The app tier, shared mounts, and the root
   tier".
+- **Signature refresh is a scheduled job, not a container-start side effect.**
+  `stack-suricata-update.timer` (root) refreshes ET Open weekly and reloads the
+  live engine; `scripts/ids.sh` records the rules file's state and mtime, and
+  `scripts/monitor.sh` pages when it is older than
+  `MONITOR_IDS_RULES_MAX_AGE_H`. CrowdSec's hub refresh is a *user* timer
+  (`crowdsec-update.timer`) because that container is rootless.
 
 ## Intrusion detection is two engines and two privilege domains
 
@@ -238,6 +244,39 @@ is just a quiet LAN. The count is in the monitor line and `stack_ids_ssh_fail`;
   dead. A sensor that has just started can fail one sweep before `eve.json`
   appears; that is the same transient as `systemctl is-active` reporting
   `activating`.
+
+## Signature and hub refresh
+
+- **The sensor updates its rules weekly, in place.** `deploy/root/suricata/update.sh`
+  is the one update command: `start.sh` calls its best-effort mode at container
+  start, and the root `stack-suricata-update.timer` (weekly, Sunday 09:30 with
+  jitter) calls `--strict`. Strict mode adds `--fail` and keeps
+  `suricata-update`'s rule test enabled; both modes pass `--no-reload`, because
+  `start.sh` is about to exec the engine and the weekly host job sends
+  `suricatasc -c reload-rules /run/suricata-command.socket` only after the fetch
+  exits 0. A failed fetch keeps the previous file; a failed reload keeps the
+  previous rule set loaded and records `reloaded=0`. Neither restarts the
+  container: the sensor's healthcheck and `Restart=always` own a wedged engine,
+  and a weekly reload is one fewer moving part than a restart.
+- **The ruleset's age is a fact, not an inference.** `suricata-update` rewrites
+  `suricata.rules` on every successful run even when the rule set is unchanged,
+  and a failed fetch leaves the old file alone, so its mtime is "the updater last
+  succeeded". `scripts/ids.sh` records `rules=ok|missing|unreadable|empty|na` and
+  `rules_epoch` in `ids.status`; an empty file is the placeholder `start.sh`
+  creates after a failed first download, so it fails the roll-up (the sensor is
+  on `local.rules` only). `scripts/monitor.sh` fails when `rules=ok` and the age
+  exceeds `MONITOR_IDS_RULES_MAX_AGE_H` (14 days, two missed weekly runs), and
+  exports `stack_ids_rules_age_hours` for history.
+- **CrowdSec's hub is refreshed in the user tier.** `crowdsec-update.timer`
+  (weekly, Sunday 10:30 with jitter) runs `scripts/crowdsec-update.sh`, which
+  does `podman exec crowdsec cscli hub update`, then `cscli hub upgrade`, then
+  `systemctl --user try-restart crowdsec.service` so upgraded parsers and
+  scenarios load. It is a user job for the same reason `ids.sh` is: root's
+  podman cannot see the rootless container, and the root tier must not learn to
+  run commands as the stack user. A stopped container is left stopped; the next
+  start refreshes the hub. The two verdict files
+  (`audit/suricata-update.status`, `audit/crowdsec-update.status`) are judged as
+  warnings; the rules-age check above is the page.
 
 ## The audit tier watches files only
 

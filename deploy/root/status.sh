@@ -6,12 +6,13 @@
 # never executed:
 #   . /etc/stack-ids/status.sh
 #
-# One implementation, two paths to it. bouncer.sh and audit-report.sh run as
-# root from /etc/stack-ids and must not read the user-writable checkout, so they
-# source the installed copy; scripts/lib.sh sources this file out of the
-# checkout, so a change here reaches the user tier without a second copy to keep
-# in step. That is why nothing in this file may depend on lib.sh: it is bash and
-# coreutils only, and must load with no stack.conf, no podman, no config.
+# One implementation, two paths to it. bouncer.sh, audit-report.sh, smart.sh and
+# suricata-update.sh run as root from /etc/stack-ids and must not read the
+# user-writable checkout, so they source the installed copy; scripts/lib.sh
+# sources this file out of the checkout, so a change here reaches the user tier
+# without a second copy to keep in step. That is why nothing in this file may
+# depend on lib.sh: it is bash and coreutils only, and must load with no
+# stack.conf, no podman, no config.
 #
 # The status contract, which scripts/monitor.sh and verify.sh depend on:
 #   * KEY=VALUE, read with env_value (sed), never sourced -- a status file is

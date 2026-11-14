@@ -8,11 +8,12 @@
 # What happens here, in order:
 #   1. the repo's local.rules is copied where default-rule-path points, so a
 #      config change lands without rebuilding anything;
-#   2. suricata-update fetches ET Open, best effort. A host with no internet (or
-#      a failed update) keeps the previous set, and a fresh host gets an empty
+#   2. update.sh fetches ET Open, best effort: a host with no internet (or a
+#      failed update) keeps the previous set, and a fresh host gets an empty
 #      file so Suricata still starts on local.rules alone -- a sensor that
 #      refuses to start because the ruleset could not be downloaded is worse
-#      than one that starts with ten rules;
+#      than one that starts with ten rules. The same script's --strict mode is
+#      the weekly stack-suricata-update job's path (docs/ids.md);
 #   3. exec suricata, so the container's PID 1 is the engine and its exit
 #      status is the unit's.
 #
@@ -32,17 +33,19 @@ mkdir -p "$RULES" /var/log/suricata
 
 cp -f "$CONF/rules/local.rules" "$RULES/local.rules"
 
-# ET Open. --no-test/--no-reload because we are about to start the engine, not
-# reload a running one. Timeout so a stalled mirror cannot keep the unit
-# "activating" forever. --disable-conf drops the families that are noise on THIS
-# host (see disable.conf: our own tor client).
-if command -v suricata-update >/dev/null 2>&1; then
-    if timeout 180 suricata-update --no-test --no-reload --disable-conf "$CONF/disable.conf" \
+# ET Open. update.sh owns the command and its flags; this is its best-effort
+# mode (no rule test, no --fail), because we are about to start the engine and a
+# cached ruleset beats refusing to start. Timeout so a stalled mirror cannot
+# keep the unit "activating" forever.
+if [ -x "$CONF/update.sh" ]; then
+    if timeout 180 "$CONF/update.sh" \
         >/var/log/suricata/suricata-update.log 2>&1; then
         echo "suricata: ET Open rules updated"
     else
         echo "suricata: suricata-update failed (see /var/log/suricata/suricata-update.log); keeping the previous ruleset" >&2
     fi
+else
+    echo "suricata: $CONF/update.sh is missing; keeping the previous ruleset" >&2
 fi
 [ -s "$RULES/suricata.rules" ] || : > "$RULES/suricata.rules"
 

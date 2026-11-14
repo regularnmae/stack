@@ -1,0 +1,18 @@
+# Refresh the Suricata ET Open ruleset and reload the live sensor.
+#
+# A root oneshot: the sensor is the repo's one rootful container, so the rule
+# fetch and the control-socket reload go through root's podman. It never
+# restarts the container -- a failed reload keeps the previous set loaded, and
+# the sensor's healthcheck plus Restart=always own a wedged engine.
+[Unit]
+Description=Refresh the Suricata ET Open ruleset (stack-suricata-update)
+After=network-online.target suricata.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/stack-ids/suricata-update.sh
+# The script bounds the fetch at 600 s and the reload at 180 s; systemd is the
+# backstop for a wedged podman exec. A cold download plus rule test can take
+# minutes.
+TimeoutStartSec=840

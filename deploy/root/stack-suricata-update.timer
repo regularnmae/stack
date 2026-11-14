@@ -1,0 +1,18 @@
+# The schedule for the ET Open refresh.
+#
+# Weekly, Sunday 09:30 + jitter: after the nightly backup (03:30) and the
+# Sunday restore drill (05:30 with up to 2 h of runtime) so the download and
+# rule test do not compete with them. Persistent=true catches a run missed
+# while the host was off; the container start also refreshes the set, so a
+# missed week is not a coverage gap until the age threshold passes.
+[Unit]
+Description=Refresh the Suricata ET Open ruleset every Sunday
+
+[Timer]
+OnCalendar=Sun 09:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=stack-suricata-update.service
+
+[Install]
+WantedBy=timers.target

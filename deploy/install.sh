@@ -137,7 +137,7 @@ install_root_tier() {
     [ -d "$data" ] || die "$data does not exist; run ./deploy.sh once first, or pass the right --data-dir"
     [ -f "$DEPLOY_DIR/root/suricata.container" ] || die "missing $DEPLOY_DIR/root/suricata.container"
 
-    log "installing the root tier (Suricata + disk health) for data dir $data"
+    log "installing the root tier (Suricata, rule refresh, disk health) for data dir $data"
 
     # Root's podman config, so the sensor's own healthchecks stop writing a
     # `health_status` event every 30s. They are podman children of the *system*
@@ -152,6 +152,9 @@ install_root_tier() {
         root_render "$DEPLOY_DIR/root/suricata/$f" "$ROOT_CONFIG_DIR/suricata/$f" 644 "$data"
     done
     root_render "$DEPLOY_DIR/root/suricata/start.sh" "$ROOT_CONFIG_DIR/suricata/start.sh" 755 "$data"
+    # The updater start.sh and the weekly stack-suricata-update job both run, so
+    # the fetch flags and --disable-conf path live in one file (docs/ids.md).
+    root_render "$DEPLOY_DIR/root/suricata/update.sh" "$ROOT_CONFIG_DIR/suricata/update.sh" 755 "$data"
     root_render "$DEPLOY_DIR/root/suricata/rules/local.rules" \
         "$ROOT_CONFIG_DIR/suricata/rules/local.rules" 644 "$data"
 
@@ -189,6 +192,17 @@ install_root_tier() {
     # manager. Mode 0644, unlike the 0600 user units: a system unit carries no
     # secret, and the unprivileged verify.sh must read it to catch drift.
     root_render "$DEPLOY_DIR/root/suricata.container" "$ROOT_UNIT_DIR/suricata.container" 644 "$data"
+
+    # The weekly ET Open refresh: a root host job because the sensor is rootful.
+    # It runs inside the running container and reloads the live engine; the
+    # rules age it produces is what scripts/ids.sh reports to the monitor.
+    root_render "$DEPLOY_DIR/root/suricata-update.sh" "$ROOT_CONFIG_DIR/suricata-update.sh" 755 "$data"
+    root_render "$DEPLOY_DIR/root/stack-suricata-update.service" \
+        /etc/systemd/system/stack-suricata-update.service 644 "$data"
+    root_render "$DEPLOY_DIR/root/stack-suricata-update.timer" \
+        /etc/systemd/system/stack-suricata-update.timer 644 "$data"
+    grep -qF "DATA_DIR=\"$data\"" "$ROOT_CONFIG_DIR/suricata-update.sh" \
+        || die "rendered $ROOT_CONFIG_DIR/suricata-update.sh does not carry DATA_DIR=$data -- the substitution failed"
 
     # A silent substitution failure is worse than a loud one: an empty @DATA_DIR@
     # renders a unit that mounts /ids/suricata, which podman rejects only after
@@ -403,6 +417,11 @@ install_root_tier() {
             || warn "stack-smart's first run failed; see: systemctl status stack-smart"
     else
         warn "could not enable stack-smart.timer"
+    fi
+    if systemctl enable --now stack-suricata-update.timer >/dev/null 2>&1; then
+        log "stack-suricata-update.timer enabled (ET Open ruleset weekly, live reload)"
+    else
+        warn "could not enable stack-suricata-update.timer"
     fi
     log "root tier installed; run ./verify.sh to check the sensor and disks"
 }

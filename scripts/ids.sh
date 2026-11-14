@@ -61,6 +61,11 @@ trap '[ -z "${CHUNK:-}" ] || rm -f "$CHUNK"' EXIT
 # world-readable files. A missing file is a normal state on a host whose root
 # tier has not been installed yet, not an error.
 EVE="$DATA_DIR/ids/suricata/eve.json"
+# The ET Open ruleset suricata-update writes (deploy/root/suricata/update.sh).
+# Its mtime is the freshness fact: a successful update rewrites it even when the
+# rule set is unchanged, and a failed fetch leaves the old file alone. The
+# monitor applies the age threshold; this script records the observation.
+RULES="$DATA_DIR/ids/suricata/lib/rules/suricata.rules"
 
 say() { [ "$VERBOSE" = 1 ] && printf '%s\n' "$*"; return 0; }
 
@@ -218,6 +223,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# the ET Open ruleset
+# ---------------------------------------------------------------------------
+# The rules file is a feed like eve.json: "the sensor is active" says nothing
+# about whether its signature set was ever fetched. An empty file is what
+# start.sh leaves when the download failed, so it is a failure (the sensor is on
+# local.rules only), not a quiet host. Age is the monitor's threshold
+# (MONITOR_IDS_RULES_MAX_AGE_H); rules_epoch is the fact it compares.
+RULES_STATE=na
+RULES_EPOCH=""
+if [ "$SURICATA_STATE" = active ]; then
+    if [ ! -e "$RULES" ]; then
+        RULES_STATE=missing
+    elif [ ! -r "$RULES" ]; then
+        RULES_STATE=unreadable
+    elif [ ! -s "$RULES" ]; then
+        RULES_STATE=empty
+    else
+        RULES_STATE=ok
+        RULES_EPOCH=$(stat -c %Y "$RULES" 2>/dev/null || true)
+        case "$RULES_EPOCH" in
+            ''|*[!0-9]*) RULES_STATE=unreadable; RULES_EPOCH="" ;;
+        esac
+    fi
+fi
+if [ "$RULES_STATE" = na ]; then
+    say "suricata rules: $RULES_STATE"
+else
+    say "suricata rules: $RULES_STATE${RULES_EPOCH:+ (epoch $RULES_EPOCH)}"
+fi
+
+# ---------------------------------------------------------------------------
 # SSH auth failures from the journal
 # ---------------------------------------------------------------------------
 # sshd is deliberately not a CrowdSec acquisition: port 22 is not
@@ -273,6 +309,15 @@ case "$EVE_STATE" in
     missing)    problem="${problem:+$problem; }suricata is active but $EVE is missing" ;;
     unreadable) problem="${problem:+$problem; }suricata is active but $EVE could not be read" ;;
 esac
+# The signature set has its own two failure modes: absent/unreadable (the
+# updater never wrote it) and empty (the download failed and start.sh created
+# the placeholder). Both mean the sensor is running local.rules only.
+case "$RULES_STATE" in
+    ok|na) ;;
+    missing)    problem="${problem:+$problem; }suricata is active but $RULES is missing" ;;
+    unreadable) problem="${problem:+$problem; }suricata is active but $RULES could not be read" ;;
+    empty)      problem="${problem:+$problem; }suricata is active but its ET Open ruleset is empty (local.rules only)" ;;
+esac
 # A successful zero count and a failed read are different answers: an active
 # sshd whose journal cannot be read would otherwise report ssh_fail=0 forever.
 case "$SSH_STATE" in
@@ -287,11 +332,12 @@ verdict_write \
     "$result" "$problem" \
     "suricata=$SURICATA_STATE" "crowdsec=$CROWDSEC_STATE" \
     "alerts=$ALERTS" "decisions=$DECISIONS" "eve=$EVE_STATE" \
+    "rules=$RULES_STATE" "rules_epoch=$RULES_EPOCH" \
     "ssh=$SSH_STATE" "ssh_fail=$SSH_FAILS"
 
-printf '%s result=%s suricata=%s crowdsec=%s eve=%s alerts=%d decisions=%d ssh=%s ssh_fail=%d%s\n' \
-    "$(date -Is)" "$result" "$SURICATA_STATE" "$CROWDSEC_STATE" "$EVE_STATE" "$ALERTS" "$DECISIONS" \
-    "$SSH_STATE" "$SSH_FAILS" "${problem:+ -- $problem}" >> "$AUDIT_LOG"
+printf '%s result=%s suricata=%s crowdsec=%s eve=%s rules=%s alerts=%d decisions=%d ssh=%s ssh_fail=%d%s\n' \
+    "$(date -Is)" "$result" "$SURICATA_STATE" "$CROWDSEC_STATE" "$EVE_STATE" "$RULES_STATE" \
+    "$ALERTS" "$DECISIONS" "$SSH_STATE" "$SSH_FAILS" "${problem:+ -- $problem}" >> "$AUDIT_LOG"
 
 [ "$result" = ok ] || { printf 'ids: %s\n' "$problem" >&2; exit 1; }
 say "ok"

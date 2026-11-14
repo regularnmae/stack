@@ -821,7 +821,8 @@ Then the things a sweep cannot judge:
 
 - `podman exec lightningd lightning-cli listpeerchannels` — are the channels back,
   in the state you expect?
-- `systemctl --user list-timers` — backup, drill, monitor and metrics scheduled;
+- `systemctl --user list-timers` — backup, drill, monitor, metrics and the hub
+  refresh scheduled; `systemctl list-timers` shows the root rule refresh.
   `./scripts/backup.sh list` shows the nightly job writing again.
 - the `.onion` addresses match what clients hold (`./deploy.sh` and
   `scripts/npm-hosts.sh` print them).
@@ -1116,13 +1117,13 @@ while the request itself exists only in NPM's access log:
 | `crowdsec` | NPM's access logs + Suricata's alert feed → decisions | rootless | `./deploy.sh` |
 
 That rootful container is the one exception to "everything runs rootless"; the
-same root tier also runs the host jobs that need root (audit, bouncer, SMART).
-It is why `bootstrap.sh` is a **two-pass** install: the sensor's config
-references the data dir, which does not exist until `./deploy.sh` has run. The
-first bootstrap prints a notice; re-running it installs the sensor and restarts
-it. The rendered unit lives in `/etc/containers/systemd/`, its config in
-`/etc/stack-ids/`, and `./verify.sh` compares every root-tier file against
-`deploy/root/`.
+same root tier also runs the host jobs that need root (audit, bouncer, SMART,
+the weekly ET Open refresh). It is why `bootstrap.sh` is a **two-pass** install:
+the sensor's config references the data dir, which does not exist until
+`./deploy.sh` has run. The first bootstrap prints a notice; re-running it installs
+the sensor and restarts it. The rendered unit lives in `/etc/containers/systemd/`,
+its config in `/etc/stack-ids/`, and `./verify.sh` compares every root-tier file
+against `deploy/root/`.
 
 ### What each can and cannot see
 
@@ -1213,7 +1214,11 @@ ban/unban tool — it sees active decisions only.
 
 `ids.status` carries `eve=ok|missing|unreadable|na`: the alert count is a report
 only if the file was read, so a missing or unreadable `eve.json` fails the roll-up
-instead of leaving `alerts=0`. It also carries `ssh=ok|unreadable|na` and
+instead of leaving `alerts=0`. It also carries `rules=ok|missing|unreadable|empty|na`
+and `rules_epoch`, the ET Open ruleset's state and mtime: an empty file is what
+`start.sh` leaves after a failed first download, so it fails the roll-up rather
+than leaving the sensor silently on `local.rules`. It also carries
+`ssh=ok|unreadable|na` and
 `ssh_fail=N`, the failed sshd auth lines in the last six minutes: an active sshd
 whose journal cannot be read fails the roll-up, and the count is history
 (`stack_ids_ssh_fail`); `stack_ssh_bruteforce` warns when one roll-up crosses
@@ -1222,6 +1227,34 @@ sweeps, and the monitor alerts on a stale or failed status. Counts are a *warnin
 not a page; the rate is in VictoriaMetrics (`stack_ids_alerts`). eve.json is in the
 log store too (see [Logs and history](#logs-and-history)), so an alert reads next
 to what the proxy, the daemons and BoltMesh were doing at that moment.
+
+### Keeping signatures current
+
+A host that stays up for months must not keep the ruleset its container started
+with. Two weekly jobs own that:
+
+- **`stack-suricata-update.timer`** (root, Sunday 09:30 + jitter) runs
+  `/etc/stack-ids/suricata-update.sh`: `suricata-update --fail` inside the
+  running container, then `suricatasc -c reload-rules` on its control socket. It
+  does not restart the sensor; a failed fetch keeps the previous file and a
+  failed reload keeps the previous set loaded.
+- **`crowdsec-update.timer`** (user, Sunday 10:30 + jitter) runs
+  `scripts/crowdsec-update.sh`: `cscli hub update`, `cscli hub upgrade`, then a
+  `try-restart` of the rootless agent so the upgraded parsers and scenarios load.
+
+The age of `suricata.rules` is a monitored fact, not an assumption: the sweep
+fails when `rules=ok` and the mtime is older than `MONITOR_IDS_RULES_MAX_AGE_H`
+(14 days, two missed runs), and exports `stack_ids_rules_age_hours`. The two
+update verdicts (`audit/suricata-update.status`, `audit/crowdsec-update.status`)
+are warnings, so a broken updater is named before the signatures are actually
+stale.
+
+```sh
+systemctl status stack-suricata-update.timer        # the root refresh
+systemctl --user status crowdsec-update.timer       # the hub refresh
+sudo /etc/stack-ids/suricata-update.sh              # refresh and reload now
+./scripts/crowdsec-update.sh                        # update/upgrade the hub now
+```
 
 ### The whitelist is load-bearing
 
@@ -1248,8 +1281,9 @@ worth a look.
 ### Resources and retention
 
 ~650 MB RSS for Suricata with the full ET Open ruleset (refreshed at container
-start, best effort), ~150 MB for CrowdSec, nothing measurable for the bouncer.
-Suricata only rotates a `filename` containing a strftime template, and ours are
+start and weekly by `stack-suricata-update.timer`, with a live reload), ~150 MB
+for CrowdSec, nothing measurable for the bouncer. Suricata only rotates a
+`filename` containing a strftime template, and ours are
 static, so the host's `logrotate` does it from `/etc/logrotate.d/stack-ids`,
 keeping `IDS_RETENTION_DAYS` (14) compressed rotations. `eve.json` is ~50 MB/day,
 so that is the budget the data disk must cover; `$DATA_DIR/ids` is regenerable and
@@ -1706,6 +1740,7 @@ stack/
   scripts/metrics.sh      # one metrics scrape into the textfile collector (metrics.timer)
   scripts/logs.sh         # cross-service log search over victoria-logs (LogsQL)
   scripts/ids.sh          # scheduled IDS roll-up (ids.timer): suricata + crowdsec
+  scripts/crowdsec-update.sh # weekly hub update/upgrade (crowdsec-update.timer)
   scripts/spend-audit.sh  # spend drift + outgoing-activity tripwire
   scripts/rotate.sh       # rotate one credential + every dependent service
   scripts/npm-hosts.sh    # every nginx-proxy-manager proxy host, via its API
@@ -1715,16 +1750,17 @@ stack/
     *.container           # every unit, rendered (they reference the data dir)
     *.container.in        # lightningd, fulcrum, crowdsec, rendered (secrets)
     *.timer               # every schedule: backup, backup-verify,
-                          #   backup-verify-db, monitor, metrics, ids (plain
-                          #   user units; Quadlet has no .timer type)
+                          #   backup-verify-db, monitor, metrics, ids,
+                          #   crowdsec-update (plain user units; Quadlet has no
+                          #   .timer type)
     *.service             # their one-shot hosts: backup-verify,
                           #   backup-verify-db, monitor, metrics, ids,
-                          #   db-dump, btcpay-plugin
+                          #   crowdsec-update, db-dump, btcpay-plugin
     npm-network.network
     crowdsec.container    # rootless: NPM access log -> decisions (local only)
     root/                 # the root tier: suricata.container + its config and
-                          #   the audit/bouncer/smart host jobs, rendered by
-                          #   install.sh --root (bootstrap.sh only)
+                          #   the audit/bouncer/smart/suricata-update host jobs,
+                          #   rendered by install.sh --root (bootstrap.sh only)
     crowdsec/             # this repo's parser, scenarios, whitelists, acquisition;
                           #   rendered into $CONFIG_DIR/ids/crowdsec
     logs/vector.toml      # the shipper's config (journald -> victoria-logs),

@@ -1,0 +1,17 @@
+# The CrowdSec hub refresh, run by crowdsec-update.timer.
+#
+# A plain systemd USER unit: crowdsec is a rootless container, so `podman exec`
+# only works in this user's manager. The job upgrades the hub items and
+# try-restarts the agent so the new parsers and scenarios load; a stopped
+# crowdsec is left stopped.
+[Unit]
+Description=CrowdSec hub update and upgrade (crowdsec-update)
+After=network-online.target crowdsec.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@REPO_DIR@/scripts/crowdsec-update.sh
+# The two cscli calls are bounded at 180 s each in the script; the unit covers
+# both plus the restart, and is the backstop for a wedged podman exec.
+TimeoutStartSec=420

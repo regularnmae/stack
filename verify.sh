@@ -889,7 +889,11 @@ ROOT_FILES=(
     "deploy/root/suricata/threshold.conf:/etc/stack-ids/suricata/threshold.conf"
     "deploy/root/suricata/disable.conf:/etc/stack-ids/suricata/disable.conf"
     "deploy/root/suricata/start.sh:/etc/stack-ids/suricata/start.sh"
+    "deploy/root/suricata/update.sh:/etc/stack-ids/suricata/update.sh"
     "deploy/root/suricata/rules/local.rules:/etc/stack-ids/suricata/rules/local.rules"
+    "deploy/root/suricata-update.sh:/etc/stack-ids/suricata-update.sh"
+    "deploy/root/stack-suricata-update.service:/etc/systemd/system/stack-suricata-update.service"
+    "deploy/root/stack-suricata-update.timer:/etc/systemd/system/stack-suricata-update.timer"
     "deploy/root/logrotate-stack-ids:/etc/logrotate.d/stack-ids"
     "deploy/root/audit-report.sh:/etc/stack-ids/audit-report.sh"
     "deploy/root/audit-rules-data.conf:/etc/systemd/system/audit-rules.service.d/10-stack-data.conf"
@@ -927,6 +931,17 @@ if [ -f /etc/containers/systemd/suricata.container ]; then
         pass "logrotate.timer is active (EVE rotation)"
     else
         warn "logrotate.timer is not active; eve.json and alerts.json will not rotate"
+    fi
+    # The signature refresh is a timer, not a container-start side effect: a
+    # host up for months would otherwise keep the image's first ruleset.
+    if [ -f /etc/systemd/system/stack-suricata-update.timer ]; then
+        if systemctl is-active --quiet stack-suricata-update.timer 2>/dev/null; then
+            pass "stack-suricata-update.timer is active (weekly ET Open refresh)"
+        else
+            warn "stack-suricata-update.timer is not active; the ruleset only refreshes at container start"
+        fi
+    else
+        warn "stack-suricata-update.timer is not installed (sudo ./bootstrap.sh); the ruleset only refreshes at container start"
     fi
     # A rendered file that no longer matches the repo means deploy/root/ was edited
     # without re-running bootstrap, so the host is not on what git holds. Every

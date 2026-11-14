@@ -123,9 +123,9 @@ for fn in env_value write_atomic status_write verdict_init verdict_write \
         || fail "lib.sh's $fn is not deploy/root/status.sh's"
 done
 
-# The two root reporters must actually source the installed copy: a shared file
+# The root reporters must actually source the installed copy: a shared file
 # nobody loads is not shared.
-for script in bouncer.sh audit-report.sh; do
+for script in bouncer.sh audit-report.sh suricata-update.sh; do
     grep -qx '\. /etc/stack-ids/status.sh' "$ROOT_DIR/deploy/root/$script" \
         || fail "deploy/root/$script does not source /etc/stack-ids/status.sh"
 done

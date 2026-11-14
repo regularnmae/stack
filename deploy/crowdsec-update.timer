@@ -1,0 +1,16 @@
+# The schedule for the CrowdSec hub refresh.
+#
+# Weekly, an hour after stack-suricata-update.timer (root, 09:30 + jitter): the
+# hub fetch is network work and the restart briefly interrupts the LAPI, so the
+# two updates do not overlap. Both are clear of the Sunday restore drill.
+[Unit]
+Description=Refresh CrowdSec's hub items every Sunday
+
+[Timer]
+OnCalendar=Sun 10:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=crowdsec-update.service
+
+[Install]
+WantedBy=timers.target

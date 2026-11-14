@@ -260,10 +260,11 @@ detect:
 
 default-rule-path: /var/lib/suricata/rules
 
-# suricata.rules is written by suricata-update at container start (see
-# start.sh); local.rules is this repo's own set, copied in at the same time.
-# start.sh creates an empty suricata.rules when the update could not run, so a
-# host with no internet still starts with the local rules.
+# suricata.rules is written by suricata-update at container start and by the
+# weekly stack-suricata-update.timer (both go through update.sh); local.rules is
+# this repo's own set, copied in at the same time. start.sh creates an empty
+# suricata.rules when the update could not run, so a host with no internet still
+# starts with the local rules.
 rule-files:
   - suricata.rules
   - local.rules

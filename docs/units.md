@@ -360,9 +360,10 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   rootless because AF_PACKET needs `CAP_NET_RAW` in the init user namespace.
   The same tier owns the root host jobs that cannot do their work as the stack
   user: `stack-audit` reads the root-only audit log, `stack-bouncer` writes
-  nftables, and `stack-smart` opens the block devices for SMART. Each writes a
-  verdict file under `$DATA_DIR/audit`, and the unprivileged monitor judges it
-  -- there is no `sudo` in `monitor.sh` or `verify.sh`.
+  nftables, `stack-smart` opens the block devices for SMART, and
+  `stack-suricata-update` fetches the ET Open rules and reloads the live sensor.
+  Each writes a verdict file under `$DATA_DIR/audit`, and the unprivileged
+  monitor judges it -- there is no `sudo` in `monitor.sh` or `verify.sh`.
   That is why bootstrap is a **two-pass** install -- the sensor's unit and config
   reference `@DATA_DIR@`, so the first run (before any data dir exists) only
   prints a notice and the rerun after the first `./deploy.sh` installs it.
@@ -393,7 +394,8 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   decisions are read (no credentials on the host), and `Network=none` was
   rejected because the agent installs hub parsers on first boot. Suricata costs
   ~650 MB with the full ET Open ruleset, which `start.sh` refreshes best-effort
-  at container start and falls back from to the twelve local rules. Three tuning
+  at container start (and `stack-suricata-update.timer` refreshes weekly with a
+  live reload), falling back to the twelve local rules. Three tuning
   facts: (1) `tpacket-v3` on `lo` needs a block size **above the loopback MTU**
   (128 KB, not the 32 KB default) -- with the default the ring mmap fails with
   "Invalid argument", and the copy-mode fallback spins a core; (2) the ET TOR

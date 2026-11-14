@@ -30,6 +30,8 @@ owns the render, the digest and the secret resolution.
 ./scripts/btcpay-wallet.sh          # import the view-only BTCPay Monero wallet
 ./scripts/backup.sh                 # restic backup / restore / verify / inspect
 ./scripts/ids.sh -v                 # the IDS roll-up by hand (ids.timer: every 5 min)
+sudo /etc/stack-ids/suricata-update.sh  # ET Open refresh + live reload now
+./scripts/crowdsec-update.sh       # cscli hub update/upgrade now
 ./scripts/spend-audit.sh            # spend drift + outgoing-activity tripwire
 ./scripts/rotate.sh --list          # --list/--status/--dry-run; one target per run
 # the CI gates, each runnable on its own

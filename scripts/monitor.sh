@@ -132,6 +132,8 @@ MONITOR_BTC_MIN_PEERS=$(monitor_var MONITOR_BTC_MIN_PEERS)
 MONITOR_MEMPOOL_MB=$(monitor_var MONITOR_MEMPOOL_MB)
 MONITOR_XMR_LAG_BLOCKS=$(monitor_var MONITOR_XMR_LAG_BLOCKS)
 MONITOR_IDS_MAX_AGE_MIN=$(monitor_var MONITOR_IDS_MAX_AGE_MIN)
+MONITOR_IDS_RULES_MAX_AGE_H=$(monitor_var MONITOR_IDS_RULES_MAX_AGE_H)
+MONITOR_IDS_UPDATE_MAX_AGE_H=$(monitor_var MONITOR_IDS_UPDATE_MAX_AGE_H)
 MONITOR_BOUNCER_MAX_AGE_MIN=$(monitor_var MONITOR_BOUNCER_MAX_AGE_MIN)
 MONITOR_AUDIT_MAX_AGE_MIN=$(monitor_var MONITOR_AUDIT_MAX_AGE_MIN)
 MONITOR_REGISTRATIONS_MAX_AGE_MIN=$(monitor_var MONITOR_REGISTRATIONS_MAX_AGE_MIN)
@@ -167,6 +169,7 @@ THRESH_XMR_LAG=$(num_or "${MONITOR_XMR_LAG_BLOCKS:-}" 3)
 #   ids: every five minutes, 20 gives four missed runs (or one long deploy that
 #   restarted the engines) before the sweep calls it stale -- the check that
 #   notices a sensor whose unit reads "active" while the engine inside stopped.
+#   suricata-update / crowdsec-update: weekly; 336h (14 days) is two missed runs.
 #   bouncer: every minute; five missed runs is a stopped timer or a wedged nft,
 #   either of which means decisions are made and nothing is enforcing.
 #   registrations: every minute; thirty missed runs is a stopped timer or a host
@@ -179,6 +182,8 @@ verdict_age() { # job -> seconds
         backup-verify)    printf '%s' $(( $(num_or "$MONITOR_BACKUP_VERIFY_MAX_AGE_H" 192) * 3600 )) ;;
         backup-verify-db) printf '%s' $(( $(num_or "$MONITOR_BACKUP_VERIFY_DB_MAX_AGE_H" 1080) * 3600 )) ;;
         ids)              printf '%s' $(( $(num_or "$MONITOR_IDS_MAX_AGE_MIN" 20) * 60 )) ;;
+        suricata-update|crowdsec-update)
+                          printf '%s' $(( $(num_or "$MONITOR_IDS_UPDATE_MAX_AGE_H" 336) * 3600 )) ;;
         bouncer)          printf '%s' $(( $(num_or "$MONITOR_BOUNCER_MAX_AGE_MIN" 5) * 60 )) ;;
         auditd)           printf '%s' $(( $(num_or "$MONITOR_AUDIT_MAX_AGE_MIN" 20) * 60 )) ;;
         registrations)    printf '%s' $(( $(num_or "$MONITOR_REGISTRATIONS_MAX_AGE_MIN" 30) * 60 )) ;;
@@ -478,6 +483,10 @@ THRESH_METRICS_S=$(num_or "${MONITOR_METRICS_MAX_AGE_S:-}" 300)
 # The log pipeline: how old the newest entry in the store may be. A "stopped
 # shipping" alarm, not a threshold -- 15 minutes gives a restart room to come back.
 THRESH_LOGS_S=$(num_or "${MONITOR_LOGS_MAX_AGE_S:-}" 900)
+# The ET Open ruleset's age, from the mtime scripts/ids.sh records. 14 days is
+# two missed weekly refreshes: one week of stale signatures is not a page, two
+# is a sensor that has stopped following upstream.
+THRESH_RULES_AGE_H=$(num_or "${MONITOR_IDS_RULES_MAX_AGE_H:-}" 336)
 # The NIC's errs+drop columns, delta'd between sweeps like the restart counters:
 # a carrier dropping packets looks like a slow sync to every chain check.
 MONITOR_NET_DROP=$(monitor_var MONITOR_NET_DROP)
@@ -887,7 +896,7 @@ fi
 schedule_faults=""
 if command -v systemctl >/dev/null 2>&1; then
     for u in backup.timer backup-verify.timer backup-verify-db.timer \
-             registrations.timer monitor.timer; do
+             registrations.timer monitor.timer crowdsec-update.timer; do
         if ! systemctl --user cat "$u" >/dev/null 2>&1; then
             schedule_faults="$schedule_faults $u(not installed)"
         elif ! systemctl --user is-active --quiet "$u" 2>/dev/null; then
@@ -1338,6 +1347,9 @@ IDS_STATUS_FILE="$AUDIT_DIR/ids.status"
 ids_alerts=0
 ids_decisions=0
 ids_ssh_fail=0
+ids_rules=""
+ids_rules_epoch=""
+ids_rules_age_h=""
 ids_up=0
 verdict_judge "$IDS_STATUS_FILE" fail "$(verdict_age ids)" "IDS roll-up" \
     "see $AUDIT_LOG" "ids.timer stopped, or ids.sh cannot read the sensor"
@@ -1346,10 +1358,42 @@ verdict_judge "$IDS_STATUS_FILE" fail "$(verdict_age ids)" "IDS roll-up" \
 ids_alerts=$(num_or "$(env_value "$IDS_STATUS_FILE" alerts)" 0)
 ids_decisions=$(num_or "$(env_value "$IDS_STATUS_FILE" decisions)" 0)
 ids_ssh_fail=$(num_or "$(env_value "$IDS_STATUS_FILE" ssh_fail)" 0)
+ids_rules=$(env_value "$IDS_STATUS_FILE" rules)
+ids_rules_epoch=$(env_value "$IDS_STATUS_FILE" rules_epoch)
+
+# The ET Open age policy. ids.sh records the rules file's mtime; this sweep owns
+# the threshold, like every other MONITOR_* number. Only judged while the
+# roll-up itself is healthy: a stale roll-up is already the failure, and one
+# fact must not page twice. missing/unreadable/empty already fail ids.sh; age is
+# the only state this adds.
+rules_problem=""
+rules_problem_sev=""
+if [ "$VERDICT_OUTCOME" = ok ] && [ "$ids_rules" = ok ]; then
+    case "$ids_rules_epoch" in
+        ''|*[!0-9]*)
+            rules_problem="IDS roll-up reports rules=ok but $IDS_STATUS_FILE has no rules_epoch"
+            rules_problem_sev=soft
+            ;;
+        *)
+            ids_rules_age_h=$(( ( $(date +%s) - ids_rules_epoch ) / 3600 ))
+            [ "$ids_rules_age_h" -ge 0 ] || ids_rules_age_h=0
+            if [ "$ids_rules_age_h" -gt "$THRESH_RULES_AGE_H" ]; then
+                ids_rules=stale
+                rules_problem="suricata's ET Open ruleset is ${ids_rules_age_h}h old (threshold ${THRESH_RULES_AGE_H}h): stack-suricata-update.timer has not refreshed it"
+                rules_problem_sev=fail
+            fi
+            ;;
+    esac
+fi
+
 case "$VERDICT_OUTCOME" in
     ok)
         ids_up=1
-        ok "IDS: suricata=$(env_value "$IDS_STATUS_FILE" suricata) crowdsec=$(env_value "$IDS_STATUS_FILE" crowdsec), $ids_alerts alert(s), $ids_decisions decision(s), $ids_ssh_fail SSH auth failure(s)" ;;
+        ok "IDS: suricata=$(env_value "$IDS_STATUS_FILE" suricata) crowdsec=$(env_value "$IDS_STATUS_FILE" crowdsec), $ids_alerts alert(s), $ids_decisions decision(s), $ids_ssh_fail SSH auth failure(s), rules=${ids_rules:-?}${ids_rules_age_h:+ (${ids_rules_age_h}h)}"
+        case "$rules_problem_sev" in
+            fail) fail "$rules_problem" ;;
+            soft) soft "$rules_problem" ;;
+        esac ;;
     *)
         ids_up=0 ;;
 esac
@@ -1359,6 +1403,29 @@ esac
 # SSH failures are the same kind of report, with their own burst rule
 # (stack_ssh_bruteforce) over the last-window count in stack_ids_ssh_fail; SSH
 # is LAN-only, so the threshold is deliberately a warning.
+
+# The weekly refresh jobs. Their *effect* is the rules age above and the hub
+# items themselves; these verdicts add the reason and an early warning. A
+# missing status is deliberately not a fault: both jobs are weekly, so a fresh
+# deploy has none until its first run, and verify.sh / the schedule check names
+# a missing timer. A skipped run is also not judged: the job skips because the
+# engine is stopped, and ids.sh already reports that state; judging it here
+# would add a warning for one fact.
+SURICATA_UPDATE_STATUS_FILE="$AUDIT_DIR/suricata-update.status"
+if [ -f /etc/systemd/system/stack-suricata-update.timer ] \
+    && [ -f "$SURICATA_UPDATE_STATUS_FILE" ] \
+    && [ "$(env_value "$SURICATA_UPDATE_STATUS_FILE" result)" != skip ]; then
+    verdict_judge "$SURICATA_UPDATE_STATUS_FILE" soft "$(verdict_age suricata-update)" \
+        "Suricata rule update" "see $DATA_DIR/ids/suricata/suricata-update.log" \
+        "systemctl status stack-suricata-update.timer"
+fi
+CROWDSEC_UPDATE_STATUS_FILE="$AUDIT_DIR/crowdsec-update.status"
+if [ -f "$CROWDSEC_UPDATE_STATUS_FILE" ] \
+    && [ "$(env_value "$CROWDSEC_UPDATE_STATUS_FILE" result)" != skip ]; then
+    verdict_judge "$CROWDSEC_UPDATE_STATUS_FILE" soft "$(verdict_age crowdsec-update)" \
+        "CrowdSec hub update" "see $AUDIT_DIR/crowdsec-update.log" \
+        "systemctl --user status crowdsec-update.timer"
+fi
 
 # The audit report: host-level changes no script in this repo makes (account
 # databases, sudoers, sshd, audit's own config), plus the hash diff over the
@@ -1607,6 +1674,7 @@ prom_ok=1
     printf 'stack_ids_alerts %s\n' "${ids_alerts:-0}"
     printf 'stack_ids_decisions %s\n' "${ids_decisions:-0}"
     printf 'stack_ids_ssh_fail %s\n' "${ids_ssh_fail:-0}"
+    [ -n "$ids_rules_age_h" ] && printf 'stack_ids_rules_age_hours %s\n' "$ids_rules_age_h"
     printf 'stack_bouncer_bans %s\n' "${bouncer_bans:-0}"
     printf 'stack_bouncer_skipped %s\n' "${bouncer_skipped:-0}"
     printf 'stack_smart_up %s\n' "${smart_up:-0}"

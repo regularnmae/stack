@@ -1,8 +1,9 @@
 # This stack's own Suricata rules -- hand-written, high precision, and the only
 # rules that are allowed to describe this host's topology.
 #
-# The ET Open set (suricata.rules, fetched at container start) covers generic
-# exploit/scan signatures. Everything below is about *this* deployment: the
+# The ET Open set (suricata.rules, fetched at container start and weekly by
+# stack-suricata-update.timer) covers generic exploit/scan signatures.
+# Everything below is about *this* deployment: the
 # ports that exist, what should never reach them, and what a request to them
 # must look like. A rule here that can fire during normal operation is a bug --
 # the cost of a noisy IDS is that its alerts stop being read.
