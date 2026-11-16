@@ -52,7 +52,7 @@ deployment problem.
 | `tor` | `localhost/tor:local` | — |
 | `uptime-kuma` | `docker.io/louislam/uptime-kuma:2.5.11` | `127.0.0.1:8107` |
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — |
-| `vector` | `docker.io/timberio/vector:0.61.0-debian` | — |
+| `vector` | `docker.io/timberio/vector:0.62.0-debian` | — |
 | `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.54.0` | `127.0.0.1:9428` |
 | `victoria-logs-mcp` | `localhost/victoria-logs-mcp:latest` | `127.0.0.1:8111` |
 | `victoriametrics` | `docker.io/victoriametrics/victoria-metrics:v1.156.0` | `127.0.0.1:8428` |
