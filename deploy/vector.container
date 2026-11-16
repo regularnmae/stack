@@ -24,7 +24,7 @@ ContainerName=vector
 # Debian, not -alpine or -distroless: the journald source needs the systemd
 # journal library and runs `journalctl` as a child, and the check below needs
 # bash.
-Image=docker.io/timberio/vector:0.61.0-debian
+Image=docker.io/timberio/vector:0.62.0-debian
 Network=npm-network.network
 
 # Reading the host journal from a rootless container takes two things, and
