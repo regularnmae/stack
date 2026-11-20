@@ -36,12 +36,22 @@ Volume=@DATA_DIR@/postgres-dump:/dump:z
 # password hashes -- the restic repository is encrypted, the staging file is
 # not.
 #
+# After= above orders against postgres.service, which systemd reports "started"
+# as soon as the container process exists -- not when the entrypoint has
+# finished initdb or WAL replay. pg_isready exits 1 while the server is starting
+# or recovering and 0 once it accepts connections, so the dump waits for that;
+# without it a reboot or a timer catch-up fails with "the database system is
+# starting up" and the snapshot silently keeps the previous day's file. 60 s is
+# the bound: a longer recovery fails the dump -- the previous file stays, and the
+# weekly drill reports the stale dump -- rather than delaying the restic run.
+#
 # The staging file is removed at the start of every run and by the traps: EXIT
 # covers pg_dumpall exiting non-zero, TERM/INT cover TimeoutStartSec below (a
 # bare sh -c dies on SIGTERM without running its EXIT trap), and the leading rm
-# makes a SIGKILL self-healing on the next run.
+# makes a SIGKILL self-healing on the next run. The readiness wait runs before
+# the staging file is created, so a kill there leaves nothing to clean up.
 Entrypoint=/bin/sh
-Exec=-c "rm -f /dump/all.sql.tmp; trap 'rm -f /dump/all.sql.tmp' EXIT; trap 'rm -f /dump/all.sql.tmp; exit 143' TERM INT; umask 077; pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
+Exec=-c "rm -f /dump/all.sql.tmp; trap 'rm -f /dump/all.sql.tmp' EXIT; trap 'rm -f /dump/all.sql.tmp; exit 143' TERM INT; timeout 60 sh -c 'until pg_isready -q; do sleep 1; done' || { echo postgres did not accept connections within 60s >&2; exit 1; }; umask 077; pg_dumpall --clean --if-exists > /dump/all.sql.tmp && mv /dump/all.sql.tmp /dump/all.sql"
 
 [Service]
 Type=oneshot

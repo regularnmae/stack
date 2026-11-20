@@ -155,10 +155,15 @@ restore" and "Disaster recovery".
   different moments. So `postgres-dump.container` `pg_dumpall`s into
   `$DATA_DIR/postgres-dump`; its libpq settings belong in
   `config/boltmesh/dump.env`, **not** `db.env` (`PGHOST`/`PGUSER` in the server's
-  own env break its socket-based entrypoint bootstrap). `scripts/db-dump.sh`
+  own env break its socket-based entrypoint bootstrap). It waits for
+  `pg_isready` first: `After=postgres.service` orders against the container
+  process, not against a server that has finished initdb or WAL replay, and a
+  dump taken during recovery fails with "the database system is starting up"
+  while the snapshot silently keeps the previous file. `scripts/db-dump.sh`
   (run by `db-dump.service`, a plain user unit — the kuma half is `podman exec`,
-  which a container cannot do) writes `npm-dump/database.sqlite` through SQLite's
-  online backup API and `uptime-kuma-dump/kuma.sql` through `mariadb-dump
+  which a container cannot do) waits for `mariadb-admin ping` for the same
+  reason, then writes `npm-dump/database.sqlite` through SQLite's online backup
+  API and `uptime-kuma-dump/kuma.sql` through `mariadb-dump
   --single-transaction`. Both units are reached through
   `Wants=/After=postgres-dump.service db-dump.service`, but a bare
   `scripts/backup.sh backup` starts them itself (best-effort — a database outage

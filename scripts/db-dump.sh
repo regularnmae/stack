@@ -139,6 +139,20 @@ dump_kuma() {
         warn "kuma: uptime-kuma is not running; keeping the previous dump"
         return 1
     fi
+    # Running is not ready: the embedded MariaDB initialises its datadir before
+    # it answers on the socket, so a dump taken at the same instant fails to
+    # connect. Same bound as the replay in scripts/backup.sh: 60 tries, 2 s apart.
+    if ! podman exec uptime-kuma sh -c '
+        i=0
+        until mariadb-admin --socket=/app/data/run/mariadb.sock -u root ping >/dev/null 2>&1; do
+            i=$((i+1))
+            [ "$i" -lt 60 ] || { echo "mariadbd did not accept connections" >&2; exit 1; }
+            sleep 2
+        done
+    '; then
+        warn "kuma: MariaDB is not ready; keeping the previous dump"
+        return 1
+    fi
     if ! podman exec uptime-kuma mariadb-dump \
         --socket=/app/data/run/mariadb.sock -u root \
         --single-transaction --databases kuma >"$stage"; then
