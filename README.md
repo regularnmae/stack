@@ -110,7 +110,7 @@ for the growth and rebuild numbers.
 | `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — |
 | `suricata` ⚙️ | `docker.io/jasonish/suricata:8.0.8` | host network |
 | `tor` | `localhost/tor:local` | — |
-| `uptime-kuma` | `docker.io/louislam/uptime-kuma:2.5.11` | `127.0.0.1:8107` |
+| `uptime-kuma` | `docker.io/louislam/uptime-kuma:2.5.12` | `127.0.0.1:8107` |
 | `valkey` | `docker.io/valkey/valkey:9.1.3-alpine` | — |
 | `vector` | `docker.io/timberio/vector:0.61.0-debian` | — |
 | `victoria-logs` | `docker.io/victoriametrics/victoria-logs:v1.54.0` | `127.0.0.1:9428` |

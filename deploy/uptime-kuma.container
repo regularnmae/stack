@@ -13,7 +13,7 @@ ContainerName=uptime-kuma
 # the first release with the admin RCE fix. The exact pin is what makes a
 # deploy take that fix instead of whatever the floating major tag last left on
 # the host.
-Image=docker.io/louislam/uptime-kuma:2.5.11
+Image=docker.io/louislam/uptime-kuma:2.5.12
 Network=npm-network.network
 
 # Loopback only: nginx-proxy-manager runs on the host network and reaches this
