@@ -9,7 +9,7 @@ After=network-online.target
 
 [Container]
 ContainerName=node-exporter
-Image=docker.io/prom/node-exporter:v1.12.1
+Image=docker.io/prom/node-exporter:v1.13.1
 Network=host
 
 # On the host network, and NOT a container on npm-network with a PublishPort:

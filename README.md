@@ -43,7 +43,7 @@ deployment problem.
 | `nbxplorer` | `docker.io/nicolasdorier/nbxplorer:2.6.23` | — |
 | `netcheck` | `localhost/netcheck:local` | — |
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.17.0` | host network |
-| `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network |
+| `node-exporter` | `docker.io/prom/node-exporter:v1.13.1` | host network |
 | `postgres` | `docker.io/library/postgres:18.7-alpine` | — |
 | `searxng` | `docker.io/searxng/searxng:2026.11.13-219b63b20` | `127.0.0.1:8082` |
 | `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` |
