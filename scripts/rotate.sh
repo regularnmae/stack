@@ -83,7 +83,7 @@ STARTED=0
 # step.
 load_manifest "$REPO_DIR"
 
-RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
+RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.20.0}"
 BITCOIND_WAIT="${BITCOIND_WAIT:-600}"
 LN_WAIT="${LN_WAIT:-300}"
 APP_HEALTH_WAIT="${APP_HEALTH_WAIT:-180}"

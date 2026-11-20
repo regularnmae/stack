@@ -28,7 +28,7 @@ After=postgres-dump.service db-dump.service
 
 [Container]
 ContainerName=stack-backup
-Image=docker.io/restic/restic:0.19.1
+Image=docker.io/restic/restic:0.20.0
 
 # The repo location + password. install.sh writes this (mode 600); never
 # committed.
