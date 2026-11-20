@@ -45,6 +45,14 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   are derived from `deploy/`, so a new service is a file plus env seeding, not a
   list to edit.
 
+- **A declared placeholder that survives the render fails the install.**
+  `render_to` calls `assert_substituted`, which checks the `@TOKEN@`s the
+  template declares outside comment lines and dies naming the output and the
+  token. Comment lines may name one on purpose (`@PLACEHOLDERS@`), and a
+  substituted value that happens to contain `@ABC@` is not a leftover.
+  Otherwise a typo renders a literal into a unit, which systemd rejects only
+  when the unit starts.
+
 - **Secret resolution order** is `secrets.env` → the installed unit
   (`flag_value`) → the daemon's config (`bitcoin_conf_value`) → generate; that
   order is what makes adoption on a running host a no-op.

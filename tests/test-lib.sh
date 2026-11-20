@@ -403,6 +403,27 @@ assert_eq '/d&|y|/d&|y/config|/r&|x|14' \
     "$(REPO_DIR='/r&|x' IDS_RETENTION_DAYS=14 render_root_template "$TMP_DIR/root.tmpl" '/d&|y')" \
     'render_root_template escapes sed metacharacters'
 
+# A declared token left in the output is a template typo, not a comment. Comment
+# lines may name one on purpose (the real templates carry @PLACEHOLDERS@), and a
+# substituted value that happens to contain @ABC@ is not a leftover.
+printf 'A=@DATA_DIR@\n# @PLACEHOLDERS@\n' > "$TMP_DIR/render.src"
+printf 'A=/d\n# @PLACEHOLDERS@\n' > "$TMP_DIR/render.ok"
+assert_substituted "$TMP_DIR/render.src" "$TMP_DIR/render.ok"
+printf 'A=@TYPO@\n' > "$TMP_DIR/render.bad.src"
+printf 'A=@TYPO@\n' > "$TMP_DIR/render.bad"
+if guard_err=$( (assert_substituted "$TMP_DIR/render.bad.src" "$TMP_DIR/render.bad") 2>&1 ); then
+    printf 'FAIL: assert_substituted accepted a leftover @TYPO@\n' >&2
+    exit 1
+fi
+case "$guard_err" in
+    *@TYPO@*) ;;
+    *) printf 'FAIL: assert_substituted did not name @TYPO@: %s\n' "$guard_err" >&2
+       exit 1 ;;
+esac
+printf 'B=@VALUE@\n' > "$TMP_DIR/value.src"
+printf 'B=x@ABC@y\n' > "$TMP_DIR/value.out"
+assert_substituted "$TMP_DIR/value.src" "$TMP_DIR/value.out"
+
 mkdir -p "$TMP_DIR/quadlet" "$TMP_DIR/data"
 printf '[Container]\nImage=one\n\n[Service]\nRestart=always\n\n[Install]\nWantedBy=default.target\n' \
     > "$TMP_DIR/quadlet/a.container"
@@ -535,7 +556,7 @@ assert_eq 0 "$AM_PAGING" 'a config with no default route stays inert'
 # truncated usage message, and healthcheck-lint used to hard-code a line range
 # that did exactly that. Compare the two for every script that has a --help.
 for script in "$ROOT_DIR"/deploy.sh "$ROOT_DIR"/verify.sh "$ROOT_DIR"/configure.sh \
-              "$ROOT_DIR"/scripts/*.sh; do
+              "$ROOT_DIR"/deploy/install.sh "$ROOT_DIR"/scripts/*.sh; do
     grep -q usage_header "$script" || continue
     case "$script" in */scripts/lib.sh) continue ;; esac
     want=$(awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$script")

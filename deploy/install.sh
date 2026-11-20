@@ -2,9 +2,9 @@
 # Install the whole stack: every quadlet unit, every secret/env file, and the
 # data directories the containers need.
 #
-# This is the **only** installer. The application repos (searxng-mcp and the
-# four crypto MCP servers, plus BoltMesh's backend and frontend) ship code,
-# tests, CI and their Containerfile; their units and env wiring live here.
+# This is the **only** installer. The application repos (the ten MCP servers,
+# plus BoltMesh's backend and frontend) ship code, tests, CI and their
+# Containerfile; their units and env wiring live here.
 #
 # EVERYTHING persistent lives under one data dir ($STACK_DATA_DIR, default
 # $HOME/data): the daemon data, the nginx-proxy-manager data, and the
@@ -731,6 +731,7 @@ EOF
         mv -f "$out.vol" "$out"
         rm -f "$vol"
     fi
+    assert_substituted "$src" "$out"
 }
 
 # Render into PATH only when PATH is missing: the seed-once rule for every env

@@ -198,6 +198,12 @@ jobs:
       # writable root redirected under a temp dir.
       - name: deploy.sh --dry-run changes nothing
         run: tests/test-deploy.sh
+      # install.sh owns the render and the seed-once rule, and deploy.sh's dry
+      # run cannot reach it (install_units goes through run()). This runs the
+      # real installer twice in a throwaway tree with stubbed podman/systemctl,
+      # pinning the rendered output, mode 600, seed-once and token reuse.
+      - name: install.sh renders and seeds in a sandbox
+        run: tests/test-install.sh
       # deploy/services.toml is the single declaration of the public surface
       # (hostnames, MCP prefixes and ports, proxy hosts, onion services); the
       # first command validates the file itself and reconciles its ports with

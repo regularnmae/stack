@@ -1,9 +1,10 @@
 # shellcheck shell=bash
 # The vocabulary every other script starts with: the one logger, the
 # sed-escaping and root-template render shared by install.sh and verify.sh,
-# and the small parsers the probes and jobs read with. dur_s/dur_valid are
-# the exception: they wrap dur_ms, which deploy/root/status.sh owns so both
-# tiers parse a duration the same way (docs/units.md).
+# the post-render placeholder check, and the small parsers the probes and jobs
+# read with. dur_s/dur_valid are the exception: they wrap dur_ms, which
+# deploy/root/status.sh owns so both tiers parse a duration the same way
+# (docs/units.md).
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -24,6 +25,21 @@ render_root_template() { # src data-dir
         -e "s|@REPO_DIR@|$(esc "${REPO_DIR:-}")|g" \
         -e "s|@IDS_RETENTION_DAYS@|$(esc "${IDS_RETENTION_DAYS:-14}")|g" \
         "$1"
+}
+
+# A template typo otherwise renders a literal @TOKEN@ into a unit, which systemd
+# rejects only when the unit starts. Check the tokens the source declares, not
+# every @UPPER@ in the output: a comment may name one on purpose
+# (@PLACEHOLDERS@), and a secret value that happens to contain @ABC@ is not a
+# substitution failure. Print the token, never the line -- the line can also
+# carry a substituted secret.
+assert_substituted() { # src out
+    local src="$1" out="$2" tok hits=""
+    while IFS= read -r tok; do
+        grep -qF -- "$tok" "$out" && hits+=" $tok"
+    done < <(awk '!/^[[:space:]]*#/' "$src" \
+        | grep -oE '@[A-Z_][A-Z0-9_]*@' | sort -u)
+    [ -z "$hits" ] || die "unsubstituted placeholder(s) in $out (from $src):$hits"
 }
 
 # A fresh secret. Hex only: these reach a rendered systemd Exec= (Quadlet splits

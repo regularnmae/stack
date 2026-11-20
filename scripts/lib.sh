@@ -9,8 +9,9 @@
 # names a topic. Order matters in one place only: log/warn/die come from core.sh
 # before deploy/root/status.sh is sourced.
 #
-#   core.sh      log/warn/die, esc, render_root_template, rand_hex, usage_header,
-#                dur_s/dur_valid, human_bytes, complete_line_bytes
+#   core.sh      log/warn/die, esc, render_root_template, assert_substituted,
+#                rand_hex, usage_header, dur_s/dur_valid, human_bytes,
+#                complete_line_bytes
 #   datadir.sh   resolve/persist/ensure the data dir, SELinux, write_env_file
 #   probes.sh    NETCHECK_*, net_curl(_host), container_health_state,
 #                verify_line_level, wait_healthy
