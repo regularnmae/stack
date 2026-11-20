@@ -67,9 +67,9 @@ env = "XMR_EXPLORER_HOST"
 domain = "status.boltmesh.net"
 env = "UPTIME_KUMA_HOST"
 # kuma_add_host: whether deploy/install.sh renders --add-host=<domain>:host-
-# # gateway into the uptime-kuma unit, so its OWN monitors resolve this vhost
-# # on the host instead of hairpinning through the router (see docs/proxy.md).
-# # The status page does not monitor itself, so it needs none.
+# gateway into the uptime-kuma unit, so its OWN monitors resolve this vhost
+# on the host instead of hairpinning through the router (see docs/proxy.md).
+# The status page does not monitor itself, so it needs none.
 kuma_add_host = false
 
 [host.mcp]

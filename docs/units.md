@@ -427,6 +427,14 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
 
 ## The host-side probes
 
+- **A container's post-job verdict writer runs from `[Service] ExecStopPost`,
+  with a leading `-`.** `postgres-dump.container` records its own result this
+  way. Quadlet already adds an `ExecStopPost` for `podman rm`, and systemd runs
+  all of them; the leading `-` on ours means a full disk or a missing
+  `/etc/stack-ids/status.sh` cannot turn a successful dump into a failed unit.
+  The helper is staged under `$DATA_DIR/bin` (never the checkout) and always
+  exits 0.
+
 - **The bridge-network probes exec into one long-lived `netcheck` container;
   they do not `podman run` per probe.** `net_curl` runs
   `podman --events-backend=none exec` against `netcheck` (npm-network). A

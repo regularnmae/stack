@@ -27,6 +27,9 @@ if [ -r "$REPO_DIR/stack.conf" ]; then
 fi
 GITHUB_ORG="${GITHUB_ORG:-regularnmae}"
 BUILD_DIR="${BUILD_DIR:-$HOME/build}"
+# Pin the clone a `curl | bash` run makes. A tag or commit makes a host holding
+# wallet keys reproducible; unset keeps the old default-branch behaviour.
+STACK_REF="${STACK_REF:-}"
 
 USER_NAME="$(id -un)"
 
@@ -230,6 +233,15 @@ else
         log "cloning $GITHUB_ORG/stack into $BUILD_DIR/stack"
         git clone -q "https://github.com/$GITHUB_ORG/stack.git" "$BUILD_DIR/stack" \
             || warn "could not clone; clone it yourself, then run deploy.sh"
+    fi
+    if [ -n "$STACK_REF" ]; then
+        # fetch --tags first: an existing checkout from an earlier run does not
+        # know a tag published since. A ref that cannot be resolved is fatal:
+        # silently deploying the default branch is the failure this pins against.
+        git -C "$BUILD_DIR/stack" fetch -q --tags origin 2>/dev/null || true
+        log "checking out STACK_REF=$STACK_REF"
+        git -C "$BUILD_DIR/stack" checkout -q --detach "$STACK_REF" \
+            || die "could not check out STACK_REF=$STACK_REF in $BUILD_DIR/stack (unknown ref, or local changes); fix it or unset STACK_REF"
     fi
 fi
 

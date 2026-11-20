@@ -897,6 +897,8 @@ ROOT_FILES=(
     "deploy/root/logrotate-stack-ids:/etc/logrotate.d/stack-ids"
     "deploy/root/audit-report.sh:/etc/stack-ids/audit-report.sh"
     "deploy/root/audit-rules-data.conf:/etc/systemd/system/audit-rules.service.d/10-stack-data.conf"
+    "deploy/root/audit-rules-load.sh:/etc/stack-ids/audit-rules-load.sh"
+    "deploy/root/audit-rules-wrapper.conf:/etc/systemd/system/audit-rules.service.d/20-stack-augenrules.conf"
     "deploy/root/status.sh:/etc/stack-ids/status.sh"
     "deploy/root/stack-audit.service:/etc/systemd/system/stack-audit.service"
     "deploy/root/stack-audit.timer:/etc/systemd/system/stack-audit.timer"

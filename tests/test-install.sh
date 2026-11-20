@@ -107,6 +107,11 @@ if [ -n "$(find "$QUADLET" "$USER_UNITS" -name '*.in' -print -quit)" ]; then
 fi
 check_modes
 check_placeholders
+[ -x "$TMP_DIR/data/bin/dump-status.sh" ] \
+    || fail 'the dump status helper is not staged under the data dir'
+grep -qF -- "$TMP_DIR/data/bin/dump-status.sh postgres-dump" \
+    "$QUADLET/postgres-dump.container" \
+    || fail 'postgres-dump does not call the staged dump status helper'
 
 # --- second install: seed-once ---------------------------------------------
 # An operator edit and a seeded token both survive a re-run, even though the

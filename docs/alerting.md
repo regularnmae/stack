@@ -97,13 +97,14 @@ not faults").
 - **Failed units are a warning, and the sweep reads two facts about them.**
   `systemctl --failed` (system and user) names what is failed now. A oneshot that
   is stopped after a failure keeps its `ExecMainStatus`, so the sweep also reads
-  the last exit of inactive system services and names a non-zero oneshot — this
-  is how `audit-rules.service` is caught after `systemctl stop`, when
-  `--failed` is already empty. Both are warnings, not pages: `augenrules` exits
-  1 on "Rule exists" with the nine watches loaded, and the checks that own each
-  effect (audit watches, bouncer, backup age, IDS) already decide the critical
-  level. `monitor.service` is excluded from the user list, because a failing
-  sweep must not report itself.
+  the last exit of inactive system services and names a non-zero oneshot after
+  `systemctl stop`, when `--failed` is already empty. Both are warnings, not
+  pages: the checks that own each effect (audit watches, bouncer, backup age,
+  IDS) already decide the critical level. `audit-rules.service` no longer
+  contributes the known duplicate-only failure: its
+  `deploy/root/audit-rules-load.sh` wrapper treats only the "Rule exists" reload
+  as success and still fails on a real error. `monitor.service` is excluded from
+  the user list, because a failing sweep must not report itself.
 
 - **The clock is a check, not an assumption.** `timedatectl show -p
   NTPSynchronized` is a yes/no fact; `no` fails because certificate issuance and
@@ -128,6 +129,12 @@ not faults").
   standby,0`); a bridge that exposes no attribute table is a warning, not a
   failure -- while a block device that cannot be opened is the probe's own
   `result=fail`.
+
+- **A stale dump names its producer.** The dump files' mtimes are the effect
+  check; when one is missing or older than `MONITOR_DUMP_MAX_AGE_H`, the sweep
+  also reads `audit/postgres-dump.status` or `audit/db-dump.status` and prints
+  that producer's result and detail. A healthy sweep does not read them, so the
+  added context costs nothing until it is needed.
 
 - **`verify.sh` is the on-demand diagnostic; the monitor is the only periodic
   producer.** The schedules, the metrics textfile, the log pipeline and

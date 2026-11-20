@@ -820,20 +820,49 @@ fi
 # backup -- restic keeps copying the last good copy -- which is why this check
 # exists: otherwise the loss appears on restore day. Each dump is renamed into
 # place only after validation, so its mtime is when it was taken.
+#
+# The mtime is the effect; the producer's verdict file is the cause. Reading it
+# only when a dump is missing or stale keeps the healthy sweep quiet and turns
+# "postgres-dump/all.sql is 38h old" into "postgres-dump.service exited 1".
+dump_verdict() { # dump-relative-path -> producer summary
+    local job f
+    case "$1" in
+        postgres-dump/*) job=postgres-dump ;;
+        *)               job=db-dump ;;
+    esac
+    f="$AUDIT_DIR/$job.status"
+    if [ ! -f "$f" ]; then
+        printf '%s has no verdict yet' "$job"
+        return 0
+    fi
+    status_verdict "$f"
+    if [ "$STATUS_RESULT" = ok ]; then
+        printf '%s reported ok; the dump file itself is the fault' "$job"
+    else
+        printf '%s=%s%s' "$job" "${STATUS_RESULT:-unknown}" \
+            "${STATUS_DETAIL:+ -- $STATUS_DETAIL}"
+    fi
+}
+
 dump_missing=""
 dump_stale=""
 dump_oldest=0
 for dump_rel in postgres-dump/all.sql npm-dump/database.sqlite uptime-kuma-dump/kuma.sql; do
     dump_file="$DATA_DIR/$dump_rel"
     if [ ! -s "$dump_file" ]; then
-        dump_missing="$dump_missing $dump_rel"
+        dump_missing="$dump_missing $dump_rel [$(dump_verdict "$dump_rel")]"
         continue
     fi
     dump_m=$(stat -c %Y "$dump_file" 2>/dev/null || true)
-    case "$dump_m" in ''|*[!0-9]*) dump_missing="$dump_missing $dump_rel"; continue ;; esac
+    case "$dump_m" in
+        ''|*[!0-9]*)
+            dump_missing="$dump_missing $dump_rel [$(dump_verdict "$dump_rel")]"
+            continue ;;
+    esac
     dump_age_h=$(( ( $(date +%s) - dump_m ) / 3600 ))
     [ "$dump_age_h" -gt "$dump_oldest" ] && dump_oldest=$dump_age_h
-    [ "$dump_age_h" -gt "$THRESH_DUMP_H" ] && dump_stale="$dump_stale $dump_rel (${dump_age_h}h)"
+    [ "$dump_age_h" -gt "$THRESH_DUMP_H" ] \
+        && dump_stale="$dump_stale $dump_rel (${dump_age_h}h) [$(dump_verdict "$dump_rel")]"
 done
 case "${backup_count:-}" in
     ''|*[!0-9]*|0)
@@ -1127,18 +1156,18 @@ fi
 # 4. failed systemd units -- the gaps the timers and verdict files do not cover
 # ---------------------------------------------------------------------------
 # A timer can be active while the oneshot it starts fails, and a failed job with
-# no status file (the distro's audit-rules.service is the example) is invisible
-# to every check above. Read both managers: the stack's units are user units,
-# while audit-rules and the distro's boot jobs are system units.
+# no status file is invisible to every check above. Read both managers: the
+# stack's units are user units, while audit-rules and the distro's boot jobs are
+# system units.
 #
 # `systemctl --failed` only sees the state a stop or reset-failed has already
-# cleared. An inactive oneshot keeps its last exit code, so the second read names
-# audit-rules after a stop: inactive now, ExecMainStatus=1, watches 9/9. Both are
-# warnings, not pages: augenrules exits 1 on "Rule exists" even with a correct
-# ruleset, and the checks that own each effect (audit watches, bouncer, backup
-# age, IDS) already decide the critical level. monitor.service is excluded from
-# the user list: a sweep that finds any other problem is itself failed until the
-# next start and must not report itself.
+# cleared. An inactive oneshot keeps its last exit code, so the second read still
+# names a stopped unit whose last run failed. Both are warnings, not pages: the
+# checks that own each effect (audit watches, bouncer, backup age, IDS) already
+# decide the critical level, and audit-rules now exits 0 for the duplicate-only
+# reload it used to report (deploy/root/audit-rules-load.sh). monitor.service is
+# excluded from the user list: a sweep that finds any other problem is itself
+# failed until the next start and must not report itself.
 head3 "systemd units"
 unit_faults=()
 unit_read_ok=1

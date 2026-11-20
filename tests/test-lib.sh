@@ -478,12 +478,14 @@ unstamped  c.container" \
 want=$(unit_digest_line "$(unit_digest)" a)
 assert_eq "$stamp_a  a.container" "$want" \
     'unit_digest_line picks one unit out of a digest set'
-if ! PATH="$TMP_DIR/bin:$PATH" unit_digest_applied | grep -qxF "$want"; then
+# Capture first: grep -q exits at the first match, and with pipefail the
+# producer's SIGPIPE would otherwise read as a failed pipeline.
+applied=$(PATH="$TMP_DIR/bin:$PATH" unit_digest_applied)
+if ! grep -qxF "$want" <<< "$applied"; then
     printf 'FAIL: a container already carrying the definition was not recognised\n' >&2
     exit 1
 fi
-if PATH="$TMP_DIR/bin:$PATH" unit_digest_applied \
-    | grep -qxF "$(unit_digest_line "$(unit_digest)" c)"; then
+if grep -qxF "$(unit_digest_line "$(unit_digest)" c)" <<< "$applied"; then
     printf 'FAIL: an unstamped container matched a definition it does not carry\n' >&2
     exit 1
 fi

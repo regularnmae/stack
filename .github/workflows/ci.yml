@@ -5,15 +5,23 @@ on:
     branches: [main]
   pull_request:
 
-# The lint job checks out, curls shellcheck, runs the markdownlint action and
-# reads git -- nothing here writes to the repository, so the token the action
-# inherits is read-only rather than the repository default.
+# Every step reads the repository or runs a pinned tool; nothing writes to it,
+# so the token the actions inherit is read-only rather than the repository
+# default.
 permissions:
   contents: read
+
+# A superseded push has nothing to prove: keep only the newest run for a ref.
+# The group is per ref, so a push to main and an open PR never cancel each other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    # The runner default is six hours; a hung curl or test must fail sooner.
+    timeout-minutes: 15
     env:
       # The runner's shellcheck is older and disagrees on some checks (SC2015
       # among them), so a lint that passes locally can fail here for no reason.
@@ -217,9 +225,10 @@ jobs:
           ./scripts/docs-render.sh --check
       # load_manifest runs this package on the bare interpreter (install.sh,
       # verify.sh, monitor.sh, CI itself), so every command in it must stay
-      # stdlib-only -- importing them proves it without a venv.
+      # stdlib-only. -S removes site-packages, so a third-party package that
+      # happens to be installed on the runner cannot make this pass.
       - name: stackctl imports without extras
-        run: PYTHONPATH=scripts python3 -c 'import stackctl.docs, stackctl.manifest, stackctl.npm, stackctl.units'
+        run: PYTHONPATH=scripts python3 -S -c 'import stackctl.docs, stackctl.manifest, stackctl.npm, stackctl.units'
       # The Python core behind the npm-hosts reconciler (scripts/stackctl/),
       # offline: declaration parsing, payload construction, a full reconcile
       # against a fake NPM admin API. The shell's Go-duration parser
@@ -252,6 +261,14 @@ jobs:
       # that lib.sh has not grown a copy back.
       - name: status writer tests
         run: tests/test-status.sh
+      # The postgres dump's ExecStopPost helper records the cause; the dump's
+      # mtime is still the monitor's effect check. It must always exit 0.
+      - name: dump status helper tests
+        run: tests/test-dump-status.sh
+      # The distro's audit-rules unit exits 1 on a duplicate rule even with a
+      # correct ruleset. Only that known pair may be treated as success.
+      - name: audit-rules duplicate tolerance tests
+        run: tests/test-audit-rules.sh
       # ... and one reader. A job that writes status_write directly skips the
       # dry-run rule and the unrecorded-verdict rule; a sweep that reads
       # result=fail itself re-decides the branch order that let the jobs drift
@@ -273,6 +290,7 @@ jobs:
   # pre-filter for this repo's own hex tokens; this is the general net.
   secrets:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       # Renovate's custom manager (renovate.json) moves this in one PR.
       GITLEAKS_VERSION: v8.30.1

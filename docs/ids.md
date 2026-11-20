@@ -353,3 +353,14 @@ is just a quiet LAN. The count is in the monitor line and `stack_ids_ssh_fail`;
   `/etc/systemd/system/audit-rules.service.d/10-stack-data.conf`. It uses
   `WantsMountsFor`, not `RequiresMountsFor`, so a missing data disk does not
   stop the host-level watches from loading.
+
+- **A duplicate reload is success, and only a duplicate reload is.** `augenrules`
+  exits 1 when a rule is already in the kernel even though the ruleset is
+  correct, which left the distro's `audit-rules.service` failed forever and made
+  `systemctl --failed` noisy. `install.sh --root` replaces its `ExecStart` with
+  `/etc/stack-ids/audit-rules-load.sh` (drop-in
+  `20-stack-augenrules.conf`). The wrapper accepts only the pair
+  `Error sending add rule data request (Rule exists)` and `There was an error in
+  line N of /etc/audit/audit.rules`; `ENOENT`, a permission error or a malformed
+  rule still fails the unit. It does not prove the stack watches loaded — the
+  audit report's `watches=N/M` comparison owns that (see above).

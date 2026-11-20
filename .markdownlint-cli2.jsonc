@@ -8,5 +8,5 @@
       "headings": false
     }
   },
-  "globs": ["AGENTS.md", "README.md", "docs/*.md"]
+  "globs": ["AGENTS.md", "README.md", "CHANGELOG.md", "docs/*.md"]
 }

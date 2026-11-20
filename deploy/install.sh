@@ -250,6 +250,14 @@ install_root_tier() {
     # mount; docs/ids.md owns why WantsMountsFor, not RequiresMountsFor.
     root_render "$DEPLOY_DIR/root/audit-rules-data.conf" \
         /etc/systemd/system/audit-rules.service.d/10-stack-data.conf 644 "$data"
+    # The distro's ExecStart is replaced with a wrapper that tolerates only the
+    # duplicate diagnostics a reload produces. Without it a correct ruleset
+    # leaves the unit failed forever, and `systemctl --failed` stops meaning
+    # anything. docs/ids.md owns the exact accepted lines.
+    root_render "$DEPLOY_DIR/root/audit-rules-load.sh" \
+        "$ROOT_CONFIG_DIR/audit-rules-load.sh" 755 "$data"
+    root_render "$DEPLOY_DIR/root/audit-rules-wrapper.conf" \
+        /etc/systemd/system/audit-rules.service.d/20-stack-augenrules.conf 644 "$data"
     aenv=$(mktemp)
     printf '# Written by deploy/install.sh --root; do not edit (deploy/root/ owns it).\nDATA_DIR=%s\n' "$data" > "$aenv"
     install -m 600 "$aenv" "$ROOT_CONFIG_DIR/audit.env"
@@ -375,6 +383,15 @@ install_root_tier() {
     fi
 
     systemctl daemon-reload
+    # The unit may be sitting failed from a duplicate-only reload taken before
+    # this wrapper existed. Reset the old result and run it through the wrapper
+    # now; a real failure stays visible instead of being hidden by reset-failed.
+    systemctl reset-failed audit-rules.service >/dev/null 2>&1 || true
+    if systemctl restart audit-rules.service >/dev/null 2>&1; then
+        log "audit-rules.service loaded through the duplicate-tolerant wrapper"
+    else
+        warn "audit-rules.service did not start; check: journalctl -u audit-rules"
+    fi
     # Quadlet turns the rendered .container into suricata.service, and the
     # generator's [Install] WantedBy=multi-user.target is what pulls it in at
     # boot -- exactly like the rootless units, which are never `systemctl --user
@@ -1551,16 +1568,18 @@ sync_tree() { # src-dir dest-dir
 # ---------------------------------------------------------------------------
 # runtime files a container runs, but that the checkout owns
 # ---------------------------------------------------------------------------
-# Two units run a file this checkout owns rather than one in $DATA_DIR: monerod's
-# --block-notify helper and the BTCPay bootstrap script. Mounting them from the
-# repo would make the checkout a *runtime* dependency of a container's start
-# (podman fails on a missing bind source, naming a path nobody edited). Host
-# scripts in deploy/*.service still run from the checkout -- they are the tooling
-# -- but a container a daemon starts must not. So both are staged here, and CI
-# fails if a container template mentions @REPO_DIR@.
+# Units run files this checkout owns rather than one in $DATA_DIR: monerod's
+# --block-notify helper, the BTCPay bootstrap script, and postgres-dump's
+# ExecStopPost verdict writer. Mounting or naming them from the repo would make
+# the checkout a *runtime* dependency of a container's start (podman fails on a
+# missing bind source, naming a path nobody edited). Host scripts in
+# deploy/*.service still run from the checkout -- they are the tooling -- but a
+# container a daemon starts must not. So all three are staged here, and CI fails
+# if a container template mentions @REPO_DIR@.
 mkdir -p "$DATA_DIR/bin"
 install -m 755 "$DEPLOY_DIR/btcpay/monero-notify.sh" "$DATA_DIR/bin/monero-notify.sh"
 install -m 755 "$REPO_DIR/scripts/btcpay_bootstrap.py" "$DATA_DIR/bin/btcpay_bootstrap.py"
+install -m 755 "$REPO_DIR/scripts/dump-status.sh" "$DATA_DIR/bin/dump-status.sh"
 
 # Render a unit over the installed one, keeping the render it replaces as
 # <target>.bak. Three things are load-bearing:

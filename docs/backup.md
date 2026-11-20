@@ -2,7 +2,7 @@
 
 What restic copies, how the snapshot is drilled, and the order a restore has to
 follow. Read this before touching `stack.conf`'s `BACKUP_PATHS`, `backup.sh`,
-either drill, or `db-dump.sh`. The operator runbooks are README's "Backup &
+either drill, `db-dump.sh`, or `dump-status.sh`. The operator runbooks are README's "Backup &
 restore" and "Disaster recovery".
 
 ## Invariants
@@ -14,6 +14,9 @@ restore" and "Disaster recovery".
   its own instant.
 - **The drill's verdict is a file** (`audit/backup-verify.status`), not an exit
   code, because that is what `monitor.sh` reads.
+- **Each dump producer writes a verdict too** (`audit/postgres-dump.status`,
+  `audit/db-dump.status`). The dump file's mtime is the effect the monitor
+  pages on; the verdict is the cause it prints with a missing or stale dump.
 - **Only an unapplied SELinux label is an acceptable restore error**, and it is
   counted, never pinned.
 - **Restore before deploy, replay the dump after, migrate last.**
@@ -168,7 +171,15 @@ restore" and "Disaster recovery".
   `Wants=/After=postgres-dump.service db-dump.service`, but a bare
   `scripts/backup.sh backup` starts them itself (best-effort — a database outage
   must not stop the run that protects the wallet; `monitor.sh` fails on a dump
-  that stops being refreshed, `MONITOR_DUMP_MAX_AGE_H`). The repo is
+  that stops being refreshed, `MONITOR_DUMP_MAX_AGE_H`).
+  `postgres-dump.container` writes its verdict from
+  `scripts/dump-status.sh` in `[Service] ExecStopPost` (staged under
+  `$DATA_DIR/bin`, not read from the checkout; the leading `-` keeps a failed
+  status write from failing a good dump). `db-dump.sh` writes its own after the
+  targets run. Both record the result and, on failure, that the previous copy
+  was kept; `monitor.sh` reads
+  them only for a dump that is already missing or stale, so a healthy sweep
+  stays quiet. The repo is
   `$STACK_BACKUP_DIR`, reached
   through `backup.env`; `scripts/backup.sh` reads `RESTIC_*` from **the
   environment first, then the file** — the only order that can recover a fresh

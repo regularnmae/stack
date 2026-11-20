@@ -56,3 +56,8 @@ Exec=-c "rm -f /dump/all.sql.tmp; trap 'rm -f /dump/all.sql.tmp' EXIT; trap 'rm 
 [Service]
 Type=oneshot
 TimeoutStartSec=900
+# The monitor checks the dump's mtime (the effect); this records which job
+# failed and why (the cause). The helper is staged under $DATA_DIR/bin, never
+# the checkout. The leading '-' is load-bearing: a status-write failure must
+# not turn a good dump into a failed unit.
+ExecStopPost=-@DATA_DIR@/bin/dump-status.sh postgres-dump "$SERVICE_RESULT" "$EXIT_STATUS"

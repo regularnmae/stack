@@ -51,7 +51,6 @@ case "${1:-}" in
 esac
 
 resolve_data_dir
-command -v podman >/dev/null 2>&1 || die "podman is required"
 
 # The dumps carry user tables (NPM's account hashes, kuma's users and monitors):
 # 0600, in directories install.sh has already made 0700.
@@ -67,7 +66,24 @@ STAGE="$DATA_DIR/.db-dump"
 
 mkdir -p "$NPM_DUMP_DIR" "$KUMA_DUMP_DIR" "$STAGE"
 chmod 700 "$NPM_DUMP_DIR" "$KUMA_DUMP_DIR" "$STAGE" 2>/dev/null || true
-trap 'rm -rf "$STAGE"' EXIT
+
+# The producer's own verdict, beside the dumps it writes. monitor.sh checks the
+# files' mtimes (the effect); this file answers "which job failed, and why".
+AUDIT_DIR="$DATA_DIR/audit"
+mkdir -p "$AUDIT_DIR"
+verdict_init "$AUDIT_DIR/db-dump.status" scripts/db-dump.sh deploy/db-dump.service
+# The dump's own cleanup stays here; verdict_unrecorded is idempotent, so a run
+# killed before the final verdict cannot leave the previous result=ok behind.
+# shellcheck disable=SC2317,SC2329  # invoked by the EXIT trap below
+cleanup() {
+    rm -rf "$STAGE"
+    verdict_unrecorded "the database dump run exited without recording a verdict"
+}
+trap cleanup EXIT
+
+# After the verdict trap, so a missing podman is recorded as this job's failure
+# instead of leaving the previous result=ok in place.
+command -v podman >/dev/null 2>&1 || die "podman is required"
 
 # One `podman run` that copies the live database through SQLite's online backup
 # API and then proves the COPY: the API takes a read snapshot and restarts if a
@@ -174,11 +190,18 @@ dump_kuma() {
 }
 
 rc=0
+failed=()
 for target in "${DUMPS[@]}"; do
     case "$target" in
-        npm)  dump_npm  || rc=1 ;;
-        kuma) dump_kuma || rc=1 ;;
+        npm)  dump_npm  || { rc=1; failed+=(npm); } ;;
+        kuma) dump_kuma || { rc=1; failed+=(kuma); } ;;
     esac
 done
-[ "$rc" -eq 0 ] || warn "at least one database dump failed; the backup keeps the previous copy"
+if [ "$rc" -eq 0 ]; then
+    verdict_write ok "${DUMPS[*]} dump(s) refreshed"
+else
+    verdict_write fail \
+        "${failed[*]} dump(s) failed; the previous copy was kept (see journalctl --user -u db-dump.service)"
+    warn "at least one database dump failed; the backup keeps the previous copy"
+fi
 exit "$rc"

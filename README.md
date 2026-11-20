@@ -15,6 +15,66 @@ and `Containerfile`. **Their units and env files live here**, so there is
 exactly one place that defines how the stack runs and one script that fixes a
 deployment problem.
 
+## Contents
+
+- [Host sizing](#host-sizing)
+- [What runs](#what-runs)
+- [One-click install](#one-click-install)
+  - [Wallets](#wallets)
+  - [Electrum (Bitcoin wallet)](#electrum-bitcoin-wallet)
+  - [Block explorers](#block-explorers)
+- [Where the data lives](#where-the-data-lives)
+  - [Full nodes and disk](#full-nodes-and-disk)
+- [Reinstalling the host without re-syncing](#reinstalling-the-host-without-re-syncing)
+- [Backup & restore](#backup--restore)
+  - [Disaster recovery](#disaster-recovery)
+  - [Verifying the backups](#verifying-the-backups)
+  - [Proving the database dump replays](#proving-the-database-dump-replays)
+- [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire)
+  - [Disk health](#disk-health)
+  - [Metrics and history](#metrics-and-history)
+  - [Logs and history](#logs-and-history)
+  - [The spend tripwire](#the-spend-tripwire)
+- [Intrusion detection](#intrusion-detection)
+  - [What each can and cannot see](#what-each-can-and-cannot-see)
+  - [Enforcement](#enforcement)
+  - [Reading it](#reading-it)
+  - [Keeping signatures current](#keeping-signatures-current)
+  - [The whitelist is load-bearing](#the-whitelist-is-load-bearing)
+  - [Resources and retention](#resources-and-retention)
+  - [Rate limiting (the onion's only defence)](#rate-limiting-the-onions-only-defence)
+  - [Host integrity](#host-integrity)
+- [Status page](#status-page)
+- [Proxy hosts](#proxy-hosts)
+  - [The MCP host](#the-mcp-host)
+  - [Agent skills (harnesses without MCP)](#agent-skills-harnesses-without-mcp)
+- [Tor onion services](#tor-onion-services)
+- [BoltMesh](#boltmesh)
+  - [Before it works](#before-it-works)
+- [How secrets are kept out of git](#how-secrets-are-kept-out-of-git)
+  - [Rotating a credential](#rotating-a-credential)
+- [Layout](#layout)
+- [Rollback](#rollback)
+- [License](#license)
+
+## Host sizing
+
+The full stack runs both archival nodes, Fulcrum's Electrum index, the app tier
+and the observability pipeline. This is the sizing the repo targets; a host that
+skips the daemons (`./deploy.sh --skip-daemons`) can be smaller.
+
+| Resource | Minimum | Why |
+| --- | --- | --- |
+| CPU | 4 vCPU | Two chain daemons, Fulcrum, PostgreSQL and the observability tier; a Fulcrum rebuild is I/O- and CPU-bound |
+| RAM | 16 GiB | Fulcrum auto-takes 2 GiB, plus the daemons' caches, PostgreSQL, NPM and VictoriaMetrics; below this a resync swaps |
+| Swap | 8 GiB | Headroom for a resync or compaction spike; it is not a substitute for RAM |
+| System disk | 40 GB | Images, journald's 2 GiB cap and the package cache; the data dir is separate |
+| Data disk | 2 TB | Roughly 800 GB Bitcoin, 250 GB Monero and 100–135 GB of Fulcrum index, with room to grow |
+
+The chains and Fulcrum's index are excluded from the backup set because they are
+re-downloadable, not because they are small. See [Full nodes and disk](#full-nodes-and-disk)
+for the growth and rebuild numbers.
+
 ## What runs
 
 <!-- BEGIN GENERATED: what-runs -->
@@ -186,15 +246,23 @@ they alert (and fail a dead-man's-switch heartbeat) once you fill in
 
 ## One-click install
 
-On a truly bare Rocky Linux 10 host (no git, no podman):
+On a truly bare Rocky Linux 10 host (no git, no podman), fetch the bootstrap
+from a **tag** and verify its checksum before running it. Do not pipe `main`
+into a shell: this host will hold wallet keys.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/regularnmae/stack/main/bootstrap.sh | bash
+STACK_REF=v1.0.0
+curl -fsSL "https://raw.githubusercontent.com/regularnmae/stack/$STACK_REF/bootstrap.sh" -o /tmp/stack-bootstrap.sh &&
+printf '%s  %s\n' '36a8087f084627085106b05dfefecf85a04698a946fc5074e0780db039fe2f31' /tmp/stack-bootstrap.sh | sha256sum -c - &&
+STACK_REF="$STACK_REF" bash /tmp/stack-bootstrap.sh &&
 ~/build/stack/deploy.sh
 ```
 
-`bootstrap.sh` installs podman/firewalld/git/jq/curl/openssl, enables user
-linger, sets
+`STACK_REF` makes the clone land on that exact tag (or commit); `bootstrap.sh`
+fails rather than falling back to the default branch when the ref is unknown.
+The checksum is the one published with the release; update both when you move to
+a newer tag. `bootstrap.sh` installs podman/firewalld/git/jq/curl/openssl,
+enables user linger, sets
 `net.ipv4.ip_unprivileged_port_start=80` (so nginx-proxy-manager can bind
 80/443/81 rootless), opens the stack's ports (`FIREWALL_PORTS`) in firewalld,
 makes journald persistent and bounded (so the container logs survive a reboot
@@ -206,7 +274,7 @@ starts everything in order and verifies.
 With git already present, the equivalent is:
 
 ```sh
-git clone https://github.com/regularnmae/stack ~/build/stack
+git clone --branch v1.0.0 https://github.com/regularnmae/stack ~/build/stack
 cd ~/build/stack
 ./bootstrap.sh
 ./deploy.sh           # or: ./deploy.sh --bootstrap to do both in one step
@@ -482,7 +550,7 @@ every token:
    rewrites fstab), then:
 
    ```sh
-   git clone https://github.com/regularnmae/stack ~/build/stack
+   git clone --branch v1.0.0 https://github.com/regularnmae/stack ~/build/stack
    cd ~/build/stack
    ./bootstrap.sh
    ./deploy.sh                 # answer the data-dir prompt with /data/stack
@@ -665,7 +733,7 @@ runs first writes a *fresh* RPC password into `bitcoin.conf`, and the restored
 1. Rebuild the host and the data disk, then get this repo:
 
    ```sh
-   git clone https://github.com/regularnmae/stack ~/build/stack
+   git clone --branch v1.0.0 https://github.com/regularnmae/stack ~/build/stack
    cd ~/build/stack
    ./bootstrap.sh
    ```
@@ -852,7 +920,9 @@ read every four weeks), restores into `$DATA_DIR/backup-verify`, and asserts eve
 `BACKUP_PATHS` entry and every `BACKUP_VERIFY_PATHS` marker came back non-empty.
 The dumps are checked by content too (trailers, `PRAGMA quick_check`, and an mtime
 inside the snapshot's own run), because presence is not consistency. The live data
-dirs are never mounted, and the verdict lands in
+dirs are never mounted, and the producer's own verdict
+(`$DATA_DIR/audit/postgres-dump.status` or `audit/db-dump.status`) is printed
+when a dump is missing or stale. The drill's verdict lands in
 `$DATA_DIR/audit/backup-verify.status` — a file, not an exit code, because that is
 what `scripts/monitor.sh` reads. A drill that keeps skipping (over
 `BACKUP_VERIFY_MAX_MB`, or short of free space) fails on the age of its last
@@ -1328,8 +1398,10 @@ Two facts decide how you read that status:
 **On this host the kernel audit subsystem is inert**: it initializes disabled and
 never writes a record, even though `auditctl -s` then reports `enabled 1`. The rules
 stay loaded (correct if the host is ever booted with auditing on), the status says
-`audit=inert`, and the **hash diff is the live check**. `docs/ids.md` covers the
-rest, including the one case neither half sees.
+`audit=inert`, and the **hash diff is the live check**. The distro's
+`audit-rules.service` is wrapped so its known duplicate-only reload exits 0; a
+real rule-loading error still fails it. `docs/ids.md` covers the rest, including
+the one case neither half sees.
 
 ## Status page
 
@@ -1727,7 +1799,9 @@ stack/
   verify.sh               # health + endpoint checks
   stack.conf              # repo / port / order manifest, data-dir + backup defaults
   renovate.json           # Renovate policy (pinned images, git refs, actions)
-  .github/workflows/ci.yml  # shellcheck + bash -n on the scripts
+  CHANGELOG.md            # release notes; the rollback tags point here
+  LICENSE                 # MIT
+  .github/workflows/ci.yml  # shellcheck, lints, sandbox tests; gitleaks on history
   AGENTS.md               # agent index: invariants, traps, the shared contract
   docs/                   # the detail behind that index, one file per subsystem
                           #   (units, logs, ids, backup, proxy, alerting,
@@ -1738,6 +1812,7 @@ stack/
   scripts/btcpay-wallet.sh # import BTCPay's view-only Monero wallet
   scripts/backup.sh       # restic backup / restore / inspect the repository
   scripts/monitor.sh      # scheduled health + spend sweep (monitor.timer)
+  scripts/dump-status.sh  # postgres-dump verdict for the monitor (staged in $DATA_DIR/bin)
   scripts/metrics.sh      # one metrics scrape into the textfile collector (metrics.timer)
   scripts/logs.sh         # cross-service log search over victoria-logs (LogsQL)
   scripts/ids.sh          # scheduled IDS roll-up (ids.timer): suricata + crowdsec
@@ -1791,12 +1866,25 @@ stack/
 Everything is idempotent and the unit each deploy replaces is kept as
 `~/.config/containers/systemd/<unit>.bak` — one generation, the one before the
 last deploy, and only rewritten when that deploy actually changed the file. (It
-is not a history: for anything older, check the unit template out of an older
-commit.) Restore the `.bak` beside its unit, `systemctl --user daemon-reload`,
-and restart that unit — a daemon-reload alone leaves the running container on
-the old definition. The restored file carries the stamp of the definition it
-holds, so the next start records it correctly; until that restart, `./verify.sh`
-keeps naming the unit as drift. Check out the older stack commit and run
-`./deploy.sh --only <unit>`, which re-renders it and restarts it. To
-roll back an application, check out an older commit in its repo and
-`./deploy.sh --only <app>`.
+is not a history.) Restore the `.bak` beside its unit, `systemctl --user
+daemon-reload`, and restart that unit — a daemon-reload alone leaves the running
+container on the old definition. The restored file carries the stamp of the
+definition it holds, so the next start records it correctly; until that restart,
+`./verify.sh` keeps naming the unit as drift.
+
+For anything older than the `.bak`, use a release tag rather than a bare commit:
+
+```sh
+git tag --list --sort=-version:refname
+git switch --detach v1.0.0
+./deploy.sh --only <unit>
+```
+
+`CHANGELOG.md` names the tag and its highlights. A stack tag pins this repo
+only: the sibling app repos are still fetched from their default branches, so a
+full application rollback also needs an older commit in that app's repo
+(`./deploy.sh --only <app>`).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
