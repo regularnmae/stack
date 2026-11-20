@@ -82,7 +82,7 @@ if [ "${BACKUP_RETENTION+x}" != x ] || [ "${#BACKUP_RETENTION[@]}" -eq 0 ]; then
     die "stack.conf must define BACKUP_RETENTION (the keep policy)"
 fi
 
-RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}"
+RESTIC_IMAGE="${RESTIC_IMAGE:-docker.io/restic/restic:0.20.0}"
 STACK_BACKUP_DIR="${STACK_BACKUP_DIR:-$HOME/data-backup}"
 
 command -v podman >/dev/null 2>&1 || die "podman is required"
