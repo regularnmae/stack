@@ -75,6 +75,44 @@ assert_eq backup    "$(unit_for_container stack-backup)" 'ContainerName maps to 
 assert_eq bitcoind  "$(unit_for_container bitcoind)"     'unit stem is the default name'
 assert_eq stranger  "$(unit_for_container stranger)"     'unknown name falls back to itself'
 
+# A host-side job that needs a service's image must not keep a second copy of
+# Image=: nginx-proxy-manager, uptime-kuma and postgres had all rotted there.
+# unit_image reads the checkout's template -- the file Renovate and image-lint
+# watch -- and container_image_or prefers the running container when it exists.
+printf '[Container]\nImage=docker.io/example/app:1.2.3\n' > "$TMP_DIR/units/foo.container"
+printf '[Container]\nImage=docker.io/example/tmpl:4.5.6\n' > "$TMP_DIR/units/bar.container.in"
+assert_eq 'docker.io/example/app:1.2.3' "$(unit_image foo "$TMP_DIR/units")" \
+    'unit_image reads a .container'
+assert_eq 'docker.io/example/tmpl:4.5.6' "$(unit_image bar "$TMP_DIR/units")" \
+    'unit_image reads a .container.in'
+if unit_image bitcoind "$TMP_DIR/units" >/dev/null; then
+    printf 'FAIL: unit_image accepted a unit with no Image=\n' >&2
+    exit 1
+fi
+# `podman container exists` answered no: fall back to the unit, not to a tag in
+# the shell. The fake lives in its own dir so the digest tests keep theirs.
+mkdir -p "$TMP_DIR/nopodman"
+printf '#!/bin/sh\nexit 1\n' > "$TMP_DIR/nopodman/podman"
+chmod +x "$TMP_DIR/nopodman/podman"
+want_image=$(unit_image postgres)
+assert_eq "$want_image" "$(PATH="$TMP_DIR/nopodman:$PATH" container_image_or postgres)" \
+    'container_image_or falls back to the unit'
+assert_eq 'example.test/npm:9.9.9' "$(NPM_IMAGE=example.test/npm:9.9.9 npm_image)" \
+    'the env override wins over both'
+
+# The monthly drill's image comes from the same place: with the stack down (its
+# normal state) replay_image must read deploy/postgres.container, and
+# POSTGRES_IMAGE is the test override. Extracted the way verdict_age is.
+sed -n '/^replay_image()/,/^}/p' "$ROOT_DIR/scripts/backup.sh" > "$TMP_DIR/replay_image.sh"
+[ -s "$TMP_DIR/replay_image.sh" ] \
+    || { printf 'FAIL: replay_image not found in scripts/backup.sh\n' >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$TMP_DIR/replay_image.sh"
+assert_eq "$want_image" "$(PATH="$TMP_DIR/nopodman:$PATH" replay_image)" \
+    'replay_image falls back to deploy/postgres.container'
+assert_eq 'example.test/postgres:1' "$(POSTGRES_IMAGE=example.test/postgres:1 replay_image)" \
+    'replay_image honours POSTGRES_IMAGE'
+
 # mcp_result unwraps the two shapes mcp_call can print: a plain JSON-RPC body,
 # and the streamable-HTTP transport's SSE stream. The tool's payload is a JSON
 # string at .result.content[0].text, so the caller's jq filter runs on JSON.

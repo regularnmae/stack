@@ -312,6 +312,16 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   `versioning: loose`. Digests belong in the Containerfiles; the helper images'
   apk packages stay unpinned for the same reason.
 
+- **Host-side jobs read a service's image from its unit, not a second copy.**
+  `scripts/lib/units.sh`'s `unit_image` reads `Image=` from
+  `deploy/<unit>.container` (or the `.in` the installer renders), and
+  `container_image_or` prefers the running container's image when it exists.
+  `npm_image`, `kuma_image` and `backup.sh`'s `replay_image` therefore have no
+  tag of their own: a Renovate bump reaches the dumps and the monthly replay
+  with no edit there, and the `*_IMAGE` variables are test/one-off overrides,
+  not pins. That is why `image-lint.sh` scans only `deploy/` -- there is no
+  shell default left to rot.
+
 - **Workflow actions go the opposite way: pinned by digest.**
   `helpers:pinGitHubActionDigests` rewrites every `uses:` ref in
   `.github/workflows/*.yml` to `<sha> # <tag>`, and keeps it there. The

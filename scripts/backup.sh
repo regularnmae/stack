@@ -456,17 +456,13 @@ next_subset() { # parts -> n (and advance the counter)
     printf '%s\n' "$(( n % parts + 1 ))" > "$VERIFY_SUBSET_FILE" 2>/dev/null || true
 }
 
-# Which postgres image to replay into: the one the stack is actually running, so
-# a Renovate bump of deploy/postgres.container reaches the drill with no edit
-# here and the replay uses the same server version that wrote the dump. Falls
-# back to the pinned tag when the unit is down: this is a monthly drill, not a
-# recovery tool, so it must not depend on the stack being up.
+# Which postgres image to replay into: the one the stack is actually running, or
+# -- with the stack down, the monthly drill's normal state -- the Image= in
+# deploy/postgres.container. No second tag here: a Renovate bump reaches the
+# drill, and the replay uses the same server version that wrote the dump. The
+# drill must not depend on the stack being up.
 replay_image() {
-    local running=""
-    if command -v podman >/dev/null 2>&1; then
-        running=$(podman inspect --format '{{.ImageName}}' postgres 2>/dev/null || true)
-    fi
-    printf '%s' "${running:-${POSTGRES_IMAGE:-docker.io/library/postgres:18-alpine}}"
+    container_image_or postgres "${POSTGRES_IMAGE:-}"
 }
 
 # Replay the restored pg_dumpall into a throwaway postgres: the one thing a

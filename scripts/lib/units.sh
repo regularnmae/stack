@@ -1,6 +1,7 @@
 # shellcheck shell=bash
-# What a unit is running, read back from the container rather than a baseline:
-# the generation stamp install.sh writes, and the image label the build writes
+# What a unit is running, or the Image= a host-side job needs while it is down,
+# read back rather than kept as a baseline: the generation stamp install.sh
+# writes, the image label the build writes, and the unit template itself
 # (docs/units.md).
 
 # --- unit generation stamps -------------------------------------------------
@@ -243,21 +244,41 @@ image_inputs_label() { # containerfile -> LABEL=VALUE for podman build --label
     printf 'org.stack.inputs=%s' "$(image_inputs_digest "$1")"
 }
 
-# The image a unit is running, falling back to a given tag when the container
-# does not exist yet (a fresh host, before the first start). Host-side jobs that
-# read a service's own database must not pin a second copy of its Image=: on a
-# deployed host the running container answers, so a Renovate bump reaches them
-# too. The fallback is a bootstrap default, not a pin to maintain.
-container_image_or() { # container default-image
-    local img=""
-    if command -v podman >/dev/null 2>&1 && podman container exists "$1" 2>/dev/null; then
+# The Image= a unit template names: deploy/<unit>.container, or the .in the
+# installer renders when the unit carries secrets. Read from the checkout because
+# that is the file Renovate and image-lint watch; the installed unit is only a
+# render of it. The second argument is a units directory, for tests.
+unit_image() { # unit [units-dir] -> image, non-zero when the unit has none
+    local unit="$1" dir="${2:-$STACK_SCRIPTS_DIR/../deploy}" f img
+    for f in "$dir/$unit.container" "$dir/$unit.container.in"; do
+        [ -r "$f" ] || continue
+        img=$(awk '/^Image=/ { sub(/^Image=/, ""); print; exit }' "$f")
+        [ -n "$img" ] && { printf '%s' "$img"; return 0; }
+    done
+    return 1
+}
+
+# The image a unit is running, or -- when the container does not exist yet (a
+# fresh host, the monthly drill with the stack down) -- the Image= in its unit
+# template. The override is for a test or a one-off and wins over both. Host-side
+# jobs that read a service's own database must not pin a second copy of Image=:
+# the running container answers after a deploy, the checkout answers before one,
+# and a Renovate bump reaches them either way.
+container_image_or() { # unit/container [override] -> image
+    local img="${2:-}"
+    if [ -z "$img" ] && command -v podman >/dev/null 2>&1 \
+        && podman container exists "$1" 2>/dev/null; then
         img=$(podman inspect "$1" --format '{{.ImageName}}' 2>/dev/null || true)
     fi
-    printf '%s' "${img:-$2}"
+    if [ -z "$img" ]; then
+        img=$(unit_image "$1") \
+            || die "cannot resolve the image for $1: no running container and no Image= in deploy/$1.container"
+    fi
+    printf '%s' "$img"
 }
 npm_image() {
-    container_image_or nginx-proxy-manager "${NPM_IMAGE:-docker.io/jc21/nginx-proxy-manager:2.16.0}"
+    container_image_or nginx-proxy-manager "${NPM_IMAGE:-}"
 }
 kuma_image() {
-    container_image_or uptime-kuma "${UPTIME_KUMA_IMAGE:-docker.io/louislam/uptime-kuma:2}"
+    container_image_or uptime-kuma "${UPTIME_KUMA_IMAGE:-}"
 }
