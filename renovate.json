@@ -214,6 +214,18 @@
     },
     {
       "customType": "regex",
+      "description": "the gitleaks release CI pins and downloads (GITLEAKS_VERSION in .github/workflows/ci.yml)",
+      "matchStrings": [
+        "GITLEAKS_VERSION: (?<currentValue>v[0-9.]+)"
+      ],
+      "depNameTemplate": "gitleaks/gitleaks",
+      "datasourceTemplate": "github-releases",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/ci\\.yml$/"
+      ]
+    },
+    {
+      "customType": "regex",
       "description": "the btc-rpc-explorer master commit pinned in btc-explorer/Containerfile (the published npm 3.4.0 is stale and does not build on Node 22)",
       "matchStrings": [
         "ARG BTC_RPC_EXPLORER_COMMIT=(?<currentDigest>[0-9a-f]{40})"

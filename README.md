@@ -1622,8 +1622,9 @@ before each restic run; the dump, not the raw cluster, is what the
 
 ## How secrets are kept out of git
 
-No secret is committed. Everything real is generated or adopted on the host, under
-`$DATA_DIR/config/`, mode 600.
+No secret is committed. Everything real is generated or adopted on the host,
+under `$DATA_DIR/config/`, mode 600; CI scans the whole history for one on every
+push and pull request (`docs/credentials.md`).
 
 Coming from the **pre-data-dir layout** (`~/.config/stack/`,
 `~/.config/crypto-nodes/` and `~/.config/<name>/*.env`), copy those files into

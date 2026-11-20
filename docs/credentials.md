@@ -21,6 +21,11 @@ token on a command line.
   first non-empty value) instead of appending a second line that `env_value`
   would not read, and never regenerates a value that is already set -- the
   CrowdSec bouncer registrations depend on that.
+- **No secret is committed.** CI's `secrets` job runs gitleaks over the whole
+  history (`--log-opts=--all`) on every push and pull request; the env-template
+  regex is the fast pre-filter for this repo's hex tokens, not the general
+  check. A finding means rotate it with `rotate.sh` first, then decide about
+  history -- never a blanket allowlist.
 
 ## Spending stays off
 
