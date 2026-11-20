@@ -78,9 +78,16 @@ HealthStartPeriod=15s
 HealthRetries=3
 HealthOnFailure=kill
 
+# Graceful stop, not podman's 10 s default: Vector budgets 60 s for shutdown
+# (the journal logs "59 seconds left"), and a SIGKILL mid-flush drops the batch
+# in flight. TimeoutStopSec below stays 30 s above it (docs/units.md, "A durable
+# unit is stopped, not killed"). HealthOnFailure=kill is not a graceful stop.
+StopTimeout=90
+
 [Service]
 Restart=always
 TimeoutStartSec=120
+TimeoutStopSec=120s
 
 [Install]
 WantedBy=default.target

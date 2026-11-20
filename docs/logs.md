@@ -83,7 +83,10 @@ event-logger setting. The operator narrative is README's "Logs and history".
   `/`; filling or stalling `/data` takes both the store and its queue with it,
   leaving journald as the fallback. VictoriaLogs can also lose what is still in
   its in-memory buffer on an unclean crash; that is below Vector and no sink
-  setting changes it. A graceful stop flushes.
+  setting changes it. A graceful stop flushes, but only if it is given the time:
+  `vector` sets `StopTimeout=90` for its 60 s shutdown budget, and
+  `HealthOnFailure=kill` is not a graceful stop (`docs/units.md`, "A durable
+  unit is stopped, not killed").
 - **`retry_max_duration_secs` is a backoff cap, not a retry budget.**
   `retry_attempts` defaults to effectively infinite, so the sink retries forever;
   the option is the maximum wait *between* attempts. It is 30s so a store that

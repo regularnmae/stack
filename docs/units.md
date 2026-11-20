@@ -267,7 +267,9 @@ container unit has to meet. Read this before touching `deploy/*.container*`,
   headroom on each listed unit, and that every listed name is a real template; a
   waiver needs an inline `# health-lint: HC010 <reason>`. Not every `@DATA_DIR@`
   mount is on the list -- a search cache or a metrics history is not state -- so
-  a new daemon whose database must be closed cleanly has to be added there.
+  a new daemon whose database must be closed cleanly has to be added there. A
+  unit can set both keys without joining the list: `vector` does, for its 60 s
+  shutdown budget rather than for durability, and HC010 does not enforce it.
 
 - **`HealthOnFailure=kill` bypasses all of it.** Podman's health kill is not a
   graceful stop, and no `StopTimeout` can make it one. That is why a probe that
