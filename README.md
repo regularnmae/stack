@@ -45,7 +45,7 @@ deployment problem.
 | `nginx-proxy-manager` | `docker.io/jc21/nginx-proxy-manager:2.17.0` | host network |
 | `node-exporter` | `docker.io/prom/node-exporter:v1.12.1` | host network |
 | `postgres` | `docker.io/library/postgres:18.7-alpine` | — |
-| `searxng` | `docker.io/searxng/searxng:2026.11.13-219b63b20` | `127.0.0.1:8082` |
+| `searxng` | `docker.io/searxng/searxng:2026.11.20-d756ba75f` | `127.0.0.1:8082` |
 | `searxng-mcp` | `localhost/searxng-mcp:latest` | `127.0.0.1:8100` |
 | `stack-bouncer` ⚙️ | — (a host script on a system timer, `deploy/root/bouncer.sh`) | — |
 | `suricata` ⚙️ | `docker.io/jasonish/suricata:8.0.8` | host network |
