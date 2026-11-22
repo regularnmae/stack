@@ -229,6 +229,12 @@ class Manifest:
         public = [h for h in self.npm if not h.domain.endswith(".onion")]
         if public:
             lines.append(_array("NPM_DOMAINS", [h.domain for h in public]))
+            # The container whose loopback publish each vhost fronts, so the
+            # monitor can label a public-surface finding with the upstream's
+            # component and root-cause inhibition can mute it when that
+            # component is down. Empty on the MCP edge, whose targets are the
+            # [mcp.*] entries rather than one container.
+            lines.append(_array("NPM_CONTAINERS", [h.container for h in public]))
             lines.append(_array("NPM_NEEDS_NODES",
                                 ["1" if h.needs_nodes else "0" for h in public]))
             lines.append(_array("NPM_FORCE_SSL",

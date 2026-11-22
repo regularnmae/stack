@@ -24,21 +24,35 @@ not faults").
   interval) is what ends a live alert.
 - **`send_resolved: false` by default** makes every recovery silent.
 - **A check whose fact is a rate is decided by a rule over a window**, not by the
-  sweep: unit restarts (`increase` over an hour), disk saturation, Suricata and
-  SSH bursts (`avg`/`max` over 15 minutes). The sweep writes the number. A per-sweep
-  verdict on a rate is an event -- true for one sweep -- so the section fired and
-  resolved around every burst.
+  sweep: unit restarts (`changes` over 30 minutes; `NRestarts` is not a counter),
+  disk saturation, Suricata and SSH bursts (`avg`/`max` over 15 minutes). The
+  sweep writes the number. A per-sweep verdict on a rate is an event -- true for
+  one sweep -- so the alert fired and resolved around every burst.
 - **The flap damper is a pair: `for:` holds the onset and `keep_firing_for:`
   holds the reset**, rendered from `MONITOR_ALERT_FOR` and `MONITOR_ALERT_HOLD_S`.
   Nothing in the producer holds alert state.
-- **A notification is a state change, never a reminder** (`repeat_interval:
-  8760h`). One mail when a section starts failing, one when it recovers, and
-  nothing while it stays the same.
+- **A notification is a state change, then a daily reminder** (`repeat_interval:
+  24h`). One mail when a component/check starts failing, one when it recovers,
+  and a reminder per day while it stays the same. `repeat_interval` must stay
+  below Alertmanager's notification-log retention (120h): a larger value is
+  repeated at the retention boundary instead, and logs a warning at startup.
+- **A startup is not an outage.** For `MONITOR_STARTUP_GRACE_S` after a container
+  starts (15 minutes by default), the checks that depend on it are `skip`, not
+  findings: a chain daemon that is still indexing and a wallet rebuilding its
+  cache are expected states. A container that is actually down or unhealthy is
+  not graced -- `stack_component_up` pages it at 2m and `stack_component_health`
+  warns after 5m.
+- **The alert identity is `(component, check)`, not the section.** A section is a
+  human grouping and a history graph; an alert names the component whose fault it
+  is and the check that failed. That is what lets Alertmanager inhibit the
+  `verify`/`public_surface` symptoms of one dead service instead of mailing three
+  alerts for one cause.
 - **`verify.sh`'s `warn` is the sweep's warning severity, and `skip` is not a
   finding.** The monitor runs `verify.sh` as its base sweep and carries both
   levels whether or not it exits non-zero -- a warning never fails its exit code,
   so the exit code alone would hide it. Each `FAIL` line becomes a critical
-  finding and each `warn` line a warning, under the same `verify.sh` section.
+  finding and each `warn` line a warning, mapped to the component the line names
+  (the `verify.sh` section itself stays the roll-up).
   `skip` is the level for an expected absence (a check skipped by request, a
   service not yet set up, a job that has not run yet) and is deliberately not
   carried, because a warning that is true on every sweep on a host that chose not
@@ -160,17 +174,32 @@ not faults").
 
 - **Alerting is three processes because they fail differently: the producer finds
   faults, vmalert decides when one has lasted, Alertmanager decides how to
-  speak.** `scripts/monitor.sh` groups every finding under its `head3` section
-  and writes one `stack_monitor_section{service,severity}` series per bad section
-  plus a `stack_monitor_detail_info{service,detail}` line carrying that section's
-  text. The rules in `deploy/monitoring/rules/stack.yml.in` (rendered to
-  `$DATA_DIR/config/monitoring/vmalert/stack.yml`) fire one alert per section
-  after `for: MONITOR_ALERT_FOR`, hold it for `keep_firing_for:
-  MONITOR_ALERT_HOLD_S` after the section clears, and pull the detail into the
-  annotation with vmalert's `query` template function. Four checks are not
-  sections but rules of their own over a window -- `stack_unit_restarting`,
-  `stack_disk_saturated`, `stack_ids_noisy`, `stack_ssh_bruteforce` -- because
-  their fact is a rate.
+  speak.** `scripts/monitor.sh` gives every finding a `component` and a `check`
+  and writes `stack_monitor_check{component,check,severity}` plus a
+  `stack_monitor_check_detail{component,check,detail}` line carrying its text.
+  It also writes one `stack_component_up`/`stack_component_health` sample per
+  expected container: down is the root cause, unhealthy the slow half. The
+  section still exists as `stack_monitor_section{service,severity}`, but it is
+  the human roll-up and history graph, not an alert identity.
+  The rules in `deploy/monitoring/rules/stack.yml.in` (rendered to
+  `$DATA_DIR/config/monitoring/vmalert/stack.yml`) fire one alert per failing
+  component/check after `for: MONITOR_ALERT_FOR`, hold it for `keep_firing_for:
+  MONITOR_ALERT_HOLD_S` after the check clears, and pull the detail into the
+  annotation with vmalert's `query` template function. `StackComponentDown`
+  pages a stopped container at 2 minutes; `StackComponentUnhealthy` warns after
+  5. Four checks are rules of their own over a window -- `StackRestartLoop`,
+  `StackDiskSaturated`, `StackIdsNoisy`, `StackSshBruteforce` -- because their
+  fact is a rate.
+  Alertmanager's inhibition is component-scoped: a critical mutes the warning
+  for the same `(component, check)`, a down component mutes its dependent
+  checks, and the chain's known dependency edges (`bitcoind` -> Fulcrum/
+  Lightning/explorers, `monerod` -> wallet/explorer, NPM -> every vhost) get
+  their own rules. One dead `btc-explorer` is one page, not a unit fault plus a
+  verify failure plus a 502. The route keeps one digest per severity
+  (`group_by: ['severity']`), waits `group_wait: 1m` for a wave and for
+  inhibiting alerts, batches follow-ups for `group_interval: 5m`, and reminds
+  once a day (`repeat_interval: 24h`); a deploy still wants a silence, not a
+  longer interval.
   Alertmanager owns grouping, inhibition, silences and delivery, and a recovery
   is vmalert's transition to inactive -- there is no `endsAt` for the producer to
   send and no producer state to keep. Five traps, all load-bearing:
@@ -186,23 +215,27 @@ not faults").
   That is the behaviour of every Prometheus-style notifier, and no Alertmanager
   setting can tell it from a real one, which is why the external heartbeat is
   mandatory here: it is the only thing that reports the evaluator itself dying.
-  When vmalert returns, the rule re-fires after a fresh `for:`, so the fault is
-  re-announced. **A severity change is a different alertname**, so the old rule
+  vmalert persists `ALERTS`/`ALERTS_FOR_STATE` through
+  `-remoteWrite.url`/`-remoteRead.url`, so a restart restores the hold-downs and
+  does not re-announce a standing fault as new; the restore only reads samples
+  from the last hour, so a longer outage or a wiped store still re-arms them.
+  **A severity change is a different alertname**, so the old rule
   goes inactive and the new one starts its own `for:` -- but it does not
   *inactivate* at once: `keep_firing_for` holds it, so the flip is one resolve
   for the critical and one fire for the warning, not a pair per sweep. While
   both are active the critical inhibits the warning, so the overlap is silent.
   (2) **`email_configs` defaults `send_resolved: false`**, so recoveries are
   silent unless it is set. The seeded example sets it.
-  (3) **The alert's identity is (alertname, service), and the text is not a
-  label.** Putting the section's message in a label would make "disk 9% free" and
+  (3) **The alert's identity is (component, check), and the text is not a
+  label.** Putting the changing message in a label would make "disk 9% free" and
   "disk 8% free" two alerts, and every sweep a state change; it lives in
-  `stack_monitor_detail_info` and is fetched at notification time instead. The
+  `stack_monitor_check_detail` and is fetched at notification time instead. The
   same split is why `for:` replaced the producer-side hold-down: Alertmanager
   only sees what is pushed at it, but vmalert evaluates the query, so it can tell
-  a check that fails every other sweep from one that has been down an hour. A
-  `for:` in flight resets on a vmalert restart (there is no `-remoteRead.url`),
-  which is a page late by at most one hold-down, never lost.
+  a check that fails every other sweep from one that has been down an hour. The
+  component is also the inhibition key: a `StackComponentDown` for
+  `btc-explorer` mutes the checks whose component is `btc-explorer`, including
+  the `verify` and `public_surface` symptoms of that one fault.
   (4) **A delivery failure cannot report itself.** `alertmanager_notifications_failed_total`
   is read back on the next sweep and turned into a failure; the heartbeat is
   pushed *after* the facts are written and fails when they could not be, so "all
@@ -300,10 +333,10 @@ not faults").
   node-exporter actually serves a `stack_*` series (the reader).
   `$DATA_DIR/monitoring` is regenerable and outside the backup set, and
   `monitor.prom` carries the sweep's own numbers. One series there is
-  deliberately high-churn: `stack_monitor_detail_info`'s label is the section's
+  deliberately high-churn: `stack_monitor_check_detail`'s label is the check's
   free text, so each distinct message is a short-lived series. It exists so the
-  mail can carry the findings, it is bounded by the number of sections (not by
-  traffic), and nothing queries or graphs it. The series and the
+  mail can carry the findings, it is bounded by the number of component/check
+  pairs (not by traffic), and nothing queries or graphs it. The series and the
   observe/decide split are documented in `scripts/metrics.sh`.
   `victoriametrics-mcp` is the authenticated front door (`/metrics` on the
   MCP host), for the same reason as the log store: the store's own API has

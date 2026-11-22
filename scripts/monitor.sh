@@ -6,9 +6,11 @@
 #   scripts/monitor.sh --no-verify  # skip the verify.sh base sweep
 #   scripts/monitor.sh --test       # send one real alert through Alertmanager
 #
-# It finds WHAT is wrong and writes it as metrics: one stack_monitor_section
-# series per failing section, plus that section's text as an info series, and the
-# numbers some checks produce. The rules vmalert loads (deploy/monitoring/rules/)
+# It finds WHAT is wrong and writes it as metrics: one stack_monitor_check
+# series per failing component/check (plus its detail) and one
+# stack_component_up/health sample per expected container, so a dead service and
+# its symptoms share a component label. stack_monitor_section stays as the human
+# roll-up and history graph. The rules vmalert loads (deploy/monitoring/rules/)
 # decide WHEN a fault has lasted long enough to page, and Alertmanager owns
 # grouping, inhibition, silences and delivery. No alert state lives in this
 # script -- `for:` damps the onset and `keep_firing_for:` the reset, so there is
@@ -146,6 +148,11 @@ MONITOR_SMART_MAX_AGE_H=$(monitor_var MONITOR_SMART_MAX_AGE_H)
 MONITOR_SMART_REALLOC_MAX=$(monitor_var MONITOR_SMART_REALLOC_MAX)
 MONITOR_SMART_PENDING_MAX=$(monitor_var MONITOR_SMART_PENDING_MAX)
 MONITOR_SMART_TEMP_MAX=$(monitor_var MONITOR_SMART_TEMP_MAX)
+# How long after a container starts its dependent checks are treated as
+# "starting", not failing. A container that is actually down is not graced --
+# stack_component_up and the component rule still page at once. 0 disables it.
+MONITOR_STARTUP_GRACE_S=$(monitor_var MONITOR_STARTUP_GRACE_S)
+STARTUP_GRACE_S=$(num_or "${MONITOR_STARTUP_GRACE_S:-}" 900)
 
 # How far Fulcrum's index may sit behind bitcoind. A healthy one polls every 5s
 # and is 0-1 block behind, so this is a "stopped following" threshold: 12 blocks
@@ -194,13 +201,19 @@ verdict_age() { # job -> seconds
 
 PROBLEMS=()
 WARNS=()
-# Which check section each entry came from. The section is the alert's stable
-# identity (its label); the text is the annotation. Without the split, "disk 9%
-# free" and "disk 8% free" would be two different alerts and every sweep would
-# look like a state change.
+# Every finding keeps its section (the human grouping and the history series)
+# and its component/check pair (the alert identity). Without the second pair,
+# one dead btc-explorer is a unit fault, a verify failure and a 502, and
+# Alertmanager cannot inhibit the two symptoms of the one cause.
 PROBLEM_SECTIONS=()
 WARN_SECTIONS=()
+PROBLEM_COMPONENTS=()
+WARN_COMPONENTS=()
+PROBLEM_CHECKS=()
+WARN_CHECKS=()
 SECTION="other"
+COMPONENT="other"
+CHECK="other"
 verify_failures=0
 backup_age_s=""
 backup_count=""
@@ -210,10 +223,119 @@ backup_verify_db_age_s=""
 backup_verify_db_ok=""
 say()  { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
 slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/_/g; s/^_//; s/_$//'; }
-head3() { say ""; say "$*"; SECTION=$(slug "$*"); }
-ok()   { say "  ok    $*"; }
-soft() { WARNS+=("$*");   WARN_SECTIONS+=("$SECTION");    say "  warn  $*"; }
-fail() { PROBLEMS+=("$*"); PROBLEM_SECTIONS+=("$SECTION"); say "  FAIL  $*"; }
+# Component labels are container/unit names, so they keep `.` and `-`:
+# stack_component_up{component="btc-explorer"} is what StackComponentDown
+# inhibits against. Checks are slugs (rpc_password, unit_failed).
+component_label() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]\+/_/g; s/^_//; s/_$//'; }
+scope() { # component check
+    COMPONENT=$(component_label "$1"); [ -n "$COMPONENT" ] || COMPONENT=other
+    CHECK=$(slug "$2");                [ -n "$CHECK" ]     || CHECK=other
+}
+head3() { say ""; say "$*"; SECTION=$(slug "$*"); scope "$SECTION" "$SECTION"; }
+ok()      { say "  ok    $*"; }
+starting(){ say "  skip  $*"; }
+soft() {
+    local comp chk
+    comp=$(component_label "${2:-$COMPONENT}"); [ -n "$comp" ] || comp=other
+    chk=$(slug "${3:-$CHECK}");                [ -n "$chk" ] || chk=other
+    WARNS+=("$1"); WARN_SECTIONS+=("$SECTION")
+    WARN_COMPONENTS+=("$comp"); WARN_CHECKS+=("$chk")
+    say "  warn  $1"
+}
+fail() {
+    local comp chk
+    comp=$(component_label "${2:-$COMPONENT}"); [ -n "$comp" ] || comp=other
+    chk=$(slug "${3:-$CHECK}");                [ -n "$chk" ] || chk=other
+    PROBLEMS+=("$1"); PROBLEM_SECTIONS+=("$SECTION")
+    PROBLEM_COMPONENTS+=("$comp"); PROBLEM_CHECKS+=("$chk")
+    say "  FAIL  $1"
+}
+
+# verify.sh's free text names the component a line is about, and that name is
+# the alert's identity. The mapping is explicit: a line that falls through is
+# "verify/verify", not a new alert for every changing message.
+classify_verify_line() { # message -> "component check"
+    local msg lmsg comp check
+    msg=$1
+    lmsg=$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')
+    # Component-specific names first: "fulcrum ... behind bitcoind" and
+    # "btc-explorer ... bitcoind RPC unreachable" both mention bitcoind, and the
+    # last pattern would otherwise win.
+    case "$lmsg" in
+        *fulcrum*)           comp=fulcrum;             check=electrum ;;
+        *lightningd*sync*)   comp=lightningd;          check=sync ;;
+        *lightningd*peer*)   comp=lightningd;          check=peers ;;
+        *lightningd*rpc*|*lightningd*unreachable*)
+                             comp=lightningd;          check=rpc ;;
+        *lightningd*|*"lightning channel"*)
+                             comp=lightningd;          check=channels ;;
+        *monerod*sync*|*monerod*behind*|*monerod*height*)
+                             comp=monerod;             check=sync ;;
+        *monerod*)           comp=monerod;             check=rpc ;;
+        *monero-wallet*)     comp=monero-wallet-btcpay; check=wallet ;;
+        *btc-explorer*)      comp=btc-explorer;        check=explorer ;;
+        *xmr-explorer*)      comp=xmr-explorer;        check=explorer ;;
+        *btcpay*)            comp=btcpay;              check=health ;;
+        *postgres*)          comp=postgres;            check=health ;;
+        *valkey*)            comp=valkey;              check=health ;;
+        *victoriametrics*|*vmalert*|*alertmanager*)
+                             comp=alerting;            check=alert_path ;;
+        *nginx-proxy-manager*|*"npm "*)
+                             comp=nginx-proxy-manager; check=proxy ;;
+        *searxng*)           comp=searxng;             check=health ;;
+        *crowdsec*)          comp=crowdsec;            check=health ;;
+        *suricata*)          comp=suricata;            check=health ;;
+        *uptime-kuma*)       comp=uptime-kuma;         check=health ;;
+        *tor:*|*"tor is"*)   comp=tor;                 check=health ;;
+        *netcheck*)          comp=netcheck;            check=health ;;
+        *bitcoind*behind*|*bitcoind*blocks*|*bitcoind*headers*)
+                             comp=bitcoind;            check=sync ;;
+        *bitcoind*peer*)     comp=bitcoind;            check=peers ;;
+        *bitcoind*mempool*)  comp=bitcoind;            check=mempool ;;
+        *bitcoind*)          comp=bitcoind;            check=rpc ;;
+        *)                   comp=verify;              check=verify ;;
+    esac
+    printf '%s %s\n' "$comp" "$check"
+}
+
+# A container's state from one `podman ps` read, and how long ago it started.
+# `component_starting` is deliberately false for a down or unhealthy container:
+# a crash loop is a fault, not a slow start, and stack_component_up owns it.
+# The caches matter: verify.sh can contribute dozens of lines, and every one
+# would otherwise be a fresh podman call.
+declare -A COMPONENT_STATE_CACHE=() COMPONENT_START_CACHE=()
+component_state() { # container -> healthy|unhealthy|starting|up|down|other
+    local c=$1 state
+    if [ -n "${COMPONENT_STATE_CACHE[$c]+x}" ]; then
+        printf '%s' "${COMPONENT_STATE_CACHE[$c]}"
+        return 0
+    fi
+    state=$(container_health_state "$(podman ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null)")
+    COMPONENT_STATE_CACHE[$c]=$state
+    printf '%s' "$state"
+}
+within_startup_grace() { # container
+    local c=$1 ts now
+    [ "$STARTUP_GRACE_S" -gt 0 ] || return 1
+    if [ -n "${COMPONENT_START_CACHE[$c]+x}" ]; then
+        ts=${COMPONENT_START_CACHE[$c]}
+    else
+        ts=$(podman inspect -f '{{.State.StartedAt}}' "$c" 2>/dev/null) || return 1
+        # podman prints Go's time as "YYYY-MM-DD HH:MM:SS.nnnnnnnnn +0400 +04";
+        # date(1) rejects the trailing zone abbreviation, so drop it first.
+        ts=${ts% +*}
+        ts=$(date -d "$ts" +%s 2>/dev/null) || return 1
+        COMPONENT_START_CACHE[$c]=$ts
+    fi
+    now=$(date +%s)
+    [ $((now - ts)) -lt "$STARTUP_GRACE_S" ]
+}
+component_starting() { # container
+    case "$(component_state "$1")" in
+        healthy|up|starting) within_startup_grace "$1" ;;
+        *) return 1 ;;
+    esac
+}
 
 # ---------------------------------------------------------------------------
 # --test: prove the delivery path, once
@@ -228,7 +350,7 @@ if [ "$ALERT_TEST" = 1 ]; then
     starts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     ends=$(date -u -d '+2 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     body=$(jq -cn --arg s "$starts" --arg e "$ends" --arg inst "$ALERT_INSTANCE" \
-        '[{labels:{alertname:"stack_test",severity:"warning",service:"alerting",instance:$inst},
+        '[{labels:{alertname:"stack_test",severity:"warning",service:"alerting",component:"alerting",check:"test",instance:$inst},
            annotations:{summary:"stack: test alert",description:"Sent by scripts/monitor.sh --test; it resolves in two minutes."},
            startsAt:$s, endsAt:$e}]')
     curl -fsS -m 10 -H 'Content-Type: application/json' \
@@ -246,7 +368,7 @@ fi
 # ---------------------------------------------------------------------------
 # verify.sh has three finding levels and this is the only consumer that decides
 # which reach the alert path: FAIL -> critical, warn -> warning (the same
-# stack_monitor_section the sweep's own soft() lines use), skip -> not carried.
+# stack_monitor_check the sweep's own soft() lines use), skip -> not carried.
 # `skip` is verify's expected-absence level (a check skipped by request, a
 # service not yet set up), so a host that chose not to run something does not
 # warn every sweep. A warning does not fail verify's exit code, which is why the
@@ -258,20 +380,35 @@ if [ "$DO_VERIFY" = 1 ]; then
     verify_out=$("$REPO_DIR/verify.sh" ${verify_args[@]+"${verify_args[@]}"} 2>&1) || verify_rc=$?
     carried=0
     vcount=0
+    vskipped=0
     while IFS= read -r line; do
         case "$(verify_line_level "$line")" in
             fail)
-                fail "verify: ${line#"  FAIL "}"
+                msg="${line#"  FAIL "}"
+                read -r vcomp vcheck <<< "$(classify_verify_line "$msg")"
+                if component_starting "$vcomp"; then
+                    starting "verify: $msg ($vcomp started less than ${STARTUP_GRACE_S}s ago)"
+                    vskipped=1
+                    continue
+                fi
+                fail "verify: $msg" "$vcomp" "$vcheck"
                 carried=1
                 vcount=$((vcount + 1))
                 ;;
             warn)
-                soft "verify: ${line#"  warn "}"
+                msg="${line#"  warn "}"
+                read -r vcomp vcheck <<< "$(classify_verify_line "$msg")"
+                if component_starting "$vcomp"; then
+                    starting "verify: $msg ($vcomp started less than ${STARTUP_GRACE_S}s ago)"
+                    vskipped=1
+                    continue
+                fi
+                soft "verify: $msg" "$vcomp" "$vcheck"
                 carried=1
                 ;;
         esac
     done <<< "$(printf '%s' "$verify_out" | sed 's/\x1b\[[0-9;]*m//g')"
-    if [ "${verify_rc:-0}" != 0 ] && [ "$vcount" = 0 ]; then
+    if [ "${verify_rc:-0}" != 0 ] && [ "$vcount" = 0 ] && [ "$vskipped" = 0 ]; then
         fail "verify.sh reported problems (exit ${verify_rc})"
     elif [ "${verify_rc:-0}" = 0 ] && [ "$carried" = 0 ]; then
         ok "verify.sh: no failures or warnings"
@@ -284,9 +421,22 @@ fi
 # ---------------------------------------------------------------------------
 # One function so a host that runs no daemon tier can skip it whole: with
 # MONITOR_SKIP_NODES=1 those units are absent on purpose, and every check below
-# would fail on the same missing daemon. head3 runs at the call site, so the
-# section -- the alert's identity -- is set before anything here can report.
+# would fail on the same missing daemon. The individual checks set their own
+# component/check scope, so one dead Fulcrum is not reported as "chain daemons".
 chain_checks() {
+    # One start inside the daemon tier makes every RPC look stale for a few
+    # minutes (lightningd sync, Fulcrum indexing, the wallet rebuilding). Skip
+    # the whole section while any of its containers is inside that window; a
+    # container that is down is not "starting" and still pages through
+    # stack_component_up below.
+    local c
+    for c in bitcoind fulcrum lightningd monerod; do
+        if component_starting "$c"; then
+            starting "chain daemons are starting ($c started less than ${STARTUP_GRACE_S}s ago)"
+            return 0
+        fi
+    done
+    scope bitcoind rpc
     info=$(bitcoind_cli getblockchaininfo 2>/dev/null) || info=""
     if [ -z "$info" ]; then
         fail "bitcoind RPC unreachable"
@@ -297,6 +447,7 @@ chain_checks() {
         if [ "$ibd" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
             ok "bitcoind is in initial block download (blocks=$blocks, not paged)"
         elif [ -n "$blocks" ] && [ -n "$headers" ] && [ "$((headers - blocks))" -gt 6 ]; then
+            scope bitcoind sync
             fail "bitcoind is behind: blocks=$blocks headers=$headers"
         else
             ok "bitcoind at height $blocks"
@@ -307,6 +458,7 @@ chain_checks() {
         # download is the same fault as a stalled tip.
         json_peers=$(bitcoind_cli getpeerinfo 2>/dev/null) || json_peers=""
         n_peers=$(printf '%s' "$json_peers" | jq -r 'if type == "array" then length else empty end' 2>/dev/null) || n_peers=""
+        scope bitcoind peers
         if [ -z "$n_peers" ]; then
             soft "could not read bitcoind getpeerinfo; skipped the peer check"
         elif [ "$n_peers" -lt "$THRESH_BTC_PEERS" ]; then
@@ -319,6 +471,7 @@ chain_checks() {
         mp=$(bitcoind_cli getmempoolinfo 2>/dev/null) || mp=""
         mp_mb=$(printf '%s' "$mp" | jq -r 'if type == "object" then ((.bytes // 0) / 1048576 | floor) else empty end' 2>/dev/null) || mp_mb=""
         if [ -n "$mp_mb" ]; then
+            scope bitcoind mempool
             if [ "$mp_mb" -ge "$THRESH_MEMPOOL_MB" ]; then
                 soft "bitcoind's mempool holds ${mp_mb} MB (warn threshold ${THRESH_MEMPOOL_MB} MB) -- fee storm or a packed signal"
             else
@@ -331,6 +484,7 @@ chain_checks() {
     # healthcheck is the process table, it keeps answering server.version while the
     # index is wedged, and the wallet/explorer surface then serves stale heights. So
     # ask the index-backed question -- the tip it reports -- and compare with bitcoind.
+    scope fulcrum electrum
     ftip=$(electrum_tip 50001)
     if [ -z "$ftip" ]; then
         if [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
@@ -351,11 +505,13 @@ chain_checks() {
         fi
     fi
     
+    scope lightningd rpc
     lninfo=$(lightning_cli getinfo 2>/dev/null) || lninfo=""
     if [ -z "$lninfo" ]; then
         fail "lightningd RPC unreachable"
     else
         if printf '%s' "$lninfo" | jq -e 'has("warning_bitcoind_sync")' >/dev/null 2>&1; then
+            scope lightningd sync
             fail "lightningd reports warning_bitcoind_sync (its view of bitcoind is stale)"
         fi
         # Peers and channels come from the node's own view, not getinfo: getinfo's
@@ -367,6 +523,7 @@ chain_checks() {
         # while the peer is offline -- a check against it passes every sweep.
         # listpeerchannels is the node's own view (peer_connected plus a state), and
         # only operational channels count (an ONCHAIN one is meant to be alone).
+        scope lightningd peers
         lpeers=$(lightning_cli listpeers 2>/dev/null) || lpeers=""
         npeers=$(printf '%s' "$lpeers" | jq -r '[.peers[] | select(.connected)] | length' 2>/dev/null) || npeers=""
         if [ -z "$npeers" ]; then
@@ -376,6 +533,7 @@ chain_checks() {
         else
             ok "lightningd has $npeers connected peer(s)"
         fi
+        scope lightningd channels
         chans=$(lightning_cli listpeerchannels 2>/dev/null) || chans=""
         offline=$(printf '%s' "$chans" | jq -r \
             '[.channels[] | select(.state == "CHANNELD_NORMAL" and .peer_connected == false)] | length' \
@@ -401,6 +559,7 @@ chain_checks() {
     # fails. The history is metrics.sh's stack_xmr_rpc_up.
     node_h=""
     sync=""
+    scope monerod rpc
     xmrnode_token=$(env_value "$CONFIG_DIR/monero-node-mcp/token.env" MONERO_MCP_TOKEN)
     if [ -n "$xmrnode_token" ]; then
         node_body=$(mcp_call monero-node-mcp "$xmrnode_token" get_info '{}') || node_body=""
@@ -413,6 +572,7 @@ chain_checks() {
                 soft "monerod restricted RPC did not answer get_info (normal while a sync batch holds the chain lock; raise MONITOR_GRACE_SYNC=0 to page on it)"
             fi
         elif [ "$sync" = false ] && [ "$MONITOR_GRACE_SYNC" != 1 ]; then
+            scope monerod sync
             fail "monerod is not synchronized (height ${node_h:-?})"
         else
             ok "monerod height ${node_h:-?} (synchronized=${sync:-?})"
@@ -423,6 +583,7 @@ chain_checks() {
             if [ -n "$node_h" ] && [ -n "$target_h" ] && [ "$target_h" -ge "$node_h" ]; then
                 xlag=$(( target_h - node_h ))
                 if [ "$sync" = true ] && [ "$xlag" -gt "$THRESH_XMR_LAG" ]; then
+                    scope monerod sync
                     fail "monerod reports synchronized but is $xlag block(s) behind its target (height $node_h, target $target_h)"
                 else
                     ok "monerod is $xlag block(s) from its target"
@@ -433,21 +594,26 @@ chain_checks() {
         soft "no MONERO_MCP_TOKEN; skipped the monerod height check"
     fi
     
-    xmrwallet_token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
-    if [ -n "$xmrwallet_token" ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
-        soft "the BTCPay view-only XMR wallet is not imported yet (config/btcpay/xmr-wallet.env); skipped the wallet height check"
-    elif [ -n "$xmrwallet_token" ]; then
-        w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
-        w_h=$(mcp_result "$w_body" | jq -r '.height // empty' 2>/dev/null)
-        if [ -z "$w_h" ]; then
-            # No answer is not "fine": the wallet RPC is down, wedged or (usually)
-            # rebuilding its cache, and the container can sit "Up (unhealthy)" for
-            # hours while every sweep reports the height as "?".
-            fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-btcpay)"
-        elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
-            soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
-        else
-            ok "monero-wallet height $w_h"
+    scope monero-wallet-btcpay wallet
+    if component_starting monero-wallet-btcpay; then
+        starting "monero-wallet is starting (started less than ${STARTUP_GRACE_S}s ago)"
+    else
+        xmrwallet_token=$(env_value "$CONFIG_DIR/monero-wallet-mcp/token.env" MONERO_MCP_TOKEN)
+        if [ -n "$xmrwallet_token" ] && [ ! -f "$DATA_DIR/btcpay/xmr-wallet/wallet.keys" ]; then
+            soft "the BTCPay view-only XMR wallet is not imported yet (config/btcpay/xmr-wallet.env); skipped the wallet height check"
+        elif [ -n "$xmrwallet_token" ]; then
+            w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
+            w_h=$(mcp_result "$w_body" | jq -r '.height // empty' 2>/dev/null)
+            if [ -z "$w_h" ]; then
+                # No answer is not "fine": the wallet RPC is down, wedged or
+                # (usually) rebuilding its cache, and the container can sit
+                # "Up (unhealthy)" for hours while every sweep reports "?".
+                fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-btcpay)"
+            elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
+                soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
+            else
+                ok "monero-wallet height $w_h"
+            fi
         fi
     fi
 }
@@ -520,6 +686,7 @@ free_pct() {
 # disk is one finding, not one per path name.
 disk_seen=" "
 for target in / "$DATA_DIR" "$HOME" "$STACK_BACKUP_DIR"; do
+    scope disk space
     if [ ! -d "$target" ]; then
         soft "disk check skipped: $target does not exist"
         continue
@@ -548,6 +715,7 @@ for target in / "$DATA_DIR" "$HOME" "$STACK_BACKUP_DIR"; do
     else
         ok "$target has ${dfree}% disk free"
     fi
+    scope disk inodes
     if [ -n "$ifree" ] && [ "$ifree" -lt "$THRESH_INODES" ]; then
         fail "inodes almost exhausted on $target: ${ifree}% free (threshold ${THRESH_INODES}%)"
     fi
@@ -556,6 +724,7 @@ done
 # A clock that stopped being disciplined breaks TLS validation and ACME, and
 # gives Lightning's gossip and invoices the wrong wall time. timedated reads the
 # kernel's STA_UNSYNC state, so this works with chrony or systemd-timesyncd.
+scope ntp sync
 if command -v timedatectl >/dev/null 2>&1; then
     ntp_sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null) || ntp_sync=""
     case "$ntp_sync" in
@@ -617,6 +786,7 @@ smart_up=0
 smart_disks=0
 SMART_PROM=()
 if [ -f /etc/systemd/system/stack-smart.timer ]; then
+    scope smart status
     verdict_judge "$SMART_STATUS_FILE" fail "$(verdict_age smart)" "SMART report" \
         "see $SMART_STATUS_FILE" "systemctl status stack-smart.timer"
     smart_disks=$(num_or "$(env_value "$SMART_STATUS_FILE" disks)" 0)
@@ -637,6 +807,7 @@ if [ -f /etc/systemd/system/stack-smart.timer ]; then
         media=$(env_value "$SMART_STATUS_FILE" "disk${i}_media_errors")
         [ -n "$name" ] || name=${dev##*/}
         label=${name:-disk$i}
+        scope "disk-$label" smart
 
         case "$state" in
             standby)
@@ -706,6 +877,7 @@ if [ -f /etc/systemd/system/stack-smart.timer ]; then
                        fi ;;
                 esac
 
+                scope "disk-$label" temperature
                 case "$temp" in
                     ''|0|*[!0-9]*) soft "SMART $label reports no temperature"
                                    bad_disk=1 ;;
@@ -750,6 +922,7 @@ fi
 #    still valid, and one of those could also spend. The comparison (method sets
 #    against stack.conf, not remembered ids) is in scripts/lib/daemons.sh so
 #    and this check agree.
+scope lightningd runes
 if podman container exists lightningd 2>/dev/null; then
     keep_runes=(
         "$(env_value "$CONFIG_DIR/lightning-mcp/node.env" LIGHTNING_RUNE)"
@@ -777,6 +950,7 @@ fi
 #    must agree. A half-applied bitcoin-rpc rotation leaves them different and
 #    nothing notices until bitcoind restarts into a config its clients no longer
 #    match. A plain string comparison -- no credentials change hands.
+scope bitcoind rpc_password
 btc_conf_pw=$(bitcoind_conf_password)
 btc_env_pw=$(env_value "$CONFIG_DIR/stack/secrets.env" BITCOIN_RPC_PASSWORD)
 if [ -z "$btc_conf_pw" ] || [ -z "$btc_env_pw" ]; then
@@ -791,6 +965,7 @@ fi
 # of a rotation interrupted before the reconciling design: a soft line so an
 # operator can delete it or re-run the target it names.
 if compgen -G "$CONFIG_DIR/rotation/*.pending" >/dev/null; then
+    scope stack rotation
     soft "stale rotation journal(s) from an older version: $(cd "$CONFIG_DIR/rotation" && printf '%s ' *.pending) -- delete them (nothing reads them)"
 fi
 
@@ -798,6 +973,7 @@ fi
 # fire-and-forget backup is the failure found on restore day.
 # restic_snapshot_summary is the same read rotate.sh makes before it will rotate
 # the repository password.
+scope backup age
 if bsummary=$(restic_snapshot_summary); then
     IFS=$'\t' read -r backup_count backup_epoch <<< "$bsummary"
     if [ -n "$backup_epoch" ]; then
@@ -864,6 +1040,7 @@ for dump_rel in postgres-dump/all.sql npm-dump/database.sqlite uptime-kuma-dump/
     [ "$dump_age_h" -gt "$THRESH_DUMP_H" ] \
         && dump_stale="$dump_stale $dump_rel (${dump_age_h}h) [$(dump_verdict "$dump_rel")]"
 done
+scope db-dump freshness
 case "${backup_count:-}" in
     ''|*[!0-9]*|0)
         soft "no restic snapshot yet; skipped the pre-backup dump freshness check" ;;
@@ -884,6 +1061,7 @@ esac
 # job (scripts/lib/jobs.sh); only the file, the severity and the age are passed
 # here.
 VERIFY_STATUS_FILE="$AUDIT_DIR/backup-verify.status"
+scope backup verify
 verdict_judge "$VERIFY_STATUS_FILE" fail "$(verdict_age backup-verify)" \
     "backup restore drill" "run scripts/backup.sh verify"
 backup_verify_age_s="${STATUS_AGE_S:-}"
@@ -903,6 +1081,7 @@ fi
 # either drill mask the other's age. A skip carries ok_epoch forward, so a run of
 # skips fails on age instead of looking green.
 VERIFY_DB_STATUS_FILE="$AUDIT_DIR/backup-verify-db.status"
+scope backup verify_db
 verdict_judge "$VERIFY_DB_STATUS_FILE" fail "$(verdict_age backup-verify-db)" \
     "backup database drill" "run scripts/backup.sh verify-db"
 backup_verify_db_age_s="${STATUS_AGE_S:-}"
@@ -938,6 +1117,7 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl --user cat db-dump.service >/dev/null 2>&1 \
         || schedule_faults="$schedule_faults db-dump.service(not installed)"
 fi
+scope systemd schedules
 if [ -z "$schedule_faults" ]; then
     ok "every scheduled job is installed and active"
 else
@@ -958,6 +1138,7 @@ for cert in "$NPM_DIR"/letsencrypt/live/*/cert.pem; do
         CERT_MIN="$days"; CERT_WHICH="$(basename "$(dirname "$cert")")"
     fi
 done
+scope nginx-proxy-manager certificate
 if [ -n "$CERT_MIN" ]; then
     if [ "$CERT_MIN" -lt "$THRESH_CERT_D" ]; then
         fail "certificate $CERT_WHICH expires in ${CERT_MIN}d (threshold ${THRESH_CERT_D}d)"
@@ -970,13 +1151,15 @@ fi
 
 # Restart counts are not checked here. A per-sweep delta ("restarted 9 times
 # since the last sweep") is an event: true for exactly one sweep, so the section
-# fired and resolved around every burst. metrics.sh exports the monotonic
-# stack_systemd_restarts{unit}, and the rules alert on increase() over an hour --
-# the same fact as a condition, which stays true while the loop is running.
+# fired and resolved around every burst. metrics.sh exports NRestarts as
+# stack_systemd_restarts{unit}; it is a gauge that resets on a manual restart, so
+# the rule uses changes() over 30 minutes -- the same fact as a condition, and
+# not increase(), which is only valid on a counter.
 
 # The collector that produces every graph: if it stops, the history stops and
 # nothing else notices, so it is checked from the outside.
 STACK_PROM="$DATA_DIR/monitoring/textfile/stack.prom"
+scope node-exporter metrics
 if systemctl --user is-active --quiet metrics.timer 2>/dev/null; then
     if [ -f "$STACK_PROM" ]; then
         prom_age=$(( $(date +%s) - $(stat -c %Y "$STACK_PROM" 2>/dev/null || echo 0) ))
@@ -1007,6 +1190,7 @@ fi
 # (every unit "active", nothing arriving). A dead store cannot hide any other
 # check, because every other check reads the daemons and the host directly.
 logs_ok=0
+scope vector logs
 if systemctl --user is-active --quiet vector.service 2>/dev/null; then
     if logs_detail=$("$REPO_DIR/scripts/logs.sh" --health --window "$THRESH_LOGS_S" --quiet 2>&1); then
         logs_ok=1
@@ -1022,6 +1206,7 @@ fi
 # The config alone is not proof -- a /var/log/journal tmpfiles has not prepared
 # leaves journald writing to /run while Storage=persistent is in force, which is
 # why bootstrap.sh judges it by a *.journal file, not by the drop-in.
+scope journald persistence
 if [ -n "$(find /var/log/journal -name '*.journal' -print -quit 2>/dev/null)" ]; then
     ok "journald is persistent ($(du -sh /var/log/journal 2>/dev/null | cut -f1))"
 elif grep -qs '^Storage=persistent' /etc/systemd/journald.conf.d/99-stack.conf; then
@@ -1037,6 +1222,7 @@ fi
 # silent until someone reads the store's growth. The user side is asked of podman
 # (the effective value) -- which also catches a later-sorting drop-in -- while the
 # root side is read from the files, because asking root's podman needs sudo.
+scope podman events
 podman_events=$(podman info --format '{{.Host.EventLogger}}' 2>/dev/null || true)
 case "$podman_events" in
     journald) soft "podman events go to journald (deploy/install.sh moves them to a bounded file)" ;;
@@ -1058,6 +1244,7 @@ nic=""
 if command -v ip >/dev/null 2>&1; then
     nic=$(ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')
 fi
+scope network drops
 if [ -z "$nic" ]; then
     soft "no default route; skipped the NIC drop check"
 elif [ ! -r /proc/net/dev ]; then
@@ -1090,6 +1277,7 @@ fi
 
 # The hottest sensor, read off sysfs here rather than from the graphs, so the
 # graphs being down does not cost the check.
+scope host temperature
 if command -v find >/dev/null 2>&1; then
     temp_max=-999
     temp_chip=""
@@ -1120,6 +1308,7 @@ fi
 # journal keeps filling from container stdout, so nothing notices. Probe the whole
 # path rather than the file: write a sentinel with logger (the same syslog(3) call
 # sshd makes) and require it back out of the journal.
+scope journald syslog
 if command -v logger >/dev/null 2>&1 && command -v journalctl >/dev/null 2>&1; then
     auth_probe="stack-monitor-authlog-$$-$(date +%s)"
     if auth_err=$(logger -p authpriv.info -- "$auth_probe" 2>&1); then
@@ -1141,6 +1330,7 @@ fi
 # the only thing that mails a registration, so it must be noticed.
 # ---------------------------------------------------------------------------
 REG_STATUS_FILE="$AUDIT_DIR/registrations.status"
+scope registrations watcher
 verdict_judge "$REG_STATUS_FILE" soft "$(verdict_age registrations)" \
     "signup watcher" "see $AUDIT_DIR/registrations.log" \
     "systemctl --user status registrations.timer"
@@ -1210,7 +1400,7 @@ if command -v systemctl >/dev/null 2>&1; then
                                 else if ($i ~ /^ExecMainStatus=/) { status=$i; sub(/^ExecMainStatus=/, "", status) }
                             }
                             if (type == "oneshot" && status ~ /^[0-9]+$/ && status + 0 != 0)
-                                printf "%s (exit %s) ", id, status
+                                printf "%s:%s ", id, status
                         }' | sed 's/ $//')
                 [ -n "$last_failed" ] && unit_faults+=("inactive oneshot: $last_failed")
             else
@@ -1228,7 +1418,22 @@ else
 fi
 if [ "${#unit_faults[@]}" -gt 0 ]; then
     for unit_fault in "${unit_faults[@]}"; do
-        soft "failed unit(s): $unit_fault -- systemctl status/journalctl names the cause"
+        case "$unit_fault" in
+            "system: "*)
+                for u in ${unit_fault#system: }; do
+                    soft "failed system unit: $u -- systemctl status/journalctl names the cause" "${u%.service}" unit_failed
+                done ;;
+            "user: "*)
+                for u in ${unit_fault#user: }; do
+                    soft "failed user unit: $u -- systemctl status/journalctl names the cause" "${u%.service}" unit_failed
+                done ;;
+            "inactive oneshot: "*)
+                for pair in ${unit_fault#inactive oneshot: }; do
+                    u=${pair%%:*}; code=${pair#*:}
+                    soft "failed inactive oneshot: $u (exit $code) -- systemctl status/journalctl names the cause" "${u%.service}" oneshot_failed
+                done ;;
+            *) soft "$unit_fault -- systemctl status/journalctl names the cause" systemd units ;;
+        esac
     done
 elif [ "$unit_read_ok" = 1 ]; then
     ok "no systemd unit failed or left a failed oneshot invocation"
@@ -1280,8 +1485,14 @@ if [ -z "${NPM_DOMAINS+x}" ] || [ "${#NPM_DOMAINS[@]}" -eq 0 ]; then
 else
     for i in "${!NPM_DOMAINS[@]}"; do
         vhost="${NPM_DOMAINS[$i]}"
+        comp="${NPM_CONTAINERS[$i]:-nginx-proxy-manager}"
         force_ssl="${NPM_FORCE_SSL[$i]:-0}"
         probe_path="${NPM_PROBE_PATHS[$i]:-/}"
+        scope "$comp" http
+        if component_starting nginx-proxy-manager || component_starting "$comp"; then
+            starting "$vhost skipped: nginx-proxy-manager or $comp started less than ${STARTUP_GRACE_S}s ago"
+            continue
+        fi
         https_headers=""
         # http first: a declared force-ssl vhost must redirect here; anything
         # else is plaintext. A vhost without it may answer on :80 until a
@@ -1297,6 +1508,7 @@ else
                     continue ;;
                 *)
                     public_bad=$((public_bad + 1))
+                    scope "$comp" redirect
                     fail "$vhost serves plaintext HTTP ($pcode): force-ssl is declared but nginx-proxy-manager is not redirecting to https (no certificate, or scripts/npm-hosts.sh has not run)"
                     continue ;;
             esac
@@ -1329,6 +1541,7 @@ else
                 if [ "$force_ssl" = 1 ] \
                     && ! printf '%s' "$https_headers" | grep -qi '^strict-transport-security:.*max-age='; then
                     public_bad=$((public_bad + 1))
+                    scope "$comp" hsts
                     fail "$vhost answers HTTPS ($pcode) without the HSTS header: force-ssl is declared, so NPM's hsts_enabled should be set (run scripts/npm-hosts.sh)"
                 elif [ "$force_ssl" = 1 ]; then
                     ok "$vhost redirects to HTTPS and sends HSTS ($pcode)"
@@ -1344,6 +1557,7 @@ fi
 # 6. the spend tripwire
 # ---------------------------------------------------------------------------
 head3 "spend tripwire"
+scope spend tripwire
 audit_out=$("$REPO_DIR/scripts/spend-audit.sh" 2>&1) || audit_rc=$?
 audit_trips=0
 while IFS= read -r line; do
@@ -1380,6 +1594,7 @@ ids_rules=""
 ids_rules_epoch=""
 ids_rules_age_h=""
 ids_up=0
+scope suricata ids
 verdict_judge "$IDS_STATUS_FILE" fail "$(verdict_age ids)" "IDS roll-up" \
     "see $AUDIT_LOG" "ids.timer stopped, or ids.sh cannot read the sensor"
 # The counters are read whichever way the verdict went: a stale roll-up's last
@@ -1419,6 +1634,7 @@ case "$VERDICT_OUTCOME" in
     ok)
         ids_up=1
         ok "IDS: suricata=$(env_value "$IDS_STATUS_FILE" suricata) crowdsec=$(env_value "$IDS_STATUS_FILE" crowdsec), $ids_alerts alert(s), $ids_decisions decision(s), $ids_ssh_fail SSH auth failure(s), rules=${ids_rules:-?}${ids_rules_age_h:+ (${ids_rules_age_h}h)}"
+        scope suricata rules
         case "$rules_problem_sev" in
             fail) fail "$rules_problem" ;;
             soft) soft "$rules_problem" ;;
@@ -1430,7 +1646,7 @@ esac
 # stack_ids_alerts and the rule holds a burst for 15 minutes. Deciding it here
 # made the section fire and resolve around every spike.
 # SSH failures are the same kind of report, with their own burst rule
-# (stack_ssh_bruteforce) over the last-window count in stack_ids_ssh_fail; SSH
+# (StackSshBruteforce) over the last-window count in stack_ids_ssh_fail; SSH
 # is LAN-only, so the threshold is deliberately a warning.
 
 # The weekly refresh jobs. Their *effect* is the rules age above and the hub
@@ -1441,6 +1657,7 @@ esac
 # engine is stopped, and ids.sh already reports that state; judging it here
 # would add a warning for one fact.
 SURICATA_UPDATE_STATUS_FILE="$AUDIT_DIR/suricata-update.status"
+scope suricata update
 if [ -f /etc/systemd/system/stack-suricata-update.timer ] \
     && [ -f "$SURICATA_UPDATE_STATUS_FILE" ] \
     && [ "$(env_value "$SURICATA_UPDATE_STATUS_FILE" result)" != skip ]; then
@@ -1449,6 +1666,7 @@ if [ -f /etc/systemd/system/stack-suricata-update.timer ] \
         "systemctl status stack-suricata-update.timer"
 fi
 CROWDSEC_UPDATE_STATUS_FILE="$AUDIT_DIR/crowdsec-update.status"
+scope crowdsec update
 if [ -f "$CROWDSEC_UPDATE_STATUS_FILE" ] \
     && [ "$(env_value "$CROWDSEC_UPDATE_STATUS_FILE" result)" != skip ]; then
     verdict_judge "$CROWDSEC_UPDATE_STATUS_FILE" soft "$(verdict_age crowdsec-update)" \
@@ -1462,6 +1680,7 @@ fi
 # emits no audit events for directory watches.
 AUDIT_STATUS_FILE="$AUDIT_DIR/auditd.status"
 audit_fim=0
+scope audit auditd
 if [ -f /etc/systemd/system/stack-audit.timer ]; then
     verdict_judge "$AUDIT_STATUS_FILE" fail "$(verdict_age auditd)" "audit report" \
         "see $AUDIT_STATUS_FILE" "systemctl status stack-audit.timer"
@@ -1489,6 +1708,7 @@ fi
 BOUNCER_STATUS_FILE="$AUDIT_DIR/bouncer.status"
 bouncer_bans=0
 bouncer_skipped=0
+scope crowdsec bouncer
 if [ -f /etc/systemd/system/stack-bouncer.timer ]; then
     verdict_judge "$BOUNCER_STATUS_FILE" fail "$(verdict_age bouncer)" "bouncer" \
         "see $BOUNCER_STATUS_FILE" "systemctl status stack-bouncer.timer"
@@ -1529,6 +1749,7 @@ if [ "$MONITOR_ALERTMANAGER_URL" = off ]; then
     ok "alerting is off (MONITOR_ALERTMANAGER_URL=off): facts are not written, so no rule can fire"
 else
     vm_url="http://127.0.0.1:8428"
+    scope victoriametrics health
     vm_code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' "$vm_url/-/healthy" 2>/dev/null) || vm_code=""
     if [ "$vm_code" != 200 ]; then
         vm_ok=0
@@ -1542,6 +1763,7 @@ else
     # runs the previous rules -- like Alertmanager's invalid config, that is a
     # warning, not a page.
     vmalert_url="http://127.0.0.1:8880"
+    scope vmalert health
     vmalert_code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' "$vmalert_url/-/healthy" 2>/dev/null) || vmalert_code=""
     if [ "$vmalert_code" != 200 ]; then
         vmalert_ok=0
@@ -1550,6 +1772,7 @@ else
         vmalert_metrics=$(curl -fsS -m 5 "$vmalert_url/metrics" 2>/dev/null) || vmalert_metrics=""
         if [ -n "$vmalert_metrics" ] \
             && printf '%s\n' "$vmalert_metrics" | grep -q '^vmalert_config_last_reload_successful 0'; then
+            scope vmalert rules
             soft "vmalert's last rule reload failed; it is running the previous rules (podman logs vmalert)"
         else
             ok "vmalert answers and its rules are loaded"
@@ -1557,6 +1780,7 @@ else
     fi
 
     am_url="${MONITOR_ALERTMANAGER_URL%/}"
+    scope alertmanager health
     am_code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' "$am_url/-/healthy" 2>/dev/null) || am_code=""
     if [ "$am_code" != 200 ]; then
         am_ok=0
@@ -1574,6 +1798,7 @@ else
             am_prev=$(cat "$ALERT_FAILED_FILE" 2>/dev/null) || am_prev=""
             if [ -n "$am_prev" ] && [ "$am_failed" -gt "$am_prev" ]; then
                 am_ok=0
+                scope alertmanager delivery
                 fail "Alertmanager failed to deliver $((am_failed - am_prev)) notification(s) since the last sweep (SMTP or receiver; podman logs alertmanager)"
             fi
             printf '%s\n' "$am_failed" > "$ALERT_FAILED_FILE" 2>/dev/null || true
@@ -1586,6 +1811,7 @@ else
     # running the last good config when it refuses a new one, so an invalid edit is
     # silent until the next restart -- a warning: the running path still works.
     AM_CFG="$CONFIG_DIR/monitoring/alertmanager/alertmanager.yml"
+    scope alertmanager config
     if [ ! -f "$AM_CFG" ]; then
         soft "no alertmanager config at $AM_CFG (run deploy/install.sh)"
     else
@@ -1609,6 +1835,7 @@ else
     # false recovery and a dead host says nothing at all. The heartbeat is the
     # only channel for both, so its absence is worth a line every sweep.
     if [ -z "$MONITOR_PING_URL" ]; then
+        scope monitor heartbeat
         soft "no MONITOR_PING_URL: a dead host or a dead vmalert cannot be reported (set a healthchecks.io ping URL)"
     fi
 fi
@@ -1632,6 +1859,7 @@ summary() {
 
 heartbeat() { # ok|fail [body]
     [ -n "$MONITOR_PING_URL" ] || return 0
+    scope monitor heartbeat
     local base url
     base="${MONITOR_PING_URL%/}"
     if [ "$1" = fail ]; then
@@ -1645,34 +1873,79 @@ heartbeat() { # ok|fail [body]
     fi
 }
 
-# One series per bad section, plus that section's text as an info series: the
-# facts vmalert's rules read. The section is the alert's identity and the text is
-# fetched at notification time, so a changing "9% free" never forks the alert.
+# One fact per expected container: down is the root cause, unhealthy is the
+# slower warning, and both are labels the per-check alerts already carry. A
+# component that is down inhibits its dependent checks in Alertmanager, so one
+# dead btc-explorer is one page, not a unit fault plus a verify failure plus a
+# 502 from the public surface.
+components_prom() {
+    local ps_out f c line state up
+    local -A ps_status=() seen=()
+    ps_out=$(podman ps --format '{{.Names}}|{{.Status}}' 2>/dev/null) || return 0
+    while IFS='|' read -r c line; do
+        [ -n "$c" ] && ps_status[$c]=$line
+    done <<< "$ps_out"
+    for f in "$REPO_DIR"/deploy/*.container "$REPO_DIR"/deploy/*.container.in; do
+        [ -f "$f" ] || continue
+        # A oneshot has no running state to report; its verdict file is the
+        # check (backup, dumps, drills).
+        grep -qE '^Type=oneshot[[:space:]]*$' "$f" && continue
+        c=$(basename "$f"); c=${c%.in}; c=${c%.container}
+        [ -n "${seen[$c]:-}" ] && continue
+        seen[$c]=1
+        if [ "$MONITOR_SKIP_NODES" = 1 ] && unit_in_set "$c" "${CHAIN_UNITS[*]:-}"; then
+            continue
+        fi
+        state=$(container_health_state "${ps_status[$c]:-}")
+        up=1
+        [ "$state" = down ] && up=0
+        printf 'stack_component_up{component="%s"} %s\n' "$c" "$up"
+        printf 'stack_component_health{component="%s",state="%s"} 1\n' "$c" "$state"
+    done
+}
+
+# The facts vmalert's rules read. stack_monitor_check is the alert identity:
+# component/check, so a dead btc-explorer is one component and its HTTP/verify
+# symptoms share that label and can be inhibited by the component rule.
+# stack_monitor_section stays as the human roll-up (and the history graph); it is
+# no longer an alert. The detail is one info series per component/check, fetched
+# at notification time, so a changing "9% free" never forks the alert.
 # Under `off` neither these nor the sweep timestamp are written -- with no facts
 # there is nothing for a rule to fire on, and a timestamp alone would page as
 # stale.
 sections_prom() {
-    local i s
-    local -A sev=() desc=()
+    local i key s comp chk
+    local -A secsev=() sev=() desc=()
     for i in "${!PROBLEMS[@]}"; do
-        s="${PROBLEM_SECTIONS[$i]}"
-        sev[$s]=critical
-        desc[$s]+="${desc[$s]:+; }${PROBLEMS[$i]}"
+        s="${PROBLEM_SECTIONS[$i]}"; comp="${PROBLEM_COMPONENTS[$i]}"; chk="${PROBLEM_CHECKS[$i]}"
+        secsev[$s]=critical
+        key="$comp|$chk"
+        sev[$key]=critical
+        desc[$key]+="${desc[$key]:+; }${PROBLEMS[$i]}"
     done
     for i in "${!WARNS[@]}"; do
-        s="${WARN_SECTIONS[$i]}"
-        [ "${sev[$s]:-}" = critical ] || sev[$s]=warning
-        desc[$s]+="${desc[$s]:+; }${WARNS[$i]}"
+        s="${WARN_SECTIONS[$i]}"; comp="${WARN_COMPONENTS[$i]}"; chk="${WARN_CHECKS[$i]}"
+        [ "${secsev[$s]:-}" = critical ] || secsev[$s]=warning
+        key="$comp|$chk"
+        [ "${sev[$key]:-}" = critical ] || sev[$key]=warning
+        desc[$key]+="${desc[$key]:+; }${WARNS[$i]}"
     done
-    [ "${#sev[@]}" -gt 0 ] || return 0
+    [ "${#secsev[@]}" -gt 0 ] || return 0
     printf '# TYPE stack_monitor_section gauge\n'
-    for s in $(printf '%s\n' "${!sev[@]}" | LC_ALL=C sort); do
-        printf 'stack_monitor_section{service="%s",severity="%s"} 1\n' "$s" "${sev[$s]}"
+    for s in $(printf '%s\n' "${!secsev[@]}" | LC_ALL=C sort); do
+        printf 'stack_monitor_section{service="%s",severity="%s"} 1\n' "$s" "${secsev[$s]}"
     done
-    printf '# TYPE stack_monitor_detail_info gauge\n'
-    for s in $(printf '%s\n' "${!desc[@]}" | LC_ALL=C sort); do
-        printf 'stack_monitor_detail_info{service="%s",detail="%s"} 1\n' \
-            "$s" "$(prom_label_value "${desc[$s]}")"
+    printf '# TYPE stack_monitor_check gauge\n'
+    for key in $(printf '%s\n' "${!sev[@]}" | LC_ALL=C sort); do
+        comp=${key%%|*}; chk=${key#*|}
+        printf 'stack_monitor_check{component="%s",check="%s",severity="%s"} 1\n' \
+            "$comp" "$chk" "${sev[$key]}"
+    done
+    printf '# TYPE stack_monitor_check_detail gauge\n'
+    for key in $(printf '%s\n' "${!desc[@]}" | LC_ALL=C sort); do
+        comp=${key%%|*}; chk=${key#*|}
+        printf 'stack_monitor_check_detail{component="%s",check="%s",detail="%s"} 1\n' \
+            "$comp" "$chk" "$(prom_label_value "${desc[$key]}")"
     done
 }
 
@@ -1713,9 +1986,10 @@ prom_ok=1
     done
     printf 'stack_audit_fim_changes %s\n' "${audit_fim:-0}"
     printf 'stack_logs_ok %s\n' "${logs_ok:-0}"
+    [ "$MONITOR_ALERTMANAGER_URL" = off ] || components_prom
     [ "$MONITOR_ALERTMANAGER_URL" = off ] || sections_prom
 } | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" \
-    || { soft "could not write monitor.prom"; prom_ok=0; }
+    || { scope monitor metrics; soft "could not write monitor.prom"; prom_ok=0; }
 
 # The facts first, then the heartbeat's verdict: a sweep whose checks pass but
 # whose metrics could not be written is a monitor that decides nothing, and the

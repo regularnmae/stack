@@ -166,7 +166,7 @@ jobs:
             exit 1
           fi
           printf 'all %s monitor.env keys documented\n' "$(printf '%s\n' "$read_keys" | wc -l)"
-      # The sweep turns a finding into a stack_monitor_section series and stops
+      # The sweep turns a finding into a stack_monitor_check series and stops
       # there; the rules are the only thing that makes it a page. A rule missing
       # for one of the two severities is a whole class of checks going silent,
       # and nothing on the host would ever say so.
@@ -238,6 +238,11 @@ jobs:
         run: python3 tests/test_stackctl.py
       - name: shared shell helper tests
         run: tests/test-lib.sh
+      # monitor.sh's alert identity is (component, check); the verify.sh
+      # classifier and the textfile builder are the two places a free-text
+      # message could fork it. Offline: no podman, no data dir.
+      - name: monitor alert identity tests
+        run: tests/test-monitor.sh
       - name: image tag lint tests
         run: tests/test-image-lint.sh
       # deploy/root/bouncer.sh shares the parser (status.sh, installed beside it)

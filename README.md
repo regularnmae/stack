@@ -1014,19 +1014,29 @@ contract it relies on — and why a probe must not touch the data path — is
 `docs/alerting.md`.
 
 **The monitor decides *what* is wrong, the rules decide *when*, Alertmanager
-decides *how* to speak.** `scripts/monitor.sh` writes one `stack_monitor_section`
-series per failing section (plus its text) into the textfile; `vmalert`
-(`victoriametrics/vmalert`, loopback `:8880`, rules rendered by `install.sh` from
-`deploy/monitoring/rules/stack.yml.in`) fires one alert per section once
-`MONITOR_ALERT_FOR` (600s, two sweeps) has passed — the **flap damper** is the
-rule's `for:` for the onset and `keep_firing_for: MONITOR_ALERT_HOLD_S` (900s)
-for the reset, not state the script keeps — and reports the recovery itself when
-the rule finally goes inactive. `deploy/alertmanager.container`
+decides *how* to speak.** `scripts/monitor.sh` gives every finding a `component`
+and a `check` and writes `stack_monitor_check` (plus its detail) into the
+textfile; it also writes `stack_component_up`/`stack_component_health` for every
+expected container, so a dead service is the root cause and its `verify`/HTTP
+symptoms share its component label. `vmalert` (`victoriametrics/vmalert`,
+loopback `:8880`, rules rendered by `install.sh` from
+`deploy/monitoring/rules/stack.yml.in`) fires one alert per failing
+component/check once `MONITOR_ALERT_FOR` (600s, two sweeps) has passed — the
+**flap damper** is the rule's `for:` for the onset and `keep_firing_for:
+MONITOR_ALERT_HOLD_S` (900s) for the reset, not state the script keeps — and
+reports the recovery itself when the rule finally goes inactive. A container
+that is down pages at 2 minutes; a component that is unhealthy warns after 5.
+`vmalert` persists its alert state in VictoriaMetrics
+(`-remoteWrite.url`/`-remoteRead.url`), so a restart no longer re-announces every
+standing fault. `deploy/alertmanager.container`
 (`prom/alertmanager`, loopback `:9093`, no public host: `ssh -L
 9093:127.0.0.1:9093`) owns grouping, inhibition, silences and delivery,
 reports failed deliveries back to the next sweep, and **notifies on the state
-change only** (`repeat_interval: 8760h`): one mail when a section starts failing,
-one when it recovers, nothing in between.
+change, then once a day while it persists** (`repeat_interval: 24h`): one mail
+when a component/check starts failing, one when it recovers, and a daily
+reminder. Inhibition is component-scoped: a down component mutes its dependent
+checks, so one dead `btc-explorer` is one page, not a unit fault plus a verify
+failure plus a 502.
 
 That puts the store on the paging path: `for:` is evaluated against
 VictoriaMetrics, so a wedged store means no rule fires. The sweep's `alerting`
@@ -1090,10 +1100,10 @@ bad it got and whether it is improving*.
 | | |
 | --- | --- |
 | `victoriametrics` | the store: Prometheus-compatible, single process, 30 days (`METRICS_RETENTION`), `127.0.0.1:8428` |
-| `vmalert` | the rules: one alert per failing sweep section, the `for:` hold-down, and the stale-sweep check (`127.0.0.1:8880`) |
+| `vmalert` | the rules: one alert per failing component/check, the `for:` hold-down, the root-cause component alert, and the stale-sweep check (`127.0.0.1:8880`) |
 | `node-exporter` | the host: disk, inodes, I/O saturation, memory, load, NIC, temperatures — plus the **textfile collector**, which is how the stack's own numbers get in |
 | `scripts/metrics.sh` (every minute) | `$DATA_DIR/monitoring/textfile/stack.prom`: chain heights and IBD, peers and mempool, Fulcrum's Electrum reachability and lag, CLN peers/offline channels, `monerod`'s RPC reachability and lag, the wallet's lag, restart counters, per-container CPU/memory/pids/network |
-| `scripts/monitor.sh` (every five) | `monitor.prom` beside it: the failing sections (`stack_monitor_section` + detail), backup age and count, verify failures, spend trips, SMART reallocated/pending sectors and temperatures (`stack_smart_*`), sweep timestamp |
+| `scripts/monitor.sh` (every five) | `monitor.prom` beside it: the failing component/checks (`stack_monitor_check` + detail), the container root-cause gauges (`stack_component_up`/`stack_component_health`), the section roll-up (`stack_monitor_section`), backup age and count, verify failures, spend trips, SMART reallocated/pending sectors and temperatures (`stack_smart_*`), sweep timestamp |
 
 **Read it over an SSH tunnel, by design:**
 
@@ -1291,7 +1301,7 @@ than leaving the sensor silently on `local.rules`. It also carries
 `ssh=ok|unreadable|na` and
 `ssh_fail=N`, the failed sshd auth lines in the last six minutes: an active sshd
 whose journal cannot be read fails the roll-up, and the count is history
-(`stack_ids_ssh_fail`); `stack_ssh_bruteforce` warns when one roll-up crosses
+(`stack_ids_ssh_fail`); `StackSshBruteforce` warns when one roll-up crosses
 `MONITOR_SSH_FAIL_WARN`. `ids.timer` runs at `*:2/5`, between the monitor's
 sweeps, and the monitor alerts on a stale or failed status. Counts are a *warning*,
 not a page; the rate is in VictoriaMetrics (`stack_ids_alerts`). eve.json is in the

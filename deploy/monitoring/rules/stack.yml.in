@@ -2,103 +2,126 @@
 # $DATA_DIR/config/monitoring/vmalert/stack.yml.
 #
 # The split: scripts/monitor.sh reads the daemons and the host and writes the
-# facts (stack_monitor_section, stack_monitor_detail_info, stack_sweep_timestamp)
-# into node-exporter's textfile; these rules decide when a fact has been true
-# long enough to speak; Alertmanager groups, repeats, inhibits and delivers.
-# monitor.sh therefore owns no alert state at all, and a recovery is vmalert's
-# transition to inactive -- not an endsAt the producer has to remember.
+# facts (stack_monitor_check, stack_monitor_check_detail, stack_component_up,
+# stack_monitor_section, stack_sweep_timestamp) into node-exporter's textfile;
+# these rules decide when a fact has been true long enough to speak; Alertmanager
+# groups, repeats, inhibits and delivers. monitor.sh therefore owns no alert
+# state at all, and a recovery is vmalert's transition to inactive -- not an
+# endsAt the producer has to remember.
 #
 # Three things are load-bearing:
-#   * the alert's identity is (alertname, service): the section is the label, and
-#     the free text is fetched from stack_monitor_detail_info at notification
-#     time. Putting the text in a label instead would make "disk 9% free" and
-#     "disk 8% free" two different alerts, and every sweep would look like a
-#     state change.
-#   * the detail IS a label on a one-sample info series, so each distinct text is
+#   * the alert's identity is (component, check), not the section. One dead
+#     btc-explorer is one component, and its `verify` and `public_surface`
+#     symptoms carry the same component label, so the component rule can inhibit
+#     them. The section series stays as the human roll-up and history graph.
+#   * the detail is a label on a one-sample info series, so each distinct text is
 #     a short-lived series. That is the price of putting the findings in the
-#     mail: bounded by the number of sections, not by traffic, and nothing
-#     queries or graphs it.
+#     mail: bounded by the number of component/check pairs, not by traffic, and
+#     nothing queries or graphs it.
 #   * `for:` damps onset and `keep_firing_for:` damps the reset. Both are
 #     evaluated against the datasource, so a wedged VictoriaMetrics stops them --
 #     the sweep's `alerting` section and the external heartbeat are what cover
-#     that hole (docs/alerting.md).
+#     that hole (docs/alerting.md). vmalert persists ALERTS/ALERTS_FOR_STATE via
+#     -remoteWrite.url/-remoteRead.url, so a restart restores the hold-downs.
 #
-# The reset half is not optional. A section only exists while something in it is
-# bad, so a sweep with nothing to report makes it vanish, and without
-# keep_firing_for that is an immediate "recovered" mail -- then a fresh alert on
-# the next bad sweep. The same goes for a critical dropping back to warning: two
-# different alerts, so the pair is a resolve plus a fire. keep_firing_for holds a
-# firing alert through both, and a section that returns inside the window
-# cancels the pending resolve (vmalert resets KeepFiringSince), so a flicker
-# costs nothing at all.
+# A component that is down is the root cause, not a symptom: stack_component_up
+# pages it at 2m, and Alertmanager's inhibition rules mute the dependent checks
+# that carry the same component. `keep_firing_for` is the reset half of the
+# damper: a check that clears for one sweep is not a recovery, and one that
+# returns inside the window cancels the pending resolve.
 groups:
   - name: stack
     # The scrape is 30s and the sweep rewrites its file every five minutes, so a
     # shorter interval only re-reads the same sample.
     interval: 30s
     rules:
-      - alert: stack_critical
-        expr: stack_monitor_section{severity="critical"} > 0
-        # monitor.sh's hold-down, rendered from MONITOR_ALERT_FOR. Two sweeps is
-        # the default: anything shorter is the flapping this exists to stop.
+      - alert: StackCheckCritical
+        expr: stack_monitor_check{severity="critical"} > 0
         for: @MONITOR_ALERT_FOR@s
-        # The mirror of `for:`, rendered from MONITOR_ALERT_HOLD_S. A section
-        # that clears for a sweep, or drops to warning, is not a recovery.
         keep_firing_for: @MONITOR_ALERT_HOLD_S@s
         labels:
           severity: critical
         annotations:
-          summary: 'stack: {{ $labels.service }} is critical'
-          description: '{{ with query (printf "stack_monitor_detail_info{service=%q}" $labels.service) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
+          summary: 'stack: {{ $labels.component }} {{ $labels.check }} is critical'
+          description: '{{ with query (printf "stack_monitor_check_detail{component=%q,check=%q}" $labels.component $labels.check) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
 
-      - alert: stack_warning
-        expr: stack_monitor_section{severity="warning"} > 0
+      - alert: StackCheckWarning
+        expr: stack_monitor_check{severity="warning"} > 0
         for: @MONITOR_ALERT_FOR@s
         keep_firing_for: @MONITOR_ALERT_HOLD_S@s
         labels:
           severity: warning
         annotations:
-          summary: 'stack: {{ $labels.service }} is warning'
-          description: '{{ with query (printf "stack_monitor_detail_info{service=%q}" $labels.service) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
+          summary: 'stack: {{ $labels.component }} {{ $labels.check }} is warning'
+          description: '{{ with query (printf "stack_monitor_check_detail{component=%q,check=%q}" $labels.component $labels.check) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
 
-      # Four checks live here rather than in the sweep because their natural
-      # shape is a rate, not a snapshot: monitor.sh writes the number, these
-      # windows decide. Deciding them per sweep made the `host` and
-      # `intrusion_detection` sections fire and resolve around every burst, since
-      # a per-sweep delta is true for exactly one sweep.
-      - alert: stack_unit_restarting
-        expr: increase(stack_systemd_restarts[1h]) > @MONITOR_RESTART_MAX@
-        for: @MONITOR_ALERT_FOR@s
-        keep_firing_for: @MONITOR_ALERT_HOLD_S@s
+      # The root cause: a container that is not running. 2m is long enough to
+      # let a deliberate restart pass, short enough that its symptoms are still
+      # held by the inhibition rule below.
+      - alert: StackComponentDown
+        expr: stack_component_up == 0
+        for: 2m
+        keep_firing_for: 5m
         labels:
           severity: critical
         annotations:
-          summary: 'stack: {{ $labels.unit }} is restarting'
-          description: '{{ $labels.unit }} restarted {{ $value | humanize }} time(s) in the last hour (threshold @MONITOR_RESTART_MAX@) -- a crash loop that a green healthcheck hides. podman logs --tail 50 {{ $labels.unit }}'
+          summary: 'stack: {{ $labels.component }} is down'
+          description: '{{ $labels.component }} is not running (stack_component_up=0). podman logs --tail 50 {{ $labels.component }}'
 
-      - alert: stack_disk_saturated
+      # A container whose own probe is failing. This is the slow half: a
+      # container that is up but unhealthy may be rebuilding or wedged, so it
+      # warns rather than pages, and mutes only its warning checks.
+      - alert: StackComponentUnhealthy
+        expr: stack_component_health{state="unhealthy"} > 0
+        for: 5m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'stack: {{ $labels.component }} is unhealthy'
+          description: '{{ $labels.component }} is running but its healthcheck is failing (podman inspect -f ''.State.Health'' {{ $labels.component }}; podman logs --tail 50 {{ $labels.component }})'
+
+      # NRestarts counts automatic restarts only and resets on a manual restart.
+      # changes() over 30m counts each increment, so a loop is visible; it is not
+      # increase(), which is only valid on a counter. The component label is what
+      # lets a down component inhibit this symptom.
+      - alert: StackRestartLoop
+        expr: changes(stack_systemd_restarts[30m]) > @MONITOR_RESTART_MAX@
+        for: @MONITOR_ALERT_FOR@s
+        keep_firing_for: 5m
+        labels:
+          severity: critical
+          component: '{{ $labels.unit }}'
+        annotations:
+          summary: 'stack: {{ $labels.unit }} restarted {{ $value | humanize }} time(s) in 30 minutes'
+          description: '{{ $labels.unit }} changed restart count {{ $value | humanize }} time(s) in the last 30 minutes (threshold @MONITOR_RESTART_MAX@) -- a crash loop that a green healthcheck hides. NRestarts counts automatic restarts and resets on a manual restart; podman logs --tail 50 {{ $labels.unit }}'
+
+      - alert: StackDiskSaturated
         expr: avg_over_time(stack_disk_util_pct[15m]) > @MONITOR_IO_UTIL_PCT@
         keep_firing_for: @MONITOR_ALERT_HOLD_S@s
         labels:
           severity: warning
+          component: '{{ $labels.device }}'
         annotations:
           summary: 'stack: {{ $labels.device }} is saturated'
           description: '{{ $labels.device }} (holding @DATA_DIR@) averaged {{ $value | humanize }}% busy over 15 minutes (threshold @MONITOR_IO_UTIL_PCT@%): everything on it is queueing, including the chains.'
 
-      - alert: stack_ids_noisy
+      - alert: StackIdsNoisy
         expr: max_over_time(stack_ids_alerts[15m]) > @MONITOR_IDS_ALERT_WARN@
         keep_firing_for: @MONITOR_ALERT_HOLD_S@s
         labels:
           severity: warning
+          component: suricata
         annotations:
           summary: 'stack: Suricata is reporting a burst'
           description: '{{ $value | humanize }} Suricata alert(s) in one report (threshold @MONITOR_IDS_ALERT_WARN@) within the last 15 minutes -- read @DATA_DIR@/ids/suricata/eve.json'
 
-      - alert: stack_ssh_bruteforce
+      - alert: StackSshBruteforce
         expr: max_over_time(stack_ids_ssh_fail[15m]) > @MONITOR_SSH_FAIL_WARN@
         keep_firing_for: @MONITOR_ALERT_HOLD_S@s
         labels:
           severity: warning
+          component: sshd
         annotations:
           summary: 'stack: SSH authentication is being brute-forced'
           description: '{{ $value | humanize }} failed sshd auth line(s) in one IDS roll-up (six-minute window; threshold @MONITOR_SSH_FAIL_WARN@) within the last 15 minutes -- read journalctl -u sshd.service --since "-15 min"'
@@ -107,11 +130,13 @@ groups:
       # last sample lives on in the store and `time() - value` keeps growing --
       # which is the only thing that notices a sweep that never ran on a host
       # where everything else still answers.
-      - alert: stack_monitor_stale
+      - alert: StackMonitorStale
         expr: (time() - stack_sweep_timestamp) > @MONITOR_SWEEP_MAX_AGE_S@
         for: 5m
         labels:
           severity: critical
+          component: monitor
+          check: sweep
         annotations:
           summary: 'stack: the health sweep has stopped'
           description: 'stack_sweep_timestamp is {{ $value | humanizeDuration }} old (threshold @MONITOR_SWEEP_MAX_AGE_S@s); the sweep is not deciding anything, so only this rule and the external heartbeat can page.'

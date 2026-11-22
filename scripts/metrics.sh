@@ -221,11 +221,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# systemd -- the restart counter of every unit managing a running container, read
-# off the user manager. monitor.sh pages on the *delta* between sweeps; this is the
-# monotonic counter for the graph, so "when did it start crash-looping and did it
-# stop" is a query, not a scroll through the journal. Units that are not running
-# are absent, as podman ps does not know them.
+# systemd -- NRestarts of every unit managing a running container, read off the
+# user manager. It is a gauge: it counts automatic restarts only and resets on a
+# manual restart, so monitor.sh uses changes() over a window, not increase().
+# The series is the graph, so "when did it start crash-looping and did it stop"
+# is a query, not a scroll through the journal. Units that are not running are
+# absent, as podman ps does not know them.
 # ---------------------------------------------------------------------------
 if command -v systemctl >/dev/null 2>&1; then
     while read -r cname; do

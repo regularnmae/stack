@@ -1,6 +1,7 @@
 # Quadlet unit for vmalert, the rule evaluator between the sweep and
-# Alertmanager: scripts/monitor.sh writes the facts (stack_monitor_section and
-# friends) into node-exporter's textfile, VictoriaMetrics stores and serves them,
+# Alertmanager: scripts/monitor.sh writes the facts (stack_monitor_check,
+# stack_component_up/health and friends) into node-exporter's textfile,
+# VictoriaMetrics stores and serves them,
 # and this process decides when one has been true long enough to page. The rules
 # it loads are deploy/monitoring/rules/stack.yml.in, rendered by install.sh --
 # thresholds are not tunable here, they come from monitor.env.
@@ -26,11 +27,13 @@ PublishPort=127.0.0.1:8880:8880
 # install.sh makes would never reach a running process.
 Volume=@CONFIG_DIR@/monitoring/vmalert:/etc/vmalert:ro,z
 
-# One Exec= line. No -remoteWrite.url: recording rules are not used, and without
-# it vmalert keeps no state of its own -- which is also why a restart resets
-# every `for:` (a page can be late by one hold-down, never lost). No
-# -external.label: the series arrive through the node scrape, so every alert
-# already carries that instance, which is what Alertmanager's inhibition keys on.
+# One Exec= line. -remoteWrite.url and -remoteRead.url persist ALERTS and
+# ALERTS_FOR_STATE in VictoriaMetrics and restore them on start, so a restart
+# does not reset every `for:`/`keep_firing_for:` and re-announce a standing
+# fault as new. Both flags are required; the restore only reads samples from the
+# last hour (-remoteRead.lookback), which is why a longer outage still re-arms
+# the hold-downs. No -external.label: the series arrive through the node scrape,
+# so every alert already carries that instance.
 #
 # A firing alert is stamped endsAt = now + 4x the group interval (2 minutes here)
 # and refreshed on every evaluation, so if this process dies Alertmanager mails
@@ -38,7 +41,7 @@ Volume=@CONFIG_DIR@/monitoring/vmalert:/etc/vmalert:ro,z
 # cleared. No flag widens that window (maxResolveDuration only shortens it), which
 # is why the dead-man's switch is not optional for this design: it is the only
 # thing that reports a dead evaluator (docs/alerting.md).
-Exec=-rule=/etc/vmalert/stack.yml -datasource.url=http://victoriametrics:8428 -notifier.url=http://alertmanager:9093 -evaluationInterval=30s -httpListenAddr=:8880
+Exec=-rule=/etc/vmalert/stack.yml -datasource.url=http://victoriametrics:8428 -notifier.url=http://alertmanager:9093 -remoteWrite.url=http://victoriametrics:8428 -remoteRead.url=http://victoriametrics:8428 -evaluationInterval=30s -httpListenAddr=:8880
 
 # The image ships wget (verified on this tag); /-/healthy is vmalert's own
 # liveness endpoint. The rules are parsed at start, so a unit that is healthy has

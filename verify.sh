@@ -28,7 +28,7 @@
 # non-interactive run with nothing recorded stops rather than inventing a path.
 #
 # Non-fatal findings have two levels, and monitor.sh treats them differently:
-# `warn` is drift the sweep carries as a warning (the stack_warning rule), while
+# `warn` is drift the sweep carries as a warning (the StackCheckWarning rule), while
 # `skip` is an expected absence -- a check skipped by request, a service not yet
 # set up, a job that has not run yet -- and is deliberately not carried. `FAIL`
 # is a fault and fails the exit code; neither `warn` nor `skip` does.

@@ -172,7 +172,7 @@ bootstrap's tmpfiles ACL makes readable to the login user, the same path
 status carries `ssh=ok|unreadable|na` and `ssh_fail=N`; an active sshd with an
 unreadable journal fails the roll-up, while a zero count after a successful read
 is just a quiet LAN. The count is in the monitor line and `stack_ids_ssh_fail`;
-`stack_ssh_bruteforce` warns when one roll-up crosses `MONITOR_SSH_FAIL_WARN`.
+`StackSshBruteforce` warns when one roll-up crosses `MONITOR_SSH_FAIL_WARN`.
 
 ## What the sensor can attribute, and what it can ban
 

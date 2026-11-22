@@ -79,26 +79,27 @@ route:
   #       matchers: [ severity = "critical" ]
   receiver: stack-email
   # Group by severity, not by alertname: one mail listing every critical check
-  # beats fifteen mails. vmalert emits one alert per check section (the `service`
-  # label) with every finding for that section in its description, so a group is
-  # still "everything wrong, by severity".
+  # beats fifteen mails. vmalert emits one alert per component/check (the
+  # `component` and `check` labels) with that check's findings in its
+  # description, so a group is still "everything wrong, by severity".
   group_by: ['severity']
   # An alert that resolves inside group_wait is never mailed at all. This is a
-  # smaller flap damper behind the rules' `for:`; it only has to absorb a
-  # resolution already in flight.
-  group_wait: 30s
+  # smaller flap damper behind the rules' `for:`; it also gives an inhibiting
+  # root-cause alert time to arrive first.
+  group_wait: 1m
   # The minimum gap between two notifications for the same group when its
   # content CHANGES (a new alert joins, one resolves). This is not a repeat: an
-  # unchanged set is never re-mailed. 10m coalesces two sections flapping in the
-  # same window into one mail.
-  group_interval: 10m
-  # Nagios' `notification_interval 0`: notify on the state change, never again
-  # while the alert is unchanged. Alertmanager rejects 0 ("repeat_interval
-  # cannot be zero"), so this is a duration longer than any incident -- one
-  # problem mail and one recovery mail per episode, and nothing in between. The
-  # trade-off is that a lost problem mail is never re-sent; verify the path with
-  # scripts/monitor.sh --test rather than relying on a reminder.
-  repeat_interval: 8760h
+  # unchanged set is never re-mailed. 5m is the standard compromise: long enough
+  # to batch a wave of related checks, short enough that a new critical is not
+  # held for a quarter of an hour. A deploy still wants a silence, not a longer
+  # interval.
+  group_interval: 5m
+  # A reminder while the alert is unchanged, not the paging delay. 24h is below
+  # Alertmanager's 120h notification-log retention (a larger value is repeated at
+  # the retention boundary instead, which is not the "never" it looks like) and
+  # is a multiple of group_interval. The first mail is still the state change;
+  # this only keeps a forgotten fault from disappearing from the inbox.
+  repeat_interval: 24h
   routes:
     # Registrations are EVENTS, not faults (scripts/registrations.sh). Each one
     # is pushed once, with its own `signup` label, and carries an endsAt ten
@@ -129,6 +130,11 @@ receivers:
     #   - to: you@example.com
     #     # Without this, recoveries are silent: Alertmanager's default is false.
     #     send_resolved: true
+    #     # A severity group has no common alertname, so the default subject
+    #     # (`CommonLabels.alertname`) is blank for every mail. Name the
+    #     # components instead.
+    #     headers:
+    #       Subject: '[{{ .Status | toUpper }}] {{ len .Alerts }} stack alert(s): {{ range .Alerts }}{{ .Labels.component }}{{ if .Labels.check }}/{{ .Labels.check }}{{ end }} {{ end }}'
     #     # The default HTML/text templates list every alert in the group with
     #     # its annotations. Customise with `html:` / `text:` if you want.
 
@@ -141,15 +147,76 @@ receivers:
     #   - to: you@example.com
     #     send_resolved: false
 
-# Inhibition: one real fault usually produces several warnings -- a full disk
-# makes every chain look stale, a dead node makes every MCP check look slow. A
-# critical on the same instance mutes the warnings. `instance` comes from the
-# node scrape the facts arrive through (all of the sweep's series share it), so
-# the rule holds whatever that scrape is relabelled to.
+# Inhibition is component-scoped. `instance` is the same on every alert on a
+# single-host stack (they all share instance=node-exporter:9100), so using it as
+# the `equal` key would let one critical mute every warning, including an
+# unrelated failed unit. A critical mutes only the same component/check; a
+# component that is down mutes its own dependent checks, which is what turns one
+# dead service into one page instead of a unit fault plus a verify failure plus
+# a 502.
 inhibit_rules:
-  - name: critical-mutes-warnings
+  - name: critical-mutes-warning-same-check
     source_matchers:
       - severity = "critical"
     target_matchers:
       - severity = "warning"
-    equal: ['instance']
+    equal: ['component', 'check']
+
+  - name: component-down-mutes-its-checks
+    source_matchers:
+      - alertname = "StackComponentDown"
+    target_matchers:
+      - alertname =~ "StackCheck(Critical|Warning)"
+    equal: ['component']
+
+  - name: component-down-mutes-restart-loop
+    source_matchers:
+      - alertname = "StackComponentDown"
+    target_matchers:
+      - alertname = "StackRestartLoop"
+    equal: ['component']
+
+  # The crash loop is the root cause; the chain-tip/verify/HTTP checks are its
+  # symptoms. One critical page, not a warning plus a page for the same unit.
+  - name: restart-loop-mutes-its-checks
+    source_matchers:
+      - alertname = "StackRestartLoop"
+    target_matchers:
+      - alertname =~ "StackCheck(Critical|Warning)"
+    equal: ['component']
+
+  - name: component-unhealthy-mutes-warning-checks
+    source_matchers:
+      - alertname = "StackComponentUnhealthy"
+    target_matchers:
+      - alertname = "StackCheckWarning"
+    equal: ['component']
+
+  # NPM is the shared root cause of every vhost probe. Its component is not the
+  # vhost's upstream, so it needs a rule of its own.
+  - name: proxy-down-mutes-public-surface
+    source_matchers:
+      - alertname = "StackComponentDown"
+      - component = "nginx-proxy-manager"
+    target_matchers:
+      - alertname =~ "StackCheck(Critical|Warning)"
+      - check =~ "http|hsts|redirect"
+
+  # The chain's dependency edges. bitcoind down explains the electrum/explorer
+  # symptoms; monerod down explains the wallet/explorer symptoms. Keep these
+  # lists in step with deploy/services.toml's needs_nodes declarations.
+  - name: bitcoind-down-mutes-chain
+    source_matchers:
+      - alertname = "StackComponentDown"
+      - component = "bitcoind"
+    target_matchers:
+      - alertname =~ "StackCheck(Critical|Warning)"
+      - component =~ "fulcrum|lightningd|btc-explorer|xmr-explorer|btcpay|nbxplorer"
+
+  - name: monerod-down-mutes-monero
+    source_matchers:
+      - alertname = "StackComponentDown"
+      - component = "monerod"
+    target_matchers:
+      - alertname =~ "StackCheck(Critical|Warning)"
+      - component =~ "monero-wallet-btcpay|xmr-explorer"
