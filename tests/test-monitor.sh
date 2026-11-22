@@ -135,7 +135,7 @@ MONITOR_SKIP_NODES=0
 THRESH_INDEX_PROGRESS_S=21600
 component_state() { printf 'healthy'; }
 electrum_tip() { :; }
-# shellcheck disable=SC2317  # called indirectly by fulcrum_index_state
+# shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_state
 fulcrum_index_progress() { printf '863000 88.3 60\n'; }
 FULCRUM_INDEXING=0; FULCRUM_INDEX_STALLED=0; FULCRUM_INDEX_DETAIL=""
 fulcrum_index_state
@@ -149,7 +149,7 @@ case "$FULCRUM_INDEX_DETAIL" in
 esac
 
 # The same line, old, is a stalled index and must reach the critical path.
-# shellcheck disable=SC2317  # called indirectly by fulcrum_index_state
+# shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_state
 fulcrum_index_progress() { printf '863000 88.3 999999\n'; }
 FULCRUM_INDEXING=0; FULCRUM_INDEX_STALLED=0; FULCRUM_INDEX_DETAIL=""
 fulcrum_index_state
