@@ -30,7 +30,7 @@
 #
 # Prove the whole path once it is filled in:
 #
-#   scripts/monitor.sh --test      # one warning mail now, one resolved in ~2 min
+#   scripts/monitor.sh --test      # one test mail now, one resolved a few minutes later
 
 global:
   # vmalert reports a recovery as soon as its rule goes inactive, so an alert
@@ -70,9 +70,18 @@ global:
   # smtp_require_tls: true
   # smtp_hello: example.com     # EHLO name; some relays reject a bare hostname
 
+# The stack's own mail templates, installed by deploy/install.sh on every run
+# (the file carries no secret, so it is stack-owned; this config is not). They
+# lead with the detail the sweep wrote instead of the stock template's label
+# dump, and make each "; "-joined finding a bullet. Edit the repo copy in
+# deploy/monitoring/alertmanager/stack.tmpl, not the installed one.
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
 route:
-  # One receiver for now: email is the only channel. The shape to grow into is
-  # a sub-route per severity -- critical to a phone, warning to a mailbox:
+  # Email is the only channel. The severity split is where a phone or a chat
+  # bridge would attach: critical and warning already have their own receivers
+  # below, and both point at the same mailbox unless you separate them.
   #
   #   routes:
   #     - receiver: stack-phone
@@ -98,7 +107,9 @@ route:
   # Alertmanager's 120h notification-log retention (a larger value is repeated at
   # the retention boundary instead, which is not the "never" it looks like) and
   # is a multiple of group_interval. The first mail is still the state change;
-  # this only keeps a forgotten fault from disappearing from the inbox.
+  # this only keeps a forgotten fault from disappearing from the inbox. The
+  # warning route below overrides it: warnings are the half that flaps, so they
+  # remind once every four days instead of once a day.
   repeat_interval: 24h
   routes:
     # Registrations are EVENTS, not faults (scripts/registrations.sh). Each one
@@ -119,6 +130,18 @@ route:
       matchers:
         - severity = "info"
 
+    # Warnings are batched and do not send a recovery. They are the half that
+    # flaps -- a Suricata burst, a busy disk -- and a resolved mail for a warning
+    # that returns in ten minutes is exactly the noise this route exists to stop.
+    # 15m also lets a warning that clears on its own never mail at all. 96h is
+    # under the 120h notification-log retention, like the default above.
+    - receiver: stack-warnings
+      matchers:
+        - severity = "warning"
+      group_wait: 15m
+      group_interval: 1h
+      repeat_interval: 96h
+
 receivers:
   - name: stack-email
     # Uncomment and fill in once the SMTP settings above are set. Until then
@@ -128,15 +151,27 @@ receivers:
     #
     # email_configs:
     #   - to: you@example.com
-    #     # Without this, recoveries are silent: Alertmanager's default is false.
+    #     # A critical recovers visibly: the state change is the useful half.
     #     send_resolved: true
-    #     # A severity group has no common alertname, so the default subject
-    #     # (`CommonLabels.alertname`) is blank for every mail. Name the
-    #     # components instead.
+    #     # The templates in deploy/monitoring/alertmanager/stack.tmpl. The
+    #     # installed copy is stack-owned (install.sh overwrites it); edit the
+    #     # repo one.
+    #     text: '{{ template "stack.email.text" . }}'
+    #     html: '{{ template "stack.email.html" . }}'
     #     headers:
-    #       Subject: '[{{ .Status | toUpper }}] {{ len .Alerts }} stack alert(s): {{ range .Alerts }}{{ .Labels.component }}{{ if .Labels.check }}/{{ .Labels.check }}{{ end }} {{ end }}'
-    #     # The default HTML/text templates list every alert in the group with
-    #     # its annotations. Customise with `html:` / `text:` if you want.
+    #       Subject: '{{ template "stack.email.subject" . }}'
+
+  # Warnings, from the sub-route above. Same mailbox unless you point `to:`
+  # somewhere else; the route's batching and the missing recovery mail are the
+  # whole point, so keep send_resolved false.
+  - name: stack-warnings
+    # email_configs:
+    #   - to: you@example.com
+    #     send_resolved: false
+    #     text: '{{ template "stack.email.text" . }}'
+    #     html: '{{ template "stack.email.html" . }}'
+    #     headers:
+    #       Subject: '{{ template "stack.email.subject" . }}'
 
   # Signature-less events (BoltMesh signups today). Same mailbox unless you want
   # them apart -- point `to:` somewhere else and they will not mix with pages.
@@ -220,3 +255,15 @@ inhibit_rules:
     target_matchers:
       - alertname =~ "StackCheck(Critical|Warning)"
       - component =~ "monero-wallet-btcpay|xmr-explorer"
+
+  # The restore drill and the unit that runs it are one fault: backup-verify.service
+  # exits non-zero because the restored dump is stale, and the monitor carries
+  # both facts. The critical names the fault; the unit warning is the same thing
+  # one layer up, so it is muted while the critical is active.
+  - name: backup-failure-mutes-its-verifier
+    source_matchers:
+      - alertname = "StackCheckCritical"
+      - component = "backup"
+    target_matchers:
+      - alertname = "StackCheckWarning"
+      - component = "backup-verify"

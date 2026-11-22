@@ -21,10 +21,12 @@
 # rate, and a per-sweep verdict on a rate is an event that fires and resolves
 # around every burst.
 #
-# A failure fails the dead-man's-switch heartbeat: a host that is down cannot
-# report itself, and neither can one whose mail is not leaving, so the heartbeat
-# also fails when the facts could not be written, or when the alert path itself
-# (the store, vmalert, Alertmanager, or its deliveries) is broken.
+# A broken sweep or alert path fails the dead-man's-switch heartbeat -- a host
+# that is down cannot report itself, and neither can one whose mail is not
+# leaving, so the heartbeat also fails when the facts could not be written or
+# when the alert path itself (the store, vmalert, Alertmanager, or its
+# deliveries) is broken. A finding does not fail it: that is the rules' job, and
+# a second copy on the heartbeat is how every fault arrived twice.
 #
 # Config comes from $DATA_DIR/config/monitoring/monitor.env (the unit's
 # EnvironmentFile), read here too so a hand run behaves the same. Empty means
@@ -153,6 +155,11 @@ MONITOR_SMART_TEMP_MAX=$(monitor_var MONITOR_SMART_TEMP_MAX)
 # stack_component_up and the component rule still page at once. 0 disables it.
 MONITOR_STARTUP_GRACE_S=$(monitor_var MONITOR_STARTUP_GRACE_S)
 STARTUP_GRACE_S=$(num_or "${MONITOR_STARTUP_GRACE_S:-}" 900)
+# How long Fulcrum's last "Processed height" log line stays evidence of an
+# active reindex. It logs every 1000 blocks; at the observed ~4.5 blocks/min that
+# is ~3.7h between lines, so six hours is the window before "it stopped".
+MONITOR_INDEX_PROGRESS_MAX_AGE_MIN=$(monitor_var MONITOR_INDEX_PROGRESS_MAX_AGE_MIN)
+THRESH_INDEX_PROGRESS_S=$(( $(num_or "${MONITOR_INDEX_PROGRESS_MAX_AGE_MIN:-}" 360) * 60 ))
 
 # How far Fulcrum's index may sit behind bitcoind. A healthy one polls every 5s
 # and is 0-1 block behind, so this is a "stopped following" threshold: 12 blocks
@@ -337,6 +344,56 @@ component_starting() { # container
     esac
 }
 
+# Fulcrum writes "Processed height: N, P%, ..." every 1000 blocks while it
+# indexes, and its Electrum port serves nothing until the index catches up. A
+# restart can put it days behind, so "not answering" is not enough to call it
+# broken. The log is the fact; there is no producer state file, and a healthy
+# Fulcrum never reaches this function.
+fulcrum_index_progress() { # -> "height pct age_seconds", empty when no progress line
+    local line ts height pct now age
+    line=$(podman logs --timestamps --tail 400 fulcrum 2>/dev/null \
+        | grep 'Processed height' | tail -n1) || return 0
+    [ -n "$line" ] || return 0
+    ts=$(date -d "${line%% *}" +%s 2>/dev/null) || return 0
+    height=$(printf '%s' "$line" | sed -n 's/.*Processed height: \([0-9][0-9]*\).*/\1/p')
+    pct=$(printf '%s' "$line" | sed -n 's/.*, \([0-9][0-9.]*\)%.*/\1/p')
+    [ -n "$height" ] || return 0
+    now=$(date +%s)
+    age=$((now - ts))
+    [ "$age" -ge 0 ] || return 0
+    printf '%s %s %s\n' "$height" "${pct:-?}" "$age"
+}
+
+# Set before the verify sweep: both that sweep's Fulcrum lines and the chain
+# section below would otherwise report the same multi-day catch-up as a critical.
+# Only an Electrum probe that fails is worth the log read, and only a container
+# that is up: a down Fulcrum is StackComponentDown's fault, not a reindex.
+# FULCRUM_INDEXING=1 means "progress is recent"; STALLED means the last line is
+# older than MONITOR_INDEX_PROGRESS_MAX_AGE_MIN and the index has stopped moving.
+FULCRUM_INDEXING=0
+FULCRUM_INDEX_STALLED=0
+FULCRUM_INDEX_DETAIL=""
+fulcrum_index_state() {
+    [ "$MONITOR_SKIP_NODES" = 1 ] && return 0
+    case "$(component_state fulcrum)" in
+        healthy|up|starting) ;;
+        *) return 0 ;;
+    esac
+    [ -z "$(electrum_tip 50001)" ] || return 0
+    local progress height pct age mins
+    progress=$(fulcrum_index_progress) || return 0
+    [ -n "$progress" ] || return 0
+    read -r height pct age <<< "$progress"
+    mins=$((age / 60))
+    if [ "$age" -le "$THRESH_INDEX_PROGRESS_S" ]; then
+        FULCRUM_INDEXING=1
+        FULCRUM_INDEX_DETAIL="fulcrum is reindexing: ${pct}% (height ${height}), last progress ${mins}m ago; Electrum is unavailable until the index catches up (no action unless progress stops)"
+    else
+        FULCRUM_INDEX_STALLED=1
+        FULCRUM_INDEX_DETAIL="fulcrum stopped progressing at ${pct}% (height ${height}), last log line $((mins / 60))h ago; Electrum is unavailable (podman logs --tail 50 fulcrum)"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # --test: prove the delivery path, once
 # ---------------------------------------------------------------------------
@@ -350,18 +407,22 @@ if [ "$ALERT_TEST" = 1 ]; then
     starts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     ends=$(date -u -d '+2 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     body=$(jq -cn --arg s "$starts" --arg e "$ends" --arg inst "$ALERT_INSTANCE" \
-        '[{labels:{alertname:"stack_test",severity:"warning",service:"alerting",component:"alerting",check:"test",instance:$inst},
-           annotations:{summary:"stack: test alert",description:"Sent by scripts/monitor.sh --test; it resolves in two minutes."},
+        '[{labels:{alertname:"stack_test",severity:"test",service:"alerting",component:"alerting",check:"test",instance:$inst},
+           annotations:{summary:"alerting/test is failing",description:"Sent by scripts/monitor.sh --test; it resolves in two minutes."},
            startsAt:$s, endsAt:$e}]')
     curl -fsS -m 10 -H 'Content-Type: application/json' \
         --data-binary "$body" "$url/api/v2/alerts" >/dev/null \
         || die "could not post a test alert to $url/api/v2/alerts"
     printf 'test alert accepted by %s\n' "$url"
-    printf 'expect a warning mail now and a resolved mail in about two minutes.\n'
+    printf 'expect a test mail in about a minute and a resolved mail a few minutes later.\n'
     printf 'nothing arrived? fill in SMTP in %s/monitoring/alertmanager/alertmanager.yml,\n' "$CONFIG_DIR"
     printf 'then: podman logs --tail 30 alertmanager\n'
     exit 0
 fi
+
+# One fact both the verify sweep and the chain section need: a Fulcrum that is
+# still catching up. Read once, before either can turn it into a critical.
+fulcrum_index_state
 
 # ---------------------------------------------------------------------------
 # 1. the base sweep: containers, MCP health, token gate, authenticated calls
@@ -386,6 +447,11 @@ if [ "$DO_VERIFY" = 1 ]; then
             fail)
                 msg="${line#"  FAIL "}"
                 read -r vcomp vcheck <<< "$(classify_verify_line "$msg")"
+                if [ "$FULCRUM_INDEXING" = 1 ] && [ "$vcomp" = fulcrum ] && [ "$vcheck" = electrum ]; then
+                    starting "verify: $msg (fulcrum is reindexing; the chain section carries the progress)"
+                    vskipped=1
+                    continue
+                fi
                 if component_starting "$vcomp"; then
                     starting "verify: $msg ($vcomp started less than ${STARTUP_GRACE_S}s ago)"
                     vskipped=1
@@ -398,6 +464,11 @@ if [ "$DO_VERIFY" = 1 ]; then
             warn)
                 msg="${line#"  warn "}"
                 read -r vcomp vcheck <<< "$(classify_verify_line "$msg")"
+                if [ "$FULCRUM_INDEXING" = 1 ] && [ "$vcomp" = fulcrum ] && [ "$vcheck" = electrum ]; then
+                    starting "verify: $msg (fulcrum is reindexing; the chain section carries the progress)"
+                    vskipped=1
+                    continue
+                fi
                 if component_starting "$vcomp"; then
                     starting "verify: $msg ($vcomp started less than ${STARTUP_GRACE_S}s ago)"
                     vskipped=1
@@ -489,8 +560,12 @@ chain_checks() {
     if [ -z "$ftip" ]; then
         if [ "${ibd:-}" = true ] && [ "$MONITOR_GRACE_SYNC" = 1 ]; then
             ok "fulcrum is not serving Electrum yet (bitcoind is in initial block download)"
+        elif [ "$FULCRUM_INDEXING" = 1 ]; then
+            soft "$FULCRUM_INDEX_DETAIL"
+        elif [ "$FULCRUM_INDEX_STALLED" = 1 ]; then
+            fail "$FULCRUM_INDEX_DETAIL"
         else
-            fail "fulcrum does not answer Electrum on 50001"
+            fail "fulcrum does not answer Electrum on 50001 (no indexing progress in its log; podman logs --tail 50 fulcrum)"
         fi
     elif [ -z "${blocks:-}" ]; then
         soft "fulcrum reports tip $ftip; bitcoind height unreadable, so lag is not compared"
@@ -603,12 +678,21 @@ chain_checks() {
             soft "the BTCPay view-only XMR wallet is not imported yet (config/btcpay/xmr-wallet.env); skipped the wallet height check"
         elif [ -n "$xmrwallet_token" ]; then
             w_body=$(mcp_call monero-wallet-mcp "$xmrwallet_token" get_height '{}') || w_body=""
+            w_raw=$(mcp_result_raw "$w_body")
             w_h=$(mcp_result "$w_body" | jq -r '.height // empty' 2>/dev/null)
             if [ -z "$w_h" ]; then
-                # No answer is not "fine": the wallet RPC is down, wedged or
-                # (usually) rebuilding its cache, and the container can sit
-                # "Up (unhealthy)" for hours while every sweep reports "?".
-                fail "monero-wallet does not answer get_height (wallet RPC down or rebuilding; podman logs monero-wallet-btcpay)"
+                case "$w_raw" in
+                    *"No wallet file"*)
+                        # The RPC is up and has no wallet open. That is the normal
+                        # state of the BTCPay view-only wallet: the plugin opens it
+                        # on demand and closes it again, so get_height is not a
+                        # liveness probe. The unit's get_version healthcheck is.
+                        ok "monero-wallet RPC is up; no wallet is open (BTCPay opens the view-only wallet on demand)"
+                        ;;
+                    *)
+                        fail "monero-wallet does not answer get_height: ${w_raw:-no reply} (podman logs --tail 50 monero-wallet-btcpay)"
+                        ;;
+                esac
             elif [ -n "$node_h" ] && [ "$((node_h - w_h))" -gt 10 ]; then
                 soft "monero-wallet is behind monerod: wallet=$w_h node=$node_h"
             else
@@ -1741,6 +1825,12 @@ fi
 # fires at all. Nothing delivered by those rules can say so -- the heartbeat is
 # the only channel left, which is why the alert path is judged here rather than
 # only by a rule's own threshold.
+#
+# ALERT_PATH_BROKEN is what the heartbeat keys on, not "any finding": a finding
+# is delivered by the rules, and a second copy over the dead-man's switch makes
+# every fault arrive twice. The switch is for the case the mail path cannot
+# report -- the store, vmalert, Alertmanager or its deliveries.
+ALERT_PATH_BROKEN=0
 head3 "alerting"
 am_ok=1
 vm_ok=1
@@ -1753,6 +1843,7 @@ else
     vm_code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' "$vm_url/-/healthy" 2>/dev/null) || vm_code=""
     if [ "$vm_code" != 200 ]; then
         vm_ok=0
+        ALERT_PATH_BROKEN=1
         fail "VictoriaMetrics does not answer at $vm_url/-/healthy: the rules cannot be evaluated, so no alert can fire (the heartbeat carries this one)"
     else
         ok "VictoriaMetrics answers"
@@ -1767,6 +1858,7 @@ else
     vmalert_code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' "$vmalert_url/-/healthy" 2>/dev/null) || vmalert_code=""
     if [ "$vmalert_code" != 200 ]; then
         vmalert_ok=0
+        ALERT_PATH_BROKEN=1
         fail "vmalert does not answer at $vmalert_url/-/healthy: the sweep's facts are not being evaluated"
     else
         vmalert_metrics=$(curl -fsS -m 5 "$vmalert_url/metrics" 2>/dev/null) || vmalert_metrics=""
@@ -1784,6 +1876,7 @@ else
     am_code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' "$am_url/-/healthy" 2>/dev/null) || am_code=""
     if [ "$am_code" != 200 ]; then
         am_ok=0
+        ALERT_PATH_BROKEN=1
         fail "Alertmanager does not answer at $am_url/-/healthy: alerts are going nowhere (the heartbeat carries this one)"
     fi
     # Cumulative since the process started, so a restart (a smaller number) is
@@ -1798,6 +1891,7 @@ else
             am_prev=$(cat "$ALERT_FAILED_FILE" 2>/dev/null) || am_prev=""
             if [ -n "$am_prev" ] && [ "$am_failed" -gt "$am_prev" ]; then
                 am_ok=0
+                ALERT_PATH_BROKEN=1
                 scope alertmanager delivery
                 fail "Alertmanager failed to deliver $((am_failed - am_prev)) notification(s) since the last sweep (SMTP or receiver; podman logs alertmanager)"
             fi
@@ -1844,6 +1938,11 @@ fi
 # 9. the record, the heartbeat, the alert
 # ---------------------------------------------------------------------------
 status=ok
+# The record, not the exit code: a finding is a successful sweep that found
+# something, and Alertmanager is its channel. The unit fails only when the
+# monitor could not do its job (facts unwritten, alert path broken), which is
+# exactly what the heartbeat reports. status stays "fail" so audit.log keeps the
+# distinction between a clean sweep and one with findings.
 [ "${#PROBLEMS[@]}" -gt 0 ] && status=fail
 
 summary() {
@@ -1991,10 +2090,12 @@ prom_ok=1
 } | prom_write "$DATA_DIR/monitoring/textfile/monitor.prom" \
     || { scope monitor metrics; soft "could not write monitor.prom"; prom_ok=0; }
 
-# The facts first, then the heartbeat's verdict: a sweep whose checks pass but
-# whose metrics could not be written is a monitor that decides nothing, and the
-# mail about that failure would ride the rules it just failed to feed.
-if [ "${#PROBLEMS[@]}" -gt 0 ]; then
+# The facts first, then the heartbeat's verdict. A completed sweep pings OK even
+# when it has findings: the findings ride the rules, and the dead-man's switch
+# exists for what the rules cannot report (a dead host, a wedged store, vmalert
+# or Alertmanager, or a delivery that did not leave). Sending /fail for every
+# finding made healthchecks.io a second copy of the alert path.
+if [ "$ALERT_PATH_BROKEN" = 1 ]; then
     heartbeat fail "$(summary)"
 elif [ "$prom_ok" = 0 ]; then
     heartbeat fail "monitor: every check passed, but its metrics could not be written -- no rule can fire on this sweep"
@@ -2017,15 +2118,14 @@ fi
 
 if [ "${#PROBLEMS[@]}" -gt 0 ]; then
     if [ "$QUIET" = 1 ]; then
-        # systemd journals only the exit status otherwise; the timer's journal
-        # must name the fault, not just "failed".
+        # A finding no longer fails the unit, so the journal is the only place a
+        # hand run and the timer read the same list. Keep printing it.
         summary >&2
     else
         say ""
         say "${#PROBLEMS[@]} problem(s):"
         printf '  - %s\n' "${PROBLEMS[@]}"
     fi
-    exit 1
 fi
 
 if [ "$prom_ok" = 0 ]; then
@@ -2037,6 +2137,20 @@ if [ "$prom_ok" = 0 ]; then
         say "no problems, but the facts could not be written (see above)"
     fi
     exit 1
+fi
+
+if [ "$ALERT_PATH_BROKEN" = 1 ]; then
+    if [ "$QUIET" = 1 ]; then
+        printf 'monitor: the alert path is broken; the findings above could not be delivered (heartbeat and podman logs alertmanager/vmalert)\n' >&2
+    else
+        say ""
+        say "the alert path is broken; the findings above could not be delivered"
+    fi
+    exit 1
+fi
+
+if [ "${#PROBLEMS[@]}" -gt 0 ]; then
+    exit 0
 fi
 
 if [ "${#WARNS[@]}" -gt 0 ]; then

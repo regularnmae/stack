@@ -42,7 +42,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: 'stack: {{ $labels.component }} {{ $labels.check }} is critical'
+          summary: '{{ $labels.component }}/{{ $labels.check }} is failing'
           description: '{{ with query (printf "stack_monitor_check_detail{component=%q,check=%q}" $labels.component $labels.check) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
 
       - alert: StackCheckWarning
@@ -52,7 +52,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: 'stack: {{ $labels.component }} {{ $labels.check }} is warning'
+          summary: '{{ $labels.component }}/{{ $labels.check }} is failing'
           description: '{{ with query (printf "stack_monitor_check_detail{component=%q,check=%q}" $labels.component $labels.check) }}{{ if . }}{{ . | first | label "detail" }}{{ end }}{{ end }}'
 
       # The root cause: a container that is not running. 2m is long enough to
@@ -65,7 +65,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: 'stack: {{ $labels.component }} is down'
+          summary: '{{ $labels.component }} is down'
           description: '{{ $labels.component }} is not running (stack_component_up=0). podman logs --tail 50 {{ $labels.component }}'
 
       # A container whose own probe is failing. This is the slow half: a
@@ -78,7 +78,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: 'stack: {{ $labels.component }} is unhealthy'
+          summary: '{{ $labels.component }} is unhealthy'
           description: '{{ $labels.component }} is running but its healthcheck is failing (podman inspect -f ''.State.Health'' {{ $labels.component }}; podman logs --tail 50 {{ $labels.component }})'
 
       # NRestarts counts automatic restarts only and resets on a manual restart.
@@ -93,7 +93,7 @@ groups:
           severity: critical
           component: '{{ $labels.unit }}'
         annotations:
-          summary: 'stack: {{ $labels.unit }} restarted {{ $value | humanize }} time(s) in 30 minutes'
+          summary: '{{ $labels.unit }} is restarting repeatedly'
           description: '{{ $labels.unit }} changed restart count {{ $value | humanize }} time(s) in the last 30 minutes (threshold @MONITOR_RESTART_MAX@) -- a crash loop that a green healthcheck hides. NRestarts counts automatic restarts and resets on a manual restart; podman logs --tail 50 {{ $labels.unit }}'
 
       - alert: StackDiskSaturated
@@ -103,7 +103,7 @@ groups:
           severity: warning
           component: '{{ $labels.device }}'
         annotations:
-          summary: 'stack: {{ $labels.device }} is saturated'
+          summary: 'Disk {{ $labels.device }} is saturated'
           description: '{{ $labels.device }} (holding @DATA_DIR@) averaged {{ $value | humanize }}% busy over 15 minutes (threshold @MONITOR_IO_UTIL_PCT@%): everything on it is queueing, including the chains.'
 
       - alert: StackIdsNoisy
@@ -113,7 +113,7 @@ groups:
           severity: warning
           component: suricata
         annotations:
-          summary: 'stack: Suricata is reporting a burst'
+          summary: 'Suricata is reporting a burst'
           description: '{{ $value | humanize }} Suricata alert(s) in one report (threshold @MONITOR_IDS_ALERT_WARN@) within the last 15 minutes -- read @DATA_DIR@/ids/suricata/eve.json'
 
       - alert: StackSshBruteforce
@@ -123,7 +123,7 @@ groups:
           severity: warning
           component: sshd
         annotations:
-          summary: 'stack: SSH authentication is being brute-forced'
+          summary: 'SSH authentication is being brute-forced'
           description: '{{ $value | humanize }} failed sshd auth line(s) in one IDS roll-up (six-minute window; threshold @MONITOR_SSH_FAIL_WARN@) within the last 15 minutes -- read journalctl -u sshd.service --since "-15 min"'
 
       # The producer's own liveness. A stopped monitor writes nothing, so its
@@ -138,5 +138,5 @@ groups:
           component: monitor
           check: sweep
         annotations:
-          summary: 'stack: the health sweep has stopped'
+          summary: 'The health sweep has stopped'
           description: 'stack_sweep_timestamp is {{ $value | humanizeDuration }} old (threshold @MONITOR_SWEEP_MAX_AGE_S@s); the sweep is not deciding anything, so only this rule and the external heartbeat can page.'

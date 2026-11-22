@@ -44,7 +44,9 @@ User=0
 
 # The config: seeded once by install.sh from
 # deploy/examples/monitoring/alertmanager.yml.example and the operator's from
-# then on, because it holds the SMTP credential.
+# then on, because it holds the SMTP credential. The templates/ directory next
+# to it is stack-owned: install.sh copies deploy/monitoring/alertmanager/
+# stack.tmpl on every run, and the config points `templates:` at it.
 #
 # The DIRECTORY is mounted, not the file, so an atomic replace (an editor's
 # write-temp-then-rename) does not leave the container reading a deleted inode.

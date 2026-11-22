@@ -536,7 +536,7 @@ MONITOR_ALERT_HOLD_S=$(resolve_monitor_timing MONITOR_ALERT_HOLD_S 900)
 MONITOR_SWEEP_MAX_AGE_S=$(resolve_monitor_timing MONITOR_SWEEP_MAX_AGE_S 900)
 MONITOR_RESTART_MAX=$(resolve_monitor_timing MONITOR_RESTART_MAX 3)
 MONITOR_IO_UTIL_PCT=$(resolve_monitor_timing MONITOR_IO_UTIL_PCT 90)
-MONITOR_IDS_ALERT_WARN=$(resolve_monitor_timing MONITOR_IDS_ALERT_WARN 20)
+MONITOR_IDS_ALERT_WARN=$(resolve_monitor_timing MONITOR_IDS_ALERT_WARN 100)
 MONITOR_SSH_FAIL_WARN=$(resolve_monitor_timing MONITOR_SSH_FAIL_WARN 10)
 
 # write_secret is scripts/lib/datadir.sh's write_env_file (atomic, 0600);
@@ -1057,6 +1057,19 @@ if ensure_secret "$ALERT_CFG" "alertmanager config"; then
     write_secret "$ALERT_CFG" < "$DEPLOY_DIR/examples/monitoring/alertmanager.yml.example"
     log "wrote $ALERT_CFG (mode 600) -- fill in SMTP before alerts are actually mailed"
 fi
+
+# The mail templates are stack-owned (no secret), so they are copied on every
+# run. The unit mounts the directory, so the file is visible; Alertmanager reads
+# it at start or on `/-/reload`, and unit_config_digest below restarts the unit
+# when this changes (a template-only edit would otherwise be invisible).
+ALERT_TPL_DIR="$CONFIG_DIR/monitoring/alertmanager/templates"
+install -d -m 755 "$ALERT_TPL_DIR"
+install -m 600 "$DEPLOY_DIR/monitoring/alertmanager/stack.tmpl" "$ALERT_TPL_DIR/stack.tmpl"
+# The directory is mounted :z, but a file created after the container started
+# does not inherit container_file_t; without this a `/-/reload` fails to read it
+# until a restart relabels the tree. Same guard as the other post-start writes.
+chcon -t container_file_t "$ALERT_TPL_DIR/stack.tmpl" 2>/dev/null || true
+log "wrote $ALERT_TPL_DIR/stack.tmpl (mode 600)"
 
 # Logs: the store, the shipper's checkpoint, and its config. Both run as container
 # root = the login user, so a plain mkdir (no podman-unshare chown, unlike

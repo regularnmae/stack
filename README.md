@@ -240,8 +240,9 @@ itself is lost — see [Backup & restore](#backup--restore) and the
 [Disaster recovery](#disaster-recovery) runbooks.
 
 A health monitor and spend tripwire run every five minutes from `monitor.timer`;
-they alert (and fail a dead-man's-switch heartbeat) once you fill in
-`$DATA_DIR/config/monitoring/monitor.env`. See
+they alert through Alertmanager once you fill in the mail config, and fail a
+dead-man's-switch heartbeat only when the monitor could not run or the alert
+path is broken. See
 [Monitoring & the spend tripwire](#monitoring--the-spend-tripwire).
 
 ## One-click install
@@ -1030,13 +1031,23 @@ that is down pages at 2 minutes; a component that is unhealthy warns after 5.
 (`-remoteWrite.url`/`-remoteRead.url`), so a restart no longer re-announces every
 standing fault. `deploy/alertmanager.container`
 (`prom/alertmanager`, loopback `:9093`, no public host: `ssh -L
-9093:127.0.0.1:9093`) owns grouping, inhibition, silences and delivery,
-reports failed deliveries back to the next sweep, and **notifies on the state
-change, then once a day while it persists** (`repeat_interval: 24h`): one mail
-when a component/check starts failing, one when it recovers, and a daily
-reminder. Inhibition is component-scoped: a down component mutes its dependent
-checks, so one dead `btc-explorer` is one page, not a unit fault plus a verify
-failure plus a 502.
+9093:127.0.0.1:9093`) owns grouping, inhibition, silences and delivery, and
+reports failed deliveries back to the next sweep. The critical route notifies on
+the state change, then once a day while it persists (`repeat_interval: 24h`), and
+sends its recovery. The warning sub-route is deliberately quieter:
+`group_wait: 15m`, `group_interval: 1h`, `repeat_interval: 96h`, and
+`send_resolved: false` — a Suricata burst or a busy disk that flaps should not
+produce a recovery mail per transition. Inhibition is component-scoped: a down
+component mutes its dependent checks, so one dead `btc-explorer` is one page, not
+a unit fault plus a verify failure plus a 502; the backup drill also mutes the
+`backup-verify` unit warning for the same stale dump.
+
+The mail is rendered by `deploy/monitoring/alertmanager/stack.tmpl`, installed on
+every `install.sh` run, instead of Alertmanager's stock template: each alert
+leads with the detail the sweep wrote, keeps `component/check` as its identity,
+and turns the semicolon-joined findings into bullets. Alertmanager reads the template
+on `/-/reload` (or a restart), and `./deploy.sh` restarts it when the repo copy
+changes.
 
 That puts the store on the paging path: `for:` is evaluated against
 VictoriaMetrics, so a wedged store means no rule fires. The sweep's `alerting`
@@ -1061,13 +1072,14 @@ can set:
 - `MONITOR_ALERTMANAGER_URL` — default `http://127.0.0.1:9093`; `off` stops the sweep
   writing alert facts, so no rule can fire and only the heartbeat can page.
 - `MONITOR_PING_URL` — a dead-man's-switch heartbeat (a healthchecks.io ping URL):
-  `curl` on success, `<url>/fail` with the failure list. This is the only thing
-  that notices when the **whole host** is down, which is why it is not an email —
-  and it is also the only thing that says the evaluator died, because a dead
-  vmalert mails a false "recovered" within minutes and then nothing more. It
-  fails when the facts cannot be written or the alert path (store, `vmalert`,
-  Alertmanager, its deliveries) is broken, so a broken mail path is never
-  silent. Set the check's period to the timer interval.
+  `curl` on a completed sweep, `<url>/fail` only when the sweep could not write
+  its facts or the alert path (store, `vmalert`, Alertmanager, its deliveries) is
+  broken. This is the only thing that notices when the **whole host** is down,
+  which is why it is not an email — and it is also the only thing that says the
+  evaluator died, because a dead vmalert mails a false "recovered" within minutes
+  and then nothing more. A finding does **not** fail it: that is Alertmanager's
+  job, and a second copy on the heartbeat delivered every fault twice. Set the
+  check's period to the timer interval.
 
 The thresholds are the same file (`MONITOR_DISK_FREE_PCT`, `MONITOR_BACKUP_MAX_AGE_H`,
 `MONITOR_ALERT_FOR`, …); each falls back to its default in the script, so an env

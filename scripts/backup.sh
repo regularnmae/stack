@@ -584,6 +584,7 @@ echo "KUMA_TABLES=$n"
 assert_dump_fresh() { # root path...
     local root="$1"; shift
     local dump dump_epoch age_h snap_epoch max_h="${VERIFY_DUMP_MAX_AGE_H:-12}"
+    local status_file producer_result producer_detail
     dump_stale_detail=""
     [ -n "${snap_time:-}" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
@@ -595,7 +596,22 @@ assert_dump_fresh() { # root path...
         case "$dump_epoch" in ''|*[!0-9]*) continue ;; esac
         age_h=$(( (snap_epoch - dump_epoch) / 3600 ))
         if [ "$age_h" -gt "$max_h" ]; then
-            dump_stale_detail="$dump is ${age_h}h older than the snapshot (max ${max_h}h): the dump was not taken as part of this backup"
+            # Name the producer: the dump file's mtime is the effect, and the
+            # status file says why the job that owns it kept the previous copy.
+            case "$dump" in
+                uptime-kuma-dump/*|npm-dump/*) status_file="$DATA_DIR/audit/db-dump.status" ;;
+                postgres-dump/*)               status_file="$DATA_DIR/audit/postgres-dump.status" ;;
+                *)                             status_file="" ;;
+            esac
+            producer_detail=""
+            if [ -n "$status_file" ] && [ -s "$status_file" ]; then
+                producer_result=$(env_value "$status_file" result)
+                producer_detail=$(env_value "$status_file" detail)
+                if [ -n "$producer_result" ]; then
+                    producer_detail="producer ${status_file##*/}: result=${producer_result}${producer_detail:+: $producer_detail}"
+                fi
+            fi
+            dump_stale_detail="$dump is ${age_h}h older than the snapshot (max ${max_h}h): the dump was not taken as part of this backup${producer_detail:+ ($producer_detail)}; take a fresh backup first: ./deploy.sh --only backup, then rerun this drill"
             return 1
         fi
     done

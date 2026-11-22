@@ -22,7 +22,18 @@ not faults").
 - **`resolve_timeout` must be far longer than the sweep** (24h); it is not a
   "how long before I page" knob, and vmalert's own end-stamp (4x the group
   interval) is what ends a live alert.
-- **`send_resolved: false` by default** makes every recovery silent.
+- **Recovery mail is for criticals; warnings are batched and silent on
+  recovery.** `email_configs` defaults `send_resolved: false`, so the warning
+  receiver is explicit about it: a Suricata burst or a busy disk that clears ten
+  times a day is not a state change worth a mail. The critical receiver sets it
+  to true.
+- **The heartbeat is a liveness signal, not a second alert channel.** A sweep
+  that completes pings OK even when it has findings; `/fail` is for a monitor
+  that could not write facts or an alert path that is broken (the store,
+  vmalert, Alertmanager, a delivery). The unit exits 0 for findings too:
+  `status=fail` in `audit.log` is the record, Alertmanager is the channel.
+  Sending `/fail` for every finding is what made healthchecks.io duplicate every
+  fault and left `monitor.service` red on every five-minute tick.
 - **A check whose fact is a rate is decided by a rule over a window**, not by the
   sweep: unit restarts (`changes` over 30 minutes; `NRestarts` is not a counter),
   disk saturation, Suricata and SSH bursts (`avg`/`max` over 15 minutes). The
@@ -31,17 +42,27 @@ not faults").
 - **The flap damper is a pair: `for:` holds the onset and `keep_firing_for:`
   holds the reset**, rendered from `MONITOR_ALERT_FOR` and `MONITOR_ALERT_HOLD_S`.
   Nothing in the producer holds alert state.
-- **A notification is a state change, then a daily reminder** (`repeat_interval:
-  24h`). One mail when a component/check starts failing, one when it recovers,
-  and a reminder per day while it stays the same. `repeat_interval` must stay
-  below Alertmanager's notification-log retention (120h): a larger value is
-  repeated at the retention boundary instead, and logs a warning at startup.
+- **A notification is a state change, then a reminder** (`repeat_interval: 24h`
+  for criticals, `96h` for warnings; both are below Alertmanager's
+  notification-log retention of 120h, because a larger value is repeated at the
+  retention boundary instead). A critical mails when a component/check starts
+  failing, when it recovers, and once a day while it stays the same. A warning
+  waits `group_wait: 15m` (so one that clears on its own never mails), updates at
+  most hourly, sends no recovery, and reminds every four days. Warnings are the
+  half that flaps; the route is what keeps a burst or a busy disk from becoming
+  a mail per transition.
 - **A startup is not an outage.** For `MONITOR_STARTUP_GRACE_S` after a container
   starts (15 minutes by default), the checks that depend on it are `skip`, not
   findings: a chain daemon that is still indexing and a wallet rebuilding its
   cache are expected states. A container that is actually down or unhealthy is
   not graced -- `stack_component_up` pages it at 2m and `stack_component_health`
-  warns after 5m.
+  warns after 5m. A long reindex is the same fact at a different scale: when
+  Fulcrum is not answering Electrum, the sweep reads its `Processed height` log
+  and emits one warning with the percentage while progress is recent
+  (`MONITOR_INDEX_PROGRESS_MAX_AGE_MIN`); only a stalled index is critical. The
+  BTCPay view-only wallet is not a fault when `get_height` says "No wallet
+  file": the RPC is up and BTCPay opens the wallet on demand, so the unit's
+  `get_version` healthcheck is its liveness probe.
 - **The alert identity is `(component, check)`, not the section.** A section is a
   human grouping and a history graph; an alert names the component whose fault it
   is and the check that failed. That is what lets Alertmanager inhibit the
@@ -195,11 +216,16 @@ not faults").
   checks, and the chain's known dependency edges (`bitcoind` -> Fulcrum/
   Lightning/explorers, `monerod` -> wallet/explorer, NPM -> every vhost) get
   their own rules. One dead `btc-explorer` is one page, not a unit fault plus a
-  verify failure plus a 502. The route keeps one digest per severity
-  (`group_by: ['severity']`), waits `group_wait: 1m` for a wave and for
-  inhibiting alerts, batches follow-ups for `group_interval: 5m`, and reminds
-  once a day (`repeat_interval: 24h`); a deploy still wants a silence, not a
-  longer interval.
+  verify failure plus a 502. A `backup` critical also mutes the `backup-verify`
+  unit warning: the verifier exited non-zero for the same stale dump, and two
+  alerts for one failed drill is exactly what inhibition is for. The route keeps
+  one digest per severity
+  (`group_by: ['severity']`). A critical waits `group_wait: 1m` for a wave and
+  for inhibiting alerts, batches follow-ups for `group_interval: 5m`, reminds
+  once a day (`repeat_interval: 24h`), and sends its recovery. A warning goes to
+  the `stack-warnings` sub-route instead: `group_wait: 15m`, `group_interval:
+  1h`, `repeat_interval: 96h`, and `send_resolved: false`, because warnings are
+  the half that flaps. A deploy still wants a silence, not a longer interval.
   Alertmanager owns grouping, inhibition, silences and delivery, and a recovery
   is vmalert's transition to inactive -- there is no `endsAt` for the producer to
   send and no producer state to keep. Five traps, all load-bearing:
@@ -224,8 +250,9 @@ not faults").
   *inactivate* at once: `keep_firing_for` holds it, so the flip is one resolve
   for the critical and one fire for the warning, not a pair per sweep. While
   both are active the critical inhibits the warning, so the overlap is silent.
-  (2) **`email_configs` defaults `send_resolved: false`**, so recoveries are
-  silent unless it is set. The seeded example sets it.
+  (2) **`email_configs` defaults `send_resolved: false`**, so a receiver without
+  it sends no recovery. That is what the warning route wants; the critical
+  receiver sets it, because a recovered page is the useful half.
   (3) **The alert's identity is (component, check), and the text is not a
   label.** Putting the changing message in a label would make "disk 9% free" and
   "disk 8% free" two alerts, and every sweep a state change; it lives in
@@ -259,6 +286,17 @@ not faults").
   0600 SMTP-bearing config — the unit sets `User=0`, which under rootless podman
   is the login user (same as `victoriametrics`), not an escalation. Proving the
   path end to end is `scripts/monitor.sh --test`.
+
+- **The mail template is stack-owned; the config is not.** `install.sh` copies
+  `deploy/monitoring/alertmanager/stack.tmpl` to
+  `$CONFIG_DIR/monitoring/alertmanager/templates/` on every run, because it
+  carries no secret. It replaces the stock template, which prints every label
+  before the annotations and buries the one sentence that says what is wrong;
+  this one leads with the detail, makes each semicolon-joined finding a bullet, and
+  drops the loopback links. `alertmanager.yml` still holds the SMTP password and
+  is seeded once. A template edit is read on `/-/reload` or a restart;
+  `unit_config_digest` hashes the directory so `./deploy.sh` restarts
+  Alertmanager when the repo copy changes.
 
 - **Editing `alertmanager.yml` needs an explicit reload.** Alertmanager v0.34
   ships no config-file watcher (the process holds no inotify fd at all: verified

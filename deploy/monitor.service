@@ -5,9 +5,10 @@
 # install.sh renders it into ~/.config/systemd/user/, and it has no [Install]
 # because the timer activates it.
 #
-# It changes nothing: it starts no unit and rewrites no config. A failure is
-# written as metrics for vmalert's rules to act on, and fails the
-# dead-man's-switch heartbeat.
+# It changes nothing: it starts no unit and rewrites no config. A finding is
+# written as metrics for vmalert's rules to act on; the unit fails only when the
+# sweep itself could not run or the alert path is broken, and that is also what
+# fails the dead-man's-switch heartbeat.
 [Unit]
 Description=Stack health monitor and spend tripwire
 # The heartbeat is an outbound POST, and the alert path is probed on loopback

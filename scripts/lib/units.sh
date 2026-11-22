@@ -51,6 +51,16 @@ unit_config_digest() { # stem -> digest, empty when the unit owns no such config
             if [ -s "$DATA_DIR/config/logs/vector/vector.toml" ]; then
                 sha256sum -- "$DATA_DIR/config/logs/vector/vector.toml" | awk '{ print $1 }'
             fi ;;
+        alertmanager)
+            # The mail templates are stack-owned and read at start or reload; a
+            # template-only edit must reach the process. alertmanager.yml is
+            # deliberately not hashed: it is operator-owned, and an edit there is
+            # a `/-/reload`, not a restart (docs/alerting.md).
+            if [ -d "$DATA_DIR/config/monitoring/alertmanager/templates" ]; then
+                find "$DATA_DIR/config/monitoring/alertmanager/templates" -type f -print0 2>/dev/null \
+                    | sort -z | xargs -0 -r sha256sum 2>/dev/null \
+                    | sha256sum | awk '{ print $1 }'
+            fi ;;
         vmalert)
             # The rules carry MONITOR_ALERT_FOR: editing the hold-down in
             # monitor.env has to reach a running vmalert, or the file says one

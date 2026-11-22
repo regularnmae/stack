@@ -1,0 +1,65 @@
+{{/*
+The stack's notification templates. install.sh copies this file to
+$CONFIG_DIR/monitoring/alertmanager/templates/ on every run (it carries no
+secret); alertmanager.yml, which does carry the SMTP password, stays
+operator-owned and is seeded only once.
+
+Why not the stock template: email.default.html prints every label of every
+alert before the annotations, so the sentence that says what is wrong sits
+under eight key=value rows, and the "Source" link points at a loopback address
+that a phone cannot open. This template leads with the detail the sweep wrote,
+keeps component/check as the identity line, and makes each "; "-joined finding
+its own bullet. The alert identity is (component, check) -- the text stays in
+the annotation, never in a label (docs/alerting.md).
+*/}}
+
+{{ define "stack.email.subject" -}}
+[{{ .Status | toUpper }}] {{ .CommonLabels.severity }}: {{ .Alerts.Firing | len }} firing{{ if .Alerts.Resolved }}, {{ .Alerts.Resolved | len }} resolved{{ end }} - stack
+{{- end }}
+
+{{ define "stack.email.text" -}}
+{{ .CommonLabels.severity | toUpper }} alerts - {{ .Alerts.Firing | len }} firing{{ if .Alerts.Resolved }}, {{ .Alerts.Resolved | len }} resolved{{ end }}
+{{ if .Alerts.Firing }}
+FIRING
+{{ range .Alerts.Firing }}
+{{ .Labels.component }}{{ if .Labels.check }}/{{ .Labels.check }}{{ end }} - firing since {{ .StartsAt | date "2006-01-02 15:04 MST" }}
+  - {{ with .Annotations.description }}{{ . | reReplaceAll "; " "\n  - " }}{{ else }}{{ .Annotations.summary }}{{ end }}
+{{ end }}
+{{- end }}
+{{- if .Alerts.Resolved }}
+RESOLVED
+{{ range .Alerts.Resolved }}
+{{ .Labels.component }}{{ if .Labels.check }}/{{ .Labels.check }}{{ end }} - firing since {{ .StartsAt | date "2006-01-02 15:04 MST" }}, resolved at {{ .EndsAt | date "2006-01-02 15:04 MST" }}
+{{ end }}
+{{- end }}
+{{- end }}
+
+{{ define "stack.email.html" -}}
+<!doctype html>
+<html>
+<body style="margin:0;padding:16px;font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:#111">
+<h2 style="margin:0 0 4px;font-size:18px">{{ .CommonLabels.severity | toUpper }} alerts</h2>
+<p style="margin:0 0 16px;color:#555">{{ .Alerts.Firing | len }} firing{{ if .Alerts.Resolved }}, {{ .Alerts.Resolved | len }} resolved{{ end }}</p>
+{{ if .Alerts.Firing }}
+<h3 style="margin:16px 0 8px;font-size:15px">Firing</h3>
+{{ range .Alerts.Firing }}
+<div style="margin:0 0 14px;padding-left:10px;border-left:3px solid #c0392b">
+<div style="font-weight:600">{{ .Labels.component }}{{ if .Labels.check }}/{{ .Labels.check }}{{ end }}</div>
+<div style="color:#555;font-size:12px">since {{ .StartsAt | date "2006-01-02 15:04 MST" }}</div>
+<div style="white-space:pre-wrap;margin-top:4px">- {{ with .Annotations.description }}{{ . | reReplaceAll "; " "\n- " }}{{ else }}{{ .Annotations.summary }}{{ end }}</div>
+</div>
+{{ end }}
+{{- end }}
+{{- if .Alerts.Resolved }}
+<h3 style="margin:16px 0 8px;font-size:15px">Resolved</h3>
+{{ range .Alerts.Resolved }}
+<div style="margin:0 0 10px;padding-left:10px;border-left:3px solid #27ae60">
+<div style="font-weight:600">{{ .Labels.component }}{{ if .Labels.check }}/{{ .Labels.check }}{{ end }}</div>
+<div style="color:#555;font-size:12px">{{ .StartsAt | date "2006-01-02 15:04 MST" }} - {{ .EndsAt | date "2006-01-02 15:04 MST" }}</div>
+</div>
+{{ end }}
+{{- end }}
+<p style="margin:24px 0 0;color:#888;font-size:12px">Stack alert path. Alertmanager is loopback-only; this mail is the notification.</p>
+</body>
+</html>
+{{- end }}
