@@ -512,6 +512,16 @@ alertmanager_paging "$ROOT_DIR/deploy/examples/monitoring/alertmanager.yml.examp
 assert_eq stack-email "$AM_RECEIVER" 'the example names its paging receiver'
 assert_eq 0 "$AM_PAGING" 'the seeded example delivers nothing, so it is inert'
 
+# A warning digest is per component: a warning joining or clearing re-sends its
+# own group, and with send_resolved: false the resolved member is dropped, so a
+# severity-wide group would repeat every other standing warning (docs/alerting.md).
+warn_group=$(awk '/receiver: stack-warnings/ { f = 1 } f && /group_by:/ { print; exit }' \
+    "$ROOT_DIR/deploy/examples/monitoring/alertmanager.yml.example")
+case "$warn_group" in
+    *component*) ;;
+    *) printf 'FAIL: the warning route is not grouped per component\n' >&2; exit 1 ;;
+esac
+
 cat > "$TMP_DIR/am-paging.yml" <<'YAML'
 route:
   receiver: stack-email

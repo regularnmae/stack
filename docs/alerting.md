@@ -50,7 +50,8 @@ not faults").
   waits `group_wait: 15m` (so one that clears on its own never mails), updates at
   most hourly, sends no recovery, and reminds every four days. Warnings are the
   half that flaps; the route is what keeps a burst or a busy disk from becoming
-  a mail per transition.
+  a mail per transition. They are grouped per component, because a warning that
+  clears re-notifies its group even though the resolution itself is hidden.
 - **A startup is not an outage.** For `MONITOR_STARTUP_GRACE_S` after a container
   starts (15 minutes by default), the checks that depend on it are `skip`, not
   findings: a chain daemon that is still indexing and a wallet rebuilding its
@@ -218,14 +219,22 @@ not faults").
   their own rules. One dead `btc-explorer` is one page, not a unit fault plus a
   verify failure plus a 502. A `backup` critical also mutes the `backup-verify`
   unit warning: the verifier exited non-zero for the same stale dump, and two
-  alerts for one failed drill is exactly what inhibition is for. The route keeps
-  one digest per severity
-  (`group_by: ['severity']`). A critical waits `group_wait: 1m` for a wave and
-  for inhibiting alerts, batches follow-ups for `group_interval: 5m`, reminds
-  once a day (`repeat_interval: 24h`), and sends its recovery. A warning goes to
+  alerts for one failed drill is exactly what inhibition is for. Criticals keep
+  one digest per severity (`group_by: ['severity']`), so a wave is one page.
+  Warnings narrow that to `['severity', 'component']`: a warning digest is
+  re-sent when a member joins *or clears*, and a transient warning in one
+  component must not re-mail a standing one in another. A critical waits
+  `group_wait: 1m` for a wave and for inhibiting alerts, batches follow-ups for
+  `group_interval: 5m`, reminds once a day (`repeat_interval: 24h`), and sends
+  its recovery. A warning goes to
   the `stack-warnings` sub-route instead: `group_wait: 15m`, `group_interval:
   1h`, `repeat_interval: 96h`, and `send_resolved: false`, because warnings are
-  the half that flaps. A deploy still wants a silence, not a longer interval.
+  the half that flaps. `send_resolved: false` makes the clear easy to misread:
+  Alertmanager's dedup counts a shrinking firing set as a group change, and the
+  email stage then drops the resolved member, so a severity-wide warning group
+  would mail an information-free repeat of the survivors. Per-component grouping
+  leaves only the cleared component's group to flush, and with no firing member
+  left nothing is sent. A deploy still wants a silence, not a longer interval.
   Alertmanager owns grouping, inhibition, silences and delivery, and a recovery
   is vmalert's transition to inactive -- there is no `endsAt` for the producer to
   send and no producer state to keep. Five traps, all load-bearing:

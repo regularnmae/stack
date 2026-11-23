@@ -87,10 +87,12 @@ route:
   #     - receiver: stack-phone
   #       matchers: [ severity = "critical" ]
   receiver: stack-email
-  # Group by severity, not by alertname: one mail listing every critical check
-  # beats fifteen mails. vmalert emits one alert per component/check (the
-  # `component` and `check` labels) with that check's findings in its
-  # description, so a group is still "everything wrong, by severity".
+  # Criticals group by severity, not by alertname: one mail listing every
+  # critical check beats fifteen mails. vmalert emits one alert per
+  # component/check (the `component` and `check` labels) with that check's
+  # findings in its description, so a group is still "everything wrong, by
+  # severity". The warning sub-route narrows this (below); docs/alerting.md owns
+  # why the two differ.
   group_by: ['severity']
   # An alert that resolves inside group_wait is never mailed at all. This is a
   # smaller flap damper behind the rules' `for:`; it also gives an inhibiting
@@ -135,9 +137,16 @@ route:
     # that returns in ten minutes is exactly the noise this route exists to stop.
     # 15m also lets a warning that clears on its own never mail at all. 96h is
     # under the 120h notification-log retention, like the default above.
+    #
+    # Group per component, not per severity: Alertmanager's dedup treats a
+    # shrinking firing set as a group change, and with send_resolved: false the
+    # resolved item is then dropped -- a transient warning joining or clearing
+    # would re-mail a standing unrelated one with no new information.
+    # docs/alerting.md owns the reasoning.
     - receiver: stack-warnings
       matchers:
         - severity = "warning"
+      group_by: ['severity', 'component']
       group_wait: 15m
       group_interval: 1h
       repeat_interval: 96h
