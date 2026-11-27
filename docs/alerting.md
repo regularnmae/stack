@@ -59,11 +59,16 @@ not faults").
   not graced -- `stack_component_up` pages it at 2m and `stack_component_health`
   warns after 5m. A long reindex is the same fact at a different scale: when
   Fulcrum is not answering Electrum, the sweep reads its `Processed height` log
-  and emits one warning with the percentage while progress is recent
-  (`MONITOR_INDEX_PROGRESS_MAX_AGE_MIN`); only a stalled index is critical. The
-  BTCPay view-only wallet is not a fault when `get_height` says "No wallet
-  file": the RPC is up and BTCPay opens the wallet on demand, so the unit's
-  `get_version` healthcheck is its liveness probe.
+  and emits one warning with the percentage while the index is moving. That
+  line is written every 1000 blocks, so its age is judged against the gap
+  between the last two lines (1.5x), not a fixed window;
+  `MONITOR_INDEX_PROGRESS_MAX_AGE_MIN` is only the floor. When the line is
+  overdue or absent (a restart starts with an empty container log), the RocksDB
+  WAL's mtime is the tie-breaker: a WAL still being written means the index is
+  advancing, and only a quiet DB is critical. The BTCPay view-only wallet is not
+  a fault when `get_height` says "No wallet file": the RPC is up and BTCPay
+  opens the wallet on demand, so the unit's `get_version` healthcheck is its
+  liveness probe.
 - **The alert identity is `(component, check)`, not the section.** A section is a
   human grouping and a history graph; an alert names the component whose fault it
   is and the check that failed. That is what lets Alertmanager inhibit the
@@ -140,7 +145,11 @@ not faults").
   contributes the known duplicate-only failure: its
   `deploy/root/audit-rules-load.sh` wrapper treats only the "Rule exists" reload
   as success and still fails on a real error. `monitor.service` is excluded from
-  the user list, because a failing sweep must not report itself.
+  the user list, because a failing sweep must not report itself. Podman's
+  transient `[systemd-run] podman healthcheck run <container-id>` units are
+  excluded too: a failed `HealthCmd` is already `stack_component_health` under
+  the container's name, and the runner unit only adds a second, unreadable
+  component label that inhibition cannot match.
 
 - **The clock is a check, not an assumption.** `timedatectl show -p
   NTPSynchronized` is a yes/no fact; `no` fails because certificate issuance and

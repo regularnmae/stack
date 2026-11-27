@@ -31,7 +31,9 @@ extract() { # function-name file
     extract fail "$MONITOR"
     extract classify_verify_line "$MONITOR"
     extract fulcrum_index_progress "$MONITOR"
+    extract fulcrum_db_age "$MONITOR"
     extract fulcrum_index_state "$MONITOR"
+    extract podman_healthcheck_unit "$MONITOR"
     extract sections_prom "$MONITOR"
 } > "$TMP_DIR/functions.sh"
 # shellcheck source=/dev/null
@@ -115,11 +117,16 @@ b=$(sections_prom)
 # --- Fulcrum reindex detection -----------------------------------------------
 # The log line is the fact: a recent "Processed height" is a catch-up, a stale
 # one is a stalled index. The podman call is stubbed so the test stays offline.
+DATA_DIR="$TMP_DIR"
+THRESH_INDEX_PROGRESS_S=21600
+FULCRUM_DB_ACTIVE_S=900
+
+# shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_progress
 podman() {
     printf '%s [2026-11-22 11:45:36.726] <Controller> Processed height: 863000, 88.3%%, 4.56 blocks/min\n' \
         "$(date -u -d '-5 minutes' '+%Y-%m-%dT%H:%M:%S+00:00')"
 }
-read -r fh fp fa <<< "$(fulcrum_index_progress)"
+read -r fh fp fa fl <<< "$(fulcrum_index_progress)"
 if [ "$fh" != 863000 ] || [ "$fp" != 88.3 ]; then
     printf 'FAIL: fulcrum progress parsed as height=%s pct=%s\n' "$fh" "$fp" >&2
     exit 1
@@ -128,15 +135,33 @@ if [ "$fa" -lt 240 ] || [ "$fa" -gt 360 ]; then
     printf 'FAIL: fulcrum progress age=%s, expected about 300\n' "$fa" >&2
     exit 1
 fi
+if [ "$fl" -ne 21600 ]; then
+    printf 'FAIL: one progress line should leave the limit at the floor, got %s\n' "$fl" >&2
+    exit 1
+fi
+
+# The cadence is the gap between lines, not the floor: two lines 8h apart allow
+# 1.5x that gap, so a live index that takes hours per 1000 blocks is not stalled.
+# shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_progress
+podman() {
+    printf '%s [2026-11-22 03:45:36.726] <Controller> Processed height: 862000, 88.2%%, 2.28 blocks/min\n' \
+        "$(date -u -d '-8 hours 5 minutes' '+%Y-%m-%dT%H:%M:%S+00:00')"
+    printf '%s [2026-11-22 11:45:36.726] <Controller> Processed height: 863000, 88.3%%, 2.28 blocks/min\n' \
+        "$(date -u -d '-5 minutes' '+%Y-%m-%dT%H:%M:%S+00:00')"
+}
+read -r fh fp fa fl <<< "$(fulcrum_index_progress)"
+if [ "$fl" -lt 40000 ] || [ "$fl" -gt 45000 ]; then
+    printf 'FAIL: an 8h line gap should allow about 12h, got %s\n' "$fl" >&2
+    exit 1
+fi
 
 # A healthy container with no Electrum answer and recent progress is INDEXING,
 # not STALLED; the detail carries the percentage the mail shows.
 MONITOR_SKIP_NODES=0
-THRESH_INDEX_PROGRESS_S=21600
 component_state() { printf 'healthy'; }
 electrum_tip() { :; }
 # shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_state
-fulcrum_index_progress() { printf '863000 88.3 60\n'; }
+fulcrum_index_progress() { printf '863000 88.3 60 21600\n'; }
 FULCRUM_INDEXING=0; FULCRUM_INDEX_STALLED=0; FULCRUM_INDEX_DETAIL=""
 fulcrum_index_state
 if [ "$FULCRUM_INDEXING" != 1 ] || [ "$FULCRUM_INDEX_STALLED" != 0 ]; then
@@ -150,11 +175,65 @@ esac
 
 # The same line, old, is a stalled index and must reach the critical path.
 # shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_state
-fulcrum_index_progress() { printf '863000 88.3 999999\n'; }
+fulcrum_index_progress() { printf '863000 88.3 999999 21600\n'; }
 FULCRUM_INDEXING=0; FULCRUM_INDEX_STALLED=0; FULCRUM_INDEX_DETAIL=""
 fulcrum_index_state
 if [ "$FULCRUM_INDEXING" != 0 ] || [ "$FULCRUM_INDEX_STALLED" != 1 ]; then
-    printf 'FAIL: stale progress was not classified as stalled\n' >&2
+    printf 'FAIL: stale progress with no DB was not classified as stalled\n' >&2
+    exit 1
+fi
+
+# The line can be overdue while the index is still committing. The WAL is the
+# tie-breaker: a fresh one keeps the check at warning, a quiet one is the stall.
+mkdir -p "$TMP_DIR/fulcrum/fulc2_db"
+: > "$TMP_DIR/fulcrum/fulc2_db/000001.log"
+# shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_state
+fulcrum_index_progress() { printf '863000 88.3 999999 21600\n'; }
+FULCRUM_INDEXING=0; FULCRUM_INDEX_STALLED=0; FULCRUM_INDEX_DETAIL=""
+fulcrum_index_state
+if [ "$FULCRUM_INDEXING" != 1 ] || [ "$FULCRUM_INDEX_STALLED" != 0 ]; then
+    printf 'FAIL: an overdue line with a live DB was not classified as indexing\n' >&2
+    exit 1
+fi
+
+# A restarted Fulcrum has no progress line yet; a fresh WAL is still a reindex.
+# shellcheck disable=SC2317,SC2329  # called indirectly by fulcrum_index_state
+fulcrum_index_progress() { :; }
+FULCRUM_INDEXING=0; FULCRUM_INDEX_STALLED=0; FULCRUM_INDEX_DETAIL=""
+fulcrum_index_state
+if [ "$FULCRUM_INDEXING" != 1 ] || [ "$FULCRUM_INDEX_STALLED" != 0 ]; then
+    printf 'FAIL: no line with a live DB was not classified as indexing\n' >&2
+    exit 1
+fi
+case "$FULCRUM_INDEX_DETAIL" in
+    *"no progress line yet"*) ;;
+    *) { printf 'FAIL: no-line detail is missing: %s\n' "$FULCRUM_INDEX_DETAIL" >&2; exit 1; } ;;
+esac
+
+# A WAL that has also gone quiet is the stall the critical level is for.
+touch -d '1 hour ago' "$TMP_DIR/fulcrum/fulc2_db/000001.log"
+FULCRUM_INDEXING=0; FULCRUM_INDEX_STALLED=0; FULCRUM_INDEX_DETAIL=""
+fulcrum_index_state
+if [ "$FULCRUM_INDEXING" != 0 ] || [ "$FULCRUM_INDEX_STALLED" != 1 ]; then
+    printf 'FAIL: no line with a quiet DB was not classified as stalled\n' >&2
+    exit 1
+fi
+
+# --- podman healthcheck runner units -----------------------------------------
+# A failing HealthCmd creates a transient `<container-id>-<hash>.service`; the
+# container's own health is already an alert identity, so the runner unit must
+# not become a second failed unit under an opaque name.
+systemctl() {
+    printf '%s\n' "${STUB_DESC:-}"
+}
+STUB_DESC='[systemd-run] /usr/bin/podman healthcheck run 1234'
+if ! podman_healthcheck_unit '1234-deadbeef.service'; then
+    printf 'FAIL: the podman healthcheck runner unit was not recognised\n' >&2
+    exit 1
+fi
+STUB_DESC='a normal failed unit'
+if podman_healthcheck_unit 'ordinary.service'; then
+    printf 'FAIL: a normal unit was taken for a podman healthcheck runner\n' >&2
     exit 1
 fi
 

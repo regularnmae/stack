@@ -72,9 +72,12 @@ daemon unit, `fulcrum`, or an explorer.
   undo info (Fulcrum's "presume the DB is consistent"), so the next restart
   cannot undo a block. `$DATA_DIR` is a rotational disk, so a from-scratch index
   runs ~40 blocks/min — slow is not a fault to chase, `--db_mem` is the only
-  knob, and 2.1.4 exposes no fast-sync or history cap to shrink the work. Its
-  `HealthCmd` is the process check on purpose: an index probe would paint a
-  normal first run red.
+  knob, and 2.1.4 exposes no fast-sync or history cap to shrink the work. The
+  `Processed height` line is written every 1000 blocks, so a live index can be
+  silent for hours; `monitor.sh` scales its stall window to the gap between
+  lines and treats a DB whose WAL is still being written as indexing, because
+  the line is a cadence, not a heartbeat. Its `HealthCmd` is the process check
+  on purpose: an index probe would paint a normal first run red.
   The functional check is outside the unit — `scripts/lib/electrum.sh`'s
   `electrum_call`/`electrum_call_tls`/`electrum_tip` (bash `/dev/tcp` and
   `openssl s_client`; the host has no `nc`), used by `verify.sh --deep` and

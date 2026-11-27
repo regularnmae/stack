@@ -155,11 +155,18 @@ MONITOR_SMART_TEMP_MAX=$(monitor_var MONITOR_SMART_TEMP_MAX)
 # stack_component_up and the component rule still page at once. 0 disables it.
 MONITOR_STARTUP_GRACE_S=$(monitor_var MONITOR_STARTUP_GRACE_S)
 STARTUP_GRACE_S=$(num_or "${MONITOR_STARTUP_GRACE_S:-}" 900)
-# How long Fulcrum's last "Processed height" log line stays evidence of an
-# active reindex. It logs every 1000 blocks; at the observed ~4.5 blocks/min that
-# is ~3.7h between lines, so six hours is the window before "it stopped".
+# The floor on how long Fulcrum's last "Processed height" log line stays
+# evidence of an active reindex. It logs every 1000 blocks, so the expected gap
+# is the line cadence, not this: the sweep measures the gap between the last two
+# lines and allows 1.5x, because a slow index can take hours per 1000 blocks and
+# a fixed window would call a live reindex stalled.
 MONITOR_INDEX_PROGRESS_MAX_AGE_MIN=$(monitor_var MONITOR_INDEX_PROGRESS_MAX_AGE_MIN)
 THRESH_INDEX_PROGRESS_S=$(( $(num_or "${MONITOR_INDEX_PROGRESS_MAX_AGE_MIN:-}" 360) * 60 ))
+# How recently Fulcrum's RocksDB WAL must have been written to call the index
+# alive when the 1000-block line is overdue or absent (a restart starts with an
+# empty container log). Every block commits to the WAL, so a quarter hour of
+# silence is a stopped index, not a slow one.
+FULCRUM_DB_ACTIVE_S=900
 
 # How far Fulcrum's index may sit behind bitcoind. A healthy one polls every 5s
 # and is 0-1 block behind, so this is a "stopped following" threshold: 12 blocks
@@ -347,13 +354,18 @@ component_starting() { # container
 # Fulcrum writes "Processed height: N, P%, ..." every 1000 blocks while it
 # indexes, and its Electrum port serves nothing until the index catches up. A
 # restart can put it days behind, so "not answering" is not enough to call it
-# broken. The log is the fact; there is no producer state file, and a healthy
+# broken. The line is the fact; there is no producer state file, and a healthy
 # Fulcrum never reaches this function.
-fulcrum_index_progress() { # -> "height pct age_seconds", empty when no progress line
-    local line ts height pct now age
-    line=$(podman logs --timestamps --tail 400 fulcrum 2>/dev/null \
-        | grep 'Processed height' | tail -n1) || return 0
-    [ -n "$line" ] || return 0
+#
+# The age alone cannot say "stalled": 1000 blocks is the clock, and on a
+# rotational disk that can be hours. The gap between the last two lines is the
+# measured cadence (1.5x for wobble); the configured threshold is only the floor.
+fulcrum_index_progress() { # -> "height pct age_seconds limit_seconds", empty when no progress line
+    local lines line prev ts prev_ts height prev_height pct now age limit expected
+    lines=$(podman logs --timestamps --tail 400 fulcrum 2>/dev/null \
+        | grep 'Processed height') || return 0
+    [ -n "$lines" ] || return 0
+    line=$(printf '%s\n' "$lines" | tail -n1)
     ts=$(date -d "${line%% *}" +%s 2>/dev/null) || return 0
     height=$(printf '%s' "$line" | sed -n 's/.*Processed height: \([0-9][0-9]*\).*/\1/p')
     pct=$(printf '%s' "$line" | sed -n 's/.*, \([0-9][0-9.]*\)%.*/\1/p')
@@ -361,15 +373,39 @@ fulcrum_index_progress() { # -> "height pct age_seconds", empty when no progress
     now=$(date +%s)
     age=$((now - ts))
     [ "$age" -ge 0 ] || return 0
-    printf '%s %s %s\n' "$height" "${pct:-?}" "$age"
+    limit=$THRESH_INDEX_PROGRESS_S
+    prev=$(printf '%s\n' "$lines" | tail -n2 | sed -n '1p')
+    if prev_ts=$(date -d "${prev%% *}" +%s 2>/dev/null); then
+        prev_height=$(printf '%s' "$prev" | sed -n 's/.*Processed height: \([0-9][0-9]*\).*/\1/p')
+        if [ -n "$prev_height" ] && [ "$ts" -gt "$prev_ts" ] && [ "$height" -gt "$prev_height" ]; then
+            expected=$(( (ts - prev_ts) * 1000 / (height - prev_height) ))
+            limit=$(( expected * 3 / 2 ))
+        fi
+    fi
+    [ "$limit" -lt "$THRESH_INDEX_PROGRESS_S" ] && limit=$THRESH_INDEX_PROGRESS_S
+    printf '%s %s %s %s\n' "$height" "${pct:-?}" "$age" "$limit"
+}
+
+# Seconds since Fulcrum last wrote its RocksDB write-ahead log, empty when the
+# DB is not there. A block commits to the WAL, so this is the "the index is
+# still advancing" fact when the 1000-block line is overdue or absent; the line
+# alone cannot tell a stretched cadence from a stop.
+fulcrum_db_age() {
+    local wal mtime
+    wal=$(find "$DATA_DIR/fulcrum/fulc2_db" -maxdepth 1 -name '*.log' \
+        -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 | cut -d' ' -f2-) || return 0
+    [ -n "$wal" ] || return 0
+    mtime=$(stat -c %Y -- "$wal" 2>/dev/null) || return 0
+    printf '%s\n' $(( $(date +%s) - mtime ))
 }
 
 # Set before the verify sweep: both that sweep's Fulcrum lines and the chain
 # section below would otherwise report the same multi-day catch-up as a critical.
 # Only an Electrum probe that fails is worth the log read, and only a container
 # that is up: a down Fulcrum is StackComponentDown's fault, not a reindex.
-# FULCRUM_INDEXING=1 means "progress is recent"; STALLED means the last line is
-# older than MONITOR_INDEX_PROGRESS_MAX_AGE_MIN and the index has stopped moving.
+# FULCRUM_INDEXING=1 means the index is advancing -- the line is inside its
+# cadence, or the WAL is still being written; STALLED means the line is overdue
+# and the WAL has gone quiet, which is the only case worth a critical.
 FULCRUM_INDEXING=0
 FULCRUM_INDEX_STALLED=0
 FULCRUM_INDEX_DETAIL=""
@@ -380,17 +416,40 @@ fulcrum_index_state() {
         *) return 0 ;;
     esac
     [ -z "$(electrum_tip 50001)" ] || return 0
-    local progress height pct age mins
+    local progress height pct age limit mins db_age
     progress=$(fulcrum_index_progress) || return 0
-    [ -n "$progress" ] || return 0
-    read -r height pct age <<< "$progress"
-    mins=$((age / 60))
-    if [ "$age" -le "$THRESH_INDEX_PROGRESS_S" ]; then
+    if [ -n "$progress" ]; then
+        read -r height pct age limit <<< "$progress"
+        mins=$((age / 60))
+        if [ "$age" -le "$limit" ]; then
+            FULCRUM_INDEXING=1
+            FULCRUM_INDEX_DETAIL="fulcrum is reindexing: ${pct}% (height ${height}), last progress ${mins}m ago; Electrum is unavailable until the index catches up (no action unless progress stops)"
+            return 0
+        fi
+        db_age=$(fulcrum_db_age) || db_age=""
+        if [ -n "$db_age" ] && [ "$db_age" -le "$FULCRUM_DB_ACTIVE_S" ]; then
+            FULCRUM_INDEXING=1
+            FULCRUM_INDEX_DETAIL="fulcrum is reindexing: ${pct}% (height ${height}), last progress ${mins}m ago; the 1000-block line is overdue but the DB is still being written, so Electrum stays unavailable until the index catches up (no action unless the DB stops changing)"
+        elif [ "$mins" -ge 60 ]; then
+            FULCRUM_INDEX_STALLED=1
+            FULCRUM_INDEX_DETAIL="fulcrum stopped progressing at ${pct}% (height ${height}), last log line $((mins / 60))h ago; Electrum is unavailable (podman logs --tail 50 fulcrum)"
+        else
+            FULCRUM_INDEX_STALLED=1
+            FULCRUM_INDEX_DETAIL="fulcrum stopped progressing at ${pct}% (height ${height}), last log line ${mins}m ago; Electrum is unavailable (podman logs --tail 50 fulcrum)"
+        fi
+        return 0
+    fi
+    # A restarted Fulcrum has no progress line until it has processed another
+    # 1000 blocks -- the container log starts empty -- so the line is not the
+    # fact yet. A WAL that is still being written is a reindex; only a quiet DB
+    # is the stall the critical level is for.
+    db_age=$(fulcrum_db_age) || db_age=""
+    if [ -n "$db_age" ] && [ "$db_age" -le "$FULCRUM_DB_ACTIVE_S" ]; then
         FULCRUM_INDEXING=1
-        FULCRUM_INDEX_DETAIL="fulcrum is reindexing: ${pct}% (height ${height}), last progress ${mins}m ago; Electrum is unavailable until the index catches up (no action unless progress stops)"
-    else
+        FULCRUM_INDEX_DETAIL="fulcrum is reindexing: no progress line yet (the DB was written $((db_age / 60))m ago); Electrum is unavailable until the index catches up (no action unless the DB stops changing)"
+    elif [ -n "$db_age" ]; then
         FULCRUM_INDEX_STALLED=1
-        FULCRUM_INDEX_DETAIL="fulcrum stopped progressing at ${pct}% (height ${height}), last log line $((mins / 60))h ago; Electrum is unavailable (podman logs --tail 50 fulcrum)"
+        FULCRUM_INDEX_DETAIL="fulcrum is not answering Electrum and its index has not advanced for $((db_age / 60))m (no progress line; podman logs --tail 50 fulcrum)"
     fi
 }
 
@@ -1442,6 +1501,21 @@ fi
 # reload it used to report (deploy/root/audit-rules-load.sh). monitor.service is
 # excluded from the user list: a sweep that finds any other problem is itself
 # failed until the next start and must not report itself.
+#
+# Podman runs each container HealthCmd as a transient user unit named by the
+# container id and an opaque suffix. A failing healthcheck therefore shows up as
+# a failed user unit under a component nobody can read, while
+# stack_component_health already reports the same fact under the container's
+# name -- the label the mail and inhibition are built on. Skip those runners; a
+# real unit whose description merely mentions podman is still reported.
+podman_healthcheck_unit() { # unit-name
+    local desc
+    desc=$(systemctl --user show -p Description --value -- "$1" 2>/dev/null) || return 1
+    case "$desc" in
+        "[systemd-run] /usr/bin/podman healthcheck run "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 head3 "systemd units"
 unit_faults=()
 unit_read_ok=1
@@ -1454,8 +1528,11 @@ if command -v systemctl >/dev/null 2>&1; then
         soft "could not read the system manager's failed units; skipped that half of the check"
     fi
     if failed_user=$(systemctl --user --failed --no-legend --plain --no-pager 2>/dev/null); then
-        failed_user=$(printf '%s\n' "$failed_user" \
-            | awk '$1 != "monitor.service" {print $1}' | paste -sd' ' -)
+        failed_user_units=""
+        for u in $(printf '%s\n' "$failed_user" | awk '$1 != "monitor.service" {print $1}'); do
+            podman_healthcheck_unit "$u" || failed_user_units="$failed_user_units $u"
+        done
+        failed_user=${failed_user_units# }
         [ -n "$failed_user" ] && unit_faults+=("user: $failed_user")
     else
         unit_read_ok=0
